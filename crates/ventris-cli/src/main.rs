@@ -1,7 +1,7 @@
 mod game_input;
 mod json;
 
-use json::{object, stringify, Value};
+use json::{Value, object, stringify};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
@@ -21,11 +21,11 @@ use ventris_format::{Endian, Format, Image, ImageMetadata, Loader, Placement};
 use ventris_game::assets::{
     AssetCatalog, AssetKind, AssetLinkKind, AssetTarget, GameAsset, GameScript,
 };
-use ventris_game::diff::{diff_revisions, BinaryRevision, RegionChangeKind, RevisionRegion};
-use ventris_game::runtime::{ingest as ingest_runtime_events, RuntimeEvent, RuntimeEventKind};
-use ventris_game::{corpus, AccessKind};
-use ventris_gen::{inventory, Generation};
-use ventris_lifter::{discover_functions, Architecture, Flow, Lifter};
+use ventris_game::diff::{BinaryRevision, RegionChangeKind, RevisionRegion, diff_revisions};
+use ventris_game::runtime::{RuntimeEvent, RuntimeEventKind, ingest as ingest_runtime_events};
+use ventris_game::{AccessKind, corpus};
+use ventris_gen::{Generation, inventory};
+use ventris_lifter::{Architecture, Flow, Lifter, discover_functions};
 use ventris_target::TargetProfile;
 
 // Bump whenever native lifting/decompilation semantics change.
@@ -441,7 +441,7 @@ fn parse_project_options(args: &[String]) -> Result<ProjectOptions, String> {
                 match arg.as_str() {
                     "--json" => format = OutputFormat::Json,
                     other => {
-                        return Err(format!("project runtime received unknown option {other:?}"))
+                        return Err(format!("project runtime received unknown option {other:?}"));
                     }
                 }
             }
@@ -462,7 +462,7 @@ fn parse_project_options(args: &[String]) -> Result<ProjectOptions, String> {
                 match arg.as_str() {
                     "--json" => format = OutputFormat::Json,
                     other => {
-                        return Err(format!("project assets received unknown option {other:?}"))
+                        return Err(format!("project assets received unknown option {other:?}"));
                     }
                 }
             }
@@ -2134,8 +2134,8 @@ fn runtime_event_from_value(value: &Value, line: usize) -> Result<RuntimeEvent, 
                 "write" => AccessKind::Write,
                 other => {
                     return Err(format!(
-                    "trace line {line}: runtime event access must be read or write, got {other:?}"
-                ))
+                        "trace line {line}: runtime event access must be read or write, got {other:?}"
+                    ));
                 }
             };
             let address = runtime_required_u64(value, "address")
@@ -3346,7 +3346,7 @@ fn handle_http(stream: &mut TcpStream) -> Result<(), String> {
                     "400 Bad Request",
                     "text/plain; charset=utf-8",
                     &format!("invalid format {other:?}; use text or json\n"),
-                )
+                );
             }
         }
     };
@@ -4370,18 +4370,24 @@ mod tests {
         assert!(output.contains("assertions_added: 3"), "{output}");
 
         let restored = Project::load_from(&project).unwrap();
-        assert!(restored
-            .references
-            .iter()
-            .any(|reference| reference.from == 0x4000 && reference.to == 0x6000));
-        assert!(restored
-            .references
-            .iter()
-            .any(|reference| reference.from == 0x4004 && reference.to == 0x5000));
-        assert!(restored
-            .assertions
-            .iter()
-            .any(|assertion| assertion.kind == "runtime-marker"));
+        assert!(
+            restored
+                .references
+                .iter()
+                .any(|reference| reference.from == 0x4000 && reference.to == 0x6000)
+        );
+        assert!(
+            restored
+                .references
+                .iter()
+                .any(|reference| reference.from == 0x4004 && reference.to == 0x5000)
+        );
+        assert!(
+            restored
+                .assertions
+                .iter()
+                .any(|assertion| assertion.kind == "runtime-marker")
+        );
 
         let args = vec![
             "project".into(),
@@ -4653,10 +4659,12 @@ mod tests {
         }))
         .unwrap();
         let restored = Project::load_from(&project).unwrap();
-        assert!(restored
-            .data
-            .iter()
-            .any(|item| item.type_name.as_deref() == Some("string")));
+        assert!(
+            restored
+                .data
+                .iter()
+                .any(|item| item.type_name.as_deref() == Some("string"))
+        );
         let _ = std::fs::remove_file(image);
         let _ = std::fs::remove_file(project);
     }

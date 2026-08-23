@@ -4,30 +4,54 @@ All notable Ventris changes are documented here.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-23
+
+### Breaking changes
+
+- Reduced the public CLI to `inspect`, `lift`, and `decompile`.
+- Replaced `decompile-native`, `recover-types`, and `reconstruct-source` with
+  the canonical `decompile` command. Project, discovery, diff, batch, corpus,
+  and HTTP commands are no longer public product API.
+- Reduced the Python package to `inspect`, `lift`, `decompile`, `version`, and
+  the low-level `run` process helper.
+- Raised the Rust edition to 2024 and the minimum supported Rust version to
+  1.98.
+
 ### Added
 
-- Executed legal-PS2 semantic baselines and machine-readable exact, diverged,
-  unsupported, and unavailable comparison reports; commercial-image parity
-  remains opt-in and reports no unexecuted expected facts.
-- O32 direct/indirect call facts, evidence-preserving object-layout recovery,
-  nominal object relations, and reconstructed-source structure scoring.
+- Added a canonical `ventris::Pipeline` facade for loading, lifting, analysis,
+  inventory, and deterministic C rendering.
+- Added declarative target profiles that keep architecture, loader, ABI,
+  address-space, image-part, and support-level facts together.
+- Added executed legal-PS2 semantic baselines and machine-readable exact,
+  diverged, unsupported, and unavailable comparison reports.
 - Expanded the legal Dungeon Game ELF gate to ten bounded functions and added
-  a Clang `mipsel-none-elf` compiler gate with normalized assembly comparison.
-- Corrected delay-slot discovery/order for MIPS/N64 control flow, made
-  conditional-return folding label-safe, and report source-supplied metadata as
-  applied evidence rather than machine-exact evidence.
+  eight per-function Clang `mipsel-none-elf` compiler floors.
+- Added a non-publishing release-candidate workflow mode.
+
 ### Changed
 
-- Refocused the product on one canonical load-lift-analyze-render function
-  pipeline and reduced the public CLI to `inspect`, `lift`, and `decompile`.
+- Moved reusable function/data inventory and game-recovery algorithms from the
+  CLI into library ownership.
+- Split native decompilation into focused control-flow, SSA, and semantic-score
+  modules without creating a second pipeline.
 - Moved corpus, compiler, oracle, transport, project, batch, and packaging
   workflows behind development-only tools.
 - Reduced Python and VS Code to thin adapters over the native executable.
 - Froze the GPUI desktop workspace outside the product pipeline while retaining
   its formatting and test jobs as release compatibility gates.
-- Added checked-in per-function compiler floors so aggregate scores cannot hide
-  a decompilation regression.
+- Corrected MIPS/N64 delay-slot discovery and ordering, made conditional-return
+  folding label-safe, preserved partial-layout field offsets, and retained
+  externally referenced control-flow labels.
 
+### Known limitations
+
+- Decompilation quality remains function-specific; a supported loader or lifter
+  is not a uniform C-quality claim.
+- Native function signatures are not yet selected from a container-specific
+  ABI at every decompiler entry point.
+- The Python and VS Code packages require a separately installed matching native
+  executable.
 
 ## [0.1.0] - 2026-08-23
 

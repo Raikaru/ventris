@@ -17,7 +17,7 @@ pub mod semantic;
 use std::collections::BTreeMap;
 use std::fmt::Write;
 use ventris_lifter::{Architecture, NativeFunction};
-use ventris_pcode::{op, Varnode, CONST_SPACE};
+use ventris_pcode::{CONST_SPACE, Varnode, op};
 use ventris_target::TargetProfile;
 
 /// Whether a register class is known for a target ABI.
@@ -2411,10 +2411,12 @@ mod tests {
             vec![0, 16, 32]
         );
         assert_eq!(candidate.fields[2].accesses.len(), 2);
-        assert!(candidate
-            .fields
-            .windows(2)
-            .all(|fields| fields[0].offset + i64::from(fields[0].width) <= fields[1].offset));
+        assert!(
+            candidate
+                .fields
+                .windows(2)
+                .all(|fields| fields[0].offset + i64::from(fields[0].width) <= fields[1].offset)
+        );
     }
 
     #[test]
@@ -2488,10 +2490,12 @@ mod tests {
             report_a.structs[0].fields[0].name.as_deref(),
             Some("health")
         );
-        assert!(report_a
-            .conflict_facts()
-            .iter()
-            .any(|fact| fact.kind == ConflictKind::ConflictingAssertion));
+        assert!(
+            report_a
+                .conflict_facts()
+                .iter()
+                .any(|fact| fact.kind == ConflictKind::ConflictingAssertion)
+        );
     }
 
     #[test]
@@ -2523,16 +2527,18 @@ mod tests {
             ObjectRelationAssertion::constructor(0x1000, Some(0x4000), "second"),
         ];
         let conflicting_facts = recover_object_relations(&conflicting_assertions, &[]);
-        assert!(conflicting_facts[0]
-            .provenance
-            .iter()
-            .any(|evidence| matches!(
-                evidence.source,
-                EvidenceSource::Conflict {
-                    kind: ConflictKind::ConflictingRelationAssertion,
-                    ..
-                }
-            )));
+        assert!(
+            conflicting_facts[0]
+                .provenance
+                .iter()
+                .any(|evidence| matches!(
+                    evidence.source,
+                    EvidenceSource::Conflict {
+                        kind: ConflictKind::ConflictingRelationAssertion,
+                        ..
+                    }
+                ))
+        );
 
         let distinct_kinds = [
             ObjectRelationAssertion::constructor(0x1000, Some(0x3000), "constructor"),
@@ -2540,9 +2546,11 @@ mod tests {
         ];
         let relations = recover_object_relations(&distinct_kinds, &[]);
         assert_eq!(relations.len(), 2);
-        assert!(relations
-            .iter()
-            .any(|relation| relation.kind == ObjectRelationKind::Destructor));
+        assert!(
+            relations
+                .iter()
+                .any(|relation| relation.kind == ObjectRelationKind::Destructor)
+        );
     }
     #[test]
     fn user_assertion_and_nominal_metadata_override_unknown_width_only() {
@@ -2589,10 +2597,12 @@ mod tests {
         let field = &report.structs[0].fields[0];
         assert_eq!(field.name.as_deref(), Some("position"));
         assert!(matches!(field.ty, GameType::Vector { lanes: 3, .. }));
-        assert!(field
-            .evidence
-            .iter()
-            .any(|e| matches!(e.source, EvidenceSource::NominalType { id: 7, .. })));
+        assert!(
+            field
+                .evidence
+                .iter()
+                .any(|e| matches!(e.source, EvidenceSource::NominalType { id: 7, .. }))
+        );
         assert_eq!(report.structs[0].nominal_type_id(), Some(7));
     }
 

@@ -1,5 +1,5 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
     "crates/ventris-addr",
     "crates/ventris-db",
@@ -15,9 +15,10 @@ members = [
     "crates/ventris-cli",
 ]
 
- [workspace.package]
- edition = "2021"
- version = "0.1.0"
+[workspace.package]
+edition = "2024"
+rust-version = "1.98"
+version = "0.2.0"
  license = "Apache-2.0"
 
 # No third-party dependencies anywhere in the scaffold. The dependency choices

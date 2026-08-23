@@ -25,6 +25,7 @@ REQUIRED_FILES = (
     "RELEASING.md",
     "Cargo.toml",
     "Cargo.lock",
+    "rust-toolchain.toml",
     "desktop/ventris-gpui/Cargo.toml",
     "desktop/ventris-gpui/Cargo.lock",
     "tools/native_smoke.py",
@@ -90,12 +91,24 @@ def check(root: Path, version: str) -> None:
     version_file = read(root, "VERSION").strip()
     if version_file != version:
         fail(f"VERSION contains {version_file!r}, expected {version!r}")
+    workspace_manifest = read(root, "Cargo.toml")
+    if not re.search(r'^\s*edition\s*=\s*"2024"\s*$', workspace_manifest, re.MULTILINE):
+        fail("Rust workspace edition is not 2024")
+    if not re.search(r'^\s*rust-version\s*=\s*"1\.98"\s*$', workspace_manifest, re.MULTILINE):
+        fail("Rust workspace MSRV is not 1.98")
+    toolchain = read(root, "rust-toolchain.toml")
+    if not re.search(r'^\s*channel\s*=\s*"1\.98\.0"\s*$', toolchain, re.MULTILINE):
+        fail("Rust toolchain is not pinned to 1.98.0")
     cli_manifest = read(root, "crates/ventris-cli/Cargo.toml")
     if not re.search(r'^\s*name\s*=\s*"ventris-cli"\s*$', cli_manifest, re.MULTILINE):
         fail("Rust CLI crate name must be ventris-cli")
     gpui_manifest = read(root, "desktop/ventris-gpui/Cargo.toml")
     if not re.search(rf'^\s*version\s*=\s*"{re.escape(version)}"\s*$', gpui_manifest, re.MULTILINE):
         fail("GPUI desktop package version is not synchronized")
+    if not re.search(r'^\s*edition\s*=\s*"2024"\s*$', gpui_manifest, re.MULTILINE):
+        fail("GPUI desktop edition is not 2024")
+    if not re.search(r'^\s*rust-version\s*=\s*"1\.98"\s*$', gpui_manifest, re.MULTILINE):
+        fail("GPUI desktop MSRV is not 1.98")
     pyproject = read(root, "pyproject.toml")
     if not re.search(r'^\s*name\s*=\s*"ventris-client"\s*$', pyproject, re.MULTILINE):
         fail("Python distribution name must be ventris-client")
@@ -115,7 +128,7 @@ def check(root: Path, version: str) -> None:
     if vscode.get("license") != "Apache-2.0":
         fail("VS Code package license is not Apache-2.0")
     if vscode.get("preview") is not True:
-        fail("0.1.x VS Code package must be marked preview")
+        fail("0.x VS Code package must be marked preview")
 
     lock = json.loads(read(root, "integrations/vscode/package-lock.json"))
     if lock.get("version") != version or lock.get("packages", {}).get("", {}).get("version") != version:

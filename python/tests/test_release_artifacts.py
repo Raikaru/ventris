@@ -28,13 +28,13 @@ class ReleaseArtifactSecurityTests(unittest.TestCase):
         cls.python_source = load_tool("verify_python_source")
         cls.vsix = load_tool("verify_vsix")
     def test_native_archive_rejects_duplicate_and_unrooted_names(self):
-        stem = "ventris-0.1.0-x86_64-unknown-linux-gnu/"
+        stem = "ventris-0.2.0-x86_64-unknown-linux-gnu/"
         with self.assertRaises(ValueError):
             self.archive._safe_names([f"{stem}ventris", f"{stem}ventris"], stem)
         with self.assertRaises(ValueError):
             self.archive._safe_names([f"{stem}../README.md"], stem)
     def test_python_source_rejects_duplicate_and_unrooted_names(self):
-        stem = "ventris_client-0.1.0/"
+        stem = "ventris_client-0.2.0/"
         with self.assertRaises(ValueError):
             self.python_source._safe_names(
                 [f"{stem}README.md", f"{stem}README.md"], stem
@@ -46,12 +46,12 @@ class ReleaseArtifactSecurityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "source.tar.gz"
             with tarfile.open(path, "w:gz") as archive:
-                info = tarfile.TarInfo("ventris_client-0.1.0/README.md")
+                info = tarfile.TarInfo("ventris_client-0.2.0/README.md")
                 info.type = tarfile.SYMTYPE
                 info.linkname = "outside"
                 archive.addfile(info)
             with self.assertRaises(ValueError):
-                self.python_source.verify(path, "0.1.0")
+                self.python_source.verify(path, "0.2.0")
 
     def test_python_wheel_rejects_duplicate_zip_entries(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -60,18 +60,34 @@ class ReleaseArtifactSecurityTests(unittest.TestCase):
                 archive.writestr("ventris/__init__.py", "")
                 archive.writestr("ventris/__init__.py", "duplicate")
             with self.assertRaises(ValueError):
-                self.python_artifact.verify(path, "0.1.0")
+                self.python_artifact.verify(path, "0.2.0")
+
+    def test_python_wheel_rejects_unexpected_runtime_module(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "unexpected.whl"
+            metadata = "ventris_client-0.2.0.dist-info/"
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("ventris/__init__.py", "")
+                archive.writestr("ventris/__main__.py", "")
+                archive.writestr("ventris/cli.py", "")
+                archive.writestr("ventris/corpus_smoke.py", "")
+                archive.writestr(f"{metadata}METADATA", "")
+                archive.writestr(f"{metadata}RECORD", "")
+                archive.writestr(f"{metadata}licenses/LICENSE", "")
+            with self.assertRaisesRegex(ValueError, "unexpected runtime modules"):
+                self.python_artifact.verify(path, "0.2.0")
+
     def test_python_wheel_accepts_thin_adapter_payload(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "ventris_client-0.1.0-py3-none-any.whl"
-            metadata = "ventris_client-0.1.0.dist-info/"
+            path = Path(directory) / "ventris_client-0.2.0-py3-none-any.whl"
+            metadata = "ventris_client-0.2.0.dist-info/"
             with zipfile.ZipFile(path, "w") as archive:
                 archive.writestr("ventris/__init__.py", "")
                 archive.writestr("ventris/cli.py", "")
                 archive.writestr(f"{metadata}METADATA", "")
                 archive.writestr(f"{metadata}RECORD", "")
                 archive.writestr(f"{metadata}licenses/LICENSE", "")
-            self.python_artifact.verify(path, "0.1.0")
+            self.python_artifact.verify(path, "0.2.0")
 
 
     def test_vsix_rejects_duplicate_zip_entries(self):
@@ -81,7 +97,7 @@ class ReleaseArtifactSecurityTests(unittest.TestCase):
                 archive.writestr("extension/package.json", "{}")
                 archive.writestr("extension/package.json", "duplicate")
             with self.assertRaises(ValueError):
-                self.vsix.verify(path, "0.1.0")
+                self.vsix.verify(path, "0.2.0")
 
 
 if __name__ == "__main__":

@@ -18,14 +18,14 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.0
         with:
           components: rustfmt
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
       - name: Validate release metadata
-        run: python -S tools/release_check.py --version 0.1.0
+        run: python -S tools/release_check.py --version 0.2.0
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run Rust tests
@@ -39,7 +39,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.0
         with:
           components: rustfmt
       - name: Check GPUI formatting
@@ -66,7 +66,7 @@ jobs:
       - name: Build Python wheel
         run: python -m pip wheel . --no-deps --no-cache-dir --wheel-dir dist
       - name: Verify Python wheel payload
-        run: python -S tools/verify_python_artifact.py --wheel dist/ventris_client-0.1.0-py3-none-any.whl --version 0.1.0
+        run: python -S tools/verify_python_artifact.py --wheel dist/ventris_client-0.2.0-py3-none-any.whl --version 0.2.0
 
   vscode:
     name: VS Code extension
@@ -91,4 +91,4 @@ jobs:
         working-directory: integrations/vscode
         run: npm run package
       - name: Verify VSIX payload
-        run: python -S tools/verify_vsix.py --vsix integrations/vscode/dist/ventris-binary-analysis-0.1.0.vsix --version 0.1.0
+        run: python -S tools/verify_vsix.py --vsix integrations/vscode/dist/ventris-binary-analysis-0.2.0.vsix --version 0.2.0

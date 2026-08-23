@@ -347,32 +347,28 @@ const POKEMON_EMERALD_FUNCTIONS: &[CorpusFunction] = &[
         source_path: "src/main.c",
         address: 0x0800_0554,
         size: 0x0c,
-        note:
-            "symbols branch pokeemerald.sym @ 9acaa0b2; source function is in the pinned src/main.c",
+        note: "symbols branch pokeemerald.sym @ 9acaa0b2; source function is in the pinned src/main.c",
     },
     CorpusFunction {
         name: "SeedRngAndSetTrainerId",
         source_path: "src/main.c",
         address: 0x0800_0560,
         size: 0x28,
-        note:
-            "symbols branch pokeemerald.sym @ 9acaa0b2; source function is in the pinned src/main.c",
+        note: "symbols branch pokeemerald.sym @ 9acaa0b2; source function is in the pinned src/main.c",
     },
     CorpusFunction {
         name: "GetGeneratedTrainerIdLower",
         source_path: "src/main.c",
         address: 0x0800_0588,
         size: 0x0c,
-        note:
-            "symbols branch pokeemerald.sym @ 9acaa0b2; source function is in the pinned src/main.c",
+        note: "symbols branch pokeemerald.sym @ 9acaa0b2; source function is in the pinned src/main.c",
     },
     CorpusFunction {
         name: "InitKeys",
         source_path: "src/main.c",
         address: 0x0800_05bc,
         size: 0x28,
-        note:
-            "symbols branch pokeemerald.sym @ 9acaa0b2; source function is in the pinned src/main.c",
+        note: "symbols branch pokeemerald.sym @ 9acaa0b2; source function is in the pinned src/main.c",
     },
 ];
 
@@ -547,10 +543,12 @@ mod tests {
                 ("flPS2InitRenderState", 0x003e_ea20, 0x230),
             ]
         );
-        assert!(entry
-            .functions
-            .iter()
-            .all(|function| semantic_baseline(entry.id, function.name).is_none()));
+        assert!(
+            entry
+                .functions
+                .iter()
+                .all(|function| semantic_baseline(entry.id, function.name).is_none())
+        );
     }
 
     #[test]
@@ -591,10 +589,12 @@ mod tests {
                 .minimum_mnemonic_lcs_ratio,
             3.0 / 13.0
         );
-        assert!(entry
-            .functions
-            .iter()
-            .all(|function| function.source_path == "source/demos/dungeon_game/game_world.cpp"));
+        assert!(
+            entry
+                .functions
+                .iter()
+                .all(|function| function.source_path == "source/demos/dungeon_game/game_world.cpp")
+        );
         assert!(entry.metadata_json.is_some());
     }
 

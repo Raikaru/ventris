@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use ventris_format::Image;
-use ventris_lifter::{discover_functions, Architecture, FunctionDiscovery, Lifter};
+use ventris_lifter::{Architecture, FunctionDiscovery, Lifter, discover_functions};
 
 const MAX_DATA_FACTS: usize = 4096;
 const MAX_FUNCTIONS: usize = 4096;

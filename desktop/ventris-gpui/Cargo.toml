@@ -1,7 +1,8 @@
 [package]
 name = "ventris-gpui"
-version = "0.1.0"
-edition = "2021"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.98"
 publish = false
 license = "Apache-2.0"
 description = "Native GPUI project and function workspace for Ventris"
@@ -12,3 +13,4 @@ gpui-component = "0.5.1"
 ventris-db = { path = "../../crates/ventris-db" }
 
 [workspace]
+resolver = "3"

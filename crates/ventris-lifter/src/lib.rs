@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use ventris_format::Image;
-use ventris_pcode::{op, InstPcode, PcodeOp, Varnode};
+use ventris_pcode::{InstPcode, PcodeOp, Varnode, op};
 
 pub const CONST_SPACE: u32 = 0;
 pub const OTHER_SPACE: u32 = 1;
@@ -1887,7 +1887,7 @@ impl Lifter for AArch64 {
                         architecture: self.architecture(),
                         address,
                         opcode: (word >> 24) as u8,
-                    })
+                    });
                 }
             };
             ops.push(p(op::CBRANCH, None, vec![constant(target, 8), condition]));
@@ -3551,7 +3551,7 @@ impl Lifter for Rv64 {
                             architecture: self.architecture(),
                             address,
                             opcode,
-                        })
+                        });
                     }
                 };
                 ops.push(p(
@@ -3593,7 +3593,7 @@ impl Lifter for Rv64 {
                             architecture: self.architecture(),
                             address,
                             opcode,
-                        })
+                        });
                     }
                 };
                 ops.push(p(code, Some(destination), vec![source, value]));
@@ -3615,7 +3615,7 @@ impl Lifter for Rv64 {
                             architecture: self.architecture(),
                             address,
                             opcode,
-                        })
+                        });
                     }
                 };
                 ops.push(p(
@@ -3636,7 +3636,7 @@ impl Lifter for Rv64 {
                             architecture: self.architecture(),
                             address,
                             opcode,
-                        })
+                        });
                     }
                 };
                 let immediate = rv_immediate_i(word);
@@ -3670,7 +3670,7 @@ impl Lifter for Rv64 {
                             architecture: self.architecture(),
                             address,
                             opcode,
-                        })
+                        });
                     }
                 };
                 let immediate = rv_immediate_s(word);
@@ -3719,7 +3719,7 @@ impl Lifter for Rv64 {
                     architecture: self.architecture(),
                     address,
                     opcode,
-                })
+                });
             }
         }
         Ok(LiftedInstruction {
@@ -3926,7 +3926,7 @@ fn ppc_lift_instruction(
                             architecture,
                             address,
                             opcode,
-                        })
+                        });
                     }
                 };
                 ops.push(p(
@@ -3991,7 +3991,7 @@ fn ppc_lift_instruction(
                 architecture,
                 address,
                 opcode,
-            })
+            });
         }
     }
     Ok(LiftedInstruction {
@@ -4234,7 +4234,7 @@ impl Lifter for Thumb {
                         architecture: Architecture::Thumb,
                         address,
                         opcode: (word >> 8) as u8,
-                    })
+                    });
                 }
             };
             let rn = ((word >> 3) & 7) as u8;
@@ -4877,7 +4877,7 @@ impl Lifter for M6502 {
                     architecture: Architecture::M6502,
                     address,
                     opcode,
-                })
+                });
             }
         };
         Ok(m68k_finish(address, &bytes[..length], ops, flow))
@@ -5042,7 +5042,7 @@ impl Lifter for Z80 {
                     architecture: Architecture::Z80,
                     address,
                     opcode,
-                })
+                });
             }
         };
         Ok(m68k_finish(address, &bytes[..length], ops, flow))
@@ -5122,7 +5122,7 @@ impl Lifter for Spu {
                     architecture: Architecture::Spu,
                     address,
                     opcode: (opcode & 0xff) as u8,
-                })
+                });
             }
         };
         Ok(spu_finish(address, &bytes[..4], ops, flow))
@@ -5166,11 +5166,12 @@ mod tests {
             .lift_instruction(0x1000, &[0x0f, 0x10, 0x85, 0xf0, 0x01, 0, 0])
             .unwrap();
         assert_eq!(load.flow, Flow::FallThrough(0x1007));
-        assert!(load
-            .pcode
-            .ops
-            .iter()
-            .any(|op| op.opcode == op::LOAD && op.output.map(|output| output.size) == Some(16)));
+        assert!(
+            load.pcode
+                .ops
+                .iter()
+                .any(|op| op.opcode == op::LOAD && op.output.map(|output| output.size) == Some(16))
+        );
 
         let store = x
             .lift_instruction(0x2000, &[0x0f, 0x29, 0x85, 0xe0, 0x02, 0, 0])
@@ -5181,11 +5182,13 @@ mod tests {
         }));
 
         let register = x.lift_instruction(0x3000, &[0x0f, 0x10, 0xc1]).unwrap();
-        assert!(register
-            .pcode
-            .ops
-            .iter()
-            .any(|op| op.opcode == op::COPY && op.output == Some(x86_xmm_reg(0))));
+        assert!(
+            register
+                .pcode
+                .ops
+                .iter()
+                .any(|op| op.opcode == op::COPY && op.output == Some(x86_xmm_reg(0)))
+        );
     }
 
     #[test]
@@ -5217,11 +5220,13 @@ mod tests {
             .lift_instruction(0x125088, &[0x18, 0x18, 0xe5, 0x00])
             .unwrap();
         assert_eq!(instruction.flow, Flow::FallThrough(0x12508c));
-        assert!(instruction
-            .pcode
-            .ops
-            .iter()
-            .any(|operation| operation.opcode == op::INT_MULT));
+        assert!(
+            instruction
+                .pcode
+                .ops
+                .iter()
+                .any(|operation| operation.opcode == op::INT_MULT)
+        );
         assert!(instruction.pcode.ops.iter().any(|operation| {
             operation.opcode == op::COPY && operation.output == Some(mips_reg(3, 4))
         }));
@@ -5499,11 +5504,11 @@ mod tests {
 
         let memory = x.lift_instruction(0x2000, &[0x84, 0x00]).unwrap();
         assert_eq!(memory.pcode.len, 2);
-        assert!(memory
-            .pcode
-            .ops
-            .iter()
-            .any(|op| { op.opcode == op::LOAD && op.output.map(|output| output.size) == Some(1) }));
+        assert!(
+            memory.pcode.ops.iter().any(|op| {
+                op.opcode == op::LOAD && op.output.map(|output| output.size) == Some(1)
+            })
+        );
 
         let high_byte = x.lift_instruction(0x3000, &[0x84, 0xe0]).unwrap();
         let and = high_byte
@@ -5539,36 +5544,44 @@ mod tests {
         let immediate_memory = x
             .lift_instruction(0x2000, &[0x48, 0x83, 0x38, 0x00])
             .unwrap();
-        assert!(immediate_memory
-            .pcode
-            .ops
-            .iter()
-            .any(|op| op.opcode == op::LOAD));
-        assert!(immediate_memory
-            .pcode
-            .ops
-            .iter()
-            .any(|op| op.opcode == op::INT_EQUAL));
+        assert!(
+            immediate_memory
+                .pcode
+                .ops
+                .iter()
+                .any(|op| op.opcode == op::LOAD)
+        );
+        assert!(
+            immediate_memory
+                .pcode
+                .ops
+                .iter()
+                .any(|op| op.opcode == op::INT_EQUAL)
+        );
 
         let store_immediate = x
             .lift_instruction(0x3000, &[0xc7, 0x05, 0, 0, 0, 0, 1, 0, 0, 0])
             .unwrap();
         assert_eq!(store_immediate.flow, Flow::FallThrough(0x300a));
-        assert!(store_immediate
-            .pcode
-            .ops
-            .iter()
-            .any(|op| op.opcode == op::STORE));
+        assert!(
+            store_immediate
+                .pcode
+                .ops
+                .iter()
+                .any(|op| op.opcode == op::STORE)
+        );
 
         let indirect_call = x
             .lift_instruction(0x4000, &[0xff, 0x15, 0, 0, 0, 0])
             .unwrap();
         assert_eq!(indirect_call.flow, Flow::FallThrough(0x4006));
-        assert!(indirect_call
-            .pcode
-            .ops
-            .iter()
-            .any(|op| op.opcode == op::CALLIND));
+        assert!(
+            indirect_call
+                .pcode
+                .ops
+                .iter()
+                .any(|op| op.opcode == op::CALLIND)
+        );
     }
 
     #[test]

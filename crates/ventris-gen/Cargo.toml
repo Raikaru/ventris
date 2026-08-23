@@ -6,6 +6,6 @@ license.workspace = true
 description = "Progressive discovery generations and convergence state"
 
 [dependencies]
-ventris-addr = { path = "../ventris-addr", version = "0.1.0" }
-ventris-format = { path = "../ventris-format", version = "0.1.0" }
-ventris-lifter = { path = "../ventris-lifter", version = "0.1.0" }
+ventris-addr = { path = "../ventris-addr", version = "0.2.0" }
+ventris-format = { path = "../ventris-format", version = "0.2.0" }
+ventris-lifter = { path = "../ventris-lifter", version = "0.2.0" }

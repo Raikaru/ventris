@@ -13,13 +13,13 @@ use ventris_decompiler::native::{NativeDecompiler, NativeDocument, NativeMemory}
 use ventris_format::{Image, ImageMetadata, LoadedImage, Loader};
 use ventris_game::reconstruction::SourceReconstruction;
 use ventris_game::{
-    recover_function, AnnotationFact, Evidence, NominalType, RecoveredFunction, RecoveryInput,
-    RelocationFact, SymbolFact, TypeAssertion,
+    AnnotationFact, Evidence, NominalType, RecoveredFunction, RecoveryInput, RelocationFact,
+    SymbolFact, TypeAssertion, recover_function,
 };
 use ventris_gen::inventory::{
     self, Inventory, RelocationFact as InventoryRelocation, SymbolFact as InventorySymbol,
 };
-use ventris_lifter::{lifter_for, Architecture, LiftError, NativeFunction};
+use ventris_lifter::{Architecture, LiftError, NativeFunction, lifter_for};
 use ventris_target::{DecompilationSupport, TargetProfile};
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -528,9 +528,11 @@ mod tests {
         .unwrap();
         let inventory = pipeline.inventory(&Hints::default(), 32).unwrap();
         assert_eq!(inventory.functions.functions.len(), 1);
-        assert!(inventory
-            .data
-            .iter()
-            .any(|fact| fact.type_name == Some("string")));
+        assert!(
+            inventory
+                .data
+                .iter()
+                .any(|fact| fact.type_name == Some("string"))
+        );
     }
 }

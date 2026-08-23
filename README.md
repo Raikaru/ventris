@@ -123,6 +123,9 @@ function pipeline.
 
 ## Build and verify
 
+Rust 1.98.0 or newer is required; all crates use Rust edition 2024. The
+repository's `rust-toolchain.toml` pins the release toolchain.
+
 ```text
 cargo build --workspace --locked
 cargo test --workspace

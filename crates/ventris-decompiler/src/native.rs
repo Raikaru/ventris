@@ -10,16 +10,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fmt::Write as FmtWrite;
 use ventris_lifter::{Architecture, NativeFunction, REGISTER_SPACE};
-use ventris_pcode::{op, PcodeOp, Varnode};
+use ventris_pcode::{PcodeOp, Varnode, op};
 
 mod c_score;
 mod control_flow;
 mod ssa;
 
-pub use c_score::{score_c, CScore};
+pub use c_score::{CScore, score_c};
 use control_flow::{simplify, structure_control_flow};
-pub use ssa::{build_ssa, SsaFunction, SsaValue, TypeConstraint, TypeSolver};
-use ssa::{merge_types, ValueKey};
+pub use ssa::{SsaFunction, SsaValue, TypeConstraint, TypeSolver, build_ssa};
+use ssa::{ValueKey, merge_types};
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Type {
@@ -1418,10 +1418,10 @@ impl fmt::Display for NativeDocument {
 mod tests {
     use super::*;
     use ventris_lifter::{
-        AArch64, Arm32, Flow, GameCube, LiftedInstruction, Lifter, M68k, Mips32, Mips32Be, Ppc32,
-        Ps1, Rv32, Rv64, Sh2, Sh4, Thumb, M6502, N64, RAM_SPACE, X86_32, X86_64, Z80,
+        AArch64, Arm32, Flow, GameCube, LiftedInstruction, Lifter, M68k, M6502, Mips32, Mips32Be,
+        N64, Ppc32, Ps1, RAM_SPACE, Rv32, Rv64, Sh2, Sh4, Thumb, X86_32, X86_64, Z80,
     };
-    use ventris_pcode::{op, InstPcode, PcodeOp, Varnode, CONST_SPACE};
+    use ventris_pcode::{CONST_SPACE, InstPcode, PcodeOp, Varnode, op};
 
     fn simple_function() -> NativeFunction {
         let x = X86_64;
@@ -1716,11 +1716,13 @@ mod tests {
             direct_c.contains("DAT_8000 = sub_2000(a0, a1, a2, a3, f12, f14);"),
             "{direct_c}"
         );
-        assert!(direct_document
-            .ssa
-            .values
-            .iter()
-            .any(|value| value.origin == return_register));
+        assert!(
+            direct_document
+                .ssa
+                .values
+                .iter()
+                .any(|value| value.origin == return_register)
+        );
 
         let indirect = make_function(op::CALLIND, Varnode::new(REGISTER_SPACE, 25 * 4, 4));
         let indirect_c = NativeDecompiler
@@ -2350,9 +2352,11 @@ mod tests {
             NativeStatement::Label(0x1020),
             NativeStatement::Return(None),
         ]);
-        assert!(statements
-            .iter()
-            .any(|statement| matches!(statement, NativeStatement::Label(0x1020))));
+        assert!(
+            statements
+                .iter()
+                .any(|statement| matches!(statement, NativeStatement::Label(0x1020)))
+        );
         let document = NativeDocument {
             name: "sub_1000".into(),
             return_type: Type::Void,

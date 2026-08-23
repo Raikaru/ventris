@@ -26,8 +26,8 @@
 pub mod inventory;
 
 use std::collections::{BTreeMap, BTreeSet};
-use ventris_addr::hash::stable64;
 use ventris_addr::Addr;
+use ventris_addr::hash::stable64;
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Generation(pub u32);

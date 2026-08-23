@@ -9,8 +9,13 @@ on:
       version:
         description: Release version without the v prefix
         required: true
-        default: 0.1.0
+        default: 0.2.0
         type: string
+      publish:
+        description: Publish the GitHub release after all artifacts pass
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -37,7 +42,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.0
         with:
           targets: ${{ matrix.target }}
       - uses: actions/setup-python@v5
@@ -101,7 +106,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.0
         with:
           components: rustfmt
       - name: Check GPUI formatting
@@ -201,6 +206,7 @@ jobs:
   publish:
     name: Publish GitHub release
     needs: [native, python, vscode, gpui]
+    if: github.event_name == 'push' || inputs.publish == true
     runs-on: ubuntu-latest
     permissions:
       contents: write

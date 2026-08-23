@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "ventris"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ventris-addr",
  "ventris-decompiler",
@@ -17,11 +17,11 @@ dependencies = [
 
 [[package]]
 name = "ventris-addr"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "ventris-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ventris",
  "ventris-addr",
@@ -37,7 +37,7 @@ dependencies = [
 
 [[package]]
 name = "ventris-db"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ventris-addr",
  "ventris-gen",
@@ -46,7 +46,7 @@ dependencies = [
 
 [[package]]
 name = "ventris-decompiler"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ventris-lifter",
  "ventris-pcode",
@@ -54,14 +54,14 @@ dependencies = [
 
 [[package]]
 name = "ventris-format"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ventris-addr",
 ]
 
 [[package]]
 name = "ventris-game"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ventris-format",
  "ventris-lifter",
@@ -71,7 +71,7 @@ dependencies = [
 
 [[package]]
 name = "ventris-gen"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ventris-addr",
  "ventris-format",
@@ -80,7 +80,7 @@ dependencies = [
 
 [[package]]
 name = "ventris-lifter"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ventris-format",
  "ventris-pcode",
@@ -88,18 +88,18 @@ dependencies = [
 
 [[package]]
 name = "ventris-log"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ventris-addr",
 ]
 
 [[package]]
 name = "ventris-pcode"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "ventris-target"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ventris-format",
  "ventris-lifter",

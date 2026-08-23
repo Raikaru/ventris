@@ -40,6 +40,19 @@ def verify(wheel: Path, version: str, distribution: str = "ventris-client") -> N
         missing = required - names
         if missing:
             raise ValueError(f"wheel is missing: {', '.join(sorted(missing))}")
+        allowed_package_files = {
+            "ventris/__init__.py",
+            "ventris/__main__.py",
+            "ventris/cli.py",
+        }
+        unexpected_package_files = {
+            name for name in names if name.startswith("ventris/")
+        } - allowed_package_files
+        if unexpected_package_files:
+            raise ValueError(
+                "wheel contains unexpected runtime modules: "
+                + ", ".join(sorted(unexpected_package_files))
+            )
         if any(name.startswith("tests/") for name in names):
             raise ValueError("wheel contains test sources")
         if not any(

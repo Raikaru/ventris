@@ -2,12 +2,12 @@ use std::env;
 use std::path::PathBuf;
 
 use gpui::{
-    div, prelude::*, px, rgb, size, App, Application, Bounds, Context, KeyDownEvent, Window,
-    WindowBounds, WindowOptions,
+    App, Application, Bounds, Context, KeyDownEvent, Window, WindowBounds, WindowOptions, div,
+    prelude::*, px, rgb, size,
 };
 use gpui_component::{
-    button::{Button, ButtonVariants},
     Selectable,
+    button::{Button, ButtonVariants},
 };
 use ventris_db::{
     Project, ProjectAssertion, ProjectData, ProjectFunction, ProjectReference,

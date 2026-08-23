@@ -1,6 +1,6 @@
 use ventris_lifter::{
-    AArch64, Architecture, Arm32, Flow, Lifter, M68k, Mips32, Mips32Be, Ppc32, Ppc64, Ps1, Rv32,
-    Rv64, Sh2, Sh4, Spu, Thumb, M6502, N64, X86_32, X86_64, Z80,
+    AArch64, Architecture, Arm32, Flow, Lifter, M68k, M6502, Mips32, Mips32Be, N64, Ppc32, Ppc64,
+    Ps1, Rv32, Rv64, Sh2, Sh4, Spu, Thumb, X86_32, X86_64, Z80,
 };
 use ventris_pcode::op;
 

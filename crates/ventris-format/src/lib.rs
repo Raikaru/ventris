@@ -2465,11 +2465,11 @@ mod tests {
         d[p..p + 4].copy_from_slice(&1u32.to_le_bytes()); // PT_LOAD
         d[p + 8..p + 12].copy_from_slice(&0x1000u32.to_le_bytes()); // vaddr
         d[p + 20..p + 24].copy_from_slice(&0x1000u32.to_le_bytes()); // memsz
-                                                                     // section 0: the aliasing one, named "image"
+        // section 0: the aliasing one, named "image"
         let s = 0x80;
         d[s + 12..s + 16].copy_from_slice(&0x1000u32.to_le_bytes()); // addr
         d[s + 20..s + 24].copy_from_slice(&0x1000u32.to_le_bytes()); // size
-                                                                     // section 1: shstrtab at file offset 0x180
+        // section 1: shstrtab at file offset 0x180
         let s1 = 0x80 + 40;
         d[s1 + 16..s1 + 20].copy_from_slice(&0x180u32.to_le_bytes());
         d[0x180..0x186].copy_from_slice(b"image\0");
@@ -2792,9 +2792,11 @@ mod tests {
             machine: 8,
             flags: 0,
         };
-        assert!(mips64_be
-            .consistent_languages()
-            .contains(&"MIPS:BE:64:default"));
+        assert!(
+            mips64_be
+                .consistent_languages()
+                .contains(&"MIPS:BE:64:default")
+        );
         let spu = ElfFacts {
             machine: 23,
             ..mips64_be
