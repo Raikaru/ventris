@@ -114,6 +114,14 @@ low-level `run` helper. It contains no parser or decompiler implementation.
 opens the result in an adjacent editor. The extension contains no server,
 project database, or analysis implementation.
 
+## Frozen desktop integration
+
+`desktop/ventris-gpui` remains compatibility-tested and gates releases, but is
+frozen: it is not a published artifact, a public analysis API, or a driver of
+the core roadmap. Its project-oriented model stays outside the canonical
+function pipeline.
+
+
 ## Build and verify
 
 ```text

@@ -23,6 +23,8 @@ All notable Ventris changes are documented here.
 - Moved corpus, compiler, oracle, transport, project, batch, and packaging
   workflows behind development-only tools.
 - Reduced Python and VS Code to thin adapters over the native executable.
+- Froze the GPUI desktop workspace outside the product pipeline while retaining
+  its formatting and test jobs as release compatibility gates.
 - Added checked-in per-function compiler floors so aggregate scores cannot hide
   a decompilation regression.
 
