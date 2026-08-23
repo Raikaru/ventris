@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from ventris import corpus_smoke
+from tools import corpus_smoke
 
 
 def envelope(command: str, result: str) -> str:

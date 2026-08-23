@@ -1,7 +1,7 @@
 {
   "name": "ventris-binary-analysis",
   "displayName": "Ventris Binary Analysis",
-  "description": "Inspect and natively decompile binaries with Ventris.",
+  "description": "Inspect, lift, and decompile native functions with Ventris.",
   "version": "0.1.0",
   "publisher": "ventris",
   "license": "Apache-2.0",
@@ -16,28 +16,16 @@
   },
   "categories": ["Other"],
   "activationEvents": [
-    "onCommand:ventris.startServer",
     "onCommand:ventris.inspect",
-    "onCommand:ventris.discover",
-    "onCommand:ventris.resolve",
     "onCommand:ventris.lift",
-    "onCommand:ventris.recoverTypes",
-    "onCommand:ventris.reconstructSource",
-    "onCommand:ventris.decompileNative",
-    "onCommand:ventris.batch"
+    "onCommand:ventris.decompile"
   ],
   "main": "./extension.js",
   "contributes": {
     "commands": [
-      { "command": "ventris.startServer", "title": "Ventris: Start Server" },
-      { "command": "ventris.discover", "title": "Ventris: Discover Functions" },
       { "command": "ventris.inspect", "title": "Ventris: Inspect Binary" },
-      { "command": "ventris.resolve", "title": "Ventris: Resolve Address" },
       { "command": "ventris.lift", "title": "Ventris: Lift Function" },
-      { "command": "ventris.recoverTypes", "title": "Ventris: Recover Game Types" },
-      { "command": "ventris.reconstructSource", "title": "Ventris: Reconstruct C Source" },
-      { "command": "ventris.decompileNative", "title": "Ventris: Decompile Function" },
-      { "command": "ventris.batch", "title": "Ventris: Run JSONL Batch" }
+      { "command": "ventris.decompile", "title": "Ventris: Decompile Function" }
     ],
     "configuration": {
       "title": "Ventris",
@@ -47,28 +35,17 @@
           "default": "ventris",
           "description": "Path to the Ventris executable."
         },
-        "ventris.serverUrl": {
-          "type": "string",
-          "default": "http://127.0.0.1:8787",
-          "description": "Ventris HTTP server URL."
-        },
-        "ventris.serverArgs": {
-          "type": "array",
-          "items": { "type": "string" },
-          "default": [],
-          "description": "Extra arguments passed before `serve` when starting Ventris."
-        },
         "ventris.target": {
           "type": "string",
           "enum": ["", "atari2600", "nes", "snes", "master-system", "game-gear", "genesis", "neo-geo", "c64", "ps1", "ps2", "n64", "saturn", "dreamcast", "gamecube", "wii", "gba", "nds", "3ds", "psp", "vita", "wiiu", "xbox360", "ps3-ppu", "ps3-spu"],
           "default": "",
-          "description": "Optional console target profile. It supplies architecture and loader defaults."
+          "description": "Optional console target profile supplying architecture, loader, and ABI defaults."
         },
         "ventris.loader": {
           "type": "string",
-          "enum": ["auto", "raw", "elf", "pe", "macho", "coff", "ihex", "srec", "nds", "ncch", "psp-prx", "vita-self", "wiiu-rpl", "xex", "ps3-self"],
+          "enum": ["auto", "raw", "elf", "pe", "macho", "coff", "ihex", "srec", "n64-rom", "dol", "nds", "ncch", "psp-prx", "vita-self", "wiiu-rpl", "xex", "ps3-self"],
           "default": "auto",
-          "description": "Image loader used by Ventris commands."
+          "description": "Image loader used by the function pipeline."
         },
         "ventris.base": {
           "type": "string",

@@ -23,7 +23,7 @@ release tag.
 
 - [ ] The release is made from a clean tagged commit; generated files, local
       images, debug logs, credentials, and machine-specific paths are absent.
-- [ ] `VERSION`, Cargo, GPUI, Python, and VS Code metadata agree exactly.
+- [ ] `VERSION`, Cargo, Python, and VS Code metadata agree exactly.
 - [ ] `LICENSE`, `NOTICE`, `SECURITY.md`, `CONTRIBUTING.md`, and
       `THIRD_PARTY_NOTICES.md` are present in source and relevant binary
       packages.
@@ -31,22 +31,19 @@ release tag.
       contact are configured before publishing registry metadata.
 - [ ] All included code and fixtures have a documented license and provenance.
       Game images and copied game source remain outside the distribution.
-- [ ] The full Rust, Python, VS Code, and GPUI checks pass on the release
-      commit.
-- [ ] Each native binary passes `version`, `inspect`, `resolve`, `lift`, and
-      semantic `decompile-native` smoke checks against a checked-in fixture,
-      using `tools/native_smoke.py`.
+- [ ] The full Rust, Python, and VS Code checks pass on the release commit.
+- [ ] Each native binary passes `version`, `inspect`, `lift`, and semantic
+      `decompile` smoke checks against a checked-in fixture, using
+      `tools/native_smoke.py`.
 - [ ] The same binary passes `tools/clean_host_smoke.py` from an isolated
       temporary working directory on every release runner.
-- [ ] HTTP behavior is checked for loopback operation, malformed requests,
-      size limits, unsupported methods, and clean shutdown.
+- [ ] Development-only corpus and compiler gates enforce every checked-in
+      per-function floor.
 - [ ] The Python package is tested in a clean virtual environment with an
       explicit released binary. Its external-binary prerequisite is visible in
       the package documentation.
-- [ ] The VSIX installs in a clean VS Code profile and its commands reach the
-      same binary/API version as the release.
-- [ ] The GPUI client opens a populated persisted project and its workspace
-      navigation and details render without errors.
+- [ ] The VSIX installs in a clean VS Code profile and its three commands reach
+      the same native executable version as the release.
 - [ ] SHA-256 checksums are generated for every artifact. The current preview
       release policy is unsigned artifacts plus a published `SHA256SUMS` file;
       no cryptographic signature is claimed.
@@ -58,15 +55,12 @@ From the repository root:
 ```text
 python -S tools/release_check.py --version 0.1.0
 cargo fmt --all -- --check
-cargo fmt --manifest-path desktop/ventris-gpui/Cargo.toml -- --check
 cargo test --workspace
 cargo build --workspace --locked
 cargo build --release --locked -p ventris-cli
-cargo test --manifest-path desktop/ventris-gpui/Cargo.toml --locked
 PYTHONPATH=python python -S -m unittest discover -s python/tests
 python -S tools/native_smoke.py --binary target/release/ventris.exe --fixture integrations/vscode/acceptance/fixture.exe --semantic-spec integrations/vscode/acceptance/semantic.json --version 0.1.0
 python -S tools/clean_host_smoke.py --binary target/release/ventris.exe --fixture integrations/vscode/acceptance/fixture.exe --semantic-spec integrations/vscode/acceptance/semantic.json --version 0.1.0
-python -S tools/http_smoke.py --binary target/release/ventris.exe
 ```
 
 Build and inspect the Python distribution in a fresh environment. The chosen
@@ -152,9 +146,9 @@ Do not call Ventris stable until all of these are true:
   addresses, sizes, or warning counts;
 - all advertised native platforms have reproducible CI builds and clean-host
   smoke coverage;
-- the VS Code and GPUI clients have host-side acceptance evidence;
-- the Python distribution has a deliberate binary-install story;
-- a security review covers file access, server exposure, cache handling, and
+- the Python and VS Code adapters have host-side acceptance evidence and a
+  deliberate native-binary installation story;
+- a security review covers file access, binary parsing, cache handling, and
   subprocess boundaries;
 - the project has a maintained issue/support channel and a published private
   security contact.

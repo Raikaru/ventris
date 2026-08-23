@@ -3,6 +3,19 @@
 version = 4
 
 [[package]]
+name = "ventris"
+version = "0.1.0"
+dependencies = [
+ "ventris-addr",
+ "ventris-decompiler",
+ "ventris-format",
+ "ventris-game",
+ "ventris-gen",
+ "ventris-lifter",
+ "ventris-target",
+]
+
+[[package]]
 name = "ventris-addr"
 version = "0.1.0"
 
@@ -10,6 +23,7 @@ version = "0.1.0"
 name = "ventris-cli"
 version = "0.1.0"
 dependencies = [
+ "ventris",
  "ventris-addr",
  "ventris-db",
  "ventris-decompiler",
@@ -60,6 +74,8 @@ name = "ventris-gen"
 version = "0.1.0"
 dependencies = [
  "ventris-addr",
+ "ventris-format",
+ "ventris-lifter",
 ]
 
 [[package]]

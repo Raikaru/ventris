@@ -1,0 +1,15 @@
+[package]
+name = "ventris"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Canonical load, lift, analyze, and render pipeline for Ventris"
+
+[dependencies]
+ventris-addr = { path = "../ventris-addr", version = "0.1.0" }
+ventris-decompiler = { path = "../ventris-decompiler", version = "0.1.0" }
+ventris-format = { path = "../ventris-format", version = "0.1.0" }
+ventris-game = { path = "../ventris-game", version = "0.1.0" }
+ventris-gen = { path = "../ventris-gen", version = "0.1.0" }
+ventris-lifter = { path = "../ventris-lifter", version = "0.1.0" }
+ventris-target = { path = "../ventris-target", version = "0.1.0" }

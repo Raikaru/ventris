@@ -12,10 +12,10 @@ checked-in semantic fixtures are development-only.
 
 ## Optional corpus metadata
 
-`ventris corpus` reports source-backed metadata so users can reproduce smoke
-checks against images they obtained independently. The repository does not
-ship those images or copied game source. Each entry records its source commit
-and the license value observed for the source project:
+Development-only corpus checks consume source-backed metadata so maintainers
+can reproduce smoke checks against images they obtained independently. The
+repository does not ship those images or copied game source. Each entry records
+its source commit and the license value observed for the source project:
 
 | Project | Metadata use | Recorded license | Distribution boundary |
 |---|---|---|---|

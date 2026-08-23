@@ -1,9 +1,9 @@
 """Run the source-backed real-image corpus smoke contract.
 
 The runner deliberately keeps game images outside the repository. It loads the
-checked-in corpus manifest through ``ventris corpus --json``, verifies each local
-image's SHA-256, resolves every manifest function address, and runs bounded
-native decompilation for each selected target.
+checked-in corpus manifest through Ventris's internal developer namespace,
+verifies each local image's SHA-256, resolves every manifest function address,
+and runs bounded native decompilation for each selected target.
 """
 
 from __future__ import annotations
@@ -40,6 +40,7 @@ class ManifestFunction:
     size: int
     semantic: dict[str, object] | None
     source_path: str
+    compiler_baseline: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -142,6 +143,7 @@ def parse_manifest(text: str) -> tuple[ManifestEntry, ...]:
             address = raw_function.get("address")
             size = raw_function.get("size")
             semantic = raw_function.get("semantic")
+            compiler_baseline = raw_function.get("compiler_baseline")
             source_path = raw_function.get("source_path")
             if (
                 not isinstance(name, str)
@@ -153,12 +155,17 @@ def parse_manifest(text: str) -> tuple[ManifestEntry, ...]:
                 raise SmokeError(
                     f"{entry_id}/{name}: semantic baseline must be an object or null"
                 )
+            if compiler_baseline is not None and not isinstance(compiler_baseline, dict):
+                raise SmokeError(
+                    f"{entry_id}/{name}: compiler baseline must be an object or null"
+                )
             functions.append(
                 ManifestFunction(
                     name=name,
                     address=address,
                     size=_parse_int(size, f"{entry_id}.function.size"),
                     semantic=semantic,
+                    compiler_baseline=compiler_baseline,
                     source_path=source_path,
                 )
             )
@@ -875,7 +882,7 @@ def run_smoke(
     if limit <= 0:
         raise SmokeError("--limit must be greater than zero")
     image_dir = image_dir.resolve()
-    command = list(command or find_ventris())
+    command = [*list(command or find_ventris()), "__internal"]
     manifest_stdout, _ = command_runner(command, ["corpus", "--json"])
     entries = {entry.id: entry for entry in parse_manifest(manifest_stdout)}
     selected_ids = tuple(ids)

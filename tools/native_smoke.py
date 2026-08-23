@@ -106,9 +106,6 @@ def smoke(
     if "PE32+" not in str(inspect.get("result", "")):
         raise ValueError("inspect smoke did not identify the checked-in PE fixture")
 
-    resolve = run_json(binary, ["resolve", str(fixture), address])
-    if address.lower() not in str(resolve.get("result", "")).lower():
-        raise ValueError("resolve smoke did not return the requested address")
 
     lift = run_json(binary, ["lift", str(fixture), address, "--arch", architecture])
     if "instructions:" not in str(lift.get("result", "")):
@@ -116,11 +113,11 @@ def smoke(
 
     decompile = run_json(
         binary,
-        ["decompile-native", str(fixture), address, "--arch", architecture],
+        ["decompile", str(fixture), address, "--arch", architecture],
     )
     body = str(decompile.get("result", ""))
     if "#include" not in body or "return" not in body:
-        raise ValueError("decompile-native smoke did not return native C")
+        raise ValueError("decompile smoke did not return native C")
     if expected_semantics is not None:
         compare_semantics(body, expected_semantics)
 

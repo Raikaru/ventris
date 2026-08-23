@@ -9,6 +9,7 @@ use std::fmt::Write as FmtWrite;
 use std::io::{Read as IoRead, Write as IoWrite};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use ventris::{Hints, LoadOptions, Pipeline};
 use ventris_addr::hash::stable64;
 use ventris_db::{
     Authority, Memo, MemoKey, Project, ProjectAssertion, ProjectCache, ProjectData,
@@ -16,22 +17,15 @@ use ventris_db::{
     ProjectReferenceKind, ProjectRegion, ProjectRelocation, ProjectSegment, ProjectSpace,
     ProjectSymbol, QueryId,
 };
-use ventris_decompiler::native::{NativeDecompiler, NativeMemory};
 use ventris_format::{Endian, Format, Image, ImageMetadata, Loader, Placement};
 use ventris_game::assets::{
     AssetCatalog, AssetKind, AssetLinkKind, AssetTarget, GameAsset, GameScript,
 };
 use ventris_game::diff::{diff_revisions, BinaryRevision, RegionChangeKind, RevisionRegion};
-use ventris_game::reconstruction::SourceReconstruction;
 use ventris_game::runtime::{ingest as ingest_runtime_events, RuntimeEvent, RuntimeEventKind};
-use ventris_game::{
-    corpus, recover_function, AccessKind, RecoveryInput, RelocationFact, SymbolFact,
-};
-use ventris_gen::Generation;
-use ventris_lifter::{
-    discover_functions, AArch64, Architecture, Arm32, Flow, GameCube, Lifter, M68k, Mips32,
-    Mips32Be, Ppc32, Ppc64, Ps1, Rv32, Rv64, Sh2, Sh4, Spu, Thumb, M6502, N64, X86_32, X86_64, Z80,
-};
+use ventris_game::{corpus, AccessKind};
+use ventris_gen::{inventory, Generation};
+use ventris_lifter::{discover_functions, Architecture, Flow, Lifter};
 use ventris_target::TargetProfile;
 
 // Bump whenever native lifting/decompilation semantics change.
@@ -39,50 +33,24 @@ const NATIVE_ANALYZER_CODE_VERSION: u32 = 8;
 const USAGE: &str = "Usage:
   ventris help
   ventris version
-  ventris corpus [--json]
-  ventris project runtime <project> <trace> [--json]
-  ventris project assets <project> <manifest> [--json]
-  ventris diff <before> <after> [--target <target>] [--loader <loader>] [--base <addr>] [--slice <n>] [--region <name>] [--json]
-  ventris project analyze <project> (--arch <arch>|--target <target>) [--limit <n>] [--json]
-  ventris project show <project> [--json]
-  ventris project refs <project> <address> [--incoming|--outgoing] [--json]
-  ventris discover <image> (--arch <arch>|--target <target>) [--loader <loader>] [--base <addr>] [--slice <n>] [--limit <n>] [--json]
   ventris inspect <image> [--target <target>] [--loader <loader>] [--base <addr>] [--slice <n>] [--json]
-  ventris decompile-native <image> <address> (--arch <arch>|--target <target>) [--loader <loader>] [--base <addr>] [--slice <n>] [--limit <n>] [--raw] [--cache <dir>] [--json]
-  ventris decompile-native --project <project> --function <name-or-address> (--arch <arch>|--target <target>) [--limit <n>] [--cache <dir>] [--json]
   ventris lift <image> <address> (--arch <arch>|--target <target>) [--loader <loader>] [--base <addr>] [--slice <n>] [--limit <n>] [--raw] [--json]
-  ventris recover-types <image> <address> --target <target> [--loader <loader>] [--base <addr>] [--slice <n>] [--limit <n>] [--raw] [--json]
-  ventris reconstruct-source <image> <address> --target <target> [--metadata <file>] [--loader <loader>] [--base <addr>] [--slice <n>] [--limit <n>] [--raw] [--cache <dir>] [--json]
+  ventris decompile <image> <address> (--arch <arch>|--target <target>) [--metadata <file>] [--loader <loader>] [--base <addr>] [--slice <n>] [--limit <n>] [--raw] [--cache <dir>] [--json]
 
 Commands:
-  diff                Compare binary revisions by named image regions.
-  project             Create, analyze, inspect, ingest runtime evidence, or link assets/scripts in a persistent project.
-  discover            Discover a bounded function and data inventory.
-  inspect             Parse an ELF, PE, Mach-O, Nintendo 64 ROM, or GameCube/Wii DOL (including a selected universal slice) and print facts without guessing a language.
-  resolve             Resolve a qualified or unambiguous bare address.
-  lift                Lift a function into architecture-neutral p-code.
-  decompile-native    Lift, analyze, and render native C without a JVM.
-  recover-types       Recover console ABI facts and evidence-backed field candidates.
-  reconstruct-source  Render native C with recovered game structs and ABI facts.
-  batch               Process JSON Lines analysis requests with stable JSON Lines results.
-  serve               Serve local HTTP analysis endpoints.
+  inspect             Parse an image and report loader and address-space facts.
+  lift                Lift one function into architecture-neutral p-code.
+  decompile           Load, lift, analyze, and render one function as C.
 
   --arch <arch>       Explicit architecture: x86_64, x86_32, aarch64, arm32, thumb, mips32, mips32be, ps1, n64, rv64, rv32, ppc32, ppc64, gamecube, m68k, sh2, sh4, m6502, z80, or spu.
   --target <target>   Console profile supplying architecture, loader, ABI, and image parts.
   --loader <loader>   Image container: auto, raw, elf, pe, macho, coff, ihex, srec, n64-rom, dol, nds, ncch, psp-prx, vita-self, wiiu-rpl, xex, or ps3-self.
+  --metadata <file>   Optional evidence sidecar with nominal types and assertions.
   --limit <n>         Maximum instructions to discover (default: 4096).
   --slice <n>         Select zero-based slice n from a universal Mach-O.
-  --raw                Treat input as a raw architecture image.
+  --raw               Treat input as a raw architecture image.
   --cache <dir>       Persist native analysis results in the supplied directory.
   --json              Wrap successful output in a stable JSON envelope.
-
-Game recovery options:
-  --metadata <file>   JSON sidecar with nominal types, annotations, and assertions.
-
-Batch options:
-  --input <file|->    JSON Lines requests; '-' reads stdin.
-  --output <file|->   JSON Lines results; '-' or omitted writes stdout.
-  --cache <dir>       Reuse native decompiler results across requests.
 
 ";
 
@@ -113,6 +81,7 @@ impl Default for ImageOptions {
 
 #[derive(Debug)]
 enum Command {
+    Decompile(GameOptions),
     Corpus(OutputFormat),
     Help,
     Version,
@@ -252,7 +221,9 @@ impl Command {
             Self::Inspect { format, .. } | Self::Resolve { format, .. } => *format,
             Self::Lift(options) | Self::DecompileNative(options) => options.format,
             Self::DecompileNativeProject(options) => options.format,
-            Self::RecoverTypes(options) | Self::ReconstructSource(options) => options.lift.format,
+            Self::Decompile(options)
+            | Self::RecoverTypes(options)
+            | Self::ReconstructSource(options) => options.lift.format,
             Self::Batch(_) => OutputFormat::Json,
             Self::Help | Self::Version | Self::Serve(_) => OutputFormat::Text,
         }
@@ -303,11 +274,6 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
     match command {
         "help" | "--help" | "-h" => Ok(Command::Help),
         "version" | "--version" | "-V" => Ok(Command::Version),
-        "corpus" => Ok(Command::Corpus(parse_corpus_options(&args[1..])?)),
-        "diff" => Ok(Command::Diff(parse_diff_options(&args[1..])?)),
-        "project" => Ok(Command::Project(parse_project_options(&args[1..])?)),
-        "discover" => Ok(Command::Discover(parse_discover_options(&args[1..])?)),
-        "serve" => Ok(Command::Serve(parse_serve_options(&args[1..])?)),
         "inspect" => {
             let (image, options, format) = parse_path_options(&args[1..], "inspect")?;
             Ok(Command::Inspect {
@@ -316,12 +282,25 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
                 format,
             })
         }
+        "lift" => Ok(Command::Lift(parse_lift_options(&args[1..])?)),
+        "__internal" => parse_internal_command(&args[1..]),
+        "decompile" => Ok(Command::Decompile(parse_game_model_options(&args[1..])?)),
+        other => Err(format!("unknown command {other:?}")),
+    }
+}
+fn parse_internal_command(args: &[String]) -> Result<Command, String> {
+    let Some(command) = args.first().map(String::as_str) else {
+        return Err("__internal requires a developer command".to_string());
+    };
+    match command {
+        "corpus" => Ok(Command::Corpus(parse_corpus_options(&args[1..])?)),
+        "diff" => Ok(Command::Diff(parse_diff_options(&args[1..])?)),
+        "project" => Ok(Command::Project(parse_project_options(&args[1..])?)),
+        "discover" => Ok(Command::Discover(parse_discover_options(&args[1..])?)),
+        "serve" => Ok(Command::Serve(parse_serve_options(&args[1..])?)),
         "resolve" => {
             if args.len() < 3 {
-                return Err(
-                    "resolve expects <image> <address> [--loader <loader>] [--base <addr>] [--slice <n>] [--json]"
-                        .into(),
-                );
+                return Err("resolve expects <image> <address> [options]".to_string());
             }
             let (options, format) = parse_image_flags(&args[3..], "resolve")?;
             Ok(Command::Resolve {
@@ -341,14 +320,12 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
                 Ok(Command::DecompileNative(parse_lift_options(&args[1..])?))
             }
         }
-        "recover-types" | "game-model" => {
-            Ok(Command::RecoverTypes(parse_game_model_options(&args[1..])?))
-        }
-        "reconstruct-source" | "source-reconstruct" => Ok(Command::ReconstructSource(
-            parse_game_model_options(&args[1..])?,
-        )),
+        "recover-types" => Ok(Command::RecoverTypes(parse_game_model_options(&args[1..])?)),
+        "reconstruct-source" => Ok(Command::ReconstructSource(parse_game_model_options(
+            &args[1..],
+        )?)),
         "batch" => Ok(Command::Batch(parse_batch_options(&args[1..])?)),
-        other => Err(format!("unknown command {other:?}")),
+        other => Err(format!("unknown internal command {other:?}")),
     }
 }
 
@@ -977,11 +954,6 @@ fn parse_game_model_options(args: &[String]) -> Result<GameOptions, String> {
         }
     }
     let lift = parse_lift_options(&lift_args)?;
-    if lift.target.is_none() {
-        return Err(
-            "recover-types requires --target; --arch alone cannot select a console ABI".into(),
-        );
-    }
     Ok(GameOptions { lift, metadata })
 }
 fn parse_batch_options(args: &[String]) -> Result<BatchOptions, String> {
@@ -1050,6 +1022,10 @@ fn parse_architecture(value: &str) -> Result<Architecture, String> {
 
 fn run(command: Command) -> Result<String, String> {
     match command {
+        Command::Decompile(options) => {
+            let format = options.lift.format;
+            output("decompile", decompile(options)?, format)
+        }
         Command::Help => Ok(USAGE.into()),
         Command::Corpus(format) => output("corpus", render_corpus(format), format),
         Command::Diff(options) => {
@@ -1151,6 +1127,19 @@ fn corpus_semantic_value(baseline: Option<corpus::CorpusSemanticBaseline>) -> Va
         ),
     ])
 }
+fn corpus_compiler_value(baseline: Option<corpus::CorpusCompilerBaseline>) -> Value {
+    let Some(baseline) = baseline else {
+        return Value::Null;
+    };
+    object([
+        ("compiler".into(), Value::string(baseline.compiler)),
+        ("target".into(), Value::string(baseline.target)),
+        (
+            "minimum_mnemonic_lcs_ratio".into(),
+            Value::number(baseline.minimum_mnemonic_lcs_ratio),
+        ),
+    ])
+}
 
 fn corpus_metadata_value(metadata: Option<&str>) -> Value {
     metadata
@@ -1211,6 +1200,13 @@ fn render_corpus(format: OutputFormat) -> String {
                                         (
                                             "semantic".into(),
                                             corpus_semantic_value(corpus::semantic_baseline(
+                                                entry.id,
+                                                function.name,
+                                            )),
+                                        ),
+                                        (
+                                            "compiler_baseline".into(),
+                                            corpus_compiler_value(corpus::compiler_baseline(
                                                 entry.id,
                                                 function.name,
                                             )),
@@ -1515,8 +1511,8 @@ impl BatchContext {
     }
 
     fn decompile_native(&mut self, options: LiftOptions) -> Result<String, String> {
-        let (file, image) = read_lift_image(&options)?;
-        let image_hash = stable64(&file);
+        let pipeline = load_pipeline(&options)?;
+        let image_hash = stable64(pipeline.bytes());
         if !self.caches.contains_key(&image_hash) {
             let cache = NativeCache::load(self.cache_dir.as_deref(), image_hash)?;
             self.caches.insert(image_hash, cache);
@@ -1525,7 +1521,7 @@ impl BatchContext {
             .caches
             .get_mut(&image_hash)
             .ok_or_else(|| "native cache was not inserted".to_string())?;
-        decompile_native_with_memo(options, &file, &image, &mut cache.memo)
+        decompile_native_with_memo(options, &pipeline, &mut cache.memo)
     }
 
     fn cache_stats(&self) -> (u64, u64) {
@@ -1915,73 +1911,44 @@ fn read_image(path: &Path, options: ImageOptions) -> Result<ImageFile, String> {
     })
 }
 
-fn read_lift_image(options: &LiftOptions) -> Result<(Vec<u8>, Image), String> {
-    let bytes = std::fs::read(&options.image)
+fn make_lifter(architecture: Architecture) -> Box<dyn Lifter> {
+    ventris_lifter::lifter_for(architecture)
+}
+
+fn load_pipeline(options: &LiftOptions) -> Result<Pipeline, String> {
+    let source = std::fs::read(&options.image)
         .map_err(|error| format!("{}: {error}", options.image.display()))?;
-    if !options.raw {
-        let image_options = effective_image_options(ImageOptions {
+    let (loader, base) = if options.raw {
+        (Loader::Raw, Some(parse_offset(&options.address)?))
+    } else {
+        (options.loader, options.base)
+    };
+    Pipeline::load(
+        source,
+        LoadOptions {
+            architecture: Some(options.architecture),
+            target: options.target,
+            loader,
+            base,
+            slice: options.slice,
+        },
+    )
+    .map_err(|error| format!("{}: {error}", options.image.display()))
+}
+
+fn load_image_pipeline(path: &Path, options: ImageOptions) -> Result<Pipeline, String> {
+    let source = std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    Pipeline::load(
+        source,
+        LoadOptions {
+            architecture: options.target.map(|target| target.spec().architecture),
+            target: options.target,
             loader: options.loader,
             base: options.base,
             slice: options.slice,
-            target: options.target,
-        });
-        let loaded = Image::load_with_slice(
-            &bytes,
-            image_options.loader,
-            image_options.base,
-            image_options.slice,
-        )
-        .map_err(|error| format!("{}: {error}", options.image.display()))?;
-        return Ok((loaded.bytes, loaded.image));
-    }
-    let address = parse_offset(&options.address)?;
-    if bytes.is_empty() {
-        return Err(format!("{}: raw image is empty", options.image.display()));
-    }
-    let loaded = Image::load(&bytes, Loader::Raw, Some(address))
-        .map_err(|error| format!("{}: {error}", options.image.display()))?;
-    Ok((loaded.bytes, loaded.image))
-}
-
-fn make_lifter(architecture: Architecture) -> Box<dyn Lifter> {
-    match architecture {
-        Architecture::X86_64 => Box::new(X86_64::new()),
-        Architecture::X86_32 => Box::new(X86_32),
-        Architecture::AArch64 => Box::new(AArch64),
-        Architecture::Arm32 => Box::new(Arm32),
-        Architecture::Thumb => Box::new(Thumb),
-        Architecture::Mips32 => Box::new(Mips32),
-        Architecture::Mips32Be => Box::new(Mips32Be),
-        Architecture::Ps1 => Box::new(Ps1),
-        Architecture::N64 => Box::new(N64),
-        Architecture::Rv64 => Box::new(Rv64),
-        Architecture::Rv32 => Box::new(Rv32),
-        Architecture::Ppc32 => Box::new(Ppc32),
-        Architecture::Ppc64 => Box::new(Ppc64),
-        Architecture::GameCube => Box::new(GameCube),
-        Architecture::M68k => Box::new(M68k),
-        Architecture::Sh2 => Box::new(Sh2),
-        Architecture::Sh4 => Box::new(Sh4),
-        Architecture::Spu => Box::new(Spu),
-        Architecture::M6502 => Box::new(M6502),
-        Architecture::Z80 => Box::new(Z80),
-    }
-}
-
-fn code_address(image: &Image, address: u64) -> bool {
-    let has_explicit_executable_segment = image
-        .segments
-        .iter()
-        .any(|segment| segment.perms.exec == Some(true));
-    image.segments.iter().any(|segment| {
-        segment.addr <= address
-            && address < segment.end()
-            && if has_explicit_executable_segment {
-                segment.perms.exec == Some(true)
-            } else {
-                segment.perms.exec != Some(false)
-            }
-    })
+        },
+    )
+    .map_err(|error| format!("{}: {error}", path.display()))
 }
 
 fn discovery_seeds(
@@ -1990,207 +1957,12 @@ fn discovery_seeds(
     architecture: Architecture,
     symbols: &[ProjectSymbol],
 ) -> BTreeSet<u64> {
-    let mut seeds = BTreeSet::new();
-    if let Some(entry) = image.entry {
-        seeds.insert(entry);
-    }
-    for symbol in symbols {
-        if code_address(image, symbol.address) {
-            seeds.insert(symbol.address);
-        }
-    }
-    let has_explicit_data_segment = image
-        .segments
-        .iter()
-        .any(|segment| segment.perms.exec == Some(false));
-    let width = pointer_width(architecture);
-    for segment in &image.segments {
-        if segment.file_size == 0 || (has_explicit_data_segment && segment.perms.exec == Some(true))
-        {
-            continue;
-        }
-        let start = usize::try_from(segment.file_off).unwrap_or(usize::MAX);
-        let length = usize::try_from(segment.file_size).unwrap_or(0);
-        let Some(end) = start.checked_add(length) else {
-            continue;
-        };
-        let Some(bytes) = file.get(start..end) else {
-            continue;
-        };
-        if width > bytes.len() {
-            continue;
-        }
-        for offset in (0..=bytes.len() - width).step_by(width) {
-            let little = match width {
-                4 => u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as u64,
-                8 => u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap()),
-                _ => unreachable!(),
-            };
-            let big = match width {
-                4 => u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as u64,
-                8 => u64::from_be_bytes(bytes[offset..offset + 8].try_into().unwrap()),
-                _ => unreachable!(),
-            };
-            if code_address(image, little) {
-                seeds.insert(little);
-            }
-            if code_address(image, big) {
-                seeds.insert(big);
-            }
-        }
-    }
-    if seeds.is_empty() {
-        if let Some(segment) = image
-            .segments
-            .iter()
-            .find(|segment| segment.perms.exec != Some(false))
-        {
-            seeds.insert(segment.addr);
-        }
-    }
-    seeds
-}
-
-fn mapped_address(image: &Image, address: u64) -> bool {
-    image
-        .segments
-        .iter()
-        .any(|segment| segment.addr <= address && address < segment.end())
-}
-
-fn pointer_width(architecture: Architecture) -> usize {
-    match architecture {
-        Architecture::AArch64
-        | Architecture::N64
-        | Architecture::Ppc64
-        | Architecture::Rv64
-        | Architecture::X86_64 => 8,
-        _ => 4,
-    }
-}
-
-fn discovered_data(
-    project_image: &ProjectImage,
-    image: &Image,
-    file: &[u8],
-    architecture: Architecture,
-    generation: u32,
-) -> Vec<ProjectData> {
-    let mut records = Vec::new();
-    let has_explicit_data_segment = image
-        .segments
-        .iter()
-        .any(|segment| segment.perms.exec == Some(false));
-    let width = pointer_width(architecture);
-    let mut seen = BTreeSet::new();
-    for segment in &image.segments {
-        if segment.file_size == 0 || (has_explicit_data_segment && segment.perms.exec == Some(true))
-        {
-            continue;
-        }
-        let start = usize::try_from(segment.file_off).unwrap_or(usize::MAX);
-        let length = usize::try_from(segment.file_size).unwrap_or(0);
-        let Some(end) = start.checked_add(length) else {
-            continue;
-        };
-        let Some(bytes) = file.get(start..end) else {
-            continue;
-        };
-        let mut string_start = None;
-        for (offset, byte) in bytes.iter().copied().enumerate() {
-            let printable = (0x20..=0x7e).contains(&byte);
-            if printable {
-                string_start.get_or_insert(offset);
-                continue;
-            }
-            if let Some(begin) = string_start.take() {
-                if offset.saturating_sub(begin) >= 4 && records.len() < 4096 {
-                    let address = segment.addr.saturating_add(begin as u64);
-                    if seen.insert(address) {
-                        records.push(ProjectData {
-                            address,
-                            size: (offset - begin + usize::from(byte == 0)) as u64,
-                            name: None,
-                            type_name: Some("string".into()),
-                            comment: None,
-                            confidence: 75,
-                            source: Some("string-discovery".into()),
-                            generation,
-                        });
-                    }
-                }
-            }
-        }
-        if let Some(begin) = string_start {
-            if bytes.len().saturating_sub(begin) >= 4 && records.len() < 4096 {
-                let address = segment.addr.saturating_add(begin as u64);
-                if seen.insert(address) {
-                    records.push(ProjectData {
-                        address,
-                        size: (bytes.len() - begin) as u64,
-                        name: None,
-                        type_name: Some("string".into()),
-                        comment: None,
-                        confidence: 75,
-                        source: Some("string-discovery".into()),
-                        generation,
-                    });
-                }
-            }
-        }
-        let scan_pointers = !has_explicit_data_segment || segment.perms.exec != Some(true);
-        if scan_pointers && width <= bytes.len() {
-            for offset in (0..=bytes.len() - width).step_by(width) {
-                let little = match width {
-                    4 => u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as u64,
-                    8 => u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap()),
-                    _ => unreachable!(),
-                };
-                let big = match width {
-                    4 => u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as u64,
-                    8 => u64::from_be_bytes(bytes[offset..offset + 8].try_into().unwrap()),
-                    _ => unreachable!(),
-                };
-                let value = if mapped_address(image, little) {
-                    Some(little)
-                } else if mapped_address(image, big) {
-                    Some(big)
-                } else {
-                    None
-                };
-                if let Some(value) = value {
-                    let address = segment.addr.saturating_add(offset as u64);
-                    if seen.insert(address) && records.len() < 4096 {
-                        records.push(ProjectData {
-                            address,
-                            size: width as u64,
-                            name: None,
-                            type_name: Some("pointer".into()),
-                            comment: Some(format!("points to 0x{value:x}")),
-                            confidence: 65,
-                            source: Some("pointer-discovery".into()),
-                            generation,
-                        });
-                    }
-                }
-            }
-        }
-    }
-    for relocation in &project_image.relocations {
-        if mapped_address(image, relocation.address) && seen.insert(relocation.address) {
-            records.push(ProjectData {
-                address: relocation.address,
-                size: 4,
-                name: relocation.symbol.clone(),
-                type_name: Some("global".into()),
-                comment: None,
-                confidence: 95,
-                source: Some("relocation-discovery".into()),
-                generation,
-            });
-        }
-    }
-    records
+    inventory::discovery_seeds(
+        image,
+        file,
+        architecture,
+        symbols.iter().map(|symbol| symbol.address),
+    )
 }
 
 fn automatic_data(
@@ -2200,55 +1972,36 @@ fn automatic_data(
     architecture: Architecture,
     generation: u32,
 ) -> Vec<ProjectData> {
-    let mut records = BTreeMap::<u64, ProjectData>::new();
-    for symbol in &project_image.symbols {
-        if code_address(image, symbol.address) {
-            continue;
-        }
-        records.insert(
-            symbol.address,
-            ProjectData {
-                address: symbol.address,
-                size: symbol.size.max(1),
-                name: Some(symbol.name.clone()),
-                type_name: None,
-                comment: None,
-                confidence: 90,
-                source: Some("symbol-discovery".into()),
-                generation,
-            },
-        );
-    }
-    for item in discovered_data(project_image, image, file, architecture, generation) {
-        match records.get(&item.address) {
-            Some(existing) if existing.confidence > item.confidence => {}
-            _ => {
-                records.insert(item.address, item);
-            }
-        }
-    }
-    if records.is_empty() {
-        for segment in image
-            .segments
-            .iter()
-            .filter(|segment| segment.perms.exec == Some(false))
-        {
-            records.insert(
-                segment.addr,
-                ProjectData {
-                    address: segment.addr,
-                    size: segment.size,
-                    name: segment.name.clone(),
-                    type_name: Some("segment".into()),
-                    comment: None,
-                    confidence: 70,
-                    source: Some("segment-discovery".into()),
-                    generation,
-                },
-            );
-        }
-    }
-    records.into_values().collect()
+    let symbols = project_image
+        .symbols
+        .iter()
+        .map(|symbol| inventory::SymbolFact {
+            address: symbol.address,
+            size: symbol.size,
+            name: symbol.name.clone(),
+        })
+        .collect::<Vec<_>>();
+    let relocations = project_image
+        .relocations
+        .iter()
+        .map(|relocation| inventory::RelocationFact {
+            address: relocation.address,
+            symbol: relocation.symbol.clone(),
+        })
+        .collect::<Vec<_>>();
+    inventory::discover_data(image, file, architecture, &symbols, &relocations)
+        .into_iter()
+        .map(|fact| ProjectData {
+            address: fact.address,
+            size: fact.size,
+            name: fact.name,
+            type_name: fact.type_name.map(str::to_owned),
+            comment: fact.comment,
+            confidence: fact.confidence,
+            source: Some(fact.source.into()),
+            generation,
+        })
+        .collect()
 }
 
 fn discover_image(
@@ -4010,9 +3763,9 @@ fn write_http(
 }
 
 fn inspect(path: &Path, options: ImageOptions) -> Result<String, String> {
-    let loaded = read_image(path, options)?;
-    let source_hash = Image::content_hash(&loaded.source);
-    let image = loaded.image;
+    let pipeline = load_image_pipeline(path, options)?;
+    let source_hash = Image::content_hash(pipeline.source());
+    let image = pipeline.image();
     let mut out = String::new();
     writeln!(out, "file: {}", path.display()).unwrap();
     writeln!(out, "length: {}", image.len).unwrap();
@@ -4209,14 +3962,17 @@ fn inspect(path: &Path, options: ImageOptions) -> Result<String, String> {
 }
 
 fn resolve(path: &Path, address: &str, options: ImageOptions) -> Result<String, String> {
-    let loaded = read_image(path, options)?;
-    let image = loaded.image;
+    let pipeline = load_image_pipeline(path, options)?;
+    let image = pipeline.image();
     let table = image.space_table();
-    let addr = table.resolve(address).map_err(|e| e.to_string())?;
+    let resolved = pipeline
+        .resolve(address)
+        .map_err(|error| error.to_string())?;
+    let addr = resolved.requested;
     let space = table
         .get(addr.space)
         .ok_or_else(|| format!("resolved to missing space {}", addr.space.0))?;
-    let base = table.to_base(addr).unwrap_or(addr);
+    let base = resolved.base;
     let base_space = table
         .get(base.space)
         .ok_or_else(|| format!("base resolved to missing space {}", base.space.0))?;
@@ -4230,40 +3986,15 @@ fn resolve(path: &Path, address: &str, options: ImageOptions) -> Result<String, 
 }
 
 fn lift(options: LiftOptions) -> Result<String, String> {
-    let (file, image) = read_lift_image(&options)?;
-    let table = image.space_table();
-    let resolved = table.resolve(&options.address).map_err(|e| e.to_string())?;
-    let base = table.to_base(resolved).unwrap_or(resolved);
-    let lifter: Box<dyn Lifter> = match options.architecture {
-        Architecture::X86_64 => Box::new(X86_64::new()),
-        Architecture::X86_32 => Box::new(X86_32),
-        Architecture::AArch64 => Box::new(AArch64),
-        Architecture::Arm32 => Box::new(Arm32),
-        Architecture::Thumb => Box::new(Thumb),
-        Architecture::Mips32 => Box::new(Mips32),
-        Architecture::Mips32Be => Box::new(Mips32Be),
-        Architecture::Ps1 => Box::new(Ps1),
-        Architecture::N64 => Box::new(N64),
-        Architecture::Rv64 => Box::new(Rv64),
-        Architecture::Rv32 => Box::new(Rv32),
-        Architecture::Ppc32 => Box::new(Ppc32),
-        Architecture::Ppc64 => Box::new(Ppc64),
-        Architecture::GameCube => Box::new(GameCube),
-        Architecture::M68k => Box::new(M68k),
-        Architecture::Sh2 => Box::new(Sh2),
-        Architecture::Sh4 => Box::new(Sh4),
-        Architecture::Spu => Box::new(Spu),
-        Architecture::M6502 => Box::new(M6502),
-        Architecture::Z80 => Box::new(Z80),
-    };
-    let function = lifter
-        .discover(&image, &file, base.off, options.limit)
-        .map_err(|e| e.to_string())?;
+    let pipeline = load_pipeline(&options)?;
+    let function = pipeline
+        .lift(&options.address, options.limit)
+        .map_err(|error| error.to_string())?;
     let mut out = String::new();
     writeln!(
         out,
         "architecture: {:?}\nentry: {:#x}\ninstructions: {}\nbytes: {}",
-        lifter.architecture(),
+        options.architecture,
         function.entry,
         function.instruction_count(),
         function.byte_length()
@@ -4304,121 +4035,76 @@ fn recover_types(options: GameOptions) -> Result<String, String> {
     Ok(recover_types_report(&options)?.render_text())
 }
 
+fn pipeline_hints(metadata: game_input::GameMetadata) -> Hints {
+    Hints {
+        nominal_types: metadata.nominal_types,
+        annotations: metadata.annotations,
+        provenance: metadata.provenance,
+        assertions: metadata.assertions,
+        ..Hints::default()
+    }
+}
+
 fn recover_types_report(options: &GameOptions) -> Result<ventris_game::RecoveredFunction, String> {
-    let target = options
+    options
         .lift
         .target
         .ok_or_else(|| "recover-types requires --target".to_string())?;
-    let source = std::fs::read(&options.lift.image)
-        .map_err(|error| format!("{}: {error}", options.lift.image.display()))?;
-    let sidecar = game_input::load(options.metadata.as_deref())?;
-    let (file, image) = read_lift_image(&options.lift)?;
-    let image_metadata: ImageMetadata = image
-        .metadata(&source)
-        .map_err(|error| format!("{}: {error}", options.lift.image.display()))?;
-    let symbols = image_metadata
-        .symbols
-        .into_iter()
-        .map(|symbol| SymbolFact {
-            address: symbol.address,
-            name: symbol.name,
-        })
-        .collect::<Vec<_>>();
-    let relocations = image_metadata
-        .relocations
-        .into_iter()
-        .filter_map(|relocation| {
-            relocation.symbol.map(|symbol| RelocationFact {
-                address: relocation.address,
-                symbol,
-            })
-        })
-        .collect::<Vec<_>>();
-    let table = image.space_table();
-    let resolved = table
-        .resolve(&options.lift.address)
-        .map_err(|e| e.to_string())?;
-    let base = table.to_base(resolved).unwrap_or(resolved);
-    let lifter: Box<dyn Lifter> = match options.lift.architecture {
-        Architecture::X86_64 => Box::new(X86_64::new()),
-        Architecture::X86_32 => Box::new(X86_32),
-        Architecture::AArch64 => Box::new(AArch64),
-        Architecture::Arm32 => Box::new(Arm32),
-        Architecture::Thumb => Box::new(Thumb),
-        Architecture::Mips32 => Box::new(Mips32),
-        Architecture::Mips32Be => Box::new(Mips32Be),
-        Architecture::Ps1 => Box::new(Ps1),
-        Architecture::N64 => Box::new(N64),
-        Architecture::Rv64 => Box::new(Rv64),
-        Architecture::Rv32 => Box::new(Rv32),
-        Architecture::Ppc32 => Box::new(Ppc32),
-        Architecture::Ppc64 => Box::new(Ppc64),
-        Architecture::GameCube => Box::new(GameCube),
-        Architecture::M68k => Box::new(M68k),
-        Architecture::Sh2 => Box::new(Sh2),
-        Architecture::Sh4 => Box::new(Sh4),
-        Architecture::Spu => Box::new(Spu),
-        Architecture::M6502 => Box::new(M6502),
-        Architecture::Z80 => Box::new(Z80),
-    };
-    let function = lifter
-        .discover(&image, &file, base.off, options.lift.limit)
-        .map_err(|e| e.to_string())?;
-    Ok(recover_function(
-        target,
-        RecoveryInput {
-            function: &function,
-            nominal_types: &sidecar.nominal_types,
-            symbols: &symbols,
-            relocations: &relocations,
-            annotations: &sidecar.annotations,
-            metadata_provenance: &sidecar.provenance,
-            assertions: &sidecar.assertions,
-        },
-    ))
+    let pipeline = load_pipeline(&options.lift)?;
+    let hints = pipeline_hints(game_input::load(options.metadata.as_deref())?);
+    pipeline
+        .analyze(&options.lift.address, options.lift.limit, &hints)
+        .map_err(|error| error.to_string())?
+        .recovered
+        .ok_or_else(|| "recover-types requires --target".to_string())
+}
+
+fn decompile(options: GameOptions) -> Result<String, String> {
+    if options.lift.target.is_some() {
+        reconstruct_source(options)
+    } else if options.metadata.is_some() {
+        Err("decompile --metadata requires --target".to_string())
+    } else {
+        decompile_native(options.lift)
+    }
 }
 
 fn reconstruct_source(options: GameOptions) -> Result<String, String> {
-    let body = decompile_native(options.lift.clone())?;
-    let report = recover_types_report(&options)?;
-    SourceReconstruction::from_report(&report, body)
-        .map(|source| source.render())
+    options
+        .lift
+        .target
+        .ok_or_else(|| "reconstruct-source requires --target".to_string())?;
+    let pipeline = load_pipeline(&options.lift)?;
+    let hints = pipeline_hints(game_input::load(options.metadata.as_deref())?);
+    pipeline
+        .decompile(&options.lift.address, options.lift.limit, &hints)
+        .map(|result| result.source)
         .map_err(|error| error.to_string())
 }
 
 fn decompile_native(options: LiftOptions) -> Result<String, String> {
-    let (file, image) = read_lift_image(&options)?;
-    let mut cache = NativeCache::load(options.cache.as_deref(), stable64(&file))?;
-    let rendered = decompile_native_with_memo(options, &file, &image, &mut cache.memo)?;
+    let pipeline = load_pipeline(&options)?;
+    let image_hash = stable64(pipeline.bytes());
+    let mut cache = NativeCache::load(options.cache.as_deref(), image_hash)?;
+    let rendered = decompile_native_with_memo(options, &pipeline, &mut cache.memo)?;
     cache.save()?;
     Ok(rendered)
 }
 
 fn decompile_native_with_memo(
     options: LiftOptions,
-    file: &[u8],
-    image: &Image,
+    pipeline: &Pipeline,
     memo: &mut Memo,
 ) -> Result<String, String> {
-    let table = image.space_table();
-    let mut symbols = BTreeMap::new();
-    if let Ok(metadata) = image.metadata(file) {
-        for symbol in metadata.symbols {
-            symbols.insert(symbol.address, symbol.name);
-        }
-        for relocation in metadata.relocations {
-            if let Some(name) = relocation.symbol {
-                symbols.entry(relocation.address).or_insert(name);
-            }
-        }
-    }
-    let resolved = table.resolve(&options.address).map_err(|e| e.to_string())?;
-    let base = table.to_base(resolved).unwrap_or(resolved);
-    let architecture = options.architecture;
+    let resolved = pipeline
+        .resolve(&options.address)
+        .map_err(|error| error.to_string())?;
+    let base = resolved.base;
     let config_text = format!(
-        "{architecture:?}|target={:?}|loader={:?}|raw_base={:?}|raw={}|space={}|base={}|limit={}",
+        "{:?}|target={:?}|loader={:?}|raw_base={:?}|raw={}|space={}|base={}|limit={}",
+        options.architecture,
         options.target,
-        options.loader,
+        pipeline.loader(),
         options.base,
         options.raw,
         base.space.0,
@@ -4426,7 +4112,7 @@ fn decompile_native_with_memo(
         options.limit
     );
     let key = MemoKey {
-        image: stable64(file),
+        image: stable64(pipeline.bytes()),
         code_version: NATIVE_ANALYZER_CODE_VERSION,
         config: stable64(config_text.as_bytes()),
         human_log: 0,
@@ -4437,80 +4123,18 @@ fn decompile_native_with_memo(
             Generation(1),
             QueryId::new("native-c", base.off),
             || {
-                let lifter: Box<dyn Lifter> = match architecture {
-                    Architecture::X86_64 => Box::new(X86_64::new()),
-                    Architecture::X86_32 => Box::new(X86_32),
-                    Architecture::AArch64 => Box::new(AArch64),
-                    Architecture::Arm32 => Box::new(Arm32),
-                    Architecture::Thumb => Box::new(Thumb),
-                    Architecture::Mips32 => Box::new(Mips32),
-                    Architecture::Mips32Be => Box::new(Mips32Be),
-                    Architecture::Ps1 => Box::new(Ps1),
-                    Architecture::N64 => Box::new(N64),
-                    Architecture::Rv64 => Box::new(Rv64),
-                    Architecture::Rv32 => Box::new(Rv32),
-                    Architecture::Ppc32 => Box::new(Ppc32),
-                    Architecture::Ppc64 => Box::new(Ppc64),
-                    Architecture::GameCube => Box::new(GameCube),
-                    Architecture::M68k => Box::new(M68k),
-                    Architecture::Sh2 => Box::new(Sh2),
-                    Architecture::Spu => Box::new(Spu),
-                    Architecture::Sh4 => Box::new(Sh4),
-                    Architecture::M6502 => Box::new(M6502),
-                    Architecture::Z80 => Box::new(Z80),
-                };
-                let function = lifter
-                    .discover(image, file, base.off, options.limit)
-                    .map_err(|e| e.to_string())?;
-                let mut decompiler = NativeDecompiler;
-                let read_memory = |address, width| {
-                    target_memory_value(options.target, image, file, address, width)
-                };
-                let is_volatile =
-                    |address, width| target_memory_is_volatile(options.target, address, width);
-                let memory = NativeMemory {
-                    read: &read_memory,
-                    is_volatile: &is_volatile,
-                };
-                let resolve_symbol = |address| symbols.get(&address).cloned();
-                let document = decompiler.decompile_with_memory_and_symbols(
-                    lifter.architecture(),
-                    &function,
-                    Some(&memory),
-                    Some(&resolve_symbol),
-                );
-                for warning in &document.warnings {
+                let analysis = pipeline
+                    .analyze(&options.address, options.limit, &Hints::default())
+                    .map_err(|error| error.to_string())?;
+                for warning in &analysis.document.warnings {
                     eprintln!("ventris: native decompiler warning: {warning}");
                 }
-                Ok::<_, String>(document.render().into_bytes())
+                Ok::<_, String>(analysis.document.render().into_bytes())
             },
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| error.to_string())?;
     String::from_utf8(rendered)
         .map_err(|_| "native decompiler returned non-UTF-8 output".to_string())
-}
-
-fn target_memory_value(
-    target: Option<TargetProfile>,
-    image: &Image,
-    file: &[u8],
-    address: u64,
-    width: u32,
-) -> Option<u64> {
-    if target != Some(TargetProfile::Gba) || !matches!(width, 1 | 2 | 4 | 8) {
-        return None;
-    }
-    let width = usize::try_from(width).ok()?;
-    let bytes = image.bytes_at(file, address, width)?;
-    (bytes.len() == width).then(|| {
-        bytes.iter().enumerate().fold(0u64, |value, (index, byte)| {
-            value | (u64::from(*byte) << (index * 8))
-        })
-    })
-}
-
-fn target_memory_is_volatile(target: Option<TargetProfile>, address: u64, _width: u32) -> bool {
-    target == Some(TargetProfile::Gba) && (0x0400_0000..0x0400_0400).contains(&address)
 }
 
 fn parse_offset(s: &str) -> Result<u64, String> {
@@ -4575,31 +4199,22 @@ mod tests {
     }
 
     #[test]
-    fn help_lists_every_top_level_command() {
-        let help = match parse_command(&[]).unwrap() {
-            Command::Help => run(Command::Help).unwrap(),
-            _ => panic!("expected help command"),
-        };
-        for command in [
-            "inspect",
-            "project",
-            "discover",
-            "corpus",
-            "resolve",
-            "lift",
-            "decompile-native",
-            "recover-types",
-            "batch",
-        ] {
+    fn help_lists_only_the_function_pipeline() {
+        let help = run(Command::Help).unwrap();
+        for command in ["inspect", "lift", "decompile"] {
             assert!(help.contains(command), "missing {command} in help");
+        }
+        for retired in ["project", "discover", "corpus", "resolve", "batch", "serve"] {
+            assert!(
+                !help.contains(&format!("\n  {retired} ")),
+                "legacy command {retired} remains public"
+            );
         }
     }
 
     #[test]
     fn corpus_command_exposes_licensed_and_observed_entries() {
-        let command = parse_command(&["corpus".into(), "--json".into()]).unwrap();
-        assert!(matches!(command, Command::Corpus(OutputFormat::Json)));
-        let output = run(command).unwrap();
+        let output = run(Command::Corpus(OutputFormat::Json)).unwrap();
         assert!(output.contains("n64-perfect-dark-ntsc-final"));
         assert!(output.contains("gamecube-animal-crossing-gafe01"));
         assert!(output.contains("gba-pokemon-emerald"));
@@ -4608,12 +4223,12 @@ mod tests {
     }
 
     #[test]
-    fn parses_resolve_arguments() {
-        let args = vec!["resolve".into(), "a.elf".into(), "ram::0x1000".into()];
-        assert!(matches!(
-            parse_command(&args).unwrap(),
-            Command::Resolve { .. }
-        ));
+    fn retired_commands_are_not_public() {
+        for command in [
+            "corpus", "project", "discover", "resolve", "diff", "batch", "serve",
+        ] {
+            assert!(parse_command(&[command.into()]).is_err(), "{command}");
+        }
     }
 
     #[test]
@@ -4696,9 +4311,7 @@ mod tests {
             "64".into(),
             "--json".into(),
         ];
-        let Command::Discover(options) = parse_command(&args).unwrap() else {
-            panic!("expected discover command");
-        };
+        let options = parse_discover_options(&args[1..]).unwrap();
         assert_eq!(options.architecture, Architecture::X86_64);
         assert_eq!(options.loader, Loader::Raw);
         assert_eq!(options.base, Some(0x4000));
@@ -4777,9 +4390,7 @@ mod tests {
             "trace.jsonl".into(),
             "--json".into(),
         ];
-        let Command::Project(options) = parse_command(&args).unwrap() else {
-            panic!("expected project command");
-        };
+        let options = parse_project_options(&args[1..]).unwrap();
         assert!(matches!(options.action, ProjectAction::Runtime { .. }));
         assert_eq!(options.format, OutputFormat::Json);
 
@@ -4869,9 +4480,7 @@ mod tests {
             "segment-0".into(),
             "--json".into(),
         ];
-        let Command::Diff(options) = parse_command(&args).unwrap() else {
-            panic!("expected diff command");
-        };
+        let options = parse_diff_options(&args[1..]).unwrap();
         assert_eq!(options.options.loader, Loader::Raw);
         assert_eq!(options.options.base, Some(0x4000));
         assert_eq!(options.region.as_deref(), Some("segment-0"));
@@ -5100,33 +4709,25 @@ mod tests {
     }
 
     #[test]
-    fn recover_types_requires_console_target_and_accepts_alias() {
+    fn decompile_accepts_console_target() {
         let args = vec![
-            "game-model".into(),
+            "decompile".into(),
             "image.bin".into(),
             "0x1000".into(),
             "--target".into(),
             "gamecube".into(),
         ];
-        let Command::RecoverTypes(options) = parse_command(&args).unwrap() else {
-            panic!("expected recover-types command");
+        let Command::Decompile(options) = parse_command(&args).unwrap() else {
+            panic!("expected decompile command");
         };
         assert_eq!(options.lift.target, Some(TargetProfile::GameCube));
         assert_eq!(options.lift.architecture, Architecture::GameCube);
-        assert!(parse_command(&[
-            "recover-types".into(),
-            "image.bin".into(),
-            "0x1000".into(),
-            "--arch".into(),
-            "mips32".into(),
-        ])
-        .is_err());
     }
 
     #[test]
-    fn reconstruct_source_requires_console_target_and_preserves_options() {
+    fn decompile_preserves_source_recovery_options() {
         let args = vec![
-            "reconstruct-source".into(),
+            "decompile".into(),
             "image.bin".into(),
             "0x1000".into(),
             "--target".into(),
@@ -5137,8 +4738,8 @@ mod tests {
             "cache".into(),
             "--json".into(),
         ];
-        let Command::ReconstructSource(options) = parse_command(&args).unwrap() else {
-            panic!("expected reconstruct-source command");
+        let Command::Decompile(options) = parse_command(&args).unwrap() else {
+            panic!("expected decompile command");
         };
         assert_eq!(options.lift.target, Some(TargetProfile::Ps2));
         assert_eq!(options.metadata, Some(PathBuf::from("facts.json")));
@@ -5299,7 +4900,7 @@ mod tests {
     #[test]
     fn parses_native_cache_directory() {
         let args = vec![
-            "decompile-native".into(),
+            "decompile".into(),
             "a.elf".into(),
             "0x1000".into(),
             "--arch".into(),
@@ -5307,10 +4908,10 @@ mod tests {
             "--cache".into(),
             "cache".into(),
         ];
-        let Command::DecompileNative(options) = parse_command(&args).unwrap() else {
-            panic!("expected native decompile command");
+        let Command::Decompile(options) = parse_command(&args).unwrap() else {
+            panic!("expected decompile command");
         };
-        assert_eq!(options.cache, Some(PathBuf::from("cache")));
+        assert_eq!(options.lift.cache, Some(PathBuf::from("cache")));
     }
     #[test]
     fn decompile_native_supports_common_processor_raw_images() {

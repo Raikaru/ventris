@@ -64,7 +64,7 @@ def wait_for_health(host: str, port: int, process: subprocess.Popen[bytes]) -> N
 def run(binary: Path, host: str, requested_port: int) -> None:
     port = requested_port or free_port(host)
     process = subprocess.Popen(
-        [str(binary), "serve", "--bind", f"{host}:{port}"],
+        [str(binary), "__internal", "serve", "--bind", f"{host}:{port}"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
     )

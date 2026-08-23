@@ -1,23 +1,11 @@
 # Ventris Binary Analysis for VS Code
 
-This extension is a thin client for a locally running Ventris HTTP server. It
-can start `ventris serve` when `ventris.binary` points to a matching executable,
-or it can use an already running server at `ventris.serverUrl`.
+A thin adapter over the installed `ventris` executable. It adds three commands:
 
-Install a released native Ventris executable first. The extension does not
-bundle one. The default server URL is loopback-only:
+- **Ventris: Inspect Binary**
+- **Ventris: Lift Function**
+- **Ventris: Decompile Function**
 
-```text
-ventris serve --bind 127.0.0.1:8787
-```
+The extension invokes the same `inspect`, `lift`, and `decompile` CLI pipeline used outside VS Code. It contains no analysis, project model, HTTP server, or editor-specific recovery logic.
 
-Configure `ventris.binary` or `ventris.serverUrl` in VS Code settings, then use
-the registered Ventris commands for inspection, function discovery, address
-resolution, lifting, type recovery, native decompilation, recovered-source
-rendering, and JSONL batches.
-
-The server has no authentication or TLS. Do not point the extension at an
-untrusted or network-exposed service.
-
-See the repository `README.md`, `SECURITY.md`, and `RELEASING.md` for the
-supported command contract, limitations, and acceptance procedure.
+Install a released Ventris executable, set `ventris.binary` if it is not on `PATH`, and optionally configure a console target, loader, raw base, or Mach-O slice. Results open in an adjacent editor.

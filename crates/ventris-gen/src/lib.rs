@@ -23,6 +23,7 @@
 //! reproducible state rather than a hidden race.
 
 #![forbid(unsafe_code)]
+pub mod inventory;
 
 use std::collections::{BTreeMap, BTreeSet};
 use ventris_addr::hash::stable64;

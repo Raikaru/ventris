@@ -1,8 +1,8 @@
 """Compile reconstructed PS2 C and compare normalized MIPS assembly.
 
 The gate is intentionally compiler-agnostic: exact bytes are reported when
-present, while ordinary runs require compilable C and a minimum mnemonic LCS
-ratio against the pinned retail function window.
+present, while ordinary runs require compilable C and enforce each function's
+checked-in mnemonic LCS floor. ``--minimum-ratio`` may only strengthen it.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import sys
 import tempfile
 from typing import Sequence
 
-from .corpus_smoke import ManifestEntry, SmokeError, _envelope, parse_manifest
+from .corpus_smoke import ManifestEntry, ManifestFunction, SmokeError, _envelope, parse_manifest
 
 
 _INSTRUCTION = re.compile(r"^\s*[0-9a-fA-F]+:\s+([A-Za-z_.][A-Za-z0-9_.]*)\b", re.MULTILINE)
@@ -77,6 +77,17 @@ def _entry(entries: Sequence[ManifestEntry], entry_id: str) -> ManifestEntry:
             return entry
     raise SmokeError(f"unknown corpus id {entry_id!r}")
 
+def _ratio_floor(function: ManifestFunction, requested: float | None) -> float:
+    baseline = function.compiler_baseline or {}
+    stored = baseline.get("minimum_mnemonic_lcs_ratio", 0.0)
+    if isinstance(stored, bool) or not isinstance(stored, (int, float)):
+        raise SmokeError(f"{function.name}: invalid compiler ratio baseline")
+    floor = float(stored)
+    if not 0.0 <= floor <= 1.0:
+        raise SmokeError(f"{function.name}: compiler ratio baseline must be between 0 and 1")
+    return max(floor, requested or 0.0)
+
+
 
 def run_gate(
     *,
@@ -86,9 +97,10 @@ def run_gate(
     compiler: str = "clang",
     objdump: str = "llvm-objdump",
     functions: Sequence[str] = (),
-    minimum_ratio: float = 0.15,
+    minimum_ratio: float | None = None,
     require_exact: bool = False,
 ) -> dict[str, object]:
+    ventris = [*ventris, "__internal"]
     corpus = _run([*ventris, "corpus", "--json"])
     if corpus.returncode != 0:
         detail = corpus.stderr.strip() or corpus.stdout.strip()
@@ -192,20 +204,21 @@ def run_gate(
 
             candidate = _mnemonics(candidate_dump.stdout)
             retail = _mnemonics(retail_dump.stdout)
+            ratio_floor = _ratio_floor(function, minimum_ratio)
             ratio = _lcs_ratio(candidate, retail)
             exact = candidate == retail
             call_counts = {
                 "candidate": sum(mnemonic in _CALLS for mnemonic in candidate),
                 "retail": sum(mnemonic in _CALLS for mnemonic in retail),
             }
-            passed = exact if require_exact else ratio >= minimum_ratio
+            passed = exact if require_exact else ratio >= ratio_floor
             item.update(
                 {
                     "status": "exact" if exact else "normalized-similar" if passed else "normalized-diverged",
                     "pass": passed,
                     "exact": exact,
                     "mnemonic_lcs_ratio": round(ratio, 6),
-                    "minimum_ratio": minimum_ratio,
+                    "minimum_ratio": ratio_floor,
                     "instruction_counts": {"candidate": len(candidate), "retail": len(retail)},
                     "call_counts": call_counts,
                     "candidate_mnemonics": candidate,
@@ -220,7 +233,7 @@ def run_gate(
         "image": os.fspath(image),
         "sha256": actual_hash,
         "require_exact": require_exact,
-        "minimum_ratio": minimum_ratio,
+        "requested_minimum_ratio": minimum_ratio,
         "functions": results,
     }
 
@@ -233,7 +246,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--compiler", default="clang")
     parser.add_argument("--objdump", default="llvm-objdump")
     parser.add_argument("--function", action="append", dest="functions", default=[])
-    parser.add_argument("--minimum-ratio", type=float, default=0.15)
+    parser.add_argument("--minimum-ratio", type=float)
     parser.add_argument("--require-exact", action="store_true")
     parser.add_argument("--json", action="store_true")
     return parser

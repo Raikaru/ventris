@@ -2,10 +2,10 @@
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
- [project]
- name = "ventris-client"
- version = "0.1.0"
- description = "Dependency-free Python client for the Ventris binary-analysis executable"
+[project]
+name = "ventris-client"
+version = "0.1.0"
+description = "Dependency-free Python adapter for the Ventris function pipeline"
  readme = "README.md"
  requires-python = ">=3.10"
  license = { file = "LICENSE" }
@@ -24,10 +24,8 @@ build-backend = "setuptools.build_meta"
      "Topic :: Software Development :: Disassemblers",
  ]
 
- [project.scripts]
- ventris-corpus-smoke = "ventris.corpus_smoke:main"
-ventris-compiler-check = "ventris.compiler_gate:main"
- ventris-python = "ventris.cli:main"
+[project.scripts]
+ventris-python = "ventris.cli:main"
 
 [tool.setuptools]
 package-dir = { "" = "python" }

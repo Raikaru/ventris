@@ -11,6 +11,7 @@
 use ventris_format::Loader;
 use ventris_lifter::Architecture;
 
+#[repr(u8)]
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum TargetProfile {
     Atari2600,
@@ -40,24 +41,40 @@ pub enum TargetProfile {
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum DecompilationSupport {
+    /// Loading and lifting exist; decompiler output is not quality-claimed.
+    LiftOnly,
+    /// The native decompiler runs, but no pinned real-image gate protects it.
+    Experimental,
+    /// A pinned real-image corpus measures semantic and compiler output.
+    Measured,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct Abi {
     pub name: &'static str,
     pub pointer_bits: u8,
     pub stack_alignment: u8,
     pub stack_grows_down: bool,
+    pub stack_pointer: &'static str,
+    pub frame_pointer: Option<&'static str>,
+    pub return_address: Option<&'static str>,
     pub return_register: &'static str,
+    pub delay_slots: u8,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct TargetSpec {
     pub profile: TargetProfile,
     pub name: &'static str,
+    pub aliases: &'static [&'static str],
     pub architecture: Architecture,
     pub loader: Loader,
     pub default_base: Option<u64>,
     pub abi: Abi,
     /// Named image parts when the container has more than one code image.
     pub parts: &'static [&'static str],
+    pub decompilation: DecompilationSupport,
 }
 
 const ABI_6502: Abi = Abi {
@@ -65,332 +82,460 @@ const ABI_6502: Abi = Abi {
     pointer_bits: 16,
     stack_alignment: 1,
     stack_grows_down: true,
+    stack_pointer: "sp",
+    frame_pointer: None,
+    return_address: None,
     return_register: "a",
+    delay_slots: 0,
 };
 const ABI_Z80: Abi = Abi {
     name: "z80",
     pointer_bits: 16,
     stack_alignment: 2,
     stack_grows_down: true,
+    stack_pointer: "sp",
+    frame_pointer: None,
+    return_address: None,
     return_register: "hl",
+    delay_slots: 0,
 };
 const ABI_M68K: Abi = Abi {
     name: "m68k-c",
     pointer_bits: 32,
     stack_alignment: 4,
     stack_grows_down: true,
+    stack_pointer: "a7",
+    frame_pointer: Some("a6"),
+    return_address: None,
     return_register: "d0",
+    delay_slots: 0,
 };
 const ABI_SH: Abi = Abi {
     name: "sh-c",
     pointer_bits: 32,
     stack_alignment: 4,
     stack_grows_down: true,
+    stack_pointer: "r15",
+    frame_pointer: Some("r14"),
+    return_address: Some("pr"),
     return_register: "r0",
+    delay_slots: 1,
 };
 const ABI_MIPS_O32: Abi = Abi {
     name: "mips-o32",
     pointer_bits: 32,
     stack_alignment: 8,
     stack_grows_down: true,
+    stack_pointer: "$sp",
+    frame_pointer: Some("$fp"),
+    return_address: Some("$ra"),
     return_register: "$v0",
+    delay_slots: 1,
 };
 const ABI_MIPS_N64: Abi = Abi {
     name: "mips-n64",
     pointer_bits: 64,
     stack_alignment: 16,
     stack_grows_down: true,
+    stack_pointer: "$sp",
+    frame_pointer: Some("$fp"),
+    return_address: Some("$ra"),
     return_register: "$v0",
+    delay_slots: 1,
 };
 const ABI_ARM_AAPCS: Abi = Abi {
     name: "aapcs32",
     pointer_bits: 32,
     stack_alignment: 8,
     stack_grows_down: true,
+    stack_pointer: "r13",
+    frame_pointer: Some("r11"),
+    return_address: Some("lr"),
     return_register: "r0",
+    delay_slots: 0,
 };
 const ABI_ARM_GBA: Abi = Abi {
     name: "aapcs32-gba",
     pointer_bits: 32,
     stack_alignment: 4,
     stack_grows_down: true,
+    stack_pointer: "r13",
+    frame_pointer: Some("r11"),
+    return_address: Some("lr"),
     return_register: "r0",
+    delay_slots: 0,
 };
 const ABI_PPC_EABI: Abi = Abi {
     name: "powerpc-eabi",
     pointer_bits: 32,
     stack_alignment: 16,
     stack_grows_down: true,
+    stack_pointer: "r1",
+    frame_pointer: None,
+    return_address: Some("lr"),
     return_register: "r3",
+    delay_slots: 0,
 };
 const ABI_XENON: Abi = Abi {
     name: "xenon-pprc",
     pointer_bits: 32,
     stack_alignment: 16,
     stack_grows_down: true,
+    stack_pointer: "r1",
+    frame_pointer: None,
+    return_address: Some("lr"),
     return_register: "r3",
+    delay_slots: 0,
 };
 const ABI_PPU: Abi = Abi {
     name: "powerpc64-elfv2",
     pointer_bits: 64,
     stack_alignment: 16,
     stack_grows_down: true,
+    stack_pointer: "r1",
+    frame_pointer: None,
+    return_address: Some("lr"),
     return_register: "r3",
+    delay_slots: 0,
 };
 const ABI_SPU: Abi = Abi {
     name: "spu-ls",
     pointer_bits: 32,
     stack_alignment: 16,
     stack_grows_down: true,
+    stack_pointer: "r1",
+    frame_pointer: None,
+    return_address: None,
     return_register: "r3",
+    delay_slots: 0,
 };
 
 impl TargetProfile {
+    pub const ALL: [Self; 24] = [
+        Self::Atari2600,
+        Self::Nes,
+        Self::Snes,
+        Self::MasterSystem,
+        Self::GameGear,
+        Self::Genesis,
+        Self::NeoGeo,
+        Self::C64,
+        Self::Ps1,
+        Self::Ps2,
+        Self::N64,
+        Self::Saturn,
+        Self::Dreamcast,
+        Self::GameCube,
+        Self::Wii,
+        Self::Gba,
+        Self::NintendoDs,
+        Self::Nintendo3Ds,
+        Self::Psp,
+        Self::Vita,
+        Self::WiiU,
+        Self::Xbox360,
+        Self::Ps3Ppu,
+        Self::Ps3Spu,
+    ];
+
     pub fn name(self) -> &'static str {
         self.spec().name
     }
 
     pub fn parse(value: &str) -> Option<Self> {
         let value = value.to_ascii_lowercase();
-        match value.as_str() {
-            "atari2600" | "atari-2600" | "2600" => Some(Self::Atari2600),
-            "nes" | "nintendo" | "nintendo-entertainment-system" => Some(Self::Nes),
-            "snes" | "super-nes" | "super-nintendo" => Some(Self::Snes),
-            "sms" | "master-system" | "mastersystem" => Some(Self::MasterSystem),
-            "game-gear" | "gamegear" | "gg" => Some(Self::GameGear),
-            "genesis" | "mega-drive" | "megadrive" => Some(Self::Genesis),
-            "neo-geo" | "neogeo" => Some(Self::NeoGeo),
-            "c64" | "commodore-64" | "commodore64" => Some(Self::C64),
-            "ps1" | "playstation" | "playstation1" | "psx" => Some(Self::Ps1),
-            "ps2" | "playstation2" => Some(Self::Ps2),
-            "n64" | "nintendo-64" | "nintendo64" => Some(Self::N64),
-            "saturn" | "sega-saturn" => Some(Self::Saturn),
-            "dreamcast" | "dc" => Some(Self::Dreamcast),
-            "gamecube" | "gc" => Some(Self::GameCube),
-            "wii" => Some(Self::Wii),
-            "gba" | "game-boy-advance" | "gameboy-advance" => Some(Self::Gba),
-            "nds" | "ds" | "nintendo-ds" | "nintendods" => Some(Self::NintendoDs),
-            "3ds" | "nintendo-3ds" | "nintendo3ds" => Some(Self::Nintendo3Ds),
-            "psp" | "playstation-portable" => Some(Self::Psp),
-            "vita" | "psvita" | "playstation-vita" => Some(Self::Vita),
-            "wiiu" | "wii-u" => Some(Self::WiiU),
-            "xbox360" | "xbox-360" | "xenon" => Some(Self::Xbox360),
-            "ps3" | "ps3-ppu" | "cell-ppu" => Some(Self::Ps3Ppu),
-            "ps3-spu" | "spu" | "cell-spu" => Some(Self::Ps3Spu),
-            _ => None,
-        }
+        TARGET_SPECS
+            .iter()
+            .find(|spec| spec.aliases.contains(&value.as_str()))
+            .map(|spec| spec.profile)
     }
 
-    pub fn spec(self) -> TargetSpec {
-        let (name, architecture, loader, default_base, abi, parts) = match self {
-            Self::Atari2600 => (
-                "atari2600",
-                Architecture::M6502,
-                Loader::Raw,
-                Some(0),
-                ABI_6502,
-                &[][..],
-            ),
-            Self::Nes => (
-                "nes",
-                Architecture::M6502,
-                Loader::Raw,
-                Some(0x8000),
-                ABI_6502,
-                &[][..],
-            ),
-            Self::Snes => (
-                "snes",
-                Architecture::M6502,
-                Loader::Raw,
-                Some(0x8000),
-                ABI_6502,
-                &[][..],
-            ),
-            Self::MasterSystem => (
-                "master-system",
-                Architecture::Z80,
-                Loader::Raw,
-                Some(0),
-                ABI_Z80,
-                &[][..],
-            ),
-            Self::GameGear => (
-                "game-gear",
-                Architecture::Z80,
-                Loader::Raw,
-                Some(0),
-                ABI_Z80,
-                &[][..],
-            ),
-            Self::Genesis => (
-                "genesis",
-                Architecture::M68k,
-                Loader::Raw,
-                Some(0),
-                ABI_M68K,
-                &[][..],
-            ),
-            Self::NeoGeo => (
-                "neo-geo",
-                Architecture::M68k,
-                Loader::Raw,
-                Some(0),
-                ABI_M68K,
-                &[][..],
-            ),
-            Self::C64 => (
-                "c64",
-                Architecture::M6502,
-                Loader::Raw,
-                Some(0),
-                ABI_6502,
-                &[][..],
-            ),
-            Self::Ps1 => (
-                "ps1",
-                Architecture::Ps1,
-                Loader::Raw,
-                Some(0x8001_0000),
-                ABI_MIPS_O32,
-                &[][..],
-            ),
-            Self::Ps2 => (
-                "ps2",
-                Architecture::Mips32,
-                Loader::Elf,
-                None,
-                ABI_MIPS_O32,
-                &[][..],
-            ),
-            Self::N64 => (
-                "n64",
-                Architecture::N64,
-                Loader::N64Rom,
-                None,
-                ABI_MIPS_N64,
-                &[][..],
-            ),
-            Self::Saturn => (
-                "saturn",
-                Architecture::Sh2,
-                Loader::Raw,
-                Some(0),
-                ABI_SH,
-                &[][..],
-            ),
-            Self::Dreamcast => (
-                "dreamcast",
-                Architecture::Sh4,
-                Loader::Elf,
-                None,
-                ABI_SH,
-                &[][..],
-            ),
-            Self::GameCube => (
-                "gamecube",
-                Architecture::GameCube,
-                Loader::Dol,
-                None,
-                ABI_PPC_EABI,
-                &[][..],
-            ),
-            Self::Wii => (
-                "wii",
-                Architecture::GameCube,
-                Loader::Dol,
-                None,
-                ABI_PPC_EABI,
-                &[][..],
-            ),
-            Self::Gba => (
-                "gba",
-                Architecture::Thumb,
-                Loader::Raw,
-                Some(0x0800_0000),
-                ABI_ARM_GBA,
-                &[][..],
-            ),
-            Self::NintendoDs => (
-                "nds",
-                Architecture::Arm32,
-                Loader::NintendoDs,
-                None,
-                ABI_ARM_AAPCS,
-                &["arm9", "arm7"][..],
-            ),
-            Self::Nintendo3Ds => (
-                "3ds",
-                Architecture::Arm32,
-                Loader::Ncch,
-                None,
-                ABI_ARM_AAPCS,
-                &["arm11"][..],
-            ),
-            Self::Psp => (
-                "psp",
-                Architecture::Mips32,
-                Loader::PspPrx,
-                None,
-                ABI_MIPS_O32,
-                &[][..],
-            ),
-            Self::Vita => (
-                "vita",
-                Architecture::Arm32,
-                Loader::VitaSelf,
-                None,
-                ABI_ARM_AAPCS,
-                &[][..],
-            ),
-            Self::WiiU => (
-                "wiiu",
-                Architecture::Ppc32,
-                Loader::WiiURpl,
-                None,
-                ABI_PPC_EABI,
-                &[][..],
-            ),
-            Self::Xbox360 => (
-                "xbox360",
-                Architecture::Ppc32,
-                Loader::Xex,
-                None,
-                ABI_XENON,
-                &[][..],
-            ),
-            Self::Ps3Ppu => (
-                "ps3-ppu",
-                Architecture::Ppc64,
-                Loader::Ps3Self,
-                None,
-                ABI_PPU,
-                &["ppu"][..],
-            ),
-            Self::Ps3Spu => (
-                "ps3-spu",
-                Architecture::Spu,
-                Loader::Ps3Self,
-                None,
-                ABI_SPU,
-                &["spu"][..],
-            ),
-        };
-        TargetSpec {
-            profile: self,
-            name,
-            architecture,
-            loader,
-            default_base,
-            abi,
-            parts,
-        }
+    pub fn spec(self) -> &'static TargetSpec {
+        &TARGET_SPECS[self as usize]
     }
 }
+
+const TARGET_SPECS: [TargetSpec; 24] = [
+    TargetSpec {
+        profile: TargetProfile::Atari2600,
+        name: "atari2600",
+        aliases: &["atari2600", "atari-2600", "2600"],
+        architecture: Architecture::M6502,
+        loader: Loader::Raw,
+        default_base: Some(0),
+        abi: ABI_6502,
+        parts: &[],
+        decompilation: DecompilationSupport::LiftOnly,
+    },
+    TargetSpec {
+        profile: TargetProfile::Nes,
+        name: "nes",
+        aliases: &["nes", "nintendo", "nintendo-entertainment-system"],
+        architecture: Architecture::M6502,
+        loader: Loader::Raw,
+        default_base: Some(0x8000),
+        abi: ABI_6502,
+        parts: &[],
+        decompilation: DecompilationSupport::LiftOnly,
+    },
+    TargetSpec {
+        profile: TargetProfile::Snes,
+        name: "snes",
+        aliases: &["snes", "super-nes", "super-nintendo"],
+        architecture: Architecture::M6502,
+        loader: Loader::Raw,
+        default_base: Some(0x8000),
+        abi: ABI_6502,
+        parts: &[],
+        decompilation: DecompilationSupport::LiftOnly,
+    },
+    TargetSpec {
+        profile: TargetProfile::MasterSystem,
+        name: "master-system",
+        aliases: &["sms", "master-system", "mastersystem"],
+        architecture: Architecture::Z80,
+        loader: Loader::Raw,
+        default_base: Some(0),
+        abi: ABI_Z80,
+        parts: &[],
+        decompilation: DecompilationSupport::LiftOnly,
+    },
+    TargetSpec {
+        profile: TargetProfile::GameGear,
+        name: "game-gear",
+        aliases: &["game-gear", "gamegear", "gg"],
+        architecture: Architecture::Z80,
+        loader: Loader::Raw,
+        default_base: Some(0),
+        abi: ABI_Z80,
+        parts: &[],
+        decompilation: DecompilationSupport::LiftOnly,
+    },
+    TargetSpec {
+        profile: TargetProfile::Genesis,
+        name: "genesis",
+        aliases: &["genesis", "mega-drive", "megadrive"],
+        architecture: Architecture::M68k,
+        loader: Loader::Raw,
+        default_base: Some(0),
+        abi: ABI_M68K,
+        parts: &[],
+        decompilation: DecompilationSupport::LiftOnly,
+    },
+    TargetSpec {
+        profile: TargetProfile::NeoGeo,
+        name: "neo-geo",
+        aliases: &["neo-geo", "neogeo"],
+        architecture: Architecture::M68k,
+        loader: Loader::Raw,
+        default_base: Some(0),
+        abi: ABI_M68K,
+        parts: &[],
+        decompilation: DecompilationSupport::LiftOnly,
+    },
+    TargetSpec {
+        profile: TargetProfile::C64,
+        name: "c64",
+        aliases: &["c64", "commodore-64", "commodore64"],
+        architecture: Architecture::M6502,
+        loader: Loader::Raw,
+        default_base: Some(0),
+        abi: ABI_6502,
+        parts: &[],
+        decompilation: DecompilationSupport::LiftOnly,
+    },
+    TargetSpec {
+        profile: TargetProfile::Ps1,
+        name: "ps1",
+        aliases: &["ps1", "playstation", "playstation1", "psx"],
+        architecture: Architecture::Ps1,
+        loader: Loader::Raw,
+        default_base: Some(0x8001_0000),
+        abi: ABI_MIPS_O32,
+        parts: &[],
+        decompilation: DecompilationSupport::Experimental,
+    },
+    TargetSpec {
+        profile: TargetProfile::Ps2,
+        name: "ps2",
+        aliases: &["ps2", "playstation2"],
+        architecture: Architecture::Mips32,
+        loader: Loader::Elf,
+        default_base: None,
+        abi: ABI_MIPS_O32,
+        parts: &[],
+        decompilation: DecompilationSupport::Measured,
+    },
+    TargetSpec {
+        profile: TargetProfile::N64,
+        name: "n64",
+        aliases: &["n64", "nintendo-64", "nintendo64"],
+        architecture: Architecture::N64,
+        loader: Loader::N64Rom,
+        default_base: None,
+        abi: ABI_MIPS_N64,
+        parts: &[],
+        decompilation: DecompilationSupport::Experimental,
+    },
+    TargetSpec {
+        profile: TargetProfile::Saturn,
+        name: "saturn",
+        aliases: &["saturn", "sega-saturn"],
+        architecture: Architecture::Sh2,
+        loader: Loader::Raw,
+        default_base: Some(0),
+        abi: ABI_SH,
+        parts: &[],
+        decompilation: DecompilationSupport::LiftOnly,
+    },
+    TargetSpec {
+        profile: TargetProfile::Dreamcast,
+        name: "dreamcast",
+        aliases: &["dreamcast", "dc"],
+        architecture: Architecture::Sh4,
+        loader: Loader::Elf,
+        default_base: None,
+        abi: ABI_SH,
+        parts: &[],
+        decompilation: DecompilationSupport::LiftOnly,
+    },
+    TargetSpec {
+        profile: TargetProfile::GameCube,
+        name: "gamecube",
+        aliases: &["gamecube", "gc"],
+        architecture: Architecture::GameCube,
+        loader: Loader::Dol,
+        default_base: None,
+        abi: ABI_PPC_EABI,
+        parts: &[],
+        decompilation: DecompilationSupport::Experimental,
+    },
+    TargetSpec {
+        profile: TargetProfile::Wii,
+        name: "wii",
+        aliases: &["wii"],
+        architecture: Architecture::GameCube,
+        loader: Loader::Dol,
+        default_base: None,
+        abi: ABI_PPC_EABI,
+        parts: &[],
+        decompilation: DecompilationSupport::LiftOnly,
+    },
+    TargetSpec {
+        profile: TargetProfile::Gba,
+        name: "gba",
+        aliases: &["gba", "game-boy-advance", "gameboy-advance"],
+        architecture: Architecture::Thumb,
+        loader: Loader::Raw,
+        default_base: Some(0x0800_0000),
+        abi: ABI_ARM_GBA,
+        parts: &[],
+        decompilation: DecompilationSupport::Experimental,
+    },
+    TargetSpec {
+        profile: TargetProfile::NintendoDs,
+        name: "nds",
+        aliases: &["nds", "ds", "nintendo-ds", "nintendods"],
+        architecture: Architecture::Arm32,
+        loader: Loader::NintendoDs,
+        default_base: None,
+        abi: ABI_ARM_AAPCS,
+        parts: &["arm9", "arm7"],
+        decompilation: DecompilationSupport::LiftOnly,
+    },
+    TargetSpec {
+        profile: TargetProfile::Nintendo3Ds,
+        name: "3ds",
+        aliases: &["3ds", "nintendo-3ds", "nintendo3ds"],
+        architecture: Architecture::Arm32,
+        loader: Loader::Ncch,
+        default_base: None,
+        abi: ABI_ARM_AAPCS,
+        parts: &["arm11"],
+        decompilation: DecompilationSupport::LiftOnly,
+    },
+    TargetSpec {
+        profile: TargetProfile::Psp,
+        name: "psp",
+        aliases: &["psp", "playstation-portable"],
+        architecture: Architecture::Mips32,
+        loader: Loader::PspPrx,
+        default_base: None,
+        abi: ABI_MIPS_O32,
+        parts: &[],
+        decompilation: DecompilationSupport::LiftOnly,
+    },
+    TargetSpec {
+        profile: TargetProfile::Vita,
+        name: "vita",
+        aliases: &["vita", "psvita", "playstation-vita"],
+        architecture: Architecture::Arm32,
+        loader: Loader::VitaSelf,
+        default_base: None,
+        abi: ABI_ARM_AAPCS,
+        parts: &[],
+        decompilation: DecompilationSupport::LiftOnly,
+    },
+    TargetSpec {
+        profile: TargetProfile::WiiU,
+        name: "wiiu",
+        aliases: &["wiiu", "wii-u"],
+        architecture: Architecture::Ppc32,
+        loader: Loader::WiiURpl,
+        default_base: None,
+        abi: ABI_PPC_EABI,
+        parts: &[],
+        decompilation: DecompilationSupport::LiftOnly,
+    },
+    TargetSpec {
+        profile: TargetProfile::Xbox360,
+        name: "xbox360",
+        aliases: &["xbox360", "xbox-360", "xenon"],
+        architecture: Architecture::Ppc32,
+        loader: Loader::Xex,
+        default_base: None,
+        abi: ABI_XENON,
+        parts: &[],
+        decompilation: DecompilationSupport::LiftOnly,
+    },
+    TargetSpec {
+        profile: TargetProfile::Ps3Ppu,
+        name: "ps3-ppu",
+        aliases: &["ps3", "ps3-ppu", "cell-ppu"],
+        architecture: Architecture::Ppc64,
+        loader: Loader::Ps3Self,
+        default_base: None,
+        abi: ABI_PPU,
+        parts: &["ppu"],
+        decompilation: DecompilationSupport::LiftOnly,
+    },
+    TargetSpec {
+        profile: TargetProfile::Ps3Spu,
+        name: "ps3-spu",
+        aliases: &["ps3-spu", "spu", "cell-spu"],
+        architecture: Architecture::Spu,
+        loader: Loader::Ps3Self,
+        default_base: None,
+        abi: ABI_SPU,
+        parts: &["spu"],
+        decompilation: DecompilationSupport::LiftOnly,
+    },
+];
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn declarative_table_covers_every_profile_once() {
+        assert_eq!(TARGET_SPECS.len(), TargetProfile::ALL.len());
+        for (index, profile) in TargetProfile::ALL.into_iter().enumerate() {
+            let spec = profile.spec();
+            assert_eq!(spec.profile, profile);
+            assert_eq!(profile as usize, index);
+            assert!(spec.aliases.contains(&spec.name));
+        }
+    }
 
     #[test]
     fn target_profiles_do_not_collapse_to_loader_identity() {

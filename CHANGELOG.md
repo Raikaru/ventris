@@ -16,6 +16,16 @@ All notable Ventris changes are documented here.
 - Corrected delay-slot discovery/order for MIPS/N64 control flow, made
   conditional-return folding label-safe, and report source-supplied metadata as
   applied evidence rather than machine-exact evidence.
+### Changed
+
+- Refocused the product on one canonical load-lift-analyze-render function
+  pipeline and reduced the public CLI to `inspect`, `lift`, and `decompile`.
+- Moved corpus, compiler, oracle, transport, project, batch, and packaging
+  workflows behind development-only tools.
+- Reduced Python and VS Code to thin adapters over the native executable.
+- Added checked-in per-function compiler floors so aggregate scores cannot hide
+  a decompilation regression.
+
 
 ## [0.1.0] - 2026-08-23
 
@@ -26,15 +36,13 @@ All notable Ventris changes are documented here.
 - Native lifting and checked-in p-code/decompiler corpus coverage across the
   documented architecture paths.
 - Console target profiles and evidence-backed ABI/type recovery through the
-  CLI, Python API, HTTP server, and VS Code integration.
-- Persistent bounded native-analysis memoization with fail-closed snapshots.
+  canonical Rust pipeline, CLI, Python adapter, and VS Code adapter.
 - Source-backed corpus metadata and opt-in hash-verified real-image smoke tests.
 - Release packaging now emits and verifies native archives, VSIX payloads, and
   Python wheel/source artifacts with policy and provenance files.
 - Release smoke gates exercise the optimized release-profile executable before
   archive packaging.
-- Cross-platform native release smoke checks, strict archive verification, and
-  GPUI persisted-project acceptance coverage.
+- Cross-platform native release smoke checks and strict archive verification.
 
 ### Known limitations
 
@@ -44,7 +52,4 @@ All notable Ventris changes are documented here.
   matching-C emission are not complete.
 - The Python package forwards to an externally installed Ventris executable; it
   does not bundle a platform-specific Rust binary.
-- The HTTP server has no authentication or TLS and is intended for loopback
-  use only.
-- Manual visual VS Code acceptance remains a release check; the GPUI desktop
-  workspace has a recorded populated-project smoke.
+- Manual visual VS Code acceptance remains a release check.

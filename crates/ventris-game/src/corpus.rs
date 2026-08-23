@@ -31,6 +31,14 @@ pub struct CorpusSemanticBaseline {
     pub nominal_fields: &'static [&'static str],
     pub source_structure: &'static [&'static str],
 }
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct CorpusCompilerBaseline {
+    pub compiler: &'static str,
+    pub target: &'static str,
+    pub minimum_mnemonic_lcs_ratio: f64,
+}
+
+const CLANG_MIPSEL: &str = "clang --target=mipsel-none-elf -O2";
 
 const DUNGEON_FADE_BASELINE: CorpusSemanticBaseline = CorpusSemanticBaseline {
     control_flow: &["if", "return"],
@@ -159,6 +167,24 @@ pub fn semantic_baseline(entry_id: &str, function: &str) -> Option<CorpusSemanti
         }
         _ => None,
     }
+}
+pub fn compiler_baseline(entry_id: &str, function: &str) -> Option<CorpusCompilerBaseline> {
+    let minimum_mnemonic_lcs_ratio = match (entry_id, function) {
+        ("ps2-dungeon-game", "_ZN9GameWorld12beginFadeOutEv") => 3.0 / 13.0,
+        ("ps2-dungeon-game", "_ZN9GameWorld11beginFadeInEv") => 2.0 / 13.0,
+        ("ps2-dungeon-game", "_ZN9GameWorld16onFadeInFinishedEv") => 1.0 / 6.0,
+        ("ps2-dungeon-game", "_ZN9GameWorld16allocEnemyEntityEv")
+        | ("ps2-dungeon-game", "_ZN9GameWorld17allocRenderEntityEv")
+        | ("ps2-dungeon-game", "_ZN9GameWorld15allocShadowBlobEv")
+        | ("ps2-dungeon-game", "_ZN9GameWorld13allocLightmapEv")
+        | ("ps2-dungeon-game", "_ZN9GameWorld20allocParticleEmitterEv") => 0.5,
+        _ => return None,
+    };
+    Some(CorpusCompilerBaseline {
+        compiler: CLANG_MIPSEL,
+        target: "ps2",
+        minimum_mnemonic_lcs_ratio,
+    })
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -550,6 +576,20 @@ mod tests {
                 .filter(|function| semantic_baseline(entry.id, function.name).is_some())
                 .count(),
             8
+        );
+        assert_eq!(
+            entry
+                .functions
+                .iter()
+                .filter(|function| compiler_baseline(entry.id, function.name).is_some())
+                .count(),
+            8
+        );
+        assert_eq!(
+            compiler_baseline(entry.id, "_ZN9GameWorld12beginFadeOutEv")
+                .unwrap()
+                .minimum_mnemonic_lcs_ratio,
+            3.0 / 13.0
         );
         assert!(entry
             .functions

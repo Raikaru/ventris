@@ -82,6 +82,34 @@ impl Architecture {
         Self::Spu,
     ];
 }
+/// Construct the one native lifter implementation for an architecture.
+///
+/// Front ends call this factory instead of maintaining their own architecture
+/// dispatch tables.
+pub fn lifter_for(architecture: Architecture) -> Box<dyn Lifter> {
+    match architecture {
+        Architecture::X86_64 => Box::new(X86_64::new()),
+        Architecture::X86_32 => Box::new(X86_32),
+        Architecture::AArch64 => Box::new(AArch64),
+        Architecture::Arm32 => Box::new(Arm32),
+        Architecture::Thumb => Box::new(Thumb),
+        Architecture::Mips32 => Box::new(Mips32),
+        Architecture::Mips32Be => Box::new(Mips32Be),
+        Architecture::Ps1 => Box::new(Ps1),
+        Architecture::N64 => Box::new(N64),
+        Architecture::Rv64 => Box::new(Rv64),
+        Architecture::Rv32 => Box::new(Rv32),
+        Architecture::Ppc32 => Box::new(Ppc32),
+        Architecture::Ppc64 => Box::new(Ppc64),
+        Architecture::GameCube => Box::new(GameCube),
+        Architecture::M68k => Box::new(M68k),
+        Architecture::Sh2 => Box::new(Sh2),
+        Architecture::Sh4 => Box::new(Sh4),
+        Architecture::M6502 => Box::new(M6502),
+        Architecture::Z80 => Box::new(Z80),
+        Architecture::Spu => Box::new(Spu),
+    }
+}
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum LiftError {

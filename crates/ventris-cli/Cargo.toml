@@ -10,6 +10,7 @@ name = "ventris"
 path = "src/main.rs"
 
 [dependencies]
+ventris = { path = "../ventris", version = "0.1.0" }
 ventris-addr = { path = "../ventris-addr", version = "0.1.0" }
 ventris-decompiler = { path = "../ventris-decompiler", version = "0.1.0" }
 ventris-format = { path = "../ventris-format", version = "0.1.0" }
