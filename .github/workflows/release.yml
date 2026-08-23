@@ -223,6 +223,9 @@ jobs:
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             release_flags+=(--verify-tag)
           fi
+          if [[ "$version" == 0.* ]]; then
+            release_flags+=(--prerelease)
+          fi
           gh release create "v${version}" artifacts/* \
             "${release_flags[@]}" \
             --title "Ventris ${version}" \
