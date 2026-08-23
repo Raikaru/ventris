@@ -31,7 +31,8 @@ release tag.
       contact are configured before publishing registry metadata.
 - [ ] All included code and fixtures have a documented license and provenance.
       Game images and copied game source remain outside the distribution.
-- [ ] The full Rust, Python, and VS Code checks pass on the release commit.
+- [ ] The full Rust, Python, VS Code, and frozen GPUI checks pass on the release
+      commit.
 - [ ] Each native binary passes `version`, `inspect`, `lift`, and semantic
       `decompile` smoke checks against a checked-in fixture, using
       `tools/native_smoke.py`.
@@ -55,7 +56,9 @@ From the repository root:
 ```text
 python -S tools/release_check.py --version 0.1.0
 cargo fmt --all -- --check
+cargo fmt --manifest-path desktop/ventris-gpui/Cargo.toml -- --check
 cargo test --workspace
+cargo test --manifest-path desktop/ventris-gpui/Cargo.toml --locked
 cargo build --workspace --locked
 cargo build --release --locked -p ventris-cli
 PYTHONPATH=python python -S -m unittest discover -s python/tests
