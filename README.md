@@ -190,7 +190,7 @@ the smoke runner exercises more than one code shape per target:
 |---|---|---|---|
 | N64 | `n64decomp/perfect_dark` | MIT | `preamble` (`0x80001000`), `vm_boot` (`0x80001050`), `vm_init_vars` (`0x800010a0`) |
 | GameCube | `ACreTeam/ac-decomp` | CC0-1.0 | `memset` (`0x800033a8`), `TRK_memset` (`0x800034e0`) |
-| PS2 | `crowded-street/3s-decomp` | AGPL-3.0 | `flBeginRender` (`0x11c1d0`), `flEndRender` (`0x11c1f0`), `flPS2InitRenderState` (`0x11c210`) |
+| PS2 | `crowded-street/3s-decomp` | AGPL-3.0 | `flBeginRender` (`0x003ee930`), `flEndRender` (`0x003ee9b0`), `flPS2InitRenderState` (`0x003eea20`) |
 | PS2 | `glampert/ps2-homebrew` Dungeon Game | MIT | ten bounded `GameWorld` functions: eight semantic baselines plus menu and texture-lookup smoke |
 | GBA | `pret/pokeemerald` | unspecified | `StartTimer1` (`0x08000554`), `SeedRngAndSetTrainerId` (`0x08000560`), `GetGeneratedTrainerIdLower` (`0x08000588`), `InitKeys` (`0x080005bc`) |
 

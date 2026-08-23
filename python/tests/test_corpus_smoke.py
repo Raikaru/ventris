@@ -183,7 +183,7 @@ class CorpusSmokeTests(unittest.TestCase):
             "calls": [],
             "globals": [],
             "access_types": ["u8"],
-            "casts": 0,
+            "casts": 1,
             "aggregate_copies": 0,
             "declaration_order": [],
             "nominal_fields": ["GameWorld.fadeAlpha"],
@@ -210,7 +210,8 @@ class CorpusSmokeTests(unittest.TestCase):
             recovery="type: u8\n",
             source=(
                 "typedef struct GameWorld { uint8_t fadeAlpha; } GameWorld;\n"
-                "void Game_Task(GameWorld * this_) { this_->fadeAlpha = 1; return; }\n"
+                "void Game_Task(GameWorld * this_) "
+                "{ this_->fadeAlpha = (uint8_t)1; return; }\n"
             ),
         )
         self.assertEqual(report["status"], "exact")
@@ -220,7 +221,7 @@ class CorpusSmokeTests(unittest.TestCase):
             if item["status"] == "applied"
         }
         self.assertEqual(
-            set(applied), {"recovered_accesses_types", "nominal_fields"}
+            set(applied), {"recovered_accesses_types", "casts", "nominal_fields"}
         )
         self.assertEqual(
             applied["nominal_fields"]["observed_evidence"]["metadata"],

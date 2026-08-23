@@ -644,7 +644,10 @@ def _semantic_report(
                     status = (
                         "applied"
                         if entry.metadata is not None
-                        and dimension in {"recovered_accesses_types", "nominal_fields"}
+                        and (
+                            dimension in {"recovered_accesses_types", "nominal_fields"}
+                            or (dimension == "casts" and bool(expected[dimension]))
+                        )
                         else "exact"
                     )
                 else:

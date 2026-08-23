@@ -226,6 +226,40 @@ fn prune_unused_parameters(signature: &mut SourceSignature, source: &str) {
     }
 }
 
+fn preserve_residual_byte_arithmetic(source: &str, name: &str) -> String {
+    let mut output = String::with_capacity(source.len() + name.len());
+    let mut cursor = 0;
+    for (index, _) in source.match_indices(name) {
+        let before = source[..index].chars().next_back();
+        let after = source[index + name.len()..].chars().next();
+        if before.is_some_and(|character| character == '_' || character.is_ascii_alphanumeric())
+            || after.is_some_and(|character| character == '_' || character.is_ascii_alphanumeric())
+        {
+            continue;
+        }
+        let prefix_operator = source[..index]
+            .chars()
+            .rev()
+            .find(|character| !character.is_whitespace())
+            .is_some_and(|character| matches!(character, '+' | '-'));
+        let suffix = source[index + name.len()..].trim_start();
+        let suffix_operator = !suffix.starts_with("->")
+            && suffix
+                .chars()
+                .next()
+                .is_some_and(|character| matches!(character, '+' | '-'));
+        if !prefix_operator && !suffix_operator {
+            continue;
+        }
+        output.push_str(&source[cursor..index]);
+        output.push_str("(uintptr_t)");
+        output.push_str(name);
+        cursor = index + name.len();
+    }
+    output.push_str(&source[cursor..]);
+    output
+}
+
 fn identifier_is_used(source: &str, name: &str) -> bool {
     source.match_indices(name).any(|(index, _)| {
         let before = source[..index].chars().next_back();
@@ -315,6 +349,7 @@ fn rewrite_recovered_field_accesses(
                 }
             }
         }
+        *body = preserve_residual_byte_arithmetic(body, &parameter);
         let desired_name = structure
             .parameter_name
             .as_deref()
@@ -623,10 +658,34 @@ mod tests {
             "uint32_t body(void) { return (uint32_t)((int64_t)(*(uint32_t *)(uintptr_t)(a0 + 0x0)) * 0x70); }",
         )
         .unwrap();
+
         let source = reconstruction.render();
         assert!(source.contains("return ((a0->health) * 0x70);"), "{source}");
         assert!(!source.contains("(uint32_t)"), "{source}");
         assert!(!source.contains("(int64_t)"), "{source}");
+    }
+    #[test]
+    fn preserves_byte_arithmetic_for_unrecovered_offsets_after_retyping_receiver() {
+        let reconstruction = SourceReconstruction::from_report(
+            &report(),
+            "uint32_t body(void) { *(uint32_t *)(uintptr_t)(a0 + 0x0) = 1; return *(uint32_t *)(uintptr_t)(a0 + 0xc); }",
+        )
+        .unwrap();
+        let source = reconstruction.render();
+        assert!(source.contains("Actor * a0"), "{source}");
+        assert!(source.contains("((uintptr_t)a0 + 0xc)"), "{source}");
+        assert!(!source.contains("(a0 + 0xc)"), "{source}");
+    }
+
+    #[test]
+    fn preserves_byte_arithmetic_when_receiver_is_an_interior_operand() {
+        let reconstruction = SourceReconstruction::from_report(
+            &report(),
+            "uint32_t body(void) { *(uint32_t *)(uintptr_t)(a0 + 0x0) = 1; return 0x70 + a0 + 0x4d0; }",
+        )
+        .unwrap();
+        let source = reconstruction.render();
+        assert!(source.contains("0x70 + (uintptr_t)a0 + 0x4d0"), "{source}");
     }
 
     #[test]

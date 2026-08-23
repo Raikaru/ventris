@@ -78,7 +78,7 @@ const fn dungeon_alloc_baseline(nominal_fields: &'static [&'static str]) -> Corp
         calls: &[],
         globals: &[],
         access_types: &["u32"],
-        casts: 0,
+        casts: 1,
         aggregate_copies: 0,
         declaration_order: &[],
         nominal_fields,
