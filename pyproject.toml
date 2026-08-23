@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+ [project]
+ name = "ventris-client"
+ version = "0.1.0"
+ description = "Dependency-free Python client for the Ventris binary-analysis executable"
+ readme = "README.md"
+ requires-python = ">=3.10"
+ license = { file = "LICENSE" }
+ classifiers = [
+     "Development Status :: 3 - Alpha",
+     "Intended Audience :: Developers",
+     "Intended Audience :: Science/Research",
+     "License :: OSI Approved :: Apache Software License",
+     "Operating System :: OS Independent",
+     "Programming Language :: Python :: 3",
+     "Programming Language :: Python :: 3 :: Only",
+     "Programming Language :: Python :: 3.10",
+     "Programming Language :: Python :: 3.11",
+     "Programming Language :: Python :: 3.12",
+     "Programming Language :: Python :: 3.13",
+     "Topic :: Software Development :: Disassemblers",
+ ]
+
+ [project.scripts]
+ ventris-corpus-smoke = "ventris.corpus_smoke:main"
+ ventris-python = "ventris.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "python" }
+
+include-package-data = false
+[tool.setuptools.packages.find]
+where = ["python"]
+exclude = ["tests*"]

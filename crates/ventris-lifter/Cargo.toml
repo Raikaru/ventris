@@ -1,0 +1,10 @@
+[package]
+name = "ventris-lifter"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Native instruction lifting to Ventris p-code"
+
+[dependencies]
+ventris-format = { path = "../ventris-format", version = "0.1.0" }
+ventris-pcode = { path = "../ventris-pcode", version = "0.1.0" }

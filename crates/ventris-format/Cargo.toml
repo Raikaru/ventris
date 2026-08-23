@@ -1,0 +1,9 @@
+[package]
+name = "ventris-format"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Bounds-checked executable and console image parsing"
+
+[dependencies]
+ventris-addr = { path = "../ventris-addr", version = "0.1.0" }

@@ -1,0 +1,412 @@
+use std::fmt::Write;
+
+use crate::{GameType, RecoveredFunction, StructCandidate};
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct SourceParameter {
+    pub name: String,
+    pub c_type: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct SourceSignature {
+    pub name: String,
+    pub return_type: String,
+    pub parameters: Vec<SourceParameter>,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct SourceField {
+    pub offset: i64,
+    pub name: String,
+    pub c_type: String,
+    pub declarator_suffix: String,
+    pub width: u32,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct SourceStruct {
+    pub name: String,
+    pub fields: Vec<SourceField>,
+    pub unresolved: Vec<String>,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct SourceReconstruction {
+    pub signature: SourceSignature,
+    pub structs: Vec<SourceStruct>,
+    pub body: String,
+    pub diagnostics: Vec<String>,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum ReconstructionError {
+    EmptyBody,
+}
+
+impl std::fmt::Display for ReconstructionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyBody => {
+                f.write_str("source reconstruction requires a non-empty function body")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ReconstructionError {}
+
+impl SourceReconstruction {
+    /// Combine a native decompiler body with the game ABI and field facts.
+    /// The body is intentionally supplied by the caller: this layer never
+    /// invents executable semantics from a type recovery report.
+    pub fn from_report(
+        report: &RecoveredFunction,
+        body: impl Into<String>,
+    ) -> Result<Self, ReconstructionError> {
+        let body = body.into();
+        if body.trim().is_empty() {
+            return Err(ReconstructionError::EmptyBody);
+        }
+        let mut diagnostics = Vec::new();
+        let structs = report
+            .structs
+            .iter()
+            .enumerate()
+            .map(|(index, candidate)| source_struct(candidate, index, &mut diagnostics))
+            .collect();
+        Ok(Self {
+            signature: source_signature(report),
+            structs,
+            body,
+            diagnostics,
+        })
+    }
+
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        out.push_str("#include <stdbool.h>\n#include <stdint.h>\n\n");
+        for structure in &self.structs {
+            writeln!(out, "typedef struct {} {{", structure.name).unwrap();
+            let mut cursor = 0_i64;
+            for field in &structure.fields {
+                if field.offset > cursor {
+                    let padding = field.offset - cursor;
+                    writeln!(out, "    uint8_t _pad_{cursor:x}[{padding}];").unwrap();
+                    cursor = field.offset;
+                }
+                if field.offset < cursor {
+                    writeln!(
+                        out,
+                        "    /* overlapping field at offset {:#x}; retained as observed */",
+                        field.offset
+                    )
+                    .unwrap();
+                }
+                writeln!(
+                    out,
+                    "    {} {}{};",
+                    field.c_type, field.name, field.declarator_suffix
+                )
+                .unwrap();
+                cursor = cursor.max(field.offset.saturating_add(i64::from(field.width)));
+            }
+            writeln!(out, "}} {};\n", structure.name).unwrap();
+            for unresolved in &structure.unresolved {
+                writeln!(out, "/* unresolved: {unresolved} */").unwrap();
+            }
+        }
+        if !self.diagnostics.is_empty() {
+            out.push_str("/* reconstruction diagnostics:\n");
+            for diagnostic in &self.diagnostics {
+                writeln!(out, " * {diagnostic}").unwrap();
+            }
+            out.push_str(" */\n");
+        }
+
+        let parameters = if self.signature.parameters.is_empty() {
+            "void".to_owned()
+        } else {
+            self.signature
+                .parameters
+                .iter()
+                .map(|parameter| format!("{} {}", parameter.c_type, parameter.name))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        writeln!(
+            out,
+            "{} {}({parameters})",
+            self.signature.return_type, self.signature.name
+        )
+        .unwrap();
+
+        if let Some(body) = function_body(&self.body) {
+            out.push_str(body);
+            if !body.ends_with('\n') {
+                out.push('\n');
+            }
+        } else {
+            out.push_str("{\n");
+            for line in self.body.trim().lines() {
+                writeln!(out, "    {line}").unwrap();
+            }
+            out.push_str("}\n");
+        }
+        out
+    }
+}
+
+fn function_body(source: &str) -> Option<&str> {
+    let start = source.find('{')?;
+    let end = source.rfind('}')?;
+    (start <= end).then(|| source[start..=end].trim())
+}
+
+fn source_signature(report: &RecoveredFunction) -> SourceSignature {
+    let name = report
+        .name
+        .as_deref()
+        .map(c_identifier)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| format!("sub_{:x}", report.entry));
+    let return_type = report
+        .abi
+        .return_register(crate::AbiRegisterClass::Integer, 0)
+        .map(|_| "uintptr_t".to_owned())
+        .unwrap_or_else(|| "void".to_owned());
+    let mut parameters = Vec::new();
+    if let Some(names) = report.abi.arguments.integer.names {
+        for name in names {
+            parameters.push(SourceParameter {
+                name: c_identifier(name),
+                c_type: "uintptr_t".into(),
+            });
+        }
+    }
+    if let Some(names) = report.abi.arguments.floating.names {
+        for name in names {
+            parameters.push(SourceParameter {
+                name: c_identifier(name),
+                c_type: "float".into(),
+            });
+        }
+    }
+    SourceSignature {
+        name,
+        return_type,
+        parameters,
+    }
+}
+
+fn source_struct(
+    candidate: &StructCandidate,
+    index: usize,
+    diagnostics: &mut Vec<String>,
+) -> SourceStruct {
+    let name = candidate
+        .name
+        .as_deref()
+        .map(c_identifier)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| format!("RecoveredStruct{index}"));
+    let mut unresolved = Vec::new();
+    let fields = candidate
+        .fields
+        .iter()
+        .map(|field| {
+            let field_name = field
+                .name
+                .as_deref()
+                .map(c_identifier)
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| format!("field_{:x}", field.offset.max(0)));
+            let (c_type, declarator_suffix) = c_declarator(&field.ty, &mut unresolved);
+            SourceField {
+                offset: field.offset,
+                name: field_name,
+                c_type,
+                declarator_suffix,
+                width: field.width.max(1),
+            }
+        })
+        .collect::<Vec<_>>();
+    if !unresolved.is_empty() {
+        diagnostics.push(format!("{} contains unresolved type facts", name));
+    }
+    SourceStruct {
+        name,
+        fields,
+        unresolved,
+    }
+}
+
+fn c_declarator(ty: &GameType, unresolved: &mut Vec<String>) -> (String, String) {
+    match ty {
+        GameType::UnknownBytes { width } => ("uint8_t".into(), format!("[{width}]")),
+        GameType::Array { element, count, .. } => {
+            let (c_type, suffix) = c_declarator(element, unresolved);
+            let count = count.map_or_else(String::new, |value| value.to_string());
+            (c_type, format!("{suffix}[{count}]"))
+        }
+        _ => (c_type(ty, unresolved), String::new()),
+    }
+}
+
+fn c_type(ty: &GameType, unresolved: &mut Vec<String>) -> String {
+    match ty {
+        GameType::UnknownBytes { .. } => "uint8_t".into(),
+        GameType::Primitive { name, bits, signed } => primitive_type(name, *bits, *signed),
+        GameType::Nominal { name, .. } => c_identifier(name),
+        GameType::Pointer { to, .. } => format!("{} *", c_type(to, unresolved)),
+        GameType::Array { element, .. } => c_type(element, unresolved),
+        GameType::Enum { name, .. } => c_identifier(name),
+        GameType::FunctionPointer { target, .. } => {
+            unresolved.push(format!(
+                "function pointer target {:?} is not a complete prototype",
+                target
+            ));
+            "uintptr_t".into()
+        }
+        GameType::Vector { lane, lanes } => {
+            format!("struct {{ {} lane[{lanes}]; }}", c_type(lane, unresolved))
+        }
+        GameType::Handle { name, bits } => {
+            unresolved.push(format!(
+                "handle {name} retains an opaque {bits}-bit representation"
+            ));
+            "uintptr_t".into()
+        }
+    }
+}
+
+fn primitive_type(name: &str, bits: u16, signed: Option<bool>) -> String {
+    match name {
+        "bool" => "bool".into(),
+        "char" => "char".into(),
+        "float" => "float".into(),
+        "double" => "double".into(),
+        "void" => "void".into(),
+        _ => match (signed, bits) {
+            (Some(true), 8) => "int8_t".into(),
+            (Some(true), 16) => "int16_t".into(),
+            (Some(true), 32) => "int32_t".into(),
+            (Some(true), 64) => "int64_t".into(),
+            (Some(false), 8) => "uint8_t".into(),
+            (Some(false), 16) => "uint16_t".into(),
+            (Some(false), 32) => "uint32_t".into(),
+            (Some(false), 64) => "uint64_t".into(),
+            _ => c_identifier(name),
+        },
+    }
+}
+
+fn c_identifier(value: &str) -> String {
+    let value = value.trim_start_matches(|character| character == '$' || character == '%');
+    let mut output = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '_' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if output.is_empty() {
+        return output;
+    }
+    if output.as_bytes()[0].is_ascii_digit() {
+        output.insert(0, '_');
+    }
+    output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Confidence, GameAbiProfile, StructCandidate, Varnode};
+    use ventris_target::TargetProfile;
+
+    fn report() -> RecoveredFunction {
+        RecoveredFunction {
+            target: TargetProfile::Ps2,
+            abi: GameAbiProfile::for_target(TargetProfile::Ps2),
+            entry: 0x1000,
+            name: Some("Actor::update".into()),
+            accesses: Vec::new(),
+            structs: vec![StructCandidate {
+                base: Varnode::new(4, 0, 4),
+                name: Some("Actor".into()),
+                fields: vec![
+                    crate::RecoveredField {
+                        offset: 0,
+                        width: 4,
+                        name: Some("health".into()),
+                        ty: GameType::Primitive {
+                            name: "int".into(),
+                            bits: 32,
+                            signed: Some(true),
+                        },
+                        accesses: Vec::new(),
+                        evidence: Vec::new(),
+                    },
+                    crate::RecoveredField {
+                        offset: 8,
+                        width: 4,
+                        name: None,
+                        ty: GameType::UnknownBytes { width: 4 },
+                        accesses: Vec::new(),
+                        evidence: Vec::new(),
+                    },
+                ],
+                strides: Vec::new(),
+                evidence: vec![crate::Evidence {
+                    source: crate::EvidenceSource::UserAssertion {
+                        note: "test".into(),
+                    },
+                    confidence: Confidence::new(100).unwrap(),
+                }],
+            }],
+            provenance: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn renders_typed_structs_and_preserves_observed_offsets() {
+        let reconstruction =
+            SourceReconstruction::from_report(&report(), "int body(void) { return 1; }").unwrap();
+        assert_eq!(reconstruction.signature.name, "Actor__update");
+        assert!(reconstruction.signature.parameters.len() >= 4);
+        let source = reconstruction.render();
+        assert!(source.contains("uintptr_t a0"));
+        assert!(source.contains("float f12"));
+        assert!(source.contains("typedef struct Actor"));
+        assert!(source.contains("int32_t health;"));
+        assert!(source.contains("uint8_t _pad_4[4];"));
+        assert!(source.contains("uintptr_t Actor__update("));
+        assert!(source.contains("{ return 1; }"));
+        assert!(!source.contains("int body(void)"));
+    }
+
+    #[test]
+    fn keeps_unresolved_function_pointer_facts_explicit() {
+        let mut report = report();
+        report.structs[0].fields[0].ty = GameType::FunctionPointer {
+            target: Some(0x2000),
+            bits: 32,
+        };
+        let reconstruction =
+            SourceReconstruction::from_report(&report, "void body(void) {}").unwrap();
+        assert_eq!(reconstruction.structs[0].fields[0].c_type, "uintptr_t");
+        assert!(reconstruction.render().contains("unresolved"));
+    }
+
+    #[test]
+    fn rejects_empty_source_body() {
+        assert_eq!(
+            SourceReconstruction::from_report(&report(), "   "),
+            Err(ReconstructionError::EmptyBody)
+        );
+    }
+}

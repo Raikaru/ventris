@@ -1,0 +1,83 @@
+{
+ "size": 10699044,
+ "machine": 8,
+ "flags": "0x20924000",
+ "entry": "0x100008",
+ "phnum": 1,
+ "shnum": 9,
+ "loads": [
+  {
+   "off": 96,
+   "va": 1048576,
+   "fsz": 9096320,
+   "msz": 9096320,
+   "fl": 0
+  }
+ ],
+ "secs": [
+  {
+   "name": "",
+   "addr": 0,
+   "size": 0,
+   "type": 0,
+   "alloc": false
+  },
+  {
+   "name": ".shstrtab",
+   "addr": 0,
+   "size": 69,
+   "type": 3,
+   "alloc": false
+  },
+  {
+   "name": ".strtab",
+   "addr": 0,
+   "size": 303386,
+   "type": 3,
+   "alloc": false
+  },
+  {
+   "name": ".symtab",
+   "addr": 0,
+   "size": 360464,
+   "type": 2,
+   "alloc": false
+  },
+  {
+   "name": "image",
+   "addr": 1048576,
+   "size": 9096320,
+   "type": 1,
+   "alloc": false
+  },
+  {
+   "name": ".relimage",
+   "addr": 0,
+   "size": 937896,
+   "type": 9,
+   "alloc": false
+  },
+  {
+   "name": ".mwcats",
+   "addr": 0,
+   "size": 360,
+   "type": 3391783618,
+   "alloc": false
+  },
+  {
+   "name": ".comment",
+   "addr": 0,
+   "size": 43,
+   "type": 1,
+   "alloc": false
+  },
+  {
+   "name": ".reginfo",
+   "addr": 0,
+   "size": 24,
+   "type": 1879048198,
+   "alloc": false
+  }
+ ],
+ "symcount": 22529
+}

@@ -1,0 +1,11 @@
+[package]
+name = "ventris-db"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Persistent generation-scoped memoization for Ventris"
+
+[dependencies]
+ventris-addr = { path = "../ventris-addr", version = "0.1.0" }
+ventris-log = { path = "../ventris-log", version = "0.1.0" }
+ventris-gen = { path = "../ventris-gen", version = "0.1.0" }

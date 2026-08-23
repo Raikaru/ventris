@@ -1,0 +1,10 @@
+[package]
+name = "ventris-decompiler"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Dependency-free native decompiler for Ventris"
+
+[dependencies]
+ventris-lifter = { path = "../ventris-lifter", version = "0.1.0" }
+ventris-pcode = { path = "../ventris-pcode", version = "0.1.0" }

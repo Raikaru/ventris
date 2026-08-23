@@ -1,0 +1,9 @@
+[package]
+name = "ventris-gen"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Progressive discovery generations and convergence state"
+
+[dependencies]
+ventris-addr = { path = "../ventris-addr", version = "0.1.0" }

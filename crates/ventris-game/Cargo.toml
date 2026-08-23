@@ -1,0 +1,11 @@
+ [package]
+ name = "ventris-game"
+ version.workspace = true
+ edition.workspace = true
+ license.workspace = true
+ description = "Console-game ABI profiles and evidence-backed type recovery"
+[dependencies]
+ventris-lifter = { path = "../ventris-lifter", version = "0.1.0" }
+ventris-format = { path = "../ventris-format", version = "0.1.0" }
+ventris-pcode = { path = "../ventris-pcode", version = "0.1.0" }
+ventris-target = { path = "../ventris-target", version = "0.1.0" }

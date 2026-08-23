@@ -1,0 +1,24 @@
+Ventris is distributed under the Apache License, Version 2.0. See LICENSE.
+
+Development oracle references
+----------------------------
+The optional `tools/diff_ghidra.py` workflow and checked-in semantic fixtures
+may be compared with the Apache-2.0-licensed Ghidra project:
+https://github.com/NationalSecurityAgency/ghidra
+
+Ventris does not bundle Ghidra binaries, Java classes, native decompiler
+artifacts, or protocol implementation code.
+
+Corpus metadata references
+--------------------------
+The optional source-backed corpus manifest contains metadata references to
+public projects. Ventris does not bundle their game images or copied source:
+
+* n64decomp/perfect_dark — MIT, as stated by that project.
+* ACreTeam/ac-decomp — CC0-1.0, as stated by that project.
+* crowded-street/3s-decomp — AGPL-3.0, as stated by that project.
+* pret/pokeemerald — no explicit repository license was recorded when the
+  metadata was captured; Ventris preserves that fact and does not redistribute
+  its source or ROM.
+
+See THIRD_PARTY_NOTICES.md for the provenance and distribution boundary.

@@ -1,0 +1,19 @@
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.exe binary
+*.dll binary
+*.zip binary
+*.elf binary
+*.dol binary
+*.z64 binary
+
+/target export-ignore
+/integrations/vscode/dist export-ignore
+/integrations/vscode/.acceptance-user export-ignore
+/integrations/vscode/.acceptance-extensions export-ignore
+*.log export-ignore

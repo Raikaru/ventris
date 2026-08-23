@@ -1,0 +1,7 @@
+{
+  "address": "0x140001450",
+  "architecture": "x86_64",
+  "return_type": "uint32_t",
+  "operator": "+",
+  "operands": ["0x10", "0x18"]
+}

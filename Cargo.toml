@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ventris-addr",
+    "crates/ventris-db",
+    "crates/ventris-decompiler",
+    "crates/ventris-format",
+    "crates/ventris-gen",
+    "crates/ventris-log",
+    "crates/ventris-pcode",
+    "crates/ventris-target",
+    "crates/ventris-lifter",
+    "crates/ventris-game",
+    "crates/ventris-cli",
+]
+
+ [workspace.package]
+ edition = "2021"
+ version = "0.1.0"
+ license = "Apache-2.0"
+
+# No third-party dependencies anywhere in the scaffold. The dependency choices
+# named in ARCHITECTURE.md (object, gimli, pdb, rayon, wasmtime) are deliberate
+# omissions here: the point of this workspace is the *boundaries*, and adding
+# real crates would let dependency creep across them go unnoticed.

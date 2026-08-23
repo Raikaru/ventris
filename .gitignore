@@ -1,0 +1,54 @@
+# Rust build output
+/desktop/ventris-gpui/target/
+/target/
+
+# Python build and cache output
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+/integrations/vscode/node_modules/
+build/
+dist/
+
+# Integration build output
+/integrations/vscode/dist/
+/integrations/vscode/.acceptance-user/
+/integrations/vscode/.acceptance-extensions/
+/integrations/vscode/.vscode-test/
+
+# Local analysis and debug output
+.ventris-cache/
+*.log
+*.tmp
+*.trace
+wire.log
+probe.log
+stage0_out.txt
+decomp_stderr.txt
+err
+/.release/
+/capsule/
+/.acceptance-gpui.vproj
+/specs/
+/init.json
+/vm.json
+/decomp_debug.xml
+/gdb_cmd.txt
+/gdb_attach.py
+/run_stage0.py
+/opcodes.json
+/protocol_ids.json
+
+# IDE and OS files
+.vscode/settings.json
+.idea/
+*.user
+*.suo
+.DS_Store
+Thumbs.db

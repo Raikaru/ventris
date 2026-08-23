@@ -1,0 +1,9 @@
+[package]
+name = "ventris-log"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Immutable machine and human analysis event log"
+
+[dependencies]
+ventris-addr = { path = "../ventris-addr", version = "0.1.0" }
