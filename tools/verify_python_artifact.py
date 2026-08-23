@@ -34,7 +34,6 @@ def verify(wheel: Path, version: str, distribution: str = "ventris-client") -> N
         required = {
             "ventris/__init__.py",
             "ventris/cli.py",
-            "ventris/corpus_smoke.py",
             f"{metadata}METADATA",
             f"{metadata}RECORD",
         }

@@ -61,6 +61,18 @@ class ReleaseArtifactSecurityTests(unittest.TestCase):
                 archive.writestr("ventris/__init__.py", "duplicate")
             with self.assertRaises(ValueError):
                 self.python_artifact.verify(path, "0.1.0")
+    def test_python_wheel_accepts_thin_adapter_payload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ventris_client-0.1.0-py3-none-any.whl"
+            metadata = "ventris_client-0.1.0.dist-info/"
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("ventris/__init__.py", "")
+                archive.writestr("ventris/cli.py", "")
+                archive.writestr(f"{metadata}METADATA", "")
+                archive.writestr(f"{metadata}RECORD", "")
+                archive.writestr(f"{metadata}licenses/LICENSE", "")
+            self.python_artifact.verify(path, "0.1.0")
+
 
     def test_vsix_rejects_duplicate_zip_entries(self):
         with tempfile.TemporaryDirectory() as directory:

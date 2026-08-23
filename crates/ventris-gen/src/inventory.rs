@@ -381,6 +381,49 @@ mod tests {
             fact.address == 0x1002 && fact.type_name == Some("string") && fact.size == 6
         }));
     }
+    #[test]
+    fn relocation_data_uses_the_architecture_pointer_width() {
+        let (file, image) = raw(&[0; 8], 0x1000);
+        let relocation = RelocationFact {
+            address: 0x1000,
+            symbol: Some("global".into()),
+        };
+        let x86_32 = discover_data(
+            &image,
+            &file,
+            Architecture::X86_32,
+            &[],
+            std::slice::from_ref(&relocation),
+        );
+        let x86_64 = discover_data(
+            &image,
+            &file,
+            Architecture::X86_64,
+            &[],
+            std::slice::from_ref(&relocation),
+        );
+        assert_eq!(x86_32[0].size, 4);
+        assert_eq!(x86_64[0].size, 8);
+    }
+
+    #[test]
+    fn stronger_relocation_replaces_a_string_at_the_same_address() {
+        let (file, image) = raw(b"hello\0\0\0", 0x1000);
+        let data = discover_data(
+            &image,
+            &file,
+            Architecture::X86_64,
+            &[],
+            &[RelocationFact {
+                address: 0x1000,
+                symbol: Some("message".into()),
+            }],
+        );
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0].source, "relocation-discovery");
+        assert_eq!(data[0].confidence, 95);
+        assert_eq!(data[0].name.as_deref(), Some("message"));
+    }
 
     #[test]
     fn one_shot_inventory_reports_functions_and_data() {
