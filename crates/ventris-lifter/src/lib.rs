@@ -2020,6 +2020,18 @@ fn mips_reg(index: u8, size: u32) -> Varnode {
 fn mips_register(offset: u64, size: u32) -> Varnode {
     Varnode::new(REGISTER_SPACE, offset, size)
 }
+
+fn mips_o32_call_inputs(target: Varnode) -> Vec<Varnode> {
+    vec![
+        target,
+        mips_reg(4, 4),
+        mips_reg(5, 4),
+        mips_reg(6, 4),
+        mips_reg(7, 4),
+        mips_register(0x200 + 12 * 4, 4),
+        mips_register(0x200 + 14 * 4, 4),
+    ]
+}
 fn mips_ram_space(size: u32) -> Varnode {
     constant(417, size)
 }
@@ -2241,7 +2253,11 @@ impl Lifter for Mips32 {
                     }
                 }
                 9 => {
-                    ops.push(p(op::CALLIND, None, vec![mips_reg(rs, 4)]));
+                    ops.push(p(
+                        op::CALLIND,
+                        Some(mips_reg(2, 4)),
+                        mips_o32_call_inputs(mips_reg(rs, 4)),
+                    ));
                     flow = Flow::FallThrough(next);
                 }
                 10 | 11 => {
@@ -2346,7 +2362,11 @@ impl Lifter for Mips32 {
                 let target =
                     (address.wrapping_add(4) & !0x0fff_ffff) | (u64::from(word & 0x03ff_ffff) << 2);
                 if opcode == 3 {
-                    ops.push(p(op::CALL, None, vec![constant(target, 4)]));
+                    ops.push(p(
+                        op::CALL,
+                        Some(mips_reg(2, 4)),
+                        mips_o32_call_inputs(constant(target, 4)),
+                    ));
                     flow = Flow::Call {
                         target,
                         fallthrough: next,
@@ -3053,6 +3073,14 @@ impl Lifter for Ps1 {
     fn lift_instruction(&self, address: u64, bytes: &[u8]) -> Result<LiftedInstruction, LiftError> {
         Mips32
             .lift_instruction(address, bytes)
+            .map(|mut instruction| {
+                for operation in &mut instruction.pcode.ops {
+                    if matches!(operation.opcode, op::CALL | op::CALLIND) {
+                        operation.inputs.truncate(5);
+                    }
+                }
+                instruction
+            })
             .map_err(|error| relabel_lift_error(error, Architecture::Ps1))
     }
 }
@@ -5219,6 +5247,126 @@ mod tests {
             .unwrap();
         assert_eq!(mips.flow, Flow::FallThrough(0x2004));
         assert!(mips.pcode.ops.iter().any(|op| op.opcode == op::CALLIND));
+    }
+
+    #[test]
+    fn mips_o32_calls_preserve_targets_argument_order_and_return_register() {
+        let direct_target: u64 = 0x2000;
+        let direct_word = (3u32 << 26) | (((direct_target >> 2) as u32) & 0x03ff_ffff);
+        let direct = Mips32
+            .lift_instruction(0x1000, &direct_word.to_le_bytes())
+            .unwrap();
+        assert_eq!(
+            direct.flow,
+            Flow::Call {
+                target: direct_target,
+                fallthrough: 0x1004
+            }
+        );
+        let direct_call = direct
+            .pcode
+            .ops
+            .iter()
+            .find(|operation| operation.opcode == op::CALL)
+            .expect("direct MIPS call p-code");
+        assert_eq!(direct_call.output, Some(mips_reg(2, 4)));
+        assert_eq!(
+            direct_call.inputs,
+            vec![
+                constant(direct_target, 4),
+                mips_reg(4, 4),
+                mips_reg(5, 4),
+                mips_reg(6, 4),
+                mips_reg(7, 4),
+                mips_register(0x230, 4),
+                mips_register(0x238, 4),
+            ]
+        );
+
+        let indirect_word = (25u32 << 21) | (31u32 << 11) | 9;
+        let indirect = Mips32
+            .lift_instruction(0x1100, &indirect_word.to_le_bytes())
+            .unwrap();
+        assert_eq!(indirect.flow, Flow::FallThrough(0x1104));
+        let indirect_call = indirect
+            .pcode
+            .ops
+            .iter()
+            .find(|operation| operation.opcode == op::CALLIND)
+            .expect("indirect MIPS call p-code");
+        assert_eq!(indirect_call.output, Some(mips_reg(2, 4)));
+        assert_eq!(
+            indirect_call.inputs,
+            vec![
+                mips_reg(25, 4),
+                mips_reg(4, 4),
+                mips_reg(5, 4),
+                mips_reg(6, 4),
+                mips_reg(7, 4),
+                mips_register(0x230, 4),
+                mips_register(0x238, 4),
+            ]
+        );
+    }
+
+    #[test]
+    fn ps1_calls_do_not_claim_ps2_hard_float_argument_registers() {
+        let target: u64 = 0x2000;
+        let word = (3u32 << 26) | (((target >> 2) as u32) & 0x03ff_ffff);
+        let instruction = Ps1.lift_instruction(0x1000, &word.to_le_bytes()).unwrap();
+        let call = instruction
+            .pcode
+            .ops
+            .iter()
+            .find(|operation| operation.opcode == op::CALL)
+            .expect("direct PS1 call p-code");
+        assert_eq!(
+            call.inputs,
+            vec![
+                constant(target, 4),
+                mips_reg(4, 4),
+                mips_reg(5, 4),
+                mips_reg(6, 4),
+                mips_reg(7, 4),
+            ]
+        );
+    }
+
+    #[test]
+    fn mips_call_discovery_keeps_delay_slots() {
+        let image = Image {
+            len: 16,
+            format: ventris_format::Format::Pe(ventris_format::PeFacts {
+                machine: 0x8664,
+                plus: true,
+                image_base: 0,
+            }),
+            segments: vec![ventris_format::Segment {
+                name: Some(".text".into()),
+                addr: 0x1000,
+                size: 16,
+                file_off: 0,
+                file_size: 16,
+                perms: ventris_format::Perms {
+                    read: Some(true),
+                    write: Some(false),
+                    exec: Some(true),
+                },
+            }],
+            regions: Vec::new(),
+            entry: Some(0x1000),
+            symbol_count: 0,
+        };
+        let file = [
+            0x00, 0x08, 0x00, 0x0c, // jal 0x2000
+            0x01, 0x00, 0x84, 0x24, // addiu a0, a0, 1
+            0x08, 0x00, 0xe0, 0x03, // jr ra
+            0x00, 0x00, 0x00, 0x00, // delay-slot nop
+        ];
+        let function = Mips32.discover(&image, &file, 0x1000, 8).unwrap();
+        assert_eq!(function.calls, BTreeSet::from([0x2000]));
+        assert!(function.instructions.contains_key(&0x1004));
+        assert!(function.instructions.contains_key(&0x100c));
     }
 
     #[test]

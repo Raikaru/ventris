@@ -14,16 +14,30 @@ def envelope(command: str, result: str) -> str:
 
 
 class CorpusSmokeTests(unittest.TestCase):
-    def manifest_output(self, *, expected_hash: str, functions=None) -> str:
+    def manifest_output(self, *, expected_hash: str, functions=None, semantic=None) -> str:
+        manifest_functions = functions or [
+            {"name": "Game_Task", "address": "0x250190", "size": "0x1f0"}
+        ]
+        manifest_functions = [
+            {**function, "source_path": function.get("source_path", "src/test.c")}
+            for function in manifest_functions
+        ]
+        if semantic is not None:
+            manifest_functions = [
+                {**function, "semantic": semantic} for function in manifest_functions
+            ]
         manifest = [
             {
                 "id": "ps2-test",
                 "title": "PS2 test",
                 "target": "ps2",
+                "source_url": "https://example.invalid/repo",
+                "source_commit": "1" * 40,
+                "source_license": "AGPL-3.0",
                 "binary_name": "test.elf",
                 "binary_sha256": expected_hash,
-                "functions": functions
-                or [{"name": "Game_Task", "address": "0x250190", "size": "0x1f0"}],
+                "binary_sha1": None,
+                "functions": manifest_functions,
             }
         ]
         return envelope("corpus", json.dumps(manifest))
@@ -115,6 +129,229 @@ class CorpusSmokeTests(unittest.TestCase):
         self.assertFalse(report["ok"])
         self.assertEqual(decompile_addresses, ["ram::0x250190", "ram::0x250380"])
         self.assertEqual([item["status"] for item in report["entries"][0]["functions"]], ["fail", "pass"])
+
+    def test_semantic_exact_match_is_distinguished(self):
+        digest = "a" * 64
+        semantic = {
+            "control_flow": [],
+            "calls": ["callee@0x3000"],
+            "globals": ["gValue"],
+            "access_types": ["u32"],
+            "casts": 0,
+            "aggregate_copies": 0,
+            "declaration_order": [],
+            "nominal_fields": ["gValue.field"],
+            "source_structure": ["call"],
+        }
+        entry = corpus_smoke.parse_manifest(
+            self.manifest_output(expected_hash=digest, semantic=semantic)
+        )[0]
+        report = corpus_smoke._semantic_report(
+            entry,
+            entry.functions[0],
+            resolved="space: ram\noffset: 0x250190\n",
+            lift="bytes: 496\ncalls: {12288}\n",
+            recovery="type: u32\nglobal: gValue\n",
+            source="void Game_Task(void) { gValue.field = callee(); return; }\n",
+        )
+
+        self.assertEqual(report["status"], "exact")
+        self.assertTrue(
+            all(item["status"] == "exact" for item in report["dimensions"])
+        )
+
+    def test_source_structure_ignores_only_unlabelled_terminal_void_return(self):
+        plain = "void f(void) { value = 0; return; }"
+        labelled = "void f(void) { if (value) goto loc_10; loc_10: return; }"
+        self.assertEqual(corpus_smoke._source_structure(plain, "f"), ([], []))
+        self.assertEqual(
+            corpus_smoke._source_structure(labelled, "f"),
+            (["if", "goto", "return"], ["if", "goto", "return"]),
+        )
+
+    def test_semantic_regression_names_function_and_dimension(self):
+        data = b"real image"
+        digest = hashlib.sha256(data).hexdigest()
+        semantic = {
+            "control_flow": ["return"],
+            "calls": ["callee@0x3000"],
+            "globals": ["gValue"],
+            "access_types": ["u32"],
+            "casts": 0,
+            "aggregate_copies": 0,
+            "declaration_order": [],
+            "nominal_fields": ["gValue.field"],
+            "source_structure": ["call", "return"],
+        }
+
+        def fake_runner(command, args):
+            if args[0] == "corpus":
+                return self.manifest_output(expected_hash=digest, semantic=semantic), ""
+            if args[0] == "resolve":
+                return envelope("resolve", "space: ram\noffset: 0x250190\n"), ""
+            if args[0] == "decompile-native":
+                return envelope("decompile-native", "void Game_Task(void) { return; }\n"), ""
+            if args[0] == "lift":
+                return envelope("lift", "bytes: 496\ncalls: {}\n"), ""
+            if args[0] == "recover-types":
+                return envelope("recover-types", "type: u32\nglobal: gValue\n"), ""
+            if args[0] == "reconstruct-source":
+                return envelope(
+                    "reconstruct-source",
+                    "void Game_Task(void) { gValue.field = callee(); return; }\n",
+                ), ""
+            raise AssertionError(args)
+
+        with tempfile.TemporaryDirectory() as directory:
+            image_dir = Path(directory)
+            (image_dir / "test.elf").write_bytes(data)
+            report = corpus_smoke.run_smoke(
+                image_dir,
+                ids=("ps2-test",),
+                command=("ventris",),
+                command_runner=fake_runner,
+            )
+
+        function = report["entries"][0]["functions"][0]
+        self.assertEqual(function["status"], "fail")
+        self.assertIn("calls", function["error"])
+        call_dimension = next(
+            item
+            for item in function["semantic"]["dimensions"]
+            if item["dimension"] == "calls"
+        )
+        self.assertEqual(call_dimension["status"], "diverged")
+        self.assertEqual(call_dimension["expected"], ["0x3000"])
+        self.assertEqual(
+            call_dimension["expected_evidence"]["commit"], "1" * 40
+        )
+        self.assertEqual(
+            call_dimension["observed_evidence"]["commands"],
+            ["lift"],
+        )
+        self.assertEqual(call_dimension["observed"], [])
+
+    def test_valid_lift_without_calls_line_observes_an_empty_call_set(self):
+        size, calls = corpus_smoke._lift_summary(
+            "architecture: Mips32\n"
+            "entry: 0x124058\n"
+            "instructions: 10\n"
+            "bytes: 40\n"
+            "edges: {(1, 2)}\n"
+        )
+        self.assertEqual(size, 40)
+        self.assertEqual(calls, [])
+
+    def test_call_observation_is_not_derived_from_expected_symbol(self):
+        digest = "a" * 64
+        semantic = {
+            "control_flow": ["return"],
+            "calls": ["callee@0x3000"],
+            "globals": [],
+            "access_types": [],
+            "casts": 0,
+            "aggregate_copies": 0,
+            "declaration_order": [],
+            "nominal_fields": [],
+            "source_structure": ["return"],
+        }
+        entry = corpus_smoke.parse_manifest(
+            self.manifest_output(expected_hash=digest, semantic=semantic)
+        )[0]
+        report = corpus_smoke._semantic_report(
+            entry,
+            entry.functions[0],
+            resolved="space: ram\noffset: 0x250190\n",
+            lift="bytes: 496\ncalls: {16384}\n",
+            recovery="memory_accesses: 0\n",
+            source="void Game_Task(void) { return; }\n",
+        )
+        call_dimension = next(
+            item for item in report["dimensions"] if item["dimension"] == "calls"
+        )
+        self.assertEqual(call_dimension["status"], "diverged")
+        self.assertEqual(call_dimension["expected"], ["0x3000"])
+        self.assertEqual(call_dimension["observed"], ["0x4000"])
+
+    def test_missing_call_facts_are_unavailable_not_an_empty_exact_set(self):
+        digest = "a" * 64
+        semantic = {
+            "control_flow": [],
+            "calls": [],
+            "globals": [],
+            "access_types": [],
+            "casts": 0,
+            "aggregate_copies": 0,
+            "declaration_order": [],
+            "nominal_fields": [],
+            "source_structure": [],
+        }
+        entry = corpus_smoke.parse_manifest(
+            self.manifest_output(expected_hash=digest, semantic=semantic)
+        )[0]
+        report = corpus_smoke._semantic_report(
+            entry,
+            entry.functions[0],
+            resolved="space: ram\noffset: 0x250190\n",
+            lift="bytes: 496\n",
+            recovery="memory_accesses: 0\n",
+            source="void Game_Task(void) {}\n",
+        )
+        call_dimension = next(
+            item for item in report["dimensions"] if item["dimension"] == "calls"
+        )
+        self.assertEqual(call_dimension["status"], "unavailable")
+        self.assertIsNone(call_dimension["observed"])
+        self.assertIsNone(call_dimension["observed_evidence"])
+
+    def test_unsupported_analysis_is_explicit_not_diverged(self):
+        data = b"real image"
+        digest = hashlib.sha256(data).hexdigest()
+        semantic = {
+            "control_flow": [],
+            "calls": [],
+            "globals": [],
+            "access_types": [],
+            "casts": 0,
+            "aggregate_copies": 0,
+            "declaration_order": [],
+            "nominal_fields": [],
+            "source_structure": [],
+        }
+
+        def fake_runner(command, args):
+            if args[0] == "corpus":
+                return self.manifest_output(expected_hash=digest, semantic=semantic), ""
+            if args[0] == "resolve":
+                return envelope("resolve", "space: ram\noffset: 0x250190\n"), ""
+            if args[0] in {
+                "decompile-native",
+                "lift",
+                "recover-types",
+                "reconstruct-source",
+            }:
+                raise corpus_smoke.SmokeError("unsupported Mips32 opcode 0x0")
+            raise AssertionError(args)
+
+        with tempfile.TemporaryDirectory() as directory:
+            image_dir = Path(directory)
+            (image_dir / "test.elf").write_bytes(data)
+            report = corpus_smoke.run_smoke(
+                image_dir,
+                ids=("ps2-test",),
+                command=("ventris",),
+                command_runner=fake_runner,
+            )
+
+        function = report["entries"][0]["functions"][0]
+        self.assertEqual(function["semantic"]["status"], "unsupported")
+        self.assertTrue(
+            all(
+                item["status"] == "unsupported"
+                for item in function["semantic"]["dimensions"]
+            )
+        )
+        self.assertIn("unsupported Mips32 opcode", function["error"])
 
     def test_text_mode_reports_passed_functions(self):
         report = {

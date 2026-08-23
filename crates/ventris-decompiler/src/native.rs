@@ -954,12 +954,47 @@ impl NativeDecompiler {
         let mut definitions: BTreeMap<ValueKey, Expr> = BTreeMap::new();
         let mut statements = Vec::new();
         let mut warnings = Vec::new();
+        let mut consumed_delay_slots = BTreeSet::new();
         let mut returned = false;
         let mut value_returned = false;
         let mut inferred_return_type = None;
         for (address, instruction) in &function.instructions {
+            if consumed_delay_slots.contains(address) {
+                continue;
+            }
             if labels.contains(address) {
                 statements.push(NativeStatement::Label(*address));
+            }
+            if matches!(
+                architecture,
+                Architecture::Mips32 | Architecture::Mips32Be | Architecture::Ps1
+            ) {
+                let delay_address = match instruction.flow {
+                    ventris_lifter::Flow::Call { fallthrough, .. } => Some(fallthrough),
+                    ventris_lifter::Flow::Return => address.checked_add(4),
+                    _ => None,
+                };
+                if let Some(delay_address) = delay_address {
+                    if !labels.contains(&delay_address) {
+                        if let Some(delay) = function.instructions.get(&delay_address) {
+                            if matches!(delay.flow, ventris_lifter::Flow::FallThrough(_)) {
+                                for operation in &delay.pcode.ops {
+                                    self.translate_operation(
+                                        architecture,
+                                        memory,
+                                        symbols,
+                                        delay_address,
+                                        operation,
+                                        &mut definitions,
+                                        &mut statements,
+                                        &mut warnings,
+                                    );
+                                }
+                                consumed_delay_slots.insert(delay_address);
+                            }
+                        }
+                    }
+                }
             }
             for operation in &instruction.pcode.ops {
                 self.translate_operation(
@@ -1347,10 +1382,12 @@ impl NativeDecompiler {
                         .inputs
                         .iter()
                         .skip(1)
+                        .filter(|value| call_argument_available(architecture, **value, definitions))
                         .map(|v| eval(*v, architecture, definitions))
                         .collect(),
                 };
                 statements.push(NativeStatement::Call(call.clone()));
+                invalidate_mips_o32_call_arguments(architecture, definitions);
                 definitions.insert(ValueKey::from(return_vnode(architecture)), call);
             }
             op::CALLIND => {
@@ -1368,10 +1405,12 @@ impl NativeDecompiler {
                         .inputs
                         .iter()
                         .skip(1)
+                        .filter(|value| call_argument_available(architecture, **value, definitions))
                         .map(|v| eval(*v, architecture, definitions))
                         .collect(),
                 };
                 statements.push(NativeStatement::Call(call.clone()));
+                invalidate_mips_o32_call_arguments(architecture, definitions);
                 definitions.insert(ValueKey::from(return_vnode(architecture)), call);
             }
             op::CBRANCH => {
@@ -1521,6 +1560,42 @@ fn structure_control_flow(statements: Vec<NativeStatement>) -> Vec<NativeStateme
             if let Some(target_index) =
                 target_index.filter(|target_index| *target_index > index + 1)
             {
+                let body_references_target =
+                    statements[index + 1..target_index]
+                        .iter()
+                        .any(|statement| match statement {
+                            NativeStatement::Goto(branch_target)
+                            | NativeStatement::IfGoto {
+                                target: branch_target,
+                                ..
+                            } => branch_target == target,
+                            _ => false,
+                        });
+                if !body_references_target {
+                    if let Some(NativeStatement::Return(value)) = statements.get(target_index + 1) {
+                        structured.push(NativeStatement::IfReturn {
+                            condition: condition.clone(),
+                            value: value.clone(),
+                        });
+                        structured.extend(statements[index + 1..target_index].iter().cloned());
+                        structured.push(NativeStatement::Return(value.clone()));
+                        index = target_index + 2;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        if let NativeStatement::IfGoto { condition, target } = &statements[index] {
+            let target_index = statements[index + 1..]
+                .iter()
+                .position(|statement| {
+                    matches!(statement, NativeStatement::Label(label) if label == target)
+                })
+                .map(|relative| index + 1 + relative);
+            if let Some(target_index) =
+                target_index.filter(|target_index| *target_index > index + 1)
+            {
                 if let Some(NativeStatement::Goto(join)) = statements.get(target_index - 1) {
                     let join_index = statements[target_index + 1..]
                         .iter()
@@ -1553,6 +1628,44 @@ fn structure_control_flow(statements: Vec<NativeStatement>) -> Vec<NativeStateme
 fn constant_value(v: &Varnode) -> Option<u64> {
     (v.space == ventris_lifter::CONST_SPACE).then_some(v.offset)
 }
+
+fn is_mips_o32_call_argument(value: Varnode) -> bool {
+    value.space == ventris_lifter::REGISTER_SPACE
+        && value.size == 4
+        && ((16..=28).contains(&value.offset) && value.offset % 4 == 0
+            || matches!(value.offset, 0x230 | 0x238))
+}
+
+fn call_argument_available(
+    architecture: Architecture,
+    value: Varnode,
+    definitions: &BTreeMap<ValueKey, Expr>,
+) -> bool {
+    if !matches!(
+        architecture,
+        Architecture::Mips32 | Architecture::Mips32Be | Architecture::Ps1
+    ) || !is_mips_o32_call_argument(value)
+    {
+        return true;
+    }
+    definitions.keys().any(|key| {
+        key.space == value.space && key.offset == value.offset && key.width == value.size
+    })
+}
+fn invalidate_mips_o32_call_arguments(
+    architecture: Architecture,
+    definitions: &mut BTreeMap<ValueKey, Expr>,
+) {
+    if matches!(
+        architecture,
+        Architecture::Mips32 | Architecture::Mips32Be | Architecture::Ps1
+    ) {
+        definitions.retain(|key, _| {
+            !is_mips_o32_call_argument(Varnode::new(key.space, key.offset, key.width))
+        });
+    }
+}
+
 fn named_global(
     symbols: Option<&dyn Fn(u64) -> Option<String>>,
     address: &Expr,
@@ -1754,14 +1867,21 @@ fn register_name(architecture: Architecture, offset: u64) -> String {
         .get(offset.saturating_sub(32).checked_div(4).unwrap_or_default() as usize)
         .unwrap_or(&"reg")
         .to_string(),
-        Architecture::Mips32 | Architecture::Mips32Be | Architecture::Ps1 => [
-            "zero", "at", "v0", "v1", "a0", "a1", "a2", "a3", "t0", "t1", "t2", "t3", "t4", "t5",
-            "t6", "t7", "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "t8", "t9", "k0", "k1",
-            "gp", "sp", "fp", "ra",
-        ]
-        .get((offset / 4) as usize)
-        .unwrap_or(&"reg")
-        .to_string(),
+        Architecture::Mips32 | Architecture::Mips32Be | Architecture::Ps1 => {
+            let fpu_offset = offset.saturating_sub(0x200);
+            if offset >= 0x200 && fpu_offset < 32 * 4 && fpu_offset % 4 == 0 {
+                format!("f{}", fpu_offset / 4)
+            } else {
+                [
+                    "zero", "at", "v0", "v1", "a0", "a1", "a2", "a3", "t0", "t1", "t2", "t3", "t4",
+                    "t5", "t6", "t7", "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "t8", "t9",
+                    "k0", "k1", "gp", "sp", "fp", "ra",
+                ]
+                .get((offset / 4) as usize)
+                .unwrap_or(&"reg")
+                .to_string()
+            }
+        }
         Architecture::N64 => [
             "zero", "at", "v0", "v1", "a0", "a1", "a2", "a3", "t0", "t1", "t2", "t3", "t4", "t5",
             "t6", "t7", "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "t8", "t9", "k0", "k1",
@@ -2059,6 +2179,256 @@ mod tests {
     }
 
     #[test]
+    fn native_mips_calls_render_defined_o32_arguments_and_return_use() {
+        let arguments = [
+            Varnode::new(REGISTER_SPACE, 16, 4),
+            Varnode::new(REGISTER_SPACE, 20, 4),
+            Varnode::new(REGISTER_SPACE, 24, 4),
+            Varnode::new(REGISTER_SPACE, 28, 4),
+            Varnode::new(REGISTER_SPACE, 0x230, 4),
+            Varnode::new(REGISTER_SPACE, 0x238, 4),
+        ];
+        let return_register = Varnode::new(REGISTER_SPACE, 8, 4);
+        let make_function = |opcode, target| {
+            let mut ops = arguments
+                .iter()
+                .copied()
+                .map(|value| PcodeOp::new(op::COPY, Some(value), vec![value]))
+                .collect::<Vec<_>>();
+            let mut inputs = vec![target];
+            inputs.extend(arguments);
+            ops.push(PcodeOp::new(opcode, Some(return_register), inputs));
+            ops.push(PcodeOp::new(
+                op::STORE,
+                None,
+                vec![
+                    Varnode::new(CONST_SPACE, 417, 4),
+                    Varnode::new(CONST_SPACE, 0x8000, 4),
+                    return_register,
+                ],
+            ));
+            ops.push(PcodeOp::new(op::RETURN, None, vec![return_register]));
+            NativeFunction {
+                entry: 0x1000,
+                instructions: BTreeMap::from([(
+                    0x1000,
+                    LiftedInstruction {
+                        address: 0x1000,
+                        bytes: vec![0; 4],
+                        pcode: InstPcode {
+                            len: 4,
+                            space: RAM_SPACE,
+                            offset: 0x1000,
+                            ops,
+                        },
+                        flow: Flow::Return,
+                    },
+                )]),
+                edges: BTreeSet::new(),
+                calls: BTreeSet::new(),
+            }
+        };
+
+        let direct = make_function(op::CALL, Varnode::new(CONST_SPACE, 0x2000, 4));
+        let direct_document = NativeDecompiler.decompile(Architecture::Mips32, &direct);
+        let direct_c = direct_document.render();
+        assert!(
+            direct_c.contains("sub_2000(a0, a1, a2, a3, f12, f14);"),
+            "{direct_c}"
+        );
+        assert!(
+            direct_c.contains("DAT_8000 = sub_2000(a0, a1, a2, a3, f12, f14);"),
+            "{direct_c}"
+        );
+        assert!(direct_document
+            .ssa
+            .values
+            .iter()
+            .any(|value| value.origin == return_register));
+
+        let indirect = make_function(op::CALLIND, Varnode::new(REGISTER_SPACE, 25 * 4, 4));
+        let indirect_c = NativeDecompiler
+            .decompile(Architecture::Mips32, &indirect)
+            .render();
+        assert!(
+            indirect_c.contains("t9(a0, a1, a2, a3, f12, f14);"),
+            "{indirect_c}"
+        );
+    }
+
+    #[test]
+    fn native_mips_call_arguments_are_invalidated_after_each_call() {
+        let a0 = Varnode::new(REGISTER_SPACE, 16, 4);
+        let v0 = Varnode::new(REGISTER_SPACE, 8, 4);
+        let function = NativeFunction {
+            entry: 0x1000,
+            instructions: BTreeMap::from([(
+                0x1000,
+                LiftedInstruction {
+                    address: 0x1000,
+                    bytes: vec![0; 4],
+                    pcode: InstPcode {
+                        len: 4,
+                        space: RAM_SPACE,
+                        offset: 0x1000,
+                        ops: vec![
+                            PcodeOp::new(op::COPY, Some(a0), vec![a0]),
+                            PcodeOp::new(
+                                op::CALL,
+                                Some(v0),
+                                vec![Varnode::new(CONST_SPACE, 0x2000, 4), a0],
+                            ),
+                            PcodeOp::new(
+                                op::CALL,
+                                Some(v0),
+                                vec![Varnode::new(CONST_SPACE, 0x3000, 4), a0],
+                            ),
+                            PcodeOp::new(op::RETURN, None, vec![v0]),
+                        ],
+                    },
+                    flow: Flow::Return,
+                },
+            )]),
+            edges: BTreeSet::new(),
+            calls: BTreeSet::new(),
+        };
+
+        let candidate = NativeDecompiler
+            .decompile(Architecture::Mips32, &function)
+            .render();
+        assert!(candidate.contains("sub_2000(a0);"), "{candidate}");
+        assert!(candidate.contains("sub_3000();"), "{candidate}");
+        assert!(!candidate.contains("sub_3000(a0);"), "{candidate}");
+    }
+
+    #[test]
+    fn native_mips_call_observes_argument_defined_in_delay_slot() {
+        let a0 = Varnode::new(REGISTER_SPACE, 16, 4);
+        let v0 = Varnode::new(REGISTER_SPACE, 8, 4);
+        let function = NativeFunction {
+            entry: 0x1000,
+            instructions: BTreeMap::from([
+                (
+                    0x1000,
+                    LiftedInstruction {
+                        address: 0x1000,
+                        bytes: vec![0; 4],
+                        pcode: InstPcode {
+                            len: 4,
+                            space: RAM_SPACE,
+                            offset: 0x1000,
+                            ops: vec![PcodeOp::new(
+                                op::CALL,
+                                Some(v0),
+                                vec![Varnode::new(CONST_SPACE, 0x2000, 4), a0],
+                            )],
+                        },
+                        flow: Flow::Call {
+                            target: 0x2000,
+                            fallthrough: 0x1004,
+                        },
+                    },
+                ),
+                (
+                    0x1004,
+                    LiftedInstruction {
+                        address: 0x1004,
+                        bytes: vec![0; 4],
+                        pcode: InstPcode {
+                            len: 4,
+                            space: RAM_SPACE,
+                            offset: 0x1004,
+                            ops: vec![PcodeOp::new(
+                                op::COPY,
+                                Some(a0),
+                                vec![Varnode::new(CONST_SPACE, 42, 4)],
+                            )],
+                        },
+                        flow: Flow::FallThrough(0x1008),
+                    },
+                ),
+                (
+                    0x1008,
+                    LiftedInstruction {
+                        address: 0x1008,
+                        bytes: vec![0; 4],
+                        pcode: InstPcode {
+                            len: 4,
+                            space: RAM_SPACE,
+                            offset: 0x1008,
+                            ops: vec![PcodeOp::new(op::RETURN, None, vec![v0])],
+                        },
+                        flow: Flow::Return,
+                    },
+                ),
+            ]),
+            edges: BTreeSet::new(),
+            calls: BTreeSet::from([0x2000]),
+        };
+
+        let candidate = NativeDecompiler
+            .decompile(Architecture::Mips32, &function)
+            .render();
+        assert!(candidate.contains("sub_2000(0x2a);"), "{candidate}");
+        assert!(!candidate.contains("sub_2000();"), "{candidate}");
+    }
+    #[test]
+    fn native_mips_return_executes_delay_slot_before_return() {
+        let function = NativeFunction {
+            entry: 0x1000,
+            instructions: BTreeMap::from([
+                (
+                    0x1000,
+                    LiftedInstruction {
+                        address: 0x1000,
+                        bytes: vec![0; 4],
+                        pcode: InstPcode {
+                            len: 4,
+                            space: RAM_SPACE,
+                            offset: 0x1000,
+                            ops: vec![PcodeOp::new(op::RETURN, None, vec![])],
+                        },
+                        flow: Flow::Return,
+                    },
+                ),
+                (
+                    0x1004,
+                    LiftedInstruction {
+                        address: 0x1004,
+                        bytes: vec![0; 4],
+                        pcode: InstPcode {
+                            len: 4,
+                            space: RAM_SPACE,
+                            offset: 0x1004,
+                            ops: vec![PcodeOp::new(
+                                op::STORE,
+                                None,
+                                vec![
+                                    Varnode::new(CONST_SPACE, 417, 4),
+                                    Varnode::new(CONST_SPACE, 0x8000, 4),
+                                    Varnode::new(CONST_SPACE, 0, 1),
+                                ],
+                            )],
+                        },
+                        flow: Flow::FallThrough(0x1008),
+                    },
+                ),
+            ]),
+            edges: BTreeSet::new(),
+            calls: BTreeSet::new(),
+        };
+
+        let candidate = NativeDecompiler
+            .decompile(Architecture::Mips32, &function)
+            .render();
+        let store = candidate
+            .find("= 0;")
+            .unwrap_or_else(|| panic!("{candidate}"));
+        let return_statement = candidate.find("return;").expect("return statement");
+        assert!(store < return_statement, "{candidate}");
+    }
+
+    #[test]
     fn thumb_start_timer_folds_literal_and_preserves_mmio_store() {
         let function = public_function_at(
             include_str!("../testdata/public/thumb_start_timer.hex"),
@@ -2214,6 +2584,51 @@ mod tests {
         assert!(c.contains("sub_2010();"), "{c}");
         assert!(c.contains("} else {"), "{c}");
         assert!(c.contains("sub_2000();"), "{c}");
+    }
+    #[test]
+    fn native_structures_branch_to_terminal_return_as_early_return() {
+        let condition = Expr::Register {
+            name: "flag".into(),
+            width: 1,
+        };
+        let body = NativeStatement::Expression(Expr::Call {
+            target: Some(0x2000),
+            callee: None,
+            args: Vec::new(),
+        });
+        let statements = structure_control_flow(vec![
+            NativeStatement::IfGoto {
+                condition: condition.clone(),
+                target: 0x1020,
+            },
+            body,
+            NativeStatement::Label(0x1020),
+            NativeStatement::Return(None),
+        ]);
+        assert!(matches!(
+            statements.as_slice(),
+            [
+                NativeStatement::IfReturn {
+                    condition: observed,
+                    value: None,
+                },
+                NativeStatement::Expression(_),
+                NativeStatement::Return(None),
+            ] if observed == &condition
+        ));
+        let document = NativeDocument {
+            name: "sub_1000".into(),
+            return_type: Type::Void,
+            statements,
+            ssa: SsaFunction::default(),
+            types: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let c = document.render();
+        assert!(c.contains("if (flag) {"), "{c}");
+        assert!(c.contains("return;"), "{c}");
+        assert!(!c.contains("goto"), "{c}");
+        assert!(!c.contains("loc_1020"), "{c}");
     }
 
     #[test]

@@ -15,6 +15,63 @@ pub struct CorpusFunction {
     pub note: &'static str,
 }
 
+/// Reviewable source-derived facts used by the opt-in semantic corpus gate.
+///
+/// These are facts, not copied source. An empty dimension means the pinned
+/// source establishes that the construct is absent.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct CorpusSemanticBaseline {
+    pub control_flow: &'static [&'static str],
+    pub calls: &'static [&'static str],
+    pub globals: &'static [&'static str],
+    pub access_types: &'static [&'static str],
+    pub casts: u32,
+    pub aggregate_copies: u32,
+    pub declaration_order: &'static [&'static str],
+    pub nominal_fields: &'static [&'static str],
+    pub source_structure: &'static [&'static str],
+}
+
+const DUNGEON_FADE_BASELINE: CorpusSemanticBaseline = CorpusSemanticBaseline {
+    control_flow: &["if", "return"],
+    calls: &[],
+    globals: &[],
+    access_types: &["bool", "u8"],
+    casts: 0,
+    aggregate_copies: 0,
+    declaration_order: &[],
+    nominal_fields: &[
+        "GameWorld.drawFadeScreen",
+        "GameWorld.fadeAlpha",
+        "GameWorld.fadeIn",
+        "GameWorld.fadeOut",
+    ],
+    source_structure: &["if", "return"],
+};
+
+const DUNGEON_FADE_FINISHED_BASELINE: CorpusSemanticBaseline = CorpusSemanticBaseline {
+    control_flow: &[],
+    calls: &[],
+    globals: &[],
+    access_types: &["bool"],
+    casts: 0,
+    aggregate_copies: 0,
+    declaration_order: &[],
+    nominal_fields: &["GameWorld.drawFadeScreen"],
+    source_structure: &[],
+};
+
+pub fn semantic_baseline(entry_id: &str, function: &str) -> Option<CorpusSemanticBaseline> {
+    match (entry_id, function) {
+        ("ps2-dungeon-game", "_ZN9GameWorld12beginFadeOutEv")
+        | ("ps2-dungeon-game", "_ZN9GameWorld11beginFadeInEv") => Some(DUNGEON_FADE_BASELINE),
+        ("ps2-dungeon-game", "_ZN9GameWorld16onFadeInFinishedEv") => {
+            Some(DUNGEON_FADE_FINISHED_BASELINE)
+        }
+        _ => None,
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct CorpusEntry {
     pub id: &'static str,
@@ -25,6 +82,7 @@ pub struct CorpusEntry {
     pub source_license: &'static str,
     pub binary_name: &'static str,
     pub binary_sha256: Option<&'static str>,
+    pub binary_sha1: Option<&'static str>,
     pub status: &'static str,
     pub functions: &'static [CorpusFunction],
 }
@@ -74,23 +132,47 @@ const STREET_FIGHTER_FUNCTIONS: &[CorpusFunction] = &[
     CorpusFunction {
         name: "flBeginRender",
         source_path: "src/anniversary/sf33rd/AcrSDK/ps2/flps2render.c",
-        address: 0x0011_c1d0,
-        size: 0x20,
-        note: "anniversary syms_sfiii.txt render_start entry; size is the next-symbol span",
+        address: 0x003e_e930,
+        size: 0x80,
+        note: "anniversary syms_sfiii.txt flBeginRender entry; size is the next-symbol span",
     },
     CorpusFunction {
         name: "flEndRender",
         source_path: "src/anniversary/sf33rd/AcrSDK/ps2/flps2render.c",
-        address: 0x0011_c1f0,
-        size: 0x20,
-        note: "anniversary syms_sfiii.txt render_end entry; size is the next-symbol span",
+        address: 0x003e_e9b0,
+        size: 0x70,
+        note: "anniversary syms_sfiii.txt flEndRender entry; size is the next-symbol span",
     },
     CorpusFunction {
         name: "flPS2InitRenderState",
         source_path: "src/anniversary/sf33rd/AcrSDK/ps2/flps2render.c",
-        address: 0x0011_c210,
-        size: 0x120,
-        note: "anniversary syms_sfiii.txt initRenderState entry; size is the next-symbol span",
+        address: 0x003e_ea20,
+        size: 0x230,
+        note: "anniversary syms_sfiii.txt flPS2InitRenderState entry; size is the next-symbol span",
+    },
+];
+
+const DUNGEON_GAME_FUNCTIONS: &[CorpusFunction] = &[
+    CorpusFunction {
+        name: "_ZN9GameWorld12beginFadeOutEv",
+        source_path: "source/demos/dungeon_game/game_world.cpp",
+        address: 0x0012_4058,
+        size: 0x28,
+        note: "GameWorld::beginFadeOut; checked-in ELF symbol and next-symbol span",
+    },
+    CorpusFunction {
+        name: "_ZN9GameWorld11beginFadeInEv",
+        source_path: "source/demos/dungeon_game/game_world.cpp",
+        address: 0x0012_4080,
+        size: 0x28,
+        note: "GameWorld::beginFadeIn; checked-in ELF symbol and next-symbol span",
+    },
+    CorpusFunction {
+        name: "_ZN9GameWorld16onFadeInFinishedEv",
+        source_path: "source/demos/dungeon_game/game_world.cpp",
+        address: 0x0012_40e8,
+        size: 0x08,
+        note: "GameWorld::onFadeInFinished; checked-in ELF symbol and next-symbol span",
     },
 ];
 
@@ -133,8 +215,9 @@ const POKEMON_EMERALD_FUNCTIONS: &[CorpusFunction] = &[
 ///
 /// The license field is factual metadata. A missing explicit license is not
 /// converted into a different license or treated as a source-code omission.
-/// `binary_sha256` pins the independently obtained reference image used by the
-/// opt-in real-image smoke runner; Ventris does not bundle those images.
+/// `binary_sha256` or `binary_sha1` pins the independently obtained reference
+/// image used by the opt-in real-image smoke runner; Ventris does not bundle
+/// those images.
 pub const CORPUS: &[CorpusEntry] = &[
     CorpusEntry {
         id: "n64-perfect-dark-ntsc-final",
@@ -145,6 +228,7 @@ pub const CORPUS: &[CorpusEntry] = &[
         source_license: "MIT",
         binary_name: "perfect_dark_ntsc_final.z64",
         binary_sha256: Some("4e51142acac686d96861cecc58cf7cb7c3b06b21733b7f8ed609a709dc039a21"),
+        binary_sha1: None,
         status: "licensed-source-metadata",
         functions: PERFECT_DARK_FUNCTIONS,
     },
@@ -157,6 +241,7 @@ pub const CORPUS: &[CorpusEntry] = &[
         source_license: "CC0-1.0",
         binary_name: "animal_crossing_gafe01.dol",
         binary_sha256: Some("e3166b15b810ff20397784fc83b2eb053db5d0c2a9e22ac2ead63a645881d150"),
+        binary_sha1: None,
         status: "licensed-source-metadata",
         functions: ANIMAL_CROSSING_FUNCTIONS,
     },
@@ -167,10 +252,24 @@ pub const CORPUS: &[CorpusEntry] = &[
         source_url: "https://github.com/crowded-street/3s-decomp",
         source_commit: "be9b9bc69dc19822a8eca9ce3e72ba560d5a3835",
         source_license: "AGPL-3.0",
-        binary_name: "street_fighter_iii_3rd_strike_anniversary.elf",
-        binary_sha256: Some("b609c9ab16561696deeb05133f897f68959c8e1e5ea1998e5c212960f0b32a74"),
+        binary_name: "THIRD_U.BIN",
+        binary_sha256: None,
+        binary_sha1: Some("cf58495054c31ad852175c66e9ca04d5094f000e"),
         status: "licensed-source-metadata",
         functions: STREET_FIGHTER_FUNCTIONS,
+    },
+    CorpusEntry {
+        id: "ps2-dungeon-game",
+        title: "Dungeon Game (PS2 homebrew)",
+        target: TargetProfile::Ps2,
+        source_url: "https://github.com/glampert/ps2-homebrew",
+        source_commit: "602441a6877a3136709d6320664340d52e3027a1",
+        source_license: "MIT",
+        binary_name: "dungeon_game.elf",
+        binary_sha256: Some("25faee2f98483f7f86d0dd7043e7b506c998728989347c8a38ae8af49c0a1af4"),
+        binary_sha1: None,
+        status: "public-reference",
+        functions: DUNGEON_GAME_FUNCTIONS,
     },
     CorpusEntry {
         id: "gba-pokemon-emerald",
@@ -181,6 +280,7 @@ pub const CORPUS: &[CorpusEntry] = &[
         source_license: "unspecified",
         binary_name: "pokeemerald.gba",
         binary_sha256: Some("a9dec84dfe7f62ab2220bafaef7479da0929d066ece16a6885f6226db19085af"),
+        binary_sha1: None,
         status: "public-reference",
         functions: POKEMON_EMERALD_FUNCTIONS,
     },
@@ -254,6 +354,56 @@ mod tests {
         assert_eq!(entry.source_license, "unspecified");
         assert_eq!(entry.status, "public-reference");
     }
+    #[test]
+    fn ps2_reference_is_pinned_to_the_source_project_image() {
+        let entry = CORPUS
+            .iter()
+            .find(|entry| entry.id == "ps2-street-fighter-iii-anniversary")
+            .unwrap();
+        assert_eq!(entry.binary_name, "THIRD_U.BIN");
+        assert_eq!(
+            entry.binary_sha1,
+            Some("cf58495054c31ad852175c66e9ca04d5094f000e")
+        );
+        assert_eq!(
+            entry
+                .functions
+                .iter()
+                .map(|function| (function.name, function.address, function.size))
+                .collect::<Vec<_>>(),
+            vec![
+                ("flBeginRender", 0x003e_e930, 0x80),
+                ("flEndRender", 0x003e_e9b0, 0x70),
+                ("flPS2InitRenderState", 0x003e_ea20, 0x230),
+            ]
+        );
+        assert!(entry
+            .functions
+            .iter()
+            .all(|function| semantic_baseline(entry.id, function.name).is_none()));
+    }
+
+    #[test]
+    fn public_ps2_game_pins_checked_in_elf_and_source_symbols() {
+        let entry = CORPUS
+            .iter()
+            .find(|entry| entry.id == "ps2-dungeon-game")
+            .unwrap();
+        assert_eq!(entry.binary_name, "dungeon_game.elf");
+        assert_eq!(
+            entry.binary_sha256,
+            Some("25faee2f98483f7f86d0dd7043e7b506c998728989347c8a38ae8af49c0a1af4")
+        );
+        assert_eq!(
+            entry.source_commit,
+            "602441a6877a3136709d6320664340d52e3027a1"
+        );
+        assert!(entry
+            .functions
+            .iter()
+            .all(|function| semantic_baseline(entry.id, function.name).is_some()));
+    }
+
     fn recover_fixture<L: ventris_lifter::Lifter>(
         target: TargetProfile,
         bytes: &[u8],

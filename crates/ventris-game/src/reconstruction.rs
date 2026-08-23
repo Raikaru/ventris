@@ -64,7 +64,7 @@ impl SourceReconstruction {
         report: &RecoveredFunction,
         body: impl Into<String>,
     ) -> Result<Self, ReconstructionError> {
-        let body = body.into();
+        let mut body = body.into();
         if body.trim().is_empty() {
             return Err(ReconstructionError::EmptyBody);
         }
@@ -74,9 +74,12 @@ impl SourceReconstruction {
             .iter()
             .enumerate()
             .map(|(index, candidate)| source_struct(candidate, index, &mut diagnostics))
-            .collect();
+            .collect::<Vec<_>>();
+        let mut signature = source_signature(report, &body);
+        rewrite_recovered_field_accesses(&mut signature, &structs, &mut body);
+        prune_unused_parameters(&mut signature, &body);
         Ok(Self {
-            signature: source_signature(report),
+            signature,
             structs,
             body,
             diagnostics,
@@ -163,18 +166,20 @@ fn function_body(source: &str) -> Option<&str> {
     (start <= end).then(|| source[start..=end].trim())
 }
 
-fn source_signature(report: &RecoveredFunction) -> SourceSignature {
+fn source_signature(report: &RecoveredFunction, body: &str) -> SourceSignature {
     let name = report
         .name
         .as_deref()
         .map(c_identifier)
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| format!("sub_{:x}", report.entry));
-    let return_type = report
-        .abi
-        .return_register(crate::AbiRegisterClass::Integer, 0)
-        .map(|_| "uintptr_t".to_owned())
-        .unwrap_or_else(|| "void".to_owned());
+    let return_type = source_return_type(body).unwrap_or_else(|| {
+        report
+            .abi
+            .return_register(crate::AbiRegisterClass::Integer, 0)
+            .map(|_| "uintptr_t".to_owned())
+            .unwrap_or_else(|| "void".to_owned())
+    });
     let mut parameters = Vec::new();
     if let Some(names) = report.abi.arguments.integer.names {
         for name in names {
@@ -196,6 +201,101 @@ fn source_signature(report: &RecoveredFunction) -> SourceSignature {
         name,
         return_type,
         parameters,
+    }
+}
+
+fn source_return_type(source: &str) -> Option<String> {
+    let signature = source.lines().find(|line| {
+        line.contains('(') && !line.trim_start().starts_with('#') && !line.trim_end().ends_with(';')
+    })?;
+    let open = signature.find('(')?;
+    let prefix = signature[..open].trim();
+    let name_start = prefix.rfind(char::is_whitespace)?;
+    let return_type = prefix[..name_start].trim();
+    (!return_type.is_empty()).then(|| return_type.to_owned())
+}
+fn prune_unused_parameters(signature: &mut SourceSignature, source: &str) {
+    let body = function_body(source).unwrap_or(source);
+    while signature
+        .parameters
+        .last()
+        .is_some_and(|parameter| !identifier_is_used(body, &parameter.name))
+    {
+        signature.parameters.pop();
+    }
+}
+
+fn identifier_is_used(source: &str, name: &str) -> bool {
+    source.match_indices(name).any(|(index, _)| {
+        let before = source[..index].chars().next_back();
+        let after = source[index + name.len()..].chars().next();
+        !before.is_some_and(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+            && !after.is_some_and(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+    })
+}
+
+fn rewrite_recovered_field_accesses(
+    signature: &mut SourceSignature,
+    structs: &[SourceStruct],
+    body: &mut String,
+) {
+    for structure in structs {
+        let Some((parameter_index, match_count)) = signature
+            .parameters
+            .iter()
+            .enumerate()
+            .map(|(index, parameter)| {
+                let count = structure
+                    .fields
+                    .iter()
+                    .filter(|field| {
+                        body.contains(&format!(
+                            "({} + 0x{:x})",
+                            parameter.name,
+                            field.offset.max(0)
+                        ))
+                    })
+                    .count();
+                (index, count)
+            })
+            .max_by_key(|(_, count)| *count)
+        else {
+            continue;
+        };
+        if match_count == 0 {
+            continue;
+        }
+        let parameter = signature.parameters[parameter_index].name.clone();
+        signature.parameters[parameter_index].c_type = format!("{} *", structure.name);
+        for field in &structure.fields {
+            let address = format!("({parameter} + 0x{:x})", field.offset.max(0));
+            let member = if field.declarator_suffix.is_empty() {
+                format!("({parameter}->{})", field.name)
+            } else {
+                format!("({parameter}->{}[0])", field.name)
+            };
+            for cast in field_cast_types(field.width) {
+                for qualifier in ["", "volatile "] {
+                    let access = format!("*({qualifier}{cast} *)(uintptr_t){address}");
+                    *body = body.replace(&access, &member);
+                }
+            }
+            if field.width == 1 {
+                for cast in ["uint32_t", "int32_t"] {
+                    *body = body.replace(&format!("({cast})({member})"), &member);
+                }
+            }
+        }
+    }
+}
+
+fn field_cast_types(width: u32) -> &'static [&'static str] {
+    match width {
+        1 => &["bool", "uint8_t", "int8_t"],
+        2 => &["uint16_t", "int16_t"],
+        4 => &["uint32_t", "int32_t", "float"],
+        8 => &["uint64_t", "int64_t", "double"],
+        _ => &[],
     }
 }
 
@@ -371,22 +471,81 @@ mod tests {
             provenance: Vec::new(),
         }
     }
-
     #[test]
     fn renders_typed_structs_and_preserves_observed_offsets() {
         let reconstruction =
             SourceReconstruction::from_report(&report(), "int body(void) { return 1; }").unwrap();
         assert_eq!(reconstruction.signature.name, "Actor__update");
-        assert!(reconstruction.signature.parameters.len() >= 4);
+        assert!(reconstruction.signature.parameters.is_empty());
         let source = reconstruction.render();
-        assert!(source.contains("uintptr_t a0"));
-        assert!(source.contains("float f12"));
+        assert!(source.contains("int Actor__update(void)"));
         assert!(source.contains("typedef struct Actor"));
         assert!(source.contains("int32_t health;"));
         assert!(source.contains("uint8_t _pad_4[4];"));
-        assert!(source.contains("uintptr_t Actor__update("));
+        assert!(source.contains("int Actor__update("));
         assert!(source.contains("{ return 1; }"));
         assert!(!source.contains("int body(void)"));
+    }
+    #[test]
+    fn trailing_pruning_preserves_unused_interior_abi_positions() {
+        let reconstruction = SourceReconstruction::from_report(
+            &report(),
+            "void body(void) { consume(a0, a2); return; }",
+        )
+        .unwrap();
+        assert_eq!(
+            reconstruction
+                .signature
+                .parameters
+                .iter()
+                .map(|parameter| parameter.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a0", "a1", "a2"]
+        );
+        let source = reconstruction.render();
+        assert!(source.contains("void Actor__update(uintptr_t a0, uintptr_t a1, uintptr_t a2)"));
+        assert!(!source.contains("uintptr_t a3"), "{source}");
+        assert!(!source.contains("float f12"), "{source}");
+    }
+
+    #[test]
+    fn preserves_native_void_return_type() {
+        let reconstruction =
+            SourceReconstruction::from_report(&report(), "void body(void) { return; }").unwrap();
+        assert_eq!(reconstruction.signature.return_type, "void");
+        assert!(reconstruction.render().contains("void Actor__update("));
+    }
+    #[test]
+    fn rewrites_evidence_backed_offsets_to_recovered_fields() {
+        let reconstruction = SourceReconstruction::from_report(
+            &report(),
+            "void body(void) { *(uint32_t *)(uintptr_t)(a0 + 0x8) = 1; return; }",
+        )
+        .unwrap();
+        let source = reconstruction.render();
+        assert!(source.contains("Actor * a0"), "{source}");
+        assert!(source.contains("(a0->field_8[0]) = 1;"), "{source}");
+        assert!(!source.contains("(uintptr_t)(a0 + 0x8)"), "{source}");
+        assert!(
+            source.contains("void Actor__update(Actor * a0)"),
+            "{source}"
+        );
+        assert!(!source.contains("uintptr_t a1"), "{source}");
+        assert!(!source.contains("float f12"), "{source}");
+    }
+    #[test]
+    fn removes_redundant_integer_cast_from_recovered_byte_field() {
+        let mut report = report();
+        report.structs[0].fields[1].width = 1;
+        report.structs[0].fields[1].ty = GameType::UnknownBytes { width: 1 };
+        let reconstruction = SourceReconstruction::from_report(
+            &report,
+            "void body(void) { if ((uint32_t)(*(bool *)(uintptr_t)(a0 + 0x8)) == 1) return; }",
+        )
+        .unwrap();
+        let source = reconstruction.render();
+        assert!(source.contains("if ((a0->field_8[0]) == 1)"), "{source}");
+        assert!(!source.contains("(uint32_t)"), "{source}");
     }
 
     #[test]

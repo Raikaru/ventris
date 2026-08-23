@@ -206,21 +206,29 @@ ventris inspect <image> --target <target>
 ventris recover-types <image> <address> --target <target> --json
 ```
 
-For the three licensed console entries, `ventris-corpus-smoke` is an opt-in
+For the source-backed console entries, `ventris-corpus-smoke` is an opt-in
 real-image gate. It reads the manifest from the Rust CLI, requires
-manifest-named images, verifies their pinned SHA-256 values, resolves and
-decompiles every listed function, and reports per-function results:
+manifest-named images, verifies each pinned SHA-256 or SHA-1 identity, resolves
+and decompiles every listed function, and reports per-function results:
 
 ```text
 ventris-corpus-smoke --image-dir <directory> --require-hashes
 ```
 
 The default entries are `n64-perfect-dark-ntsc-final`,
-`gamecube-animal-crossing-gafe01`, and `ps2-street-fighter-iii-anniversary`.
-Use repeated `--id` flags to select a subset. The image directory must contain
-`perfect_dark_ntsc_final.z64`, `animal_crossing_gafe01.dol`, and
-`street_fighter_iii_3rd_strike_anniversary.elf`. The runner does not bundle or
-extract game images.
+`gamecube-animal-crossing-gafe01`, and `ps2-dungeon-game`. Use repeated `--id`
+flags to select a subset. The PS2 image is the MIT-licensed
+`source/demos/bin/dungeon_game.elf` checked into the pinned
+[`glampert/ps2-homebrew`](https://github.com/glampert/ps2-homebrew) revision;
+download it without modification as `dungeon_game.elf`.
+Commercial references remain selectable, including
+`ps2-street-fighter-iii-anniversary`, but their real-image semantic validation
+is pending the exact pinned executable; no unexecuted expectations are emitted
+for them. The hash gate rejects a different regional or rebuilt executable, and
+the runner never bundles or extracts commercial images. Only
+`ps2-dungeon-game` currently has source-backed expectations exercised against
+its exact legal ELF. Reports distinguish exact, diverged, unsupported, and
+unavailable dimensions instead of manufacturing a pass.
 
 The `gba` target selects Thumb-1 and uses the raw ROM base `0x08000000`.
 

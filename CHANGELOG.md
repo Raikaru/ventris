@@ -2,6 +2,16 @@
 
 All notable Ventris changes are documented here.
 
+## [Unreleased]
+
+### Added
+
+- Executed legal-PS2 semantic baselines and machine-readable exact, diverged,
+  unsupported, and unavailable comparison reports; commercial-image parity
+  remains opt-in and reports no unexecuted expected facts.
+- O32 direct/indirect call facts, evidence-preserving object-layout recovery,
+  nominal object relations, and reconstructed-source structure scoring.
+
 ## [0.1.0] - 2026-08-23
 
 ### Added

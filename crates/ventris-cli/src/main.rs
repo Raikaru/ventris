@@ -1119,6 +1119,39 @@ fn output(command: &str, text: String, format: OutputFormat) -> Result<String, S
     ))
 }
 
+fn corpus_strings(items: &[&str]) -> Value {
+    Value::Array(items.iter().map(|item| Value::string(*item)).collect())
+}
+
+fn corpus_semantic_value(baseline: Option<corpus::CorpusSemanticBaseline>) -> Value {
+    let Some(baseline) = baseline else {
+        return Value::Null;
+    };
+    object([
+        ("control_flow".into(), corpus_strings(baseline.control_flow)),
+        ("calls".into(), corpus_strings(baseline.calls)),
+        ("globals".into(), corpus_strings(baseline.globals)),
+        ("access_types".into(), corpus_strings(baseline.access_types)),
+        ("casts".into(), Value::number(baseline.casts)),
+        (
+            "aggregate_copies".into(),
+            Value::number(baseline.aggregate_copies),
+        ),
+        (
+            "declaration_order".into(),
+            corpus_strings(baseline.declaration_order),
+        ),
+        (
+            "nominal_fields".into(),
+            corpus_strings(baseline.nominal_fields),
+        ),
+        (
+            "source_structure".into(),
+            corpus_strings(baseline.source_structure),
+        ),
+    ])
+}
+
 fn render_corpus(format: OutputFormat) -> String {
     if format == OutputFormat::Json {
         let entries = corpus::entries()
@@ -1138,6 +1171,10 @@ fn render_corpus(format: OutputFormat) -> String {
                             .binary_sha256
                             .map(Value::string)
                             .unwrap_or(Value::Null),
+                    ),
+                    (
+                        "binary_sha1".into(),
+                        entry.binary_sha1.map(Value::string).unwrap_or(Value::Null),
                     ),
                     ("status".into(), Value::string(entry.status)),
                     (
@@ -1159,6 +1196,13 @@ fn render_corpus(format: OutputFormat) -> String {
                                             Value::string(format!("0x{:x}", function.size)),
                                         ),
                                         ("note".into(), Value::string(function.note)),
+                                        (
+                                            "semantic".into(),
+                                            corpus_semantic_value(corpus::semantic_baseline(
+                                                entry.id,
+                                                function.name,
+                                            )),
+                                        ),
                                     ])
                                 })
                                 .collect(),

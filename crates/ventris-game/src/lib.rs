@@ -13,6 +13,7 @@ pub mod diff;
 pub mod patterns;
 pub mod reconstruction;
 pub mod runtime;
+pub mod semantic;
 use std::collections::BTreeMap;
 use std::fmt::Write;
 use ventris_lifter::{Architecture, NativeFunction};
@@ -461,6 +462,28 @@ impl Confidence {
     }
 }
 
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum ConflictKind {
+    /// Two machine accesses describe byte ranges that cannot be represented as
+    /// distinct, non-overlapping fields without losing information.
+    OverlappingAccess,
+    /// Two human assertions describe different types or names at one
+    /// coordinate.
+    ConflictingAssertion,
+    /// Two human assertions describe different nominal identities for one
+    /// object base.
+    ConflictingNominalAssertion,
+    /// Two human object-relation assertions disagree about a relation target.
+    ConflictingRelationAssertion,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum ObjectRelationKind {
+    Constructor,
+    Destructor,
+    Vtable,
+}
+
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum AccessKind {
     Read,
@@ -494,6 +517,14 @@ pub enum EvidenceSource {
         id: u64,
         name: String,
     },
+    /// A nominal identity was supplied explicitly rather than inferred from
+    /// the machine access. Keeping the identity in provenance prevents a
+    /// later machine reanalysis from silently renaming the object.
+    NominalAssertion {
+        id: Option<u64>,
+        name: String,
+        note: String,
+    },
     EmulatorMemory {
         sequence: u64,
         instruction: u64,
@@ -521,6 +552,28 @@ pub enum EvidenceSource {
     UserAssertion {
         note: String,
     },
+    /// A conflict is itself surfaced evidence. It is deliberately data, not a
+    /// warning string, so callers can sort and consume it deterministically.
+    Conflict {
+        kind: ConflictKind,
+        base: Option<Varnode>,
+        offsets: Vec<i64>,
+        widths: Vec<u32>,
+        detail: String,
+    },
+    ObjectRelationAssertion {
+        subject: u64,
+        kind: ObjectRelationKind,
+        target: Option<u64>,
+        note: String,
+    },
+    ObjectRelationObservation {
+        subject: u64,
+        kind: ObjectRelationKind,
+        target: Option<u64>,
+        instruction: u64,
+        note: String,
+    },
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -528,7 +581,242 @@ pub struct Evidence {
     pub source: EvidenceSource,
     pub confidence: Confidence,
 }
+/// A deterministic conflict surfaced by recovery rather than silently
+/// resolved. `provenance` contains the evidence that caused the fact to be
+/// emitted; callers can retain it when presenting a diagnostic.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ConflictFact {
+    pub kind: ConflictKind,
+    pub base: Option<Varnode>,
+    pub offsets: Vec<i64>,
+    pub widths: Vec<u32>,
+    pub detail: String,
+    pub confidence: Confidence,
+    pub provenance: Vec<Evidence>,
+}
 
+impl ConflictFact {
+    pub fn is_overlap(&self) -> bool {
+        self.kind == ConflictKind::OverlappingAccess
+    }
+}
+
+/// An explicit relation between an object/function address and another object
+/// (for example, a constructor entry and the object it initializes). The
+/// address semantics are intentionally generic: a stripped binary may leave
+/// `target` unresolved, but the relation kind is never guessed.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ObjectRelationAssertion {
+    pub subject: u64,
+    pub kind: ObjectRelationKind,
+    pub target: Option<u64>,
+    pub note: String,
+}
+
+impl ObjectRelationAssertion {
+    pub fn new(
+        subject: u64,
+        kind: ObjectRelationKind,
+        target: Option<u64>,
+        note: impl Into<String>,
+    ) -> Self {
+        Self {
+            subject,
+            kind,
+            target,
+            note: note.into(),
+        }
+    }
+
+    pub fn constructor(subject: u64, target: Option<u64>, note: impl Into<String>) -> Self {
+        Self::new(subject, ObjectRelationKind::Constructor, target, note)
+    }
+
+    pub fn destructor(subject: u64, target: Option<u64>, note: impl Into<String>) -> Self {
+        Self::new(subject, ObjectRelationKind::Destructor, target, note)
+    }
+
+    pub fn vtable(subject: u64, target: Option<u64>, note: impl Into<String>) -> Self {
+        Self::new(subject, ObjectRelationKind::Vtable, target, note)
+    }
+}
+
+/// A machine observation with explicit relation classification. No
+/// constructor/destructor/vtable relation is inferred from a call or store
+/// that has not been classified by the caller.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ObjectRelationObservation {
+    pub subject: u64,
+    pub kind: ObjectRelationKind,
+    pub target: Option<u64>,
+    pub instruction: u64,
+    pub note: String,
+}
+
+impl ObjectRelationObservation {
+    pub fn new(
+        subject: u64,
+        kind: ObjectRelationKind,
+        target: Option<u64>,
+        instruction: u64,
+        note: impl Into<String>,
+    ) -> Self {
+        Self {
+            subject,
+            kind,
+            target,
+            instruction,
+            note: note.into(),
+        }
+    }
+}
+
+/// The selected relation after deterministic precedence and conflict
+/// handling. Human assertions have precedence over machine observations.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ObjectRelationFact {
+    pub subject: u64,
+    pub kind: ObjectRelationKind,
+    pub target: Option<u64>,
+    pub confidence: Confidence,
+    pub provenance: Vec<Evidence>,
+}
+
+/// Short aliases keep the public API readable for clients that already use
+/// “relation” rather than “object relation” terminology.
+pub type RelationAssertion = ObjectRelationAssertion;
+pub type RelationObservation = ObjectRelationObservation;
+pub type RelationFact = ObjectRelationFact;
+
+/// Resolve explicit relation assertions and observations without inferring
+/// relation kinds from unrelated machine behaviour.
+pub fn recover_object_relations(
+    assertions: &[ObjectRelationAssertion],
+    observations: &[ObjectRelationObservation],
+) -> Vec<ObjectRelationFact> {
+    #[derive(Clone)]
+    enum Candidate {
+        Assertion(ObjectRelationAssertion),
+        Observation(ObjectRelationObservation),
+    }
+
+    let mut grouped: BTreeMap<(u64, ObjectRelationKind), Vec<Candidate>> = BTreeMap::new();
+    for assertion in assertions {
+        grouped
+            .entry((assertion.subject, assertion.kind))
+            .or_default()
+            .push(Candidate::Assertion(assertion.clone()));
+    }
+    for observation in observations {
+        grouped
+            .entry((observation.subject, observation.kind))
+            .or_default()
+            .push(Candidate::Observation(observation.clone()));
+    }
+
+    grouped
+        .into_iter()
+        .map(|((subject, kind), candidates)| {
+            let has_assertion = candidates
+                .iter()
+                .any(|candidate| matches!(candidate, Candidate::Assertion(_)));
+            let mut candidates = candidates;
+            candidates.sort_by_key(|candidate| match candidate {
+                Candidate::Assertion(assertion) => {
+                    (assertion.target, assertion.note.clone(), 0_u8, 0_u64)
+                }
+                Candidate::Observation(observation) => (
+                    observation.target,
+                    observation.note.clone(),
+                    1_u8,
+                    observation.instruction,
+                ),
+            });
+            let selected = candidates
+                .iter()
+                .filter(|candidate| {
+                    matches!(
+                        (has_assertion, candidate),
+                        (true, Candidate::Assertion(_)) | (false, Candidate::Observation(_))
+                    )
+                })
+                .collect::<Vec<_>>();
+
+            let target = selected
+                .first()
+                .map(|candidate| match candidate {
+                    Candidate::Assertion(assertion) => assertion.target,
+                    Candidate::Observation(observation) => observation.target,
+                })
+                .unwrap_or(None);
+            let mut provenance = Vec::with_capacity(candidates.len() + 1);
+            for candidate in &candidates {
+                match candidate {
+                    Candidate::Assertion(assertion) => provenance.push(Evidence {
+                        source: EvidenceSource::ObjectRelationAssertion {
+                            subject,
+                            kind,
+                            target: assertion.target,
+                            note: assertion.note.clone(),
+                        },
+                        confidence: Confidence(100),
+                    }),
+                    Candidate::Observation(observation) => provenance.push(Evidence {
+                        source: EvidenceSource::ObjectRelationObservation {
+                            subject,
+                            kind,
+                            target: observation.target,
+                            instruction: observation.instruction,
+                            note: observation.note.clone(),
+                        },
+                        confidence: Confidence(75),
+                    }),
+                }
+            }
+            let distinct_targets = selected
+                .iter()
+                .map(|candidate| match candidate {
+                    Candidate::Assertion(assertion) => assertion.target,
+                    Candidate::Observation(observation) => observation.target,
+                })
+                .collect::<std::collections::BTreeSet<_>>();
+            if has_assertion && distinct_targets.len() > 1 {
+                provenance.push(Evidence {
+                    source: EvidenceSource::Conflict {
+                        kind: ConflictKind::ConflictingRelationAssertion,
+                        base: None,
+                        offsets: Vec::new(),
+                        widths: Vec::new(),
+                        detail: format!(
+                            "conflicting {:?} assertions for subject {subject:#x}",
+                            kind
+                        ),
+                    },
+                    confidence: Confidence(100),
+                });
+            }
+            ObjectRelationFact {
+                subject,
+                kind,
+                target,
+                confidence: if has_assertion {
+                    Confidence(100)
+                } else {
+                    Confidence(75)
+                },
+                provenance,
+            }
+        })
+        .collect()
+}
+
+/// Synonym for callers that treat relation resolution as a merge operation.
+pub fn resolve_object_relations(
+    assertions: &[ObjectRelationAssertion],
+    observations: &[ObjectRelationObservation],
+) -> Vec<ObjectRelationFact> {
+    recover_object_relations(assertions, observations)
+}
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum GameType {
     /// Width observed, but no semantic type asserted.
@@ -755,7 +1043,7 @@ enum AddressExpr {
     Base {
         base: Varnode,
         offset: i64,
-        stride: Option<u32>,
+        strides: Vec<u32>,
     },
 }
 
@@ -766,11 +1054,11 @@ impl AddressExpr {
             Self::Base {
                 base,
                 offset,
-                stride,
+                strides,
             } => Self::Base {
                 base,
                 offset: offset.saturating_add(value),
-                stride,
+                strides,
             },
         }
     }
@@ -781,12 +1069,19 @@ impl AddressExpr {
             Self::Base {
                 base,
                 offset,
-                stride,
+                strides,
             } => AddressFact::BaseOffset {
                 base,
                 offset,
-                stride,
+                stride: strides.last().copied(),
             },
+        }
+    }
+
+    fn strides(&self) -> &[u32] {
+        match self {
+            Self::Absolute(_) => &[],
+            Self::Base { strides, .. } => strides,
         }
     }
 }
@@ -813,7 +1108,7 @@ fn address_expr(v: Varnode, values: &BTreeMap<VarnodeKey, AddressExpr>) -> Addre
     AddressExpr::Base {
         base: v,
         offset: 0,
-        stride: None,
+        strides: Vec::new(),
     }
 }
 
@@ -857,7 +1152,7 @@ fn set_copy(
             AddressExpr::Base {
                 base: input,
                 offset: 0,
-                stride: None,
+                strides: Vec::new(),
             },
         );
     }
@@ -909,7 +1204,7 @@ fn set_ptradd(
     let AddressExpr::Base {
         base,
         offset,
-        stride: old_stride,
+        mut strides,
     } = base_expr
     else {
         return;
@@ -920,14 +1215,43 @@ fn set_ptradd(
         }
         _ => offset,
     };
+    if let Some(stride) = stride {
+        if !strides.contains(&stride) {
+            strides.push(stride);
+        }
+    }
     values.insert(
         VarnodeKey::from(output),
         AddressExpr::Base {
             base,
             offset,
-            stride: stride.or(old_stride),
+            strides,
         },
     );
+}
+
+fn access_evidence(
+    instruction: u64,
+    opcode: i32,
+    access: AccessKind,
+    strides: &[u32],
+) -> Vec<Evidence> {
+    let mut evidence = vec![Evidence {
+        source: EvidenceSource::PcodeAccess {
+            instruction,
+            opcode,
+            access,
+        },
+        confidence: Confidence(90),
+    }];
+    evidence.extend(strides.iter().copied().map(|stride| Evidence {
+        source: EvidenceSource::PcodeStride {
+            instruction,
+            stride,
+        },
+        confidence: Confidence(80),
+    }));
+    evidence
 }
 
 fn collect_accesses(function: &NativeFunction) -> Vec<MemoryAccess> {
@@ -948,21 +1272,21 @@ fn collect_accesses(function: &NativeFunction) -> Vec<MemoryAccess> {
                 op::PTRADD => set_ptradd(operation.output, &operation.inputs, &mut values),
                 op::LOAD => {
                     if let Some(address) = operation.inputs.get(1).copied() {
-                        let address = address_expr(address, &values).fact();
+                        let expression = address_expr(address, &values);
+                        let evidence = access_evidence(
+                            instruction.address,
+                            operation.opcode,
+                            AccessKind::Read,
+                            expression.strides(),
+                        );
+                        let address = expression.fact();
                         let width = operation.output.map_or(0, |output| output.size);
                         accesses.push(MemoryAccess {
                             instruction: instruction.address,
                             kind: AccessKind::Read,
                             width,
                             address,
-                            evidence: vec![Evidence {
-                                source: EvidenceSource::PcodeAccess {
-                                    instruction: instruction.address,
-                                    opcode: operation.opcode,
-                                    access: AccessKind::Read,
-                                },
-                                confidence: Confidence(90),
-                            }],
+                            evidence,
                         });
                     }
                 }
@@ -970,20 +1294,20 @@ fn collect_accesses(function: &NativeFunction) -> Vec<MemoryAccess> {
                     if let (Some(address), Some(value)) =
                         (operation.inputs.get(1), operation.inputs.get(2))
                     {
-                        let address = address_expr(*address, &values).fact();
+                        let expression = address_expr(*address, &values);
+                        let evidence = access_evidence(
+                            instruction.address,
+                            operation.opcode,
+                            AccessKind::Write,
+                            expression.strides(),
+                        );
+                        let address = expression.fact();
                         accesses.push(MemoryAccess {
                             instruction: instruction.address,
                             kind: AccessKind::Write,
                             width: value.size,
                             address,
-                            evidence: vec![Evidence {
-                                source: EvidenceSource::PcodeAccess {
-                                    instruction: instruction.address,
-                                    opcode: operation.opcode,
-                                    access: AccessKind::Write,
-                                },
-                                confidence: Confidence(90),
-                            }],
+                            evidence,
                         });
                     }
                 }
@@ -991,47 +1315,180 @@ fn collect_accesses(function: &NativeFunction) -> Vec<MemoryAccess> {
             }
         }
     }
-    for access in &mut accesses {
-        if let AddressFact::BaseOffset {
-            stride: Some(stride),
-            ..
-        } = access.address
-        {
-            access.evidence.push(Evidence {
-                source: EvidenceSource::PcodeStride {
-                    instruction: access.instruction,
-                    stride,
-                },
-                confidence: Confidence(80),
-            });
-        }
-    }
     accesses
 }
 
-fn find_nominal<'a>(input: &'a RecoveryInput<'_>, base: Varnode) -> Option<&'a NominalType> {
-    input.assertions.iter().find_map(|assertion| {
-        if assertion.base != base || assertion.offset != 0 {
-            return None;
-        }
-        match &assertion.ty {
-            GameType::Nominal { id: Some(id), .. } => {
-                input.nominal_types.iter().find(|ty| ty.id == *id)
-            }
-            _ => None,
-        }
-    })
+fn assertion_sort_key(assertion: &TypeAssertion) -> (Option<String>, String, String) {
+    (
+        assertion.name.clone(),
+        format!("{:?}", assertion.ty),
+        assertion.note.clone(),
+    )
 }
 
-fn field_assertion<'a>(
-    input: &'a RecoveryInput<'_>,
-    base: Varnode,
-    offset: i64,
-) -> Option<&'a TypeAssertion> {
-    input
+fn nominal_assertions<'a>(input: &'a RecoveryInput<'_>, base: Varnode) -> Vec<&'a TypeAssertion> {
+    let mut assertions = input
         .assertions
         .iter()
-        .find(|assertion| assertion.base == base && assertion.offset == offset)
+        .filter(|assertion| {
+            assertion.base == base
+                && assertion.offset == 0
+                && matches!(assertion.ty, GameType::Nominal { .. })
+        })
+        .collect::<Vec<_>>();
+    assertions.sort_by_key(|assertion| assertion_sort_key(assertion));
+    assertions
+}
+
+fn find_nominal<'a>(input: &'a RecoveryInput<'_>, base: Varnode) -> Option<&'a NominalType> {
+    nominal_assertions(input, base)
+        .into_iter()
+        .filter_map(|assertion| {
+            let GameType::Nominal { id: Some(id), .. } = &assertion.ty else {
+                return None;
+            };
+            input
+                .nominal_types
+                .iter()
+                .filter(|nominal| nominal.id == *id)
+                .min_by_key(|nominal| {
+                    (
+                        nominal.name.clone(),
+                        nominal.size,
+                        format!("{:?}", nominal.fields),
+                    )
+                })
+        })
+        .next()
+}
+
+fn field_assertions<'a>(
+    input: &'a RecoveryInput<'_>,
+    base: Varnode,
+    offsets: impl IntoIterator<Item = i64>,
+) -> Vec<&'a TypeAssertion> {
+    let offsets = offsets
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut assertions = input
+        .assertions
+        .iter()
+        .filter(|assertion| assertion.base == base && offsets.contains(&assertion.offset))
+        .collect::<Vec<_>>();
+    assertions.sort_by_key(|assertion| (assertion.offset, assertion_sort_key(assertion)));
+    assertions.dedup_by(|left, right| {
+        left.offset == right.offset
+            && left.name == right.name
+            && left.ty == right.ty
+            && left.note == right.note
+    });
+    assertions
+}
+
+fn assertion_fingerprint(assertion: &TypeAssertion) -> (Option<String>, String) {
+    (assertion.name.clone(), format!("{:?}", assertion.ty))
+}
+
+fn add_conflict(
+    evidence: &mut Vec<Evidence>,
+    kind: ConflictKind,
+    base: Option<Varnode>,
+    offsets: Vec<i64>,
+    widths: Vec<u32>,
+    detail: String,
+    confidence: u8,
+) {
+    evidence.push(Evidence {
+        source: EvidenceSource::Conflict {
+            kind,
+            base,
+            offsets,
+            widths,
+            detail,
+        },
+        confidence: Confidence(confidence),
+    });
+}
+fn access_interval(access: &MemoryAccess) -> Option<(i64, i64)> {
+    let AddressFact::BaseOffset { offset, .. } = access.address else {
+        return None;
+    };
+    if access.width == 0 {
+        return None;
+    }
+    Some((offset, offset.saturating_add(i64::from(access.width))))
+}
+
+fn ranges_overlap(left: &MemoryAccess, right: &MemoryAccess) -> bool {
+    let (Some((left_start, left_end)), Some((right_start, right_end))) =
+        (access_interval(left), access_interval(right))
+    else {
+        return false;
+    };
+    left_start < right_end && right_start < left_end
+}
+
+fn access_sort_key(access: &MemoryAccess) -> (i64, u32, u8, u64, Option<u32>) {
+    let (offset, stride) = match access.address {
+        AddressFact::BaseOffset { offset, stride, .. } => (offset, stride),
+        AddressFact::Absolute { .. } => (i64::MAX, None),
+    };
+    (
+        offset,
+        access.width,
+        match access.kind {
+            AccessKind::Read => 0,
+            AccessKind::Write => 1,
+        },
+        access.instruction,
+        stride,
+    )
+}
+
+fn cluster_accesses(mut accesses: Vec<MemoryAccess>) -> Vec<Vec<MemoryAccess>> {
+    accesses.sort_by_key(access_sort_key);
+    let mut clusters = Vec::<Vec<MemoryAccess>>::new();
+    let mut current = Vec::<MemoryAccess>::new();
+    let mut current_end = i64::MIN;
+    for access in accesses {
+        let Some((offset, end)) = access_interval(&access) else {
+            if !current.is_empty() {
+                clusters.push(std::mem::take(&mut current));
+                current_end = i64::MIN;
+            }
+            continue;
+        };
+        if current.is_empty() || offset >= current_end {
+            if !current.is_empty() {
+                clusters.push(std::mem::take(&mut current));
+            }
+            current_end = end;
+        } else {
+            current_end = current_end.max(end);
+        }
+        current.push(access);
+    }
+    if !current.is_empty() {
+        clusters.push(current);
+    }
+    clusters
+}
+
+fn cluster_span(cluster: &[MemoryAccess]) -> (i64, u32) {
+    let start = cluster
+        .iter()
+        .filter_map(access_interval)
+        .map(|(start, _)| start)
+        .min()
+        .unwrap_or(0);
+    let end = cluster
+        .iter()
+        .filter_map(access_interval)
+        .map(|(_, end)| end)
+        .max()
+        .unwrap_or(start);
+    let width = end.saturating_sub(start).try_into().unwrap_or(u32::MAX);
+    (start, width)
 }
 
 fn build_structs(input: &RecoveryInput<'_>, accesses: &[MemoryAccess]) -> Vec<StructCandidate> {
@@ -1049,9 +1506,25 @@ fn build_structs(input: &RecoveryInput<'_>, accesses: &[MemoryAccess]) -> Vec<St
         .map(|(key, accesses)| {
             let base = Varnode::new(key.space, key.offset, key.size);
             let nominal = find_nominal(input, base);
-            let name = nominal.map(|ty| ty.name.clone());
-            let mut fields: BTreeMap<i64, RecoveredField> = BTreeMap::new();
-            let mut strides = Vec::new();
+            let nominal_assertions = nominal_assertions(input, base);
+            let name = nominal.map(|ty| ty.name.clone()).or_else(|| {
+                nominal_assertions
+                    .first()
+                    .and_then(|assertion| match &assertion.ty {
+                        GameType::Nominal { name, .. } => Some(name.clone()),
+                        _ => None,
+                    })
+            });
+            let mut strides = accesses
+                .iter()
+                .flat_map(|access| access.evidence.iter())
+                .filter_map(|evidence| match evidence.source {
+                    EvidenceSource::PcodeStride { stride, .. } => Some(stride),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            strides.sort_unstable();
+            strides.dedup();
             let mut evidence = Vec::new();
             if let Some(nominal) = nominal {
                 evidence.extend(nominal.evidence.clone());
@@ -1063,81 +1536,175 @@ fn build_structs(input: &RecoveryInput<'_>, accesses: &[MemoryAccess]) -> Vec<St
                     confidence: Confidence(100),
                 });
             }
-            for access in accesses {
-                let (offset, stride) = match &access.address {
-                    AddressFact::BaseOffset { offset, stride, .. } => (*offset, *stride),
-                    AddressFact::Absolute { .. } => continue,
-                };
-                if let Some(stride) = stride {
-                    if !strides.contains(&stride) {
-                        strides.push(stride);
-                    }
-                }
-                let assertion = field_assertion(input, base, offset);
-                let nominal_field =
-                    nominal.and_then(|ty| ty.fields.iter().find(|field| field.offset == offset));
-                let (field_name, ty, mut field_evidence) = if let Some(assertion) = assertion {
-                    let evidence = vec![Evidence {
-                        source: EvidenceSource::UserAssertion {
+            for assertion in &nominal_assertions {
+                if let GameType::Nominal { id, name, .. } = &assertion.ty {
+                    evidence.push(Evidence {
+                        source: EvidenceSource::NominalAssertion {
+                            id: *id,
+                            name: name.clone(),
                             note: assertion.note.clone(),
                         },
                         confidence: Confidence(100),
-                    }];
-                    (assertion.name.clone(), assertion.ty.clone(), evidence)
-                } else if let Some(field) = nominal_field {
-                    let mut evidence = field.evidence.clone();
-                    if let Some(nominal) = nominal {
-                        evidence.push(Evidence {
-                            source: EvidenceSource::NominalType {
-                                id: nominal.id,
-                                name: nominal.name.clone(),
-                            },
-                            confidence: Confidence(95),
-                        });
-                    }
-                    (Some(field.name.clone()), field.ty.clone(), evidence)
-                } else {
-                    (None, GameType::unknown(access.width), Vec::new())
-                };
-                field_evidence.extend(access.evidence.clone());
-                let field = fields.entry(offset).or_insert_with(|| RecoveredField {
-                    offset,
-                    width: access.width,
-                    name: field_name.clone(),
-                    ty: ty.clone(),
-                    accesses: Vec::new(),
-                    evidence: Vec::new(),
+                    });
+                }
+            }
+            let nominal_fingerprints = nominal_assertions
+                .iter()
+                .filter_map(|assertion| match &assertion.ty {
+                    GameType::Nominal { id, name, size } => Some((*id, name.clone(), *size)),
+                    _ => None,
+                })
+                .collect::<std::collections::BTreeSet<_>>();
+            if nominal_fingerprints.len() > 1 {
+                add_conflict(
+                    &mut evidence,
+                    ConflictKind::ConflictingNominalAssertion,
+                    Some(base),
+                    vec![0],
+                    nominal_fingerprints
+                        .iter()
+                        .map(|(_, _, size)| *size)
+                        .collect(),
+                    "multiple nominal identities asserted for one base".into(),
+                    100,
+                );
+            }
+
+            let clusters = cluster_accesses(accesses);
+            let mut fields = Vec::with_capacity(clusters.len());
+            for cluster in clusters {
+                let (offset, width) = cluster_span(&cluster);
+                let cluster_offsets = cluster
+                    .iter()
+                    .filter_map(|access| match access.address {
+                        AddressFact::BaseOffset { offset, .. } => Some(offset),
+                        AddressFact::Absolute { .. } => None,
+                    })
+                    .collect::<Vec<_>>();
+                let assertions = field_assertions(input, base, cluster_offsets.iter().copied());
+                let assertion_fingerprints = assertions
+                    .iter()
+                    .map(|assertion| assertion_fingerprint(assertion))
+                    .collect::<std::collections::BTreeSet<_>>();
+                let selected_assertion = assertions.first().copied();
+                let nominal_field = nominal.and_then(|nominal| {
+                    cluster_offsets
+                        .iter()
+                        .copied()
+                        .filter_map(|candidate_offset| {
+                            nominal
+                                .fields
+                                .iter()
+                                .find(|field| field.offset == candidate_offset)
+                        })
+                        .min_by_key(|field| field.offset)
                 });
-                field.width = field.width.max(access.width);
-                if field.name.is_none() {
-                    field.name = field_name;
+                let (field_name, ty, mut field_evidence) =
+                    if let Some(assertion) = selected_assertion {
+                        let field_evidence = assertions
+                            .iter()
+                            .map(|assertion| Evidence {
+                                source: EvidenceSource::UserAssertion {
+                                    note: assertion.note.clone(),
+                                },
+                                confidence: Confidence(100),
+                            })
+                            .collect::<Vec<_>>();
+                        (assertion.name.clone(), assertion.ty.clone(), field_evidence)
+                    } else if let Some(field) = nominal_field {
+                        let mut field_evidence = field.evidence.clone();
+                        if let Some(nominal) = nominal {
+                            field_evidence.push(Evidence {
+                                source: EvidenceSource::NominalType {
+                                    id: nominal.id,
+                                    name: nominal.name.clone(),
+                                },
+                                confidence: Confidence(95),
+                            });
+                        }
+                        (Some(field.name.clone()), field.ty.clone(), field_evidence)
+                    } else {
+                        (None, GameType::unknown(width), Vec::new())
+                    };
+                if assertion_fingerprints.len() > 1 {
+                    add_conflict(
+                        &mut field_evidence,
+                        ConflictKind::ConflictingAssertion,
+                        Some(base),
+                        assertions
+                            .iter()
+                            .map(|assertion| assertion.offset)
+                            .collect(),
+                        vec![width],
+                        "multiple human assertions describe one recovered field".into(),
+                        100,
+                    );
                 }
-                if matches!(field.ty, GameType::UnknownBytes { .. })
-                    && !matches!(ty, GameType::UnknownBytes { .. })
-                {
-                    field.ty = ty;
+                let mut overlapping = false;
+                for (index, left) in cluster.iter().enumerate() {
+                    for right in cluster.iter().skip(index + 1) {
+                        if ranges_overlap(left, right)
+                            && access_interval(left) != access_interval(right)
+                        {
+                            overlapping = true;
+                        }
+                    }
                 }
-                field.accesses.push(access);
-                field.evidence.extend(field_evidence);
+                if overlapping {
+                    let offsets = cluster
+                        .iter()
+                        .filter_map(|access| match access.address {
+                            AddressFact::BaseOffset { offset, .. } => Some(offset),
+                            AddressFact::Absolute { .. } => None,
+                        })
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .collect::<Vec<_>>();
+                    let widths = cluster
+                        .iter()
+                        .map(|access| access.width)
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .collect::<Vec<_>>();
+                    add_conflict(
+                        &mut field_evidence,
+                        ConflictKind::OverlappingAccess,
+                        Some(base),
+                        offsets,
+                        widths,
+                        "overlapping machine accesses were merged into one field".into(),
+                        80,
+                    );
+                }
+                for access in &cluster {
+                    field_evidence.extend(access.evidence.clone());
+                }
+                fields.push(RecoveredField {
+                    offset,
+                    width,
+                    name: field_name,
+                    ty,
+                    accesses: cluster,
+                    evidence: field_evidence,
+                });
             }
             evidence.extend(
                 fields
-                    .values()
+                    .iter()
                     .flat_map(|field| field.evidence.iter().cloned()),
             );
-            let mut remaining = fields.into_values().collect::<Vec<_>>();
-            let mut ordered = Vec::with_capacity(remaining.len());
+            let mut ordered = Vec::with_capacity(fields.len());
             if let Some(nominal) = nominal {
                 for nominal_field in &nominal.fields {
-                    if let Some(index) = remaining
+                    if let Some(index) = fields
                         .iter()
                         .position(|field| field.offset == nominal_field.offset)
                     {
-                        ordered.push(remaining.remove(index));
+                        ordered.push(fields.remove(index));
                     }
                 }
             }
-            ordered.extend(remaining);
+            ordered.extend(fields);
             StructCandidate {
                 base,
                 name,
@@ -1148,7 +1715,6 @@ fn build_structs(input: &RecoveryInput<'_>, accesses: &[MemoryAccess]) -> Vec<St
         })
         .collect()
 }
-
 /// Recover only facts supported by p-code and supplied metadata.
 pub fn recover_function(target: TargetProfile, input: RecoveryInput<'_>) -> RecoveredFunction {
     let abi = GameAbiProfile::for_target(target);
@@ -1203,6 +1769,222 @@ pub fn recover_function(target: TargetProfile, input: RecoveryInput<'_>) -> Reco
         accesses,
         structs,
         provenance,
+    }
+}
+/// Recover a function and attach explicit object-relation evidence to its
+/// existing provenance stream. The ordinary recovery path intentionally has
+/// no relation guesses; callers opt into this API when they have an assertion
+/// or a classified observation.
+pub fn recover_function_with_object_relations(
+    target: TargetProfile,
+    input: RecoveryInput<'_>,
+    assertions: &[ObjectRelationAssertion],
+    observations: &[ObjectRelationObservation],
+) -> RecoveredFunction {
+    let mut report = recover_function(target, input);
+    for relation in recover_object_relations(assertions, observations) {
+        report.provenance.extend(relation.provenance);
+    }
+    report
+}
+
+pub fn recover_function_with_relations(
+    target: TargetProfile,
+    input: RecoveryInput<'_>,
+    assertions: &[ObjectRelationAssertion],
+    observations: &[ObjectRelationObservation],
+) -> RecoveredFunction {
+    recover_function_with_object_relations(target, input, assertions, observations)
+}
+
+fn conflict_key(
+    kind: ConflictKind,
+    base: Option<Varnode>,
+    offsets: &[i64],
+    widths: &[u32],
+    detail: &str,
+) -> (
+    ConflictKind,
+    Option<(u32, u64, u32)>,
+    Vec<i64>,
+    Vec<u32>,
+    String,
+) {
+    (
+        kind,
+        base.map(|base| (base.space, base.offset, base.size)),
+        offsets.to_vec(),
+        widths.to_vec(),
+        detail.to_owned(),
+    )
+}
+
+fn conflict_fact(evidence: &Evidence, supporting: &[Evidence]) -> Option<ConflictFact> {
+    let EvidenceSource::Conflict {
+        kind,
+        base,
+        offsets,
+        widths,
+        detail,
+    } = &evidence.source
+    else {
+        return None;
+    };
+    let mut provenance = supporting
+        .iter()
+        .filter(|item| !matches!(item.source, EvidenceSource::Conflict { .. }))
+        .cloned()
+        .collect::<Vec<_>>();
+    provenance.retain(|item| item != evidence);
+    provenance.push(evidence.clone());
+    Some(ConflictFact {
+        kind: *kind,
+        base: *base,
+        offsets: offsets.clone(),
+        widths: widths.clone(),
+        detail: detail.clone(),
+        confidence: evidence.confidence,
+        provenance,
+    })
+}
+
+impl StructCandidate {
+    pub fn nominal_type_id(&self) -> Option<u64> {
+        self.evidence
+            .iter()
+            .find_map(|evidence| match evidence.source {
+                EvidenceSource::NominalType { id, .. }
+                | EvidenceSource::NominalAssertion { id: Some(id), .. } => Some(id),
+                _ => None,
+            })
+    }
+
+    pub fn conflict_facts(&self) -> Vec<ConflictFact> {
+        let mut facts = BTreeMap::new();
+        for evidence in &self.evidence {
+            if let Some(fact) = conflict_fact(evidence, &self.evidence) {
+                let key = conflict_key(
+                    fact.kind,
+                    fact.base,
+                    &fact.offsets,
+                    &fact.widths,
+                    &fact.detail,
+                );
+                facts.entry(key).or_insert(fact);
+            }
+        }
+        for field in &self.fields {
+            for evidence in &field.evidence {
+                if let Some(fact) = conflict_fact(evidence, &field.evidence) {
+                    let key = conflict_key(
+                        fact.kind,
+                        fact.base,
+                        &fact.offsets,
+                        &fact.widths,
+                        &fact.detail,
+                    );
+                    facts.entry(key).or_insert(fact);
+                }
+            }
+        }
+        facts.into_values().collect()
+    }
+}
+
+impl RecoveredFunction {
+    pub fn conflict_facts(&self) -> Vec<ConflictFact> {
+        let mut facts = BTreeMap::new();
+        let mut supporting = self.provenance.clone();
+        supporting.extend(
+            self.accesses
+                .iter()
+                .flat_map(|access| access.evidence.iter().cloned()),
+        );
+        supporting.extend(
+            self.structs
+                .iter()
+                .flat_map(|candidate| candidate.evidence.iter().cloned()),
+        );
+        supporting.extend(self.structs.iter().flat_map(|candidate| {
+            candidate
+                .fields
+                .iter()
+                .flat_map(|field| field.evidence.iter().cloned())
+        }));
+        let mut add = |evidence: &Evidence| {
+            if let Some(fact) = conflict_fact(evidence, &supporting) {
+                let key = conflict_key(
+                    fact.kind,
+                    fact.base,
+                    &fact.offsets,
+                    &fact.widths,
+                    &fact.detail,
+                );
+                facts.entry(key).or_insert(fact);
+            }
+        };
+        for evidence in &self.provenance {
+            add(evidence);
+        }
+        for access in &self.accesses {
+            for evidence in &access.evidence {
+                add(evidence);
+            }
+        }
+        for candidate in &self.structs {
+            for evidence in &candidate.evidence {
+                add(evidence);
+            }
+            for field in &candidate.fields {
+                for evidence in &field.evidence {
+                    add(evidence);
+                }
+            }
+        }
+        facts.into_values().collect()
+    }
+
+    pub fn conflicts(&self) -> Vec<ConflictFact> {
+        self.conflict_facts()
+    }
+
+    pub fn relation_facts(&self) -> Vec<ObjectRelationFact> {
+        let mut assertions = Vec::new();
+        let mut observations = Vec::new();
+        for evidence in &self.provenance {
+            match &evidence.source {
+                EvidenceSource::ObjectRelationAssertion {
+                    subject,
+                    kind,
+                    target,
+                    note,
+                } => assertions.push(ObjectRelationAssertion::new(
+                    *subject,
+                    *kind,
+                    *target,
+                    note.clone(),
+                )),
+                EvidenceSource::ObjectRelationObservation {
+                    subject,
+                    kind,
+                    target,
+                    instruction,
+                    note,
+                } => observations.push(ObjectRelationObservation::new(
+                    *subject,
+                    *kind,
+                    *target,
+                    *instruction,
+                    note.clone(),
+                )),
+                _ => {}
+            }
+        }
+        recover_object_relations(&assertions, &observations)
+    }
+
+    pub fn relations(&self) -> Vec<ObjectRelationFact> {
+        self.relation_facts()
     }
 }
 
@@ -1377,6 +2159,41 @@ impl RecoveredFunction {
             )
             .unwrap();
         }
+        let conflicts = self.conflict_facts();
+        if !conflicts.is_empty() {
+            writeln!(out, "conflicts: {}", conflicts.len()).unwrap();
+            for conflict in conflicts {
+                writeln!(
+                    out,
+                    "  conflict kind={:?} base={} offsets={:?} widths={:?} confidence={} detail={}",
+                    conflict.kind,
+                    conflict.base.map_or_else(|| "none".into(), varnode_text),
+                    conflict.offsets,
+                    conflict.widths,
+                    conflict.confidence.value(),
+                    conflict.detail
+                )
+                .unwrap();
+            }
+        }
+        let relations = self.relation_facts();
+        if !relations.is_empty() {
+            writeln!(out, "object_relations: {}", relations.len()).unwrap();
+            for relation in relations {
+                writeln!(
+                    out,
+                    "  relation kind={:?} subject={:#x} target={} confidence={} provenance={}",
+                    relation.kind,
+                    relation.subject,
+                    relation
+                        .target
+                        .map_or_else(|| "none".into(), |target| format!("{target:#x}")),
+                    relation.confidence.value(),
+                    relation.provenance.len()
+                )
+                .unwrap();
+            }
+        }
         out
     }
 }
@@ -1487,6 +2304,217 @@ mod tests {
     }
 
     #[test]
+    fn nested_ptradd_preserves_each_observed_stride() {
+        let base = Varnode::new(4, 0, 4);
+        let first_index = Varnode::new(4, 4, 4);
+        let second_index = Varnode::new(4, 8, 4);
+        let outer = Varnode::new(2, 0, 4);
+        let inner = Varnode::new(2, 4, 4);
+        let loaded = Varnode::new(4, 12, 4);
+        let function = function(vec![
+            PcodeOp::new(
+                op::PTRADD,
+                Some(outer),
+                vec![base, first_index, constant(16, 4)],
+            ),
+            PcodeOp::new(
+                op::PTRADD,
+                Some(inner),
+                vec![outer, second_index, constant(4, 4)],
+            ),
+            PcodeOp::new(op::LOAD, Some(loaded), vec![constant(417, 4), inner]),
+        ]);
+        let report = recover_function(TargetProfile::Ps2, RecoveryInput::new(&function));
+        assert_eq!(report.structs[0].strides, vec![4, 16]);
+        let stride_evidence = report.structs[0].fields[0]
+            .evidence
+            .iter()
+            .filter_map(|evidence| match evidence.source {
+                EvidenceSource::PcodeStride { stride, .. } => Some(stride),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(stride_evidence, BTreeSet::from([4, 16]));
+    }
+
+    #[test]
+    fn repeated_and_strided_accesses_merge_stably_without_overlapping_fields() {
+        let base = Varnode::new(4, 0, 4);
+        let address_a = Varnode::new(2, 0, 4);
+        let address_b = Varnode::new(2, 4, 4);
+        let address_c = Varnode::new(2, 8, 4);
+        let address_d = Varnode::new(2, 12, 4);
+        let loaded_a = Varnode::new(4, 16, 4);
+        let loaded_b = Varnode::new(4, 20, 4);
+        let loaded_c = Varnode::new(4, 24, 4);
+        let loaded_d = Varnode::new(4, 28, 4);
+        let index = Varnode::new(4, 32, 4);
+        let function = function(vec![
+            PcodeOp::new(op::INT_ADD, Some(address_a), vec![base, constant(0x20, 4)]),
+            PcodeOp::new(op::LOAD, Some(loaded_a), vec![constant(417, 4), address_a]),
+            PcodeOp::new(op::COPY, Some(address_b), vec![address_a]),
+            PcodeOp::new(op::LOAD, Some(loaded_b), vec![constant(417, 4), address_b]),
+            PcodeOp::new(
+                op::PTRADD,
+                Some(address_c),
+                vec![base, index, constant(16, 4)],
+            ),
+            PcodeOp::new(op::LOAD, Some(loaded_c), vec![constant(417, 4), address_c]),
+            PcodeOp::new(
+                op::INT_ADD,
+                Some(address_d),
+                vec![address_c, constant(16, 4)],
+            ),
+            PcodeOp::new(op::LOAD, Some(loaded_d), vec![constant(417, 4), address_d]),
+        ]);
+        let first = recover_function(TargetProfile::Ps2, RecoveryInput::new(&function));
+        let second = recover_function(TargetProfile::Ps2, RecoveryInput::new(&function));
+        assert_eq!(first, second);
+        let candidate = &first.structs[0];
+        assert_eq!(candidate.strides, vec![16]);
+        assert_eq!(
+            candidate
+                .fields
+                .iter()
+                .map(|field| field.offset)
+                .collect::<Vec<_>>(),
+            vec![0, 16, 32]
+        );
+        assert_eq!(candidate.fields[2].accesses.len(), 2);
+        assert!(candidate
+            .fields
+            .windows(2)
+            .all(|fields| fields[0].offset + i64::from(fields[0].width) <= fields[1].offset));
+    }
+
+    #[test]
+    fn overlapping_accesses_merge_to_one_span_and_surface_conflict() {
+        let base = Varnode::new(4, 0, 4);
+        let address_a = Varnode::new(2, 0, 4);
+        let address_b = Varnode::new(2, 4, 4);
+        let loaded_a = Varnode::new(4, 8, 4);
+        let loaded_b = Varnode::new(4, 12, 4);
+        let function = function(vec![
+            PcodeOp::new(op::INT_ADD, Some(address_a), vec![base, constant(0, 4)]),
+            PcodeOp::new(op::LOAD, Some(loaded_a), vec![constant(417, 4), address_a]),
+            PcodeOp::new(op::INT_ADD, Some(address_b), vec![base, constant(2, 4)]),
+            PcodeOp::new(op::LOAD, Some(loaded_b), vec![constant(417, 4), address_b]),
+        ]);
+        let report = recover_function(TargetProfile::Ps2, RecoveryInput::new(&function));
+        assert_eq!(report.structs[0].fields.len(), 1);
+        assert_eq!(report.structs[0].fields[0].offset, 0);
+        assert_eq!(report.structs[0].fields[0].width, 6);
+        let conflicts = report.conflict_facts();
+        assert_eq!(
+            conflicts
+                .iter()
+                .filter(|fact| fact.kind == ConflictKind::OverlappingAccess)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn conflicting_human_assertions_are_deterministic_and_surfaced() {
+        let base = Varnode::new(4, 0, 4);
+        let address = Varnode::new(2, 0, 4);
+        let loaded = Varnode::new(4, 8, 4);
+        let function = function(vec![
+            PcodeOp::new(op::INT_ADD, Some(address), vec![base, constant(0x20, 4)]),
+            PcodeOp::new(op::LOAD, Some(loaded), vec![constant(417, 4), address]),
+        ]);
+        let first = TypeAssertion {
+            base,
+            offset: 0x20,
+            name: Some("zombie_id".into()),
+            ty: GameType::Primitive {
+                name: "u32".into(),
+                bits: 32,
+                signed: Some(false),
+            },
+            note: "first human assertion".into(),
+        };
+        let second = TypeAssertion {
+            base,
+            offset: 0x20,
+            name: Some("health".into()),
+            ty: GameType::Primitive {
+                name: "int".into(),
+                bits: 32,
+                signed: Some(true),
+            },
+            note: "second human assertion".into(),
+        };
+        let assertions_a = [first.clone(), second.clone()];
+        let assertions_b = [second, first];
+        let mut input_a = RecoveryInput::new(&function);
+        input_a.assertions = &assertions_a;
+        let mut input_b = RecoveryInput::new(&function);
+        input_b.assertions = &assertions_b;
+        let report_a = recover_function(TargetProfile::Ps2, input_a);
+        let report_b = recover_function(TargetProfile::Ps2, input_b);
+        assert_eq!(report_a, report_b);
+        assert_eq!(
+            report_a.structs[0].fields[0].name.as_deref(),
+            Some("health")
+        );
+        assert!(report_a
+            .conflict_facts()
+            .iter()
+            .any(|fact| fact.kind == ConflictKind::ConflictingAssertion));
+    }
+
+    #[test]
+    fn explicit_object_relations_preserve_kind_confidence_and_provenance() {
+        let observations = [ObjectRelationObservation::new(
+            0x1000,
+            ObjectRelationKind::Constructor,
+            Some(0x2000),
+            0x1004,
+            "classified constructor call",
+        )];
+        let assertions = [ObjectRelationAssertion::constructor(
+            0x1000,
+            Some(0x3000),
+            "human constructor assertion",
+        )];
+        let facts = recover_object_relations(&assertions, &observations);
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].kind, ObjectRelationKind::Constructor);
+        assert_eq!(facts[0].target, Some(0x3000));
+        assert_eq!(facts[0].confidence.value(), 100);
+        assert!(facts[0].provenance.iter().any(|evidence| matches!(
+            evidence.source,
+            EvidenceSource::ObjectRelationAssertion { .. }
+        )));
+
+        let conflicting_assertions = [
+            ObjectRelationAssertion::constructor(0x1000, Some(0x3000), "first"),
+            ObjectRelationAssertion::constructor(0x1000, Some(0x4000), "second"),
+        ];
+        let conflicting_facts = recover_object_relations(&conflicting_assertions, &[]);
+        assert!(conflicting_facts[0]
+            .provenance
+            .iter()
+            .any(|evidence| matches!(
+                evidence.source,
+                EvidenceSource::Conflict {
+                    kind: ConflictKind::ConflictingRelationAssertion,
+                    ..
+                }
+            )));
+
+        let distinct_kinds = [
+            ObjectRelationAssertion::constructor(0x1000, Some(0x3000), "constructor"),
+            ObjectRelationAssertion::destructor(0x1000, None, "destructor"),
+        ];
+        let relations = recover_object_relations(&distinct_kinds, &[]);
+        assert_eq!(relations.len(), 2);
+        assert!(relations
+            .iter()
+            .any(|relation| relation.kind == ObjectRelationKind::Destructor));
+    }
+    #[test]
     fn user_assertion_and_nominal_metadata_override_unknown_width_only() {
         let base = Varnode::new(4, 0, 4);
         let address = Varnode::new(2, 0, 4);
@@ -1535,6 +2563,7 @@ mod tests {
             .evidence
             .iter()
             .any(|e| matches!(e.source, EvidenceSource::NominalType { id: 7, .. })));
+        assert_eq!(report.structs[0].nominal_type_id(), Some(7));
     }
 
     #[test]
