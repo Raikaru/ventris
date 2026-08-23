@@ -1524,9 +1524,13 @@ fn invert_condition(value: Expr) -> Expr {
         value => Expr::Not(Box::new(value)),
     }
 }
-fn has_other_branch_to(statements: &[NativeStatement], current_index: usize, target: u64) -> bool {
+fn has_other_branch_to(
+    statements: &[NativeStatement],
+    excluded_indices: &[usize],
+    target: u64,
+) -> bool {
     statements.iter().enumerate().any(|(index, statement)| {
-        index != current_index
+        !excluded_indices.contains(&index)
             && match statement {
                 NativeStatement::Goto(branch_target)
                 | NativeStatement::IfGoto {
@@ -1554,7 +1558,7 @@ fn structure_control_flow(statements: Vec<NativeStatement>) -> Vec<NativeStateme
                 &statements[index + 2],
                 &statements[index + 3],
             ) {
-                if target == label && !has_other_branch_to(&statements, index, *target) {
+                if target == label && !has_other_branch_to(&statements, &[index], *target) {
                     structured.push(NativeStatement::IfReturn {
                         condition: invert_condition(condition.clone()),
                         value: value.clone(),
@@ -1576,7 +1580,7 @@ fn structure_control_flow(statements: Vec<NativeStatement>) -> Vec<NativeStateme
             if let Some(target_index) =
                 target_index.filter(|target_index| *target_index > index + 1)
             {
-                if !has_other_branch_to(&statements, index, *target) {
+                if !has_other_branch_to(&statements, &[index], *target) {
                     if let Some(NativeStatement::Return(value)) = statements.get(target_index + 1) {
                         structured.push(NativeStatement::IfReturn {
                             condition: condition.clone(),
@@ -1609,16 +1613,21 @@ fn structure_control_flow(statements: Vec<NativeStatement>) -> Vec<NativeStateme
                         })
                         .map(|relative| target_index + 1 + relative);
                     if let Some(join_index) = join_index {
-                        let then_body = statements[target_index + 1..join_index].to_vec();
-                        let else_body = statements[index + 1..target_index - 1].to_vec();
-                        if !then_body.is_empty() || !else_body.is_empty() {
-                            structured.push(NativeStatement::IfElse {
-                                condition: condition.clone(),
-                                then_body,
-                                else_body,
-                            });
-                            index = join_index + 1;
-                            continue;
+                        let consumed_join_branch = target_index - 1;
+                        if !has_other_branch_to(&statements, &[index], *target)
+                            && !has_other_branch_to(&statements, &[consumed_join_branch], *join)
+                        {
+                            let then_body = statements[target_index + 1..join_index].to_vec();
+                            let else_body = statements[index + 1..consumed_join_branch].to_vec();
+                            if !then_body.is_empty() || !else_body.is_empty() {
+                                structured.push(NativeStatement::IfElse {
+                                    condition: condition.clone(),
+                                    then_body,
+                                    else_body,
+                                });
+                                index = join_index + 1;
+                                continue;
+                            }
                         }
                     }
                 }
@@ -2673,6 +2682,70 @@ mod tests {
         assert!(c.contains("sub_2010();"), "{c}");
         assert!(c.contains("} else {"), "{c}");
         assert!(c.contains("sub_2000();"), "{c}");
+    }
+
+    #[test]
+    fn native_if_else_fold_keeps_externally_referenced_labels() {
+        for (external_target, external_branch) in [
+            (0x1020, NativeStatement::Goto(0x1020)),
+            (
+                0x1030,
+                NativeStatement::IfGoto {
+                    condition: Expr::Register {
+                        name: "again".into(),
+                        width: 1,
+                    },
+                    target: 0x1030,
+                },
+            ),
+        ] {
+            let call = |target| {
+                NativeStatement::Call(Expr::Call {
+                    target: Some(target),
+                    callee: None,
+                    args: Vec::new(),
+                })
+            };
+            let statements = structure_control_flow(vec![
+                NativeStatement::IfGoto {
+                    condition: Expr::Register {
+                        name: "flag".into(),
+                        width: 1,
+                    },
+                    target: 0x1020,
+                },
+                call(0x2000),
+                NativeStatement::Goto(0x1030),
+                NativeStatement::Label(0x1020),
+                call(0x2010),
+                NativeStatement::Label(0x1030),
+                external_branch,
+                NativeStatement::Return(None),
+            ]);
+            assert!(
+                statements
+                    .iter()
+                    .any(|statement| matches!(statement, NativeStatement::Label(label) if *label == external_target)),
+                "missing externally referenced label {external_target:#x}: {statements:?}"
+            );
+            assert!(
+                !statements
+                    .iter()
+                    .any(|statement| matches!(statement, NativeStatement::IfElse { .. })),
+                "unsafe fold retained for {external_target:#x}: {statements:?}"
+            );
+            let document = NativeDocument {
+                name: "sub_1000".into(),
+                return_type: Type::Void,
+                statements,
+                ssa: SsaFunction::default(),
+                types: Vec::new(),
+                warnings: Vec::new(),
+            };
+            let c = document.render();
+            assert!(c.contains(&format!("goto loc_{external_target:x};")), "{c}");
+            assert!(c.contains(&format!("loc_{external_target:x}:")), "{c}");
+        }
     }
     #[test]
     fn native_structures_branch_to_terminal_return_as_early_return() {
