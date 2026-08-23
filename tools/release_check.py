@@ -134,7 +134,9 @@ def check(root: Path, version: str) -> None:
     if lock.get("version") != version or lock.get("packages", {}).get("", {}).get("version") != version:
         fail("VS Code lockfile version is not synchronized")
 
-
+    release_workflow = read(root, ".github/workflows/release.yml")
+    if "sha256sum --binary * > SHA256SUMS" not in release_workflow:
+        fail("release checksums must use portable binary-mode markers")
     for manifest in sorted((root / "crates").glob("*/Cargo.toml")):
         text = manifest.read_text(encoding="utf-8")
         if "license.workspace = true" not in text and 'license = "Apache-2.0"' not in text:

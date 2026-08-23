@@ -4,6 +4,10 @@ All notable Ventris changes are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- Generate release checksum manifests with explicit binary-mode markers.
+
 ## [0.2.0] - 2026-08-23
 
 ### Breaking changes
