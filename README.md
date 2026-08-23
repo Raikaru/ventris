@@ -121,7 +121,6 @@ frozen: it is not a published artifact, a public analysis API, or a driver of
 the core roadmap. Its project-oriented model stays outside the canonical
 function pipeline.
 
-
 ## Build and verify
 
 ```text
