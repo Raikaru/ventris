@@ -6402,10 +6402,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ventris-format"
+version = "0.1.0"
+dependencies = [
+ "ventris-addr",
+]
+
+[[package]]
 name = "ventris-gen"
 version = "0.1.0"
 dependencies = [
  "ventris-addr",
+ "ventris-format",
+ "ventris-lifter",
 ]
 
 [[package]]
@@ -6418,11 +6427,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ventris-lifter"
+version = "0.1.0"
+dependencies = [
+ "ventris-format",
+ "ventris-pcode",
+]
+
+[[package]]
 name = "ventris-log"
 version = "0.1.0"
 dependencies = [
  "ventris-addr",
 ]
+
+[[package]]
+name = "ventris-pcode"
+version = "0.1.0"
 
 [[package]]
 name = "version_check"
