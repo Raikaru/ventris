@@ -1537,6 +1537,7 @@ fn has_other_branch_to(
                     target: branch_target,
                     ..
                 } => *branch_target == target,
+                NativeStatement::IndirectGoto(_) => true,
                 _ => false,
             }
     })
@@ -2791,6 +2792,83 @@ mod tests {
         assert!(c.contains("return;"), "{c}");
         assert!(!c.contains("goto"), "{c}");
         assert!(!c.contains("loc_1020"), "{c}");
+    }
+    #[test]
+    fn native_indirect_goto_blocks_label_eliminating_folds() {
+        let computed = || {
+            NativeStatement::IndirectGoto(Expr::Register {
+                name: "switch_target".into(),
+                width: 4,
+            })
+        };
+        let early_return = vec![
+            NativeStatement::IfGoto {
+                condition: Expr::Register {
+                    name: "flag".into(),
+                    width: 1,
+                },
+                target: 0x1020,
+            },
+            NativeStatement::Return(Some(Expr::Constant { value: 1, width: 4 })),
+            NativeStatement::Label(0x1020),
+            NativeStatement::Return(Some(Expr::Constant { value: 0, width: 4 })),
+            computed(),
+        ];
+        let if_else = vec![
+            NativeStatement::IfGoto {
+                condition: Expr::Register {
+                    name: "flag".into(),
+                    width: 1,
+                },
+                target: 0x2020,
+            },
+            NativeStatement::Call(Expr::Call {
+                target: Some(0x3000),
+                callee: None,
+                args: Vec::new(),
+            }),
+            NativeStatement::Goto(0x2030),
+            NativeStatement::Label(0x2020),
+            NativeStatement::Call(Expr::Call {
+                target: Some(0x3010),
+                callee: None,
+                args: Vec::new(),
+            }),
+            NativeStatement::Label(0x2030),
+            computed(),
+            NativeStatement::Return(None),
+        ];
+        for (input, required_labels) in [
+            (early_return, vec![0x1020]),
+            (if_else, vec![0x2020, 0x2030]),
+        ] {
+            let statements = structure_control_flow(input);
+            assert!(
+                !statements.iter().any(|statement| matches!(
+                    statement,
+                    NativeStatement::IfReturn { .. } | NativeStatement::IfElse { .. }
+                )),
+                "label-eliminating fold survived indirect branch: {statements:?}"
+            );
+            for label in required_labels {
+                assert!(
+                    statements.iter().any(
+                        |statement| matches!(statement, NativeStatement::Label(address) if *address == label)
+                    ),
+                    "missing label {label:#x}: {statements:?}"
+                );
+            }
+            let document = NativeDocument {
+                name: "sub_1000".into(),
+                return_type: Type::Void,
+                statements,
+                ssa: SsaFunction::default(),
+                types: Vec::new(),
+                warnings: Vec::new(),
+            };
+            let c = document.render();
+            assert!(c.contains("goto *(switch_target);"), "{c}");
+        }
     }
     #[test]
     fn native_keeps_return_label_referenced_by_an_external_branch() {
