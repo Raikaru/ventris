@@ -1152,6 +1152,14 @@ fn corpus_semantic_value(baseline: Option<corpus::CorpusSemanticBaseline>) -> Va
     ])
 }
 
+fn corpus_metadata_value(metadata: Option<&str>) -> Value {
+    metadata
+        .map(|metadata| {
+            crate::json::parse(metadata).expect("checked-in corpus metadata must be valid JSON")
+        })
+        .unwrap_or(Value::Null)
+}
+
 fn render_corpus(format: OutputFormat) -> String {
     if format == OutputFormat::Json {
         let entries = corpus::entries()
@@ -1177,6 +1185,10 @@ fn render_corpus(format: OutputFormat) -> String {
                         entry.binary_sha1.map(Value::string).unwrap_or(Value::Null),
                     ),
                     ("status".into(), Value::string(entry.status)),
+                    (
+                        "metadata".into(),
+                        corpus_metadata_value(entry.metadata_json),
+                    ),
                     (
                         "functions".into(),
                         Value::Array(
@@ -4360,6 +4372,7 @@ fn recover_types_report(options: &GameOptions) -> Result<ventris_game::Recovered
             symbols: &symbols,
             relocations: &relocations,
             annotations: &sidecar.annotations,
+            metadata_provenance: &sidecar.provenance,
             assertions: &sidecar.assertions,
         },
     ))
@@ -4590,6 +4603,8 @@ mod tests {
         assert!(output.contains("n64-perfect-dark-ntsc-final"));
         assert!(output.contains("gamecube-animal-crossing-gafe01"));
         assert!(output.contains("gba-pokemon-emerald"));
+        assert!(output.contains("\\\"metadata\\\":{\\\"assertions\\\""));
+        assert!(output.contains("game_world.hpp"));
     }
 
     #[test]

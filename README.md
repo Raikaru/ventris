@@ -191,6 +191,7 @@ the smoke runner exercises more than one code shape per target:
 | N64 | `n64decomp/perfect_dark` | MIT | `preamble` (`0x80001000`), `vm_boot` (`0x80001050`), `vm_init_vars` (`0x800010a0`) |
 | GameCube | `ACreTeam/ac-decomp` | CC0-1.0 | `memset` (`0x800033a8`), `TRK_memset` (`0x800034e0`) |
 | PS2 | `crowded-street/3s-decomp` | AGPL-3.0 | `flBeginRender` (`0x11c1d0`), `flEndRender` (`0x11c1f0`), `flPS2InitRenderState` (`0x11c210`) |
+| PS2 | `glampert/ps2-homebrew` Dungeon Game | MIT | ten bounded `GameWorld` functions: eight semantic baselines plus menu and texture-lookup smoke |
 | GBA | `pret/pokeemerald` | unspecified | `StartTimer1` (`0x08000554`), `SeedRngAndSetTrainerId` (`0x08000560`), `GetGeneratedTrainerIdLower` (`0x08000588`), `InitKeys` (`0x080005bc`) |
 
 The manifest pins each source commit, symbol path, address, function size,
@@ -229,6 +230,21 @@ the runner never bundles or extracts commercial images. Only
 `ps2-dungeon-game` currently has source-backed expectations exercised against
 its exact legal ELF. Reports distinguish exact, diverged, unsupported, and
 unavailable dimensions instead of manufacturing a pass.
+
+`ventris-compiler-check` is the separate compiler-backed PS2 gate. It
+reconstructs the source-controlled semantic functions, compiles them for
+`mipsel-none-elf` with Clang, disassembles both candidate objects and the pinned
+retail windows, then reports exactness, normalized mnemonic LCS ratios,
+instruction counts, call counts, and compiler diagnostics:
+
+```text
+ventris-compiler-check --image-dir <directory> --ventris <path> \
+  --id ps2-dungeon-game
+```
+
+The default threshold is a regression gate, not a byte-matching claim.
+`--require-exact` is available for functions expected to have identical
+normalized mnemonic streams.
 
 The `gba` target selects Thumb-1 and uses the raw ROM base `0x08000000`.
 

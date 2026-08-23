@@ -61,12 +61,101 @@ const DUNGEON_FADE_FINISHED_BASELINE: CorpusSemanticBaseline = CorpusSemanticBas
     source_structure: &[],
 };
 
+const DUNGEON_ALLOC_ENEMY_BASELINE: CorpusSemanticBaseline =
+    dungeon_alloc_baseline(&["GameWorld.enemyEntitiesInUse"]);
+const DUNGEON_ALLOC_RENDER_BASELINE: CorpusSemanticBaseline =
+    dungeon_alloc_baseline(&["GameWorld.renderEntitiesInUse"]);
+const DUNGEON_ALLOC_SHADOW_BASELINE: CorpusSemanticBaseline =
+    dungeon_alloc_baseline(&["GameWorld.shadowBlobsInUse"]);
+const DUNGEON_ALLOC_LIGHTMAP_BASELINE: CorpusSemanticBaseline =
+    dungeon_alloc_baseline(&["GameWorld.lightmapsInUse"]);
+const DUNGEON_ALLOC_PARTICLE_BASELINE: CorpusSemanticBaseline =
+    dungeon_alloc_baseline(&["GameWorld.prtEmittersInUse"]);
+
+const fn dungeon_alloc_baseline(nominal_fields: &'static [&'static str]) -> CorpusSemanticBaseline {
+    CorpusSemanticBaseline {
+        control_flow: &["return"],
+        calls: &[],
+        globals: &[],
+        access_types: &["u32"],
+        casts: 0,
+        aggregate_copies: 0,
+        declaration_order: &[],
+        nominal_fields,
+        source_structure: &["return"],
+    }
+}
+
+/// Source-controlled facts consumed by `recover-types` and
+/// `reconstruct-source` for the public Dungeon Game acceptance corpus.
+pub const DUNGEON_GAME_METADATA_JSON: &str = r#"{
+  "provenance": {
+    "url": "https://github.com/glampert/ps2-homebrew",
+    "commit": "602441a6877a3136709d6320664340d52e3027a1",
+    "license": "MIT",
+    "path": "source/demos/dungeon_game/game_world.hpp"
+  },
+  "nominal_types": [{
+    "id": 1,
+    "name": "GameWorld",
+    "size": 22224,
+    "fields": [
+      {"offset": 1186, "name": "fadeAlpha", "width": 1,
+       "type": {"kind": "primitive", "name": "uint8_t", "bits": 8, "signed": false}},
+      {"offset": 1187, "name": "drawFadeScreen", "width": 1,
+       "type": {"kind": "primitive", "name": "bool", "bits": 8}},
+      {"offset": 1188, "name": "fadeOut", "width": 1,
+       "type": {"kind": "primitive", "name": "bool", "bits": 8}},
+      {"offset": 1189, "name": "fadeIn", "width": 1,
+       "type": {"kind": "primitive", "name": "bool", "bits": 8}},
+      {"offset": 1190, "name": "inMainMenu", "width": 1,
+       "type": {"kind": "primitive", "name": "bool", "bits": 8}},
+      {"offset": 1192, "name": "currLevel", "width": 4,
+       "type": {"kind": "enum", "name": "LevelId", "bits": 32, "signed": true}},
+      {"offset": 1200, "name": "enemyEntitiesInUse", "width": 4,
+       "type": {"kind": "primitive", "name": "uint32_t", "bits": 32, "signed": false}},
+      {"offset": 1204, "name": "renderEntitiesInUse", "width": 4,
+       "type": {"kind": "primitive", "name": "uint32_t", "bits": 32, "signed": false}},
+      {"offset": 1208, "name": "shadowBlobsInUse", "width": 4,
+       "type": {"kind": "primitive", "name": "uint32_t", "bits": 32, "signed": false}},
+      {"offset": 1212, "name": "lightmapsInUse", "width": 4,
+       "type": {"kind": "primitive", "name": "uint32_t", "bits": 32, "signed": false}},
+      {"offset": 1216, "name": "prtEmittersInUse", "width": 4,
+       "type": {"kind": "primitive", "name": "uint32_t", "bits": 32, "signed": false}}
+    ]
+  }],
+  "assertions": [{
+    "space": 4,
+    "base": 16,
+    "size": 4,
+    "offset": 0,
+    "name": "this_",
+    "type": {"kind": "nominal", "id": 1, "name": "GameWorld", "size": 22224},
+    "note": "GameWorld member-function receiver from pinned source metadata"
+  }]
+}"#;
+
 pub fn semantic_baseline(entry_id: &str, function: &str) -> Option<CorpusSemanticBaseline> {
     match (entry_id, function) {
         ("ps2-dungeon-game", "_ZN9GameWorld12beginFadeOutEv")
         | ("ps2-dungeon-game", "_ZN9GameWorld11beginFadeInEv") => Some(DUNGEON_FADE_BASELINE),
         ("ps2-dungeon-game", "_ZN9GameWorld16onFadeInFinishedEv") => {
             Some(DUNGEON_FADE_FINISHED_BASELINE)
+        }
+        ("ps2-dungeon-game", "_ZN9GameWorld16allocEnemyEntityEv") => {
+            Some(DUNGEON_ALLOC_ENEMY_BASELINE)
+        }
+        ("ps2-dungeon-game", "_ZN9GameWorld17allocRenderEntityEv") => {
+            Some(DUNGEON_ALLOC_RENDER_BASELINE)
+        }
+        ("ps2-dungeon-game", "_ZN9GameWorld15allocShadowBlobEv") => {
+            Some(DUNGEON_ALLOC_SHADOW_BASELINE)
+        }
+        ("ps2-dungeon-game", "_ZN9GameWorld13allocLightmapEv") => {
+            Some(DUNGEON_ALLOC_LIGHTMAP_BASELINE)
+        }
+        ("ps2-dungeon-game", "_ZN9GameWorld20allocParticleEmitterEv") => {
+            Some(DUNGEON_ALLOC_PARTICLE_BASELINE)
         }
         _ => None,
     }
@@ -84,6 +173,7 @@ pub struct CorpusEntry {
     pub binary_sha256: Option<&'static str>,
     pub binary_sha1: Option<&'static str>,
     pub status: &'static str,
+    pub metadata_json: Option<&'static str>,
     pub functions: &'static [CorpusFunction],
 }
 
@@ -174,6 +264,55 @@ const DUNGEON_GAME_FUNCTIONS: &[CorpusFunction] = &[
         size: 0x08,
         note: "GameWorld::onFadeInFinished; checked-in ELF symbol and next-symbol span",
     },
+    CorpusFunction {
+        name: "_ZN9GameWorld15drawMainMenuOptER5Vec2fPKcb",
+        source_path: "source/demos/dungeon_game/game_world.cpp",
+        address: 0x0012_3cd0,
+        size: 0xb4,
+        note: "GameWorld::drawMainMenuOpt; bounded call/conditional smoke from checked-in ELF",
+    },
+    CorpusFunction {
+        name: "_ZNK9GameWorld17getBuiltInTextureEPKc",
+        source_path: "source/demos/dungeon_game/game_world.cpp",
+        address: 0x0012_4fa8,
+        size: 0xd4,
+        note: "GameWorld::getBuiltInTexture; bounded call-chain smoke from checked-in ELF",
+    },
+    CorpusFunction {
+        name: "_ZN9GameWorld16allocEnemyEntityEv",
+        source_path: "source/demos/dungeon_game/game_world.cpp",
+        address: 0x0012_5080,
+        size: 0x20,
+        note: "GameWorld::allocEnemyEntity; checked-in ELF symbol and next-symbol span",
+    },
+    CorpusFunction {
+        name: "_ZN9GameWorld17allocRenderEntityEv",
+        source_path: "source/demos/dungeon_game/game_world.cpp",
+        address: 0x0012_50a0,
+        size: 0x20,
+        note: "GameWorld::allocRenderEntity; checked-in ELF symbol and next-symbol span",
+    },
+    CorpusFunction {
+        name: "_ZN9GameWorld15allocShadowBlobEv",
+        source_path: "source/demos/dungeon_game/game_world.cpp",
+        address: 0x0012_50c0,
+        size: 0x20,
+        note: "GameWorld::allocShadowBlob; checked-in ELF symbol and next-symbol span",
+    },
+    CorpusFunction {
+        name: "_ZN9GameWorld13allocLightmapEv",
+        source_path: "source/demos/dungeon_game/game_world.cpp",
+        address: 0x0012_50e0,
+        size: 0x20,
+        note: "GameWorld::allocLightmap; checked-in ELF symbol and next-symbol span",
+    },
+    CorpusFunction {
+        name: "_ZN9GameWorld20allocParticleEmitterEv",
+        source_path: "source/demos/dungeon_game/game_world.cpp",
+        address: 0x0012_5100,
+        size: 0x20,
+        note: "GameWorld::allocParticleEmitter; checked-in ELF symbol and next-symbol span",
+    },
 ];
 
 const POKEMON_EMERALD_FUNCTIONS: &[CorpusFunction] = &[
@@ -229,6 +368,7 @@ pub const CORPUS: &[CorpusEntry] = &[
         binary_name: "perfect_dark_ntsc_final.z64",
         binary_sha256: Some("4e51142acac686d96861cecc58cf7cb7c3b06b21733b7f8ed609a709dc039a21"),
         binary_sha1: None,
+        metadata_json: None,
         status: "licensed-source-metadata",
         functions: PERFECT_DARK_FUNCTIONS,
     },
@@ -242,6 +382,7 @@ pub const CORPUS: &[CorpusEntry] = &[
         binary_name: "animal_crossing_gafe01.dol",
         binary_sha256: Some("e3166b15b810ff20397784fc83b2eb053db5d0c2a9e22ac2ead63a645881d150"),
         binary_sha1: None,
+        metadata_json: None,
         status: "licensed-source-metadata",
         functions: ANIMAL_CROSSING_FUNCTIONS,
     },
@@ -255,6 +396,7 @@ pub const CORPUS: &[CorpusEntry] = &[
         binary_name: "THIRD_U.BIN",
         binary_sha256: None,
         binary_sha1: Some("cf58495054c31ad852175c66e9ca04d5094f000e"),
+        metadata_json: None,
         status: "licensed-source-metadata",
         functions: STREET_FIGHTER_FUNCTIONS,
     },
@@ -268,6 +410,7 @@ pub const CORPUS: &[CorpusEntry] = &[
         binary_name: "dungeon_game.elf",
         binary_sha256: Some("25faee2f98483f7f86d0dd7043e7b506c998728989347c8a38ae8af49c0a1af4"),
         binary_sha1: None,
+        metadata_json: Some(DUNGEON_GAME_METADATA_JSON),
         status: "public-reference",
         functions: DUNGEON_GAME_FUNCTIONS,
     },
@@ -281,6 +424,7 @@ pub const CORPUS: &[CorpusEntry] = &[
         binary_name: "pokeemerald.gba",
         binary_sha256: Some("a9dec84dfe7f62ab2220bafaef7479da0929d066ece16a6885f6226db19085af"),
         binary_sha1: None,
+        metadata_json: None,
         status: "public-reference",
         functions: POKEMON_EMERALD_FUNCTIONS,
     },
@@ -398,10 +542,20 @@ mod tests {
             entry.source_commit,
             "602441a6877a3136709d6320664340d52e3027a1"
         );
+        assert_eq!(entry.functions.len(), 10);
+        assert_eq!(
+            entry
+                .functions
+                .iter()
+                .filter(|function| semantic_baseline(entry.id, function.name).is_some())
+                .count(),
+            8
+        );
         assert!(entry
             .functions
             .iter()
-            .all(|function| semantic_baseline(entry.id, function.name).is_some()));
+            .all(|function| function.source_path == "source/demos/dungeon_game/game_world.cpp"));
+        assert!(entry.metadata_json.is_some());
     }
 
     fn recover_fixture<L: ventris_lifter::Lifter>(

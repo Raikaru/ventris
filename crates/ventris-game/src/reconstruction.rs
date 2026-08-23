@@ -27,6 +27,7 @@ pub struct SourceField {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct SourceStruct {
     pub name: String,
+    pub parameter_name: Option<String>,
     pub fields: Vec<SourceField>,
     pub unresolved: Vec<String>,
 }
@@ -234,6 +235,25 @@ fn identifier_is_used(source: &str, name: &str) -> bool {
     })
 }
 
+fn replace_identifier(source: &str, old: &str, new: &str) -> String {
+    let mut output = String::with_capacity(source.len() + new.len().saturating_sub(old.len()));
+    let mut cursor = 0;
+    for (index, _) in source.match_indices(old) {
+        let before = source[..index].chars().next_back();
+        let after = source[index + old.len()..].chars().next();
+        if before.is_some_and(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+            || after.is_some_and(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+        {
+            continue;
+        }
+        output.push_str(&source[cursor..index]);
+        output.push_str(new);
+        cursor = index + old.len();
+    }
+    output.push_str(&source[cursor..]);
+    output
+}
+
 fn rewrite_recovered_field_accesses(
     signature: &mut SourceSignature,
     structs: &[SourceStruct],
@@ -285,6 +305,31 @@ fn rewrite_recovered_field_accesses(
                     *body = body.replace(&format!("({cast})({member})"), &member);
                 }
             }
+            if field.width == 4 && field.declarator_suffix.is_empty() {
+                for wide in ["int64_t", "uint64_t"] {
+                    *body = body.replace(&format!("({wide})({member})"), &member);
+                }
+                for narrow in ["uint32_t", "int32_t"] {
+                    *body =
+                        body.replace(&format!("({narrow})({member} * "), &format!("({member} * "));
+                }
+            }
+        }
+        let desired_name = structure
+            .parameter_name
+            .as_deref()
+            .map(c_identifier)
+            .filter(|name| !name.is_empty() && name != &parameter)
+            .filter(|name| {
+                !signature
+                    .parameters
+                    .iter()
+                    .enumerate()
+                    .any(|(index, candidate)| index != parameter_index && candidate.name == *name)
+            });
+        if let Some(desired_name) = desired_name {
+            *body = replace_identifier(body, &parameter, &desired_name);
+            signature.parameters[parameter_index].name = desired_name;
         }
     }
 }
@@ -335,6 +380,11 @@ fn source_struct(
         diagnostics.push(format!("{} contains unresolved type facts", name));
     }
     SourceStruct {
+        parameter_name: candidate
+            .parameter_name
+            .as_deref()
+            .map(c_identifier)
+            .filter(|name| !name.is_empty()),
         name,
         fields,
         unresolved,
@@ -438,6 +488,7 @@ mod tests {
             structs: vec![StructCandidate {
                 base: Varnode::new(4, 0, 4),
                 name: Some("Actor".into()),
+                parameter_name: None,
                 fields: vec![
                     crate::RecoveredField {
                         offset: 0,
@@ -534,6 +585,23 @@ mod tests {
         assert!(!source.contains("float f12"), "{source}");
     }
     #[test]
+    fn applies_source_backed_parameter_name_to_typed_receiver() {
+        let mut report = report();
+        report.structs[0].parameter_name = Some("this_".into());
+        let reconstruction = SourceReconstruction::from_report(
+            &report,
+            "void body(void) { *(uint32_t *)(uintptr_t)(a0 + 0x8) = 1; return; }",
+        )
+        .unwrap();
+        let source = reconstruction.render();
+        assert!(
+            source.contains("void Actor__update(Actor * this_)"),
+            "{source}"
+        );
+        assert!(source.contains("(this_->field_8[0]) = 1;"), "{source}");
+        assert!(!source.contains("Actor * a0"), "{source}");
+    }
+    #[test]
     fn removes_redundant_integer_cast_from_recovered_byte_field() {
         let mut report = report();
         report.structs[0].fields[1].width = 1;
@@ -546,6 +614,19 @@ mod tests {
         let source = reconstruction.render();
         assert!(source.contains("if ((a0->field_8[0]) == 1)"), "{source}");
         assert!(!source.contains("(uint32_t)"), "{source}");
+    }
+
+    #[test]
+    fn removes_redundant_integer_promotion_around_recovered_word_field() {
+        let reconstruction = SourceReconstruction::from_report(
+            &report(),
+            "uint32_t body(void) { return (uint32_t)((int64_t)(*(uint32_t *)(uintptr_t)(a0 + 0x0)) * 0x70); }",
+        )
+        .unwrap();
+        let source = reconstruction.render();
+        assert!(source.contains("return ((a0->health) * 0x70);"), "{source}");
+        assert!(!source.contains("(uint32_t)"), "{source}");
+        assert!(!source.contains("(int64_t)"), "{source}");
     }
 
     #[test]

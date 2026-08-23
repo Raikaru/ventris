@@ -230,7 +230,13 @@ pub trait Lifter {
                 .ok_or(LiftError::AddressUnavailable(address))?;
             let instruction = self.lift_instruction(address, bytes)?;
             instructions.insert(address, instruction.clone());
-            let next = instruction.flow.fallthrough();
+            let next = instruction.flow.fallthrough().map(|next| {
+                if self.has_delay_slot() && !matches!(instruction.flow, Flow::FallThrough(_)) {
+                    next.saturating_add(instruction.pcode.len as u64)
+                } else {
+                    next
+                }
+            });
             if let Some(next) = next {
                 edges.insert((address, next));
                 pending.push_back(next);
@@ -252,17 +258,11 @@ pub trait Lifter {
             }
             if self.has_delay_slot() && !matches!(instruction.flow, Flow::FallThrough(_)) {
                 let delay_address = address.saturating_add(instruction.pcode.len as u64);
-                if matches!(instruction.flow, Flow::Return) {
-                    if seen.insert(delay_address) {
-                        if let Some(delay_bytes) = image.bytes_at(file, delay_address, 4) {
-                            let delay = self.lift_instruction(delay_address, delay_bytes)?;
-                            instructions.insert(delay_address, delay);
-                        }
+                if seen.insert(delay_address) {
+                    if let Some(delay_bytes) = image.bytes_at(file, delay_address, 4) {
+                        let delay = self.lift_instruction(delay_address, delay_bytes)?;
+                        instructions.insert(delay_address, delay);
                     }
-                } else if !seen.contains(&delay_address) {
-                    // Calls and jumps must traverse the delay slot so its
-                    // fallthrough reaches the post-delay instruction.
-                    pending.push_front(delay_address);
                 }
             }
         }
@@ -2293,6 +2293,27 @@ impl Lifter for Mips32 {
                     }
                     flow = Flow::FallThrough(next);
                 }
+                24 | 25 => {
+                    let left = unique(address, 6, 8);
+                    let right = unique(address, 7, 8);
+                    let product = unique(address, 8, 8);
+                    let lo = mips_register(136, 4);
+                    let hi = mips_register(132, 4);
+                    let extension = if funct == 24 {
+                        op::INT_SEXT
+                    } else {
+                        op::INT_ZEXT
+                    };
+                    ops.push(p(extension, Some(left), vec![mips_reg(rs, 4)]));
+                    ops.push(p(extension, Some(right), vec![mips_reg(rt, 4)]));
+                    ops.push(p(op::INT_MULT, Some(product), vec![left, right]));
+                    ops.push(p(op::SUBPIECE, Some(lo), vec![product, constant(0, 4)]));
+                    ops.push(p(op::SUBPIECE, Some(hi), vec![product, constant(4, 4)]));
+                    if rd != 0 {
+                        ops.push(p(op::COPY, Some(mips_reg(rd, 4)), vec![lo]));
+                    }
+                    flow = Flow::FallThrough(next);
+                }
                 32 | 33 | 34 | 35 | 36 | 37 | 38 | 39 | 42 | 43 | 44 | 45 | 46 | 47 => {
                     let width = if funct >= 44 { 8 } else { 4 };
                     let code = match funct {
@@ -2377,16 +2398,21 @@ impl Lifter for Mips32 {
                 }
             }
             4..=7 | 20..=23 => {
-                let Some(condition) = mips_branch_condition(address, opcode, rs, rt, &mut ops)
-                else {
-                    return Err(mips_unsupported(address, opcode));
-                };
                 let target = mips_branch_target(address, immediate);
-                ops.push(p(op::CBRANCH, None, vec![constant(target, 4), condition]));
-                flow = Flow::Conditional {
-                    target,
-                    fallthrough: next,
-                };
+                if matches!(opcode, 4 | 20) && rs == rt {
+                    ops.push(p(op::BRANCH, None, vec![constant(target, 4)]));
+                    flow = Flow::Jump(target);
+                } else {
+                    let Some(condition) = mips_branch_condition(address, opcode, rs, rt, &mut ops)
+                    else {
+                        return Err(mips_unsupported(address, opcode));
+                    };
+                    ops.push(p(op::CBRANCH, None, vec![constant(target, 4), condition]));
+                    flow = Flow::Conditional {
+                        target,
+                        fallthrough: next,
+                    };
+                }
             }
             8 | 9 => {
                 ops.push(p(
@@ -5158,6 +5184,25 @@ mod tests {
     }
 
     #[test]
+    fn ps2_three_operand_mult_writes_named_destination_and_lo_hi() {
+        let instruction = Mips32
+            .lift_instruction(0x125088, &[0x18, 0x18, 0xe5, 0x00])
+            .unwrap();
+        assert_eq!(instruction.flow, Flow::FallThrough(0x12508c));
+        assert!(instruction
+            .pcode
+            .ops
+            .iter()
+            .any(|operation| operation.opcode == op::INT_MULT));
+        assert!(instruction.pcode.ops.iter().any(|operation| {
+            operation.opcode == op::COPY && operation.output == Some(mips_reg(3, 4))
+        }));
+        assert!(instruction.pcode.ops.iter().any(|operation| {
+            operation.opcode == op::SUBPIECE && operation.output == Some(mips_register(132, 4))
+        }));
+    }
+
+    #[test]
     fn architecture_return_encodings_are_recognized() {
         assert_eq!(
             AArch64
@@ -5367,6 +5412,43 @@ mod tests {
         assert_eq!(function.calls, BTreeSet::from([0x2000]));
         assert!(function.instructions.contains_key(&0x1004));
         assert!(function.instructions.contains_key(&0x100c));
+    }
+
+    #[test]
+    fn mips_jump_discovery_does_not_follow_delay_slot_fallthrough() {
+        let image = Image {
+            len: 12,
+            format: ventris_format::Format::Pe(ventris_format::PeFacts {
+                machine: 0x8664,
+                plus: true,
+                image_base: 0,
+            }),
+            segments: vec![ventris_format::Segment {
+                name: Some(".text".into()),
+                addr: 0x1000,
+                size: 12,
+                file_off: 0,
+                file_size: 12,
+                perms: ventris_format::Perms {
+                    read: Some(true),
+                    write: Some(false),
+                    exec: Some(true),
+                },
+            }],
+            regions: Vec::new(),
+            entry: Some(0x1000),
+            symbol_count: 0,
+        };
+        let file = [
+            0x00, 0x04, 0x00, 0x08, // j 0x1000
+            0x00, 0x00, 0x00, 0x00, // delay-slot nop
+            0xff, 0xff, 0xff, 0xff, // unreachable invalid instruction
+        ];
+        let function = Mips32.discover(&image, &file, 0x1000, 8).unwrap();
+        assert_eq!(
+            function.instructions.keys().copied().collect::<Vec<_>>(),
+            vec![0x1000, 0x1004]
+        );
     }
 
     #[test]

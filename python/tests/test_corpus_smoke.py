@@ -14,7 +14,9 @@ def envelope(command: str, result: str) -> str:
 
 
 class CorpusSmokeTests(unittest.TestCase):
-    def manifest_output(self, *, expected_hash: str, functions=None, semantic=None) -> str:
+    def manifest_output(
+        self, *, expected_hash: str, functions=None, semantic=None, metadata=None
+    ) -> str:
         manifest_functions = functions or [
             {"name": "Game_Task", "address": "0x250190", "size": "0x1f0"}
         ]
@@ -37,6 +39,7 @@ class CorpusSmokeTests(unittest.TestCase):
                 "binary_name": "test.elf",
                 "binary_sha256": expected_hash,
                 "binary_sha1": None,
+                "metadata": metadata,
                 "functions": manifest_functions,
             }
         ]
@@ -49,6 +52,20 @@ class CorpusSmokeTests(unittest.TestCase):
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0].functions[0].size, 0x1F0)
         self.assertEqual(entries[0].binary_sha256, digest)
+
+    def test_parse_manifest_retains_embedded_source_metadata(self):
+        metadata = {
+            "provenance": {
+                "url": "https://example.invalid/repo",
+                "commit": "1" * 40,
+                "license": "MIT",
+                "path": "src/game.hpp",
+            }
+        }
+        entry = corpus_smoke.parse_manifest(
+            self.manifest_output(expected_hash="a" * 64, metadata=metadata)
+        )[0]
+        self.assertEqual(entry.metadata, metadata)
 
     def test_smoke_runs_every_manifest_function(self):
         data = b"real image"
@@ -158,6 +175,56 @@ class CorpusSmokeTests(unittest.TestCase):
         self.assertEqual(report["status"], "exact")
         self.assertTrue(
             all(item["status"] == "exact" for item in report["dimensions"])
+        )
+
+    def test_source_metadata_is_reported_as_applied_not_machine_exact(self):
+        semantic = {
+            "control_flow": [],
+            "calls": [],
+            "globals": [],
+            "access_types": ["u8"],
+            "casts": 0,
+            "aggregate_copies": 0,
+            "declaration_order": [],
+            "nominal_fields": ["GameWorld.fadeAlpha"],
+            "source_structure": [],
+        }
+        metadata = {
+            "provenance": {
+                "url": "https://example.invalid/repo",
+                "commit": "1" * 40,
+                "license": "MIT",
+                "path": "src/game_world.hpp",
+            }
+        }
+        entry = corpus_smoke.parse_manifest(
+            self.manifest_output(
+                expected_hash="a" * 64, semantic=semantic, metadata=metadata
+            )
+        )[0]
+        report = corpus_smoke._semantic_report(
+            entry,
+            entry.functions[0],
+            resolved="space: ram\noffset: 0x250190\n",
+            lift="bytes: 496\ncalls: {}\n",
+            recovery="type: u8\n",
+            source=(
+                "typedef struct GameWorld { uint8_t fadeAlpha; } GameWorld;\n"
+                "void Game_Task(GameWorld * this_) { this_->fadeAlpha = 1; return; }\n"
+            ),
+        )
+        self.assertEqual(report["status"], "exact")
+        applied = {
+            item["dimension"]: item
+            for item in report["dimensions"]
+            if item["status"] == "applied"
+        }
+        self.assertEqual(
+            set(applied), {"recovered_accesses_types", "nominal_fields"}
+        )
+        self.assertEqual(
+            applied["nominal_fields"]["observed_evidence"]["metadata"],
+            metadata["provenance"],
         )
 
     def test_source_structure_ignores_only_unlabelled_terminal_void_return(self):

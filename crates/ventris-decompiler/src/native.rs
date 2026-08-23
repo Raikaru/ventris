@@ -967,7 +967,10 @@ impl NativeDecompiler {
             }
             if matches!(
                 architecture,
-                Architecture::Mips32 | Architecture::Mips32Be | Architecture::Ps1
+                Architecture::Mips32
+                    | Architecture::Mips32Be
+                    | Architecture::Ps1
+                    | Architecture::N64
             ) {
                 let delay_address = match instruction.flow {
                     ventris_lifter::Flow::Call { fallthrough, .. } => Some(fallthrough),
@@ -1521,6 +1524,19 @@ fn invert_condition(value: Expr) -> Expr {
         value => Expr::Not(Box::new(value)),
     }
 }
+fn has_other_branch_to(statements: &[NativeStatement], current_index: usize, target: u64) -> bool {
+    statements.iter().enumerate().any(|(index, statement)| {
+        index != current_index
+            && match statement {
+                NativeStatement::Goto(branch_target)
+                | NativeStatement::IfGoto {
+                    target: branch_target,
+                    ..
+                } => *branch_target == target,
+                _ => false,
+            }
+    })
+}
 
 fn structure_control_flow(statements: Vec<NativeStatement>) -> Vec<NativeStatement> {
     let mut structured = Vec::with_capacity(statements.len());
@@ -1538,7 +1554,7 @@ fn structure_control_flow(statements: Vec<NativeStatement>) -> Vec<NativeStateme
                 &statements[index + 2],
                 &statements[index + 3],
             ) {
-                if target == label {
+                if target == label && !has_other_branch_to(&statements, index, *target) {
                     structured.push(NativeStatement::IfReturn {
                         condition: invert_condition(condition.clone()),
                         value: value.clone(),
@@ -1560,18 +1576,7 @@ fn structure_control_flow(statements: Vec<NativeStatement>) -> Vec<NativeStateme
             if let Some(target_index) =
                 target_index.filter(|target_index| *target_index > index + 1)
             {
-                let body_references_target =
-                    statements[index + 1..target_index]
-                        .iter()
-                        .any(|statement| match statement {
-                            NativeStatement::Goto(branch_target)
-                            | NativeStatement::IfGoto {
-                                target: branch_target,
-                                ..
-                            } => branch_target == target,
-                            _ => false,
-                        });
-                if !body_references_target {
+                if !has_other_branch_to(&statements, index, *target) {
                     if let Some(NativeStatement::Return(value)) = statements.get(target_index + 1) {
                         structured.push(NativeStatement::IfReturn {
                             condition: condition.clone(),
@@ -2429,6 +2434,90 @@ mod tests {
     }
 
     #[test]
+    fn native_n64_executes_call_and_return_delay_slots_in_order() {
+        let store = |address, value| {
+            PcodeOp::new(
+                op::STORE,
+                None,
+                vec![
+                    Varnode::new(CONST_SPACE, 417, 8),
+                    Varnode::new(CONST_SPACE, address, 8),
+                    Varnode::new(CONST_SPACE, value, 1),
+                ],
+            )
+        };
+        let instruction = |address, ops, flow| LiftedInstruction {
+            address,
+            bytes: vec![0; 4],
+            pcode: InstPcode {
+                len: 4,
+                space: RAM_SPACE,
+                offset: address,
+                ops,
+            },
+            flow,
+        };
+        let function = NativeFunction {
+            entry: 0x1000,
+            instructions: BTreeMap::from([
+                (
+                    0x1000,
+                    instruction(
+                        0x1000,
+                        vec![PcodeOp::new(
+                            op::CALL,
+                            None,
+                            vec![Varnode::new(CONST_SPACE, 0x2000, 8)],
+                        )],
+                        Flow::Call {
+                            target: 0x2000,
+                            fallthrough: 0x1004,
+                        },
+                    ),
+                ),
+                (
+                    0x1004,
+                    instruction(0x1004, vec![store(0x8000, 1)], Flow::FallThrough(0x1008)),
+                ),
+                (
+                    0x1008,
+                    instruction(
+                        0x1008,
+                        vec![PcodeOp::new(op::RETURN, None, vec![])],
+                        Flow::Return,
+                    ),
+                ),
+                (
+                    0x100c,
+                    instruction(0x100c, vec![store(0x8001, 0)], Flow::FallThrough(0x1010)),
+                ),
+            ]),
+            edges: BTreeSet::new(),
+            calls: BTreeSet::from([0x2000]),
+        };
+
+        let candidate = NativeDecompiler
+            .decompile(Architecture::N64, &function)
+            .render();
+        let call_delay = candidate
+            .find("= 1;")
+            .unwrap_or_else(|| panic!("{candidate}"));
+        let call = candidate
+            .find("sub_2000();")
+            .unwrap_or_else(|| panic!("{candidate}"));
+        let return_delay = candidate
+            .find("= 0;")
+            .unwrap_or_else(|| panic!("{candidate}"));
+        let return_statement = candidate
+            .find("return;")
+            .unwrap_or_else(|| panic!("{candidate}"));
+        assert!(
+            call_delay < call && call < return_delay && return_delay < return_statement,
+            "{candidate}"
+        );
+    }
+
+    #[test]
     fn thumb_start_timer_folds_literal_and_preserves_mmio_store() {
         let function = public_function_at(
             include_str!("../testdata/public/thumb_start_timer.hex"),
@@ -2629,6 +2718,40 @@ mod tests {
         assert!(c.contains("return;"), "{c}");
         assert!(!c.contains("goto"), "{c}");
         assert!(!c.contains("loc_1020"), "{c}");
+    }
+    #[test]
+    fn native_keeps_return_label_referenced_by_an_external_branch() {
+        let statements = structure_control_flow(vec![
+            NativeStatement::Goto(0x1020),
+            NativeStatement::IfGoto {
+                condition: Expr::Register {
+                    name: "flag".into(),
+                    width: 1,
+                },
+                target: 0x1020,
+            },
+            NativeStatement::Expression(Expr::Call {
+                target: Some(0x2000),
+                callee: None,
+                args: Vec::new(),
+            }),
+            NativeStatement::Label(0x1020),
+            NativeStatement::Return(None),
+        ]);
+        assert!(statements
+            .iter()
+            .any(|statement| matches!(statement, NativeStatement::Label(0x1020))));
+        let document = NativeDocument {
+            name: "sub_1000".into(),
+            return_type: Type::Void,
+            statements,
+            ssa: SsaFunction::default(),
+            types: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let c = document.render();
+        assert_eq!(c.matches("goto loc_1020;").count(), 2, "{c}");
+        assert!(c.contains("loc_1020:"), "{c}");
     }
 
     #[test]

@@ -1,12 +1,16 @@
 use crate::json::Value;
 use std::path::Path;
-use ventris_game::{AnnotationFact, GameType, NominalField, NominalType, TypeAssertion};
+use ventris_game::{
+    AnnotationFact, Confidence, Evidence, EvidenceSource, GameType, NominalField, NominalType,
+    TypeAssertion,
+};
 use ventris_pcode::Varnode;
 
 #[derive(Debug, Default)]
 pub struct GameMetadata {
     pub nominal_types: Vec<NominalType>,
     pub annotations: Vec<AnnotationFact>,
+    pub provenance: Vec<Evidence>,
     pub assertions: Vec<TypeAssertion>,
 }
 
@@ -24,14 +28,35 @@ pub fn load(path: Option<&Path>) -> Result<GameMetadata, String> {
 
 fn parse_root(value: &Value) -> Result<GameMetadata, String> {
     let object = as_object(value, "metadata root")?;
+    let provenance = parse_provenance(object.get("provenance"))?;
     Ok(GameMetadata {
-        nominal_types: parse_nominal_types(object.get("nominal_types"))?,
+        nominal_types: parse_nominal_types(object.get("nominal_types"), &provenance)?,
         annotations: parse_annotations(object.get("annotations"))?,
+        provenance,
         assertions: parse_assertions(object.get("assertions"))?,
     })
 }
 
-fn parse_nominal_types(value: Option<&Value>) -> Result<Vec<NominalType>, String> {
+fn parse_provenance(value: Option<&Value>) -> Result<Vec<Evidence>, String> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let object = as_object(value, "provenance")?;
+    Ok(vec![Evidence {
+        source: EvidenceSource::SourceMetadata {
+            url: required_string(object, "url")?.to_owned(),
+            commit: required_string(object, "commit")?.to_owned(),
+            license: required_string(object, "license")?.to_owned(),
+            path: required_string(object, "path")?.to_owned(),
+        },
+        confidence: Confidence::new(100).expect("valid source-metadata confidence"),
+    }])
+}
+
+fn parse_nominal_types(
+    value: Option<&Value>,
+    provenance: &[Evidence],
+) -> Result<Vec<NominalType>, String> {
     let Some(value) = value else {
         return Ok(Vec::new());
     };
@@ -60,7 +85,7 @@ fn parse_nominal_types(value: Option<&Value>) -> Result<Vec<NominalType>, String
                             width: required_u64(field, "width")?
                                 .try_into()
                                 .map_err(|_| "nominal field width is too large".to_string())?,
-                            evidence: Vec::new(),
+                            evidence: provenance.to_vec(),
                         })
                     })
                     .collect::<Result<Vec<_>, String>>()?,
@@ -73,7 +98,7 @@ fn parse_nominal_types(value: Option<&Value>) -> Result<Vec<NominalType>, String
                     .try_into()
                     .map_err(|_| "nominal type size is too large".to_string())?,
                 fields,
-                evidence: Vec::new(),
+                evidence: provenance.to_vec(),
             })
         })
         .collect()
@@ -334,6 +359,12 @@ mod tests {
     fn parses_annotations_assertions_and_nominal_types() {
         let value = crate::json::parse(
             r#"{
+                "provenance": {
+                    "url": "https://example.test/game",
+                    "commit": "abc123",
+                    "license": "MIT",
+                    "path": "src/actor.hpp"
+                },
                 "nominal_types": [{
                     "id": 7,
                     "name": "Actor",
@@ -367,6 +398,14 @@ mod tests {
         let metadata = parse_root(&value).unwrap();
         assert_eq!(metadata.nominal_types[0].name, "Actor");
         assert_eq!(metadata.nominal_types[0].fields[0].offset, 16);
+        assert!(matches!(
+            metadata.provenance[0].source,
+            EvidenceSource::SourceMetadata { ref commit, .. } if commit == "abc123"
+        ));
+        assert_eq!(
+            metadata.nominal_types[0].fields[0].evidence,
+            metadata.provenance
+        );
         assert_eq!(metadata.annotations[0].address, 0x1000);
         assert_eq!(metadata.assertions[0].base.offset, 0x20);
         assert_eq!(metadata.assertions[0].offset, -16);

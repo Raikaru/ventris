@@ -517,6 +517,14 @@ pub enum EvidenceSource {
         id: u64,
         name: String,
     },
+    /// Source-controlled metadata applied by the caller. This is distinct from
+    /// a fact inferred from p-code, even when the resulting value is identical.
+    SourceMetadata {
+        url: String,
+        commit: String,
+        license: String,
+        path: String,
+    },
     /// A nominal identity was supplied explicitly rather than inferred from
     /// the machine access. Keeping the identity in provenance prevents a
     /// later machine reanalysis from silently renaming the object.
@@ -999,6 +1007,7 @@ pub struct RecoveredField {
 pub struct StructCandidate {
     pub base: Varnode,
     pub name: Option<String>,
+    pub parameter_name: Option<String>,
     pub fields: Vec<RecoveredField>,
     pub strides: Vec<u32>,
     pub evidence: Vec<Evidence>,
@@ -1021,6 +1030,7 @@ pub struct RecoveryInput<'a> {
     pub symbols: &'a [SymbolFact],
     pub relocations: &'a [RelocationFact],
     pub annotations: &'a [AnnotationFact],
+    pub metadata_provenance: &'a [Evidence],
     pub assertions: &'a [TypeAssertion],
 }
 
@@ -1032,6 +1042,7 @@ impl<'a> RecoveryInput<'a> {
             symbols: &[],
             relocations: &[],
             annotations: &[],
+            metadata_provenance: &[],
             assertions: &[],
         }
     }
@@ -1515,6 +1526,9 @@ fn build_structs(input: &RecoveryInput<'_>, accesses: &[MemoryAccess]) -> Vec<St
                         _ => None,
                     })
             });
+            let parameter_name = nominal_assertions
+                .first()
+                .and_then(|assertion| assertion.name.clone());
             let mut strides = accesses
                 .iter()
                 .flat_map(|access| access.evidence.iter())
@@ -1708,6 +1722,7 @@ fn build_structs(input: &RecoveryInput<'_>, accesses: &[MemoryAccess]) -> Vec<St
             StructCandidate {
                 base,
                 name,
+                parameter_name,
                 fields: ordered,
                 strides,
                 evidence,
@@ -1723,7 +1738,7 @@ pub fn recover_function(target: TargetProfile, input: RecoveryInput<'_>) -> Reco
         .function
         .entry
         .saturating_add(input.function.byte_length());
-    let mut provenance = Vec::new();
+    let mut provenance = input.metadata_provenance.to_vec();
     let name = input
         .symbols
         .iter()
@@ -2015,6 +2030,21 @@ impl RecoveredFunction {
             self.entry
         )
         .unwrap();
+        for evidence in &self.provenance {
+            if let EvidenceSource::SourceMetadata {
+                url,
+                commit,
+                license,
+                path,
+            } = &evidence.source
+            {
+                writeln!(
+                    out,
+                    "source_metadata: {url} @ {commit} license={license} path={path}"
+                )
+                .unwrap();
+            }
+        }
         writeln!(out, "abi.pointer_bits: {}", self.abi.pointer_bits).unwrap();
         writeln!(
             out,

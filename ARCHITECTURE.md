@@ -290,8 +290,9 @@ profiles plus conservative base-plus-offset and array-stride recovery.
 
 *Done when:* native output preserves ABI-visible temporaries, calls and
 globals, aggregate copies, declaration order, casts, and nominal field names
-closely enough to support byte matching. This is the current checked public
-corpus bar.
+closely enough to support byte matching. The compiler-backed PS2 gate now
+compiles reconstructed C and measures normalized assembly; the current
+functions clear the regression threshold but are not exact matches.
 
 **Stage 3 · Surfaces.** VS Code client and standalone GPUI desktop client share
 the persisted project model. Ghidra remains an optional development oracle,
@@ -308,8 +309,8 @@ of full engine reconstruction:
 |---|---|---|
 | Stage 0 · parity by borrowing | Retired | The callback transport and model adapter were removed after the native path became the product. External Ghidra comparison remains available only through checked-in fixtures and `tools/diff_ghidra.py`. |
 | Stage 1 · own the lifter | Complete for the checked corpus | x86-64, x86-32, AArch64, ARM32/Thumb, MIPS32 little-/big-endian, PS1, N64, RV32/RV64, PPC32/PPC64, GameCube, M68k, SH2, SH4, 6502, Z80, and SPU are implemented; the checked-in lifter corpus covers native instruction forms for all twenty architecture paths, including endianness, PowerPC width, SPU control flow, and delay/return semantics. |
-| Stage 2 · own the decompiler | Complete for the checked public corpus | SSA constraints, width/type propagation, store assignments, structured conditional returns and joins, calls, memory writes and reads, ABI return mapping, aggregate-copy rendering, and checked semantic body scores are covered by the native decompiler test gate; the public corpus spans x86-64, AArch64, MIPS, PowerPC, ARM, RISC-V, SH, 6502, and Z80 paths. |
-| Game ABI/type recovery | Initial vertical slice | `ventris-game` provides target-specific ABI facts, explicit unknown types, confidence/provenance, O32 direct/indirect call arguments and returns, deterministic non-overlapping base-plus-offset/`PTRADD` layouts, nominal fields and explicit object relations, symbols, relocations, and user assertions. Source-backed PS2 corpus expectations feed machine-readable exact/diverged/unsupported/unavailable reports through the opt-in corpus smoke runner. |
+| Stage 2 · own the decompiler | Initial compiler-measured slice | SSA constraints, width/type propagation, store assignments, structured conditional returns and joins, calls, memory writes and reads, ABI return mapping, aggregate-copy rendering, and checked semantic body scores are covered by the native decompiler test gate. The public corpus spans x86-64, AArch64, MIPS, PowerPC, ARM, RISC-V, SH, 6502, and Z80 paths. The separate compiler gate compiles eight source-backed Dungeon Game functions for `mipsel-none-elf` and compares normalized mnemonic streams; it does not yet report exact matches. |
+| Game ABI/type recovery | Initial vertical slice | `ventris-game` provides target-specific ABI facts, explicit unknown types, confidence/provenance, O32 direct/indirect call arguments and returns, deterministic non-overlapping base-plus-offset/`PTRADD` layouts, nominal fields and explicit object relations, symbols, relocations, and user assertions. Source-backed PS2 corpus expectations distinguish machine-derived exact evidence from successfully applied source metadata, and feed machine-readable exact/diverged/unsupported/unavailable reports through the opt-in corpus smoke runner. |
 | Stage 3 · surfaces | Complete for the current 0.1 surfaces | The dependency-free VS Code client calls the local Ventris HTTP API; the separate GPUI desktop client reads persisted projects through the same public model; packaged VS Code command-path smoke covers startup, inspect, resolve, lift, native decompilation, game type recovery, recovered-source rendering, JSONL batch, HTTP errors, stale-server recovery, and result documents; the GPUI project fixture rendered the populated Functions/Data/References workspace; the Ghidra plugin release surface is intentionally absent. |
 
 

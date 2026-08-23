@@ -28,6 +28,7 @@ REQUIRED_FILES = (
     "desktop/ventris-gpui/Cargo.toml",
     "desktop/ventris-gpui/Cargo.lock",
     "tools/native_smoke.py",
+    "tools/compiler_check.py",
     "tools/clean_host_smoke.py",
     "tools/http_smoke.py",
     "tools/verify_release_archive.py",

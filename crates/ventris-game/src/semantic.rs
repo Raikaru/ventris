@@ -89,6 +89,9 @@ impl SemanticExpectation {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ObservationAvailability {
     Available(SemanticValue),
+    /// A value produced after applying explicit source metadata. This is
+    /// successful evidence, but it must not be reported as machine-derived.
+    Applied(SemanticValue),
     Unsupported(String),
     Unavailable(String),
 }
@@ -109,6 +112,18 @@ impl SemanticObservation {
         Self {
             dimension,
             availability: ObservationAvailability::Available(value.normalized()),
+            provenance: provenance.into(),
+        }
+    }
+
+    pub fn applied(
+        dimension: SemanticDimension,
+        value: SemanticValue,
+        provenance: impl Into<String>,
+    ) -> Self {
+        Self {
+            dimension,
+            availability: ObservationAvailability::Applied(value.normalized()),
             provenance: provenance.into(),
         }
     }
@@ -141,6 +156,7 @@ impl SemanticObservation {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SemanticStatus {
     Exact,
+    Applied,
     Diverged,
     Unsupported,
     Unavailable,
@@ -229,6 +245,19 @@ pub fn compare_semantics(
                     observed_provenance: Some(observation.provenance.clone()),
                     detail: None,
                 },
+                ObservationAvailability::Applied(observed) => SemanticDimensionResult {
+                    dimension,
+                    status: if expectation.value == *observed {
+                        SemanticStatus::Applied
+                    } else {
+                        SemanticStatus::Diverged
+                    },
+                    expected: expectation.value,
+                    observed: Some(observed.clone()),
+                    expected_provenance: expectation.provenance,
+                    observed_provenance: Some(observation.provenance.clone()),
+                    detail: None,
+                },
                 ObservationAvailability::Unsupported(reason) => SemanticDimensionResult {
                     dimension,
                     status: SemanticStatus::Unsupported,
@@ -253,7 +282,7 @@ pub fn compare_semantics(
 
     let status = if dimensions
         .iter()
-        .all(|item| item.status == SemanticStatus::Exact)
+        .all(|item| matches!(item.status, SemanticStatus::Exact | SemanticStatus::Applied))
     {
         SemanticReportStatus::Exact
     } else if dimensions
@@ -300,6 +329,29 @@ mod tests {
         assert_eq!(
             report.dimensions[0].observed_provenance.as_deref(),
             Some("lifted p-code")
+        );
+    }
+
+    #[test]
+    fn applied_source_metadata_is_successful_but_not_machine_exact() {
+        let report = compare_semantics(
+            "render",
+            [expectation(
+                SemanticDimension::NominalFields,
+                SemanticValue::set(["GameWorld.fadeAlpha"]),
+            )],
+            [SemanticObservation::applied(
+                SemanticDimension::NominalFields,
+                SemanticValue::set(["GameWorld.fadeAlpha"]),
+                "game_world.hpp@602441a",
+            )],
+        )
+        .unwrap();
+        assert_eq!(report.status, SemanticReportStatus::Exact);
+        assert_eq!(report.dimensions[0].status, SemanticStatus::Applied);
+        assert_eq!(
+            report.dimensions[0].observed_provenance.as_deref(),
+            Some("game_world.hpp@602441a")
         );
     }
 

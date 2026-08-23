@@ -17,6 +17,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import tempfile
 import sys
 from typing import Callable, Iterable, Sequence
 
@@ -53,6 +54,7 @@ class ManifestEntry:
     binary_sha256: str | None
     binary_sha1: str | None
     functions: tuple[ManifestFunction, ...]
+    metadata: dict[str, object] | None = None
 
 
 CommandRunner = Callable[[Sequence[str], Sequence[str]], tuple[str, str]]
@@ -108,6 +110,7 @@ def parse_manifest(text: str) -> tuple[ManifestEntry, ...]:
         source_url = raw.get("source_url")
         source_commit = raw.get("source_commit")
         source_license = raw.get("source_license")
+        metadata = raw.get("metadata")
         functions_raw = raw.get("functions")
         if not all(
             isinstance(value, str)
@@ -126,6 +129,8 @@ def parse_manifest(text: str) -> tuple[ManifestEntry, ...]:
             raise SmokeError(f"{entry_id}: binary_sha256 must be a string or null")
         if expected_sha1 is not None and not isinstance(expected_sha1, str):
             raise SmokeError(f"{entry_id}: binary_sha1 must be a string or null")
+        if metadata is not None and not isinstance(metadata, dict):
+            raise SmokeError(f"{entry_id}: metadata must be an object or null")
         if not isinstance(functions_raw, list) or not functions_raw:
             raise SmokeError(f"{entry_id}: corpus entry has no representative function")
 
@@ -169,6 +174,7 @@ def parse_manifest(text: str) -> tuple[ManifestEntry, ...]:
                 binary_name=binary_name,
                 binary_sha256=expected_hash,
                 binary_sha1=expected_sha1,
+                metadata=metadata,
                 functions=tuple(functions),
             )
         )
@@ -346,8 +352,13 @@ def _source_cast_count(source: str, function_name: str) -> int:
 
 def _source_nominal_fields(source: str, function_name: str) -> list[str]:
     body = _source_body(source, function_name) or ""
+    parameter_types = {
+        name: c_type
+        for c_type, name in re.findall(r"\b([A-Z]\w*)\s*\*\s*([A-Za-z_]\w*)", source)
+    }
     fields = {
-        match.group(1) + re.sub(r"->", ".", match.group(2))
+        parameter_types.get(match.group(1), match.group(1))
+        + re.sub(r"->", ".", match.group(2))
         for match in re.finditer(
             r"\b([A-Za-z_]\w*)((?:(?:->|\.)[A-Za-z_]\w+)+)", body
         )
@@ -358,6 +369,13 @@ def _source_nominal_fields(source: str, function_name: str) -> list[str]:
 def _source_globals(source: str, function_name: str) -> list[str]:
     body = _source_body(source, function_name) or ""
     locals_ = set(_source_declarations(source, function_name))
+    signature = re.search(
+        rf"\b{re.escape(function_name)}\s*\((.*?)\)", source, re.DOTALL
+    )
+    if signature:
+        locals_.update(
+            re.findall(r"\b([A-Za-z_]\w*)\s*(?=,|$)", signature.group(1))
+        )
     calls = {
         match.group(1)
         for match in re.finditer(r"\b([A-Za-z_]\w*)\s*\(", body)
@@ -622,11 +640,15 @@ def _semantic_report(
                 detail = "recovered access types are unavailable"
                 observed_value = None
             else:
-                status = (
-                    "exact"
-                    if expected[dimension] == observed_value
-                    else "diverged"
-                )
+                if expected[dimension] == observed_value:
+                    status = (
+                        "applied"
+                        if entry.metadata is not None
+                        and dimension in {"recovered_accesses_types", "nominal_fields"}
+                        else "exact"
+                    )
+                else:
+                    status = "diverged"
         observed_evidence = None
         if observed_value is not None:
             observed_evidence = {
@@ -635,6 +657,8 @@ def _semantic_report(
                 "image_sha1": image_sha1,
                 "address": function.address,
             }
+            if status == "applied":
+                observed_evidence["metadata"] = entry.metadata.get("provenance")
         result = {
             "function": function.name,
             "dimension": dimension,
@@ -650,7 +674,7 @@ def _semantic_report(
     statuses = {item["status"] for item in dimensions}
     report_status = (
         "exact"
-        if statuses == {"exact"}
+        if statuses <= {"exact", "applied"}
         else "diverged"
         if "diverged" in statuses
         else "unsupported"
@@ -673,6 +697,7 @@ def smoke_entry(
     limit: int,
     require_hashes: bool,
     command_runner: CommandRunner = run_command,
+    metadata_dir: Path | None = None,
 ) -> dict[str, object]:
     image = image_dir / entry.binary_name
     if not image.is_file():
@@ -680,6 +705,15 @@ def smoke_entry(
     actual_hash = sha256_file(image)
     actual_sha1 = sha1_file(image)
     hash_status = _hash_status(entry, actual_hash, actual_sha1, require_hashes)
+    metadata_args: list[str] = []
+    if entry.metadata is not None:
+        if metadata_dir is None:
+            raise SmokeError(f"{entry.id}: metadata_dir is required for embedded metadata")
+        metadata_path = metadata_dir / f"{entry.id}.metadata.json"
+        metadata_path.write_text(
+            json.dumps(entry.metadata, sort_keys=True), encoding="utf-8"
+        )
+        metadata_args = ["--metadata", os.fspath(metadata_path)]
     target_args = ["--target", entry.target, "--json"]
     function_results: list[dict[str, object]] = []
     warnings: list[str] = []
@@ -756,9 +790,12 @@ def smoke_entry(
             }
             for producer in outputs:
                 try:
-                    stdout, stderr = command_runner(
-                        command, [producer, *analysis_args]
+                    producer_args = (
+                        [*analysis_args, *metadata_args]
+                        if producer in {"recover-types", "reconstruct-source"}
+                        else analysis_args
                     )
+                    stdout, stderr = command_runner(command, [producer, *producer_args])
                     outputs[producer] = _envelope(stdout, producer)
                     command_warnings.extend(stderr.splitlines())
                 except SmokeError as error:
@@ -839,6 +876,8 @@ def run_smoke(
     manifest_stdout, _ = command_runner(command, ["corpus", "--json"])
     entries = {entry.id: entry for entry in parse_manifest(manifest_stdout)}
     selected_ids = tuple(ids)
+    metadata_temp = tempfile.TemporaryDirectory(prefix="ventris-corpus-metadata-")
+    metadata_dir = Path(metadata_temp.name)
     if not selected_ids:
         raise SmokeError("at least one --id is required")
 
@@ -857,11 +896,13 @@ def run_smoke(
                     limit=limit,
                     require_hashes=require_hashes,
                     command_runner=command_runner,
+                    metadata_dir=metadata_dir,
                 )
             )
         except SmokeError as error:
             results.append({"id": entry.id, "title": entry.title, "target": entry.target, "status": "fail", "error": str(error)})
 
+    metadata_temp.cleanup()
     return {
         "ok": all(result.get("status") == "pass" for result in results),
         "image_dir": os.fspath(image_dir),

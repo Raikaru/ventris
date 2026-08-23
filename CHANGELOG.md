@@ -11,6 +11,11 @@ All notable Ventris changes are documented here.
   remains opt-in and reports no unexecuted expected facts.
 - O32 direct/indirect call facts, evidence-preserving object-layout recovery,
   nominal object relations, and reconstructed-source structure scoring.
+- Expanded the legal Dungeon Game ELF gate to ten bounded functions and added
+  a Clang `mipsel-none-elf` compiler gate with normalized assembly comparison.
+- Corrected delay-slot discovery/order for MIPS/N64 control flow, made
+  conditional-return folding label-safe, and report source-supplied metadata as
+  applied evidence rather than machine-exact evidence.
 
 ## [0.1.0] - 2026-08-23
 

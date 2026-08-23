@@ -26,6 +26,7 @@ build-backend = "setuptools.build_meta"
 
  [project.scripts]
  ventris-corpus-smoke = "ventris.corpus_smoke:main"
+ventris-compiler-check = "ventris.compiler_gate:main"
  ventris-python = "ventris.cli:main"
 
 [tool.setuptools]
