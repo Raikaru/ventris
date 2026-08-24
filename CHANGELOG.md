@@ -35,6 +35,12 @@ All notable Ventris changes are documented here.
   and a merged value is named with one assignment per incoming path instead of
   being dropped. Resolution is order-independent, so a definition below its use
   is found.
+- Added graph statement emission, ported from `PrintC::emitBlockBasic`: blocks
+  emit in address order into the label-and-goto form the structuring pass
+  consumes, phi assignments land at the end of each predecessor, and a shared
+  computation is spelled once and reused. No join repair, path-invariance proof,
+  or predecessor-state intersection is needed, because the graph already records
+  which values merge.
 
 - Added `LiftedInstruction::skips_delay_slot`, which reports the MIPS
   likely-branch shape so consumers stop treating its sequential successor as

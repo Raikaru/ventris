@@ -16,6 +16,7 @@
 //! Source authority: `varnode.hh`, `op.hh`, `funcdata.hh`, `funcdata_varnode.cc`,
 //! `funcdata_op.cc` at commit `8b4c91d4d5bd1549622bfbade0df199585b98365`.
 
+pub mod emit;
 pub mod guard;
 pub mod heritage;
 pub mod refine;

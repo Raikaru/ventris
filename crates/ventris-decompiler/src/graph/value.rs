@@ -106,6 +106,20 @@ impl<'a> Resolver<'a> {
         self.resolve_guarded(value, &mut BTreeSet::new())
     }
 
+    /// The expression a named value's definition computes.
+    ///
+    /// [`Self::resolve`] returns the name, which is what a use site wants. The
+    /// definition site wants the computation itself, so it can be assigned to
+    /// that name exactly once.
+    pub fn resolve_definition(&self, value: VarnodeId) -> Expr {
+        let Some(def) = self.data.varnode(value).def else {
+            return self.storage(value);
+        };
+        let mut active = BTreeSet::from([value]);
+        self.translate(def, &mut active)
+            .unwrap_or_else(|| self.storage(value))
+    }
+
     fn resolve_guarded(&self, value: VarnodeId, active: &mut BTreeSet<VarnodeId>) -> Expr {
         let varnode = self.data.varnode(value);
         if varnode.flags.constant {
