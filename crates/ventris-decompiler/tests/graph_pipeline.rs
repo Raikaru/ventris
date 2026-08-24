@@ -114,3 +114,14 @@ fn direct_calls_and_conditionals_survive_the_graph_pipeline() {
         "a conditional branch stays conditional\n{source}"
     );
 }
+
+#[test]
+fn a_dereferenced_stack_value_is_declared_as_a_pointer() {
+    // Type recovery runs on the graph, so a value used as an address is
+    // declared as a pointer rather than as its storage width.
+    let source = render_via_graph(GET_BUILT_IN_TEXTURE, 0x124fa8);
+    assert!(
+        source.contains("uintptr_t"),
+        "no pointer type was recovered\n{source}"
+    );
+}

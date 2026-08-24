@@ -20,6 +20,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use ventris_lifter::RAM_SPACE;
 use ventris_pcode::op;
 
+use super::types::Types;
 use super::value::{Naming, Resolver, mark_explicit};
 use super::{Funcdata, GraphBlockId, OpId};
 use crate::native::{Expr, NativeStatement, Type};
@@ -29,12 +30,22 @@ pub fn emit(
     data: &Funcdata,
     register_name: &dyn Fn(u32, u64, u32) -> Option<String>,
 ) -> Vec<NativeStatement> {
+    emit_with_types(data, register_name, &Types::default())
+}
+
+/// Emits statements, declaring each named value at its recovered type.
+pub fn emit_with_types(
+    data: &Funcdata,
+    register_name: &dyn Fn(u32, u64, u32) -> Option<String>,
+    types: &Types,
+) -> Vec<NativeStatement> {
     let naming = mark_explicit(data);
     let resolver = Resolver::new(data, &naming, register_name);
     Emitter {
         data,
         naming: &naming,
         resolver,
+        types,
     }
     .run()
 }
@@ -43,6 +54,17 @@ struct Emitter<'a> {
     data: &'a Funcdata,
     naming: &'a Naming,
     resolver: Resolver<'a>,
+    types: &'a Types,
+}
+
+impl Emitter<'_> {
+    /// The recovered type of a value, falling back to its storage width.
+    fn type_of(&self, value: super::VarnodeId) -> Type {
+        self.types
+            .get(value)
+            .cloned()
+            .unwrap_or_else(|| Type::Unsigned(self.data.varnode(value).size.saturating_mul(8)))
+    }
 }
 
 impl Emitter<'_> {
@@ -122,9 +144,10 @@ impl Emitter<'_> {
                 continue;
             };
             let width = self.data.varnode(output).size;
+            let _ = width;
             declarations.push(NativeStatement::DeclareLocal {
                 name: name.to_string(),
-                ty: Type::Unsigned(width.saturating_mul(8)),
+                ty: self.type_of(output),
             });
         }
         declarations
@@ -173,11 +196,11 @@ impl Emitter<'_> {
                 match operation.output.and_then(|output| {
                     self.naming
                         .name_of(output)
-                        .map(|name| (name.to_string(), self.data.varnode(output).size))
+                        .map(|name| (name.to_string(), output))
                 }) {
-                    Some((name, width)) => Emission::Body(NativeStatement::Declare {
+                    Some((name, output)) => Emission::Body(NativeStatement::Declare {
                         name,
-                        ty: Type::Unsigned(width.saturating_mul(8)),
+                        ty: self.type_of(output),
                         value: call,
                     }),
                     None => Emission::Body(NativeStatement::Call(call)),
@@ -228,10 +251,9 @@ impl Emitter<'_> {
             .name_of(output)
             .expect("caller checked the value is named")
             .to_string();
-        let width = self.data.varnode(output).size;
         NativeStatement::Declare {
             name,
-            ty: Type::Unsigned(width.saturating_mul(8)),
+            ty: self.type_of(output),
             value: self.resolver.resolve_definition(output),
         }
     }

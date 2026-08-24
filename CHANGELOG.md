@@ -69,6 +69,12 @@ All notable Ventris changes are documented here.
 - Fixed the graph pipeline running the statement-level action database. Those
   rules repair the address-ordered emitter's output and assume its shape; on
   graph-emitted statements they deleted conditional branches.
+- Added type inference on the graph, ported from `ActionInferTypes`: types flow
+  along data-flow edges under `Datatype::typeOrder`, bounded at seven passes.
+  Propagation is bidirectional through copies, merges, and offsets, so a pointer
+  discovered at a dereference reaches the argument register it arrived in and
+  the base a field access started from. The previous solver only merged
+  constraints per value, which could not carry a type upward at all.
 
 - Added `LiftedInstruction::skips_delay_slot`, which reports the MIPS
   likely-branch shape so consumers stop treating its sequential successor as

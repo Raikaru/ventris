@@ -1836,7 +1836,8 @@ impl NativeDecompiler {
         // address-ordered emitter's output. Its rules assume that shape, and
         // running them over graph-emitted statements loses conditionals. The
         // graph's own rules already ran, on the graph.
-        let mut statements = graph::emit::emit(&data, &naming);
+        let recovered = graph::types::infer_types(&data, &BTreeMap::new());
+        let mut statements = graph::emit::emit_with_types(&data, &naming, &recovered);
         statements = structure::structure_graph(statements);
         let parameters = recover_parameters(abi, &statements);
         NativeDocument {
