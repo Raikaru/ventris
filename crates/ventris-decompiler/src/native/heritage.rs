@@ -58,7 +58,10 @@ pub(super) struct HeritageOperation {
     pub(super) id: OperationId,
     pub(super) opcode: i32,
     pub(super) defs: Vec<VersionedValue>,
-    pub(super) uses: Vec<VersionedValue>,
+    /// One entry per p-code input, in order. `None` marks a constant, which
+    /// has no version. Position must be preserved: a consumer substitutes
+    /// values back into the operation's own operand slots.
+    pub(super) uses: Vec<Option<VersionedValue>>,
     /// Memory state observed before this operation.
     pub(super) memory_in: Version,
     /// Memory state after this operation.  STORE and calls advance it;
@@ -908,10 +911,10 @@ fn rename_block(state: &mut RenameState<'_>, block_id: BlockId) {
             )
         };
         let is_multiequal = opcode == op::MULTIEQUAL;
-        let uses = if is_multiequal {
+        let uses: Vec<Option<VersionedValue>> = if is_multiequal {
             inputs
                 .iter()
-                .filter_map(|input| {
+                .map(|input| {
                     location_key(*input).map(|location| VersionedValue {
                         location,
                         version: 0,
@@ -921,7 +924,7 @@ fn rename_block(state: &mut RenameState<'_>, block_id: BlockId) {
         } else {
             inputs
                 .iter()
-                .filter_map(|input| {
+                .map(|input| {
                     let location = location_key(*input)?;
                     Some(VersionedValue {
                         location,
@@ -1064,7 +1067,7 @@ fn finalize_multiequal_uses(
                 .inputs
                 .iter()
                 .enumerate()
-                .filter_map(|(index, input)| {
+                .map(|(index, input)| {
                     let location = location_key(*input)?;
                     let version = pred_list
                         .get(index)
@@ -1334,7 +1337,9 @@ mod tests {
 
         let heritage = build_heritage(&function);
         let operations = &heritage.blocks[0].operations;
-        assert!(operations[0].uses.is_empty());
+        // The call's only input is its constant target, so the slot is present
+        // but carries no version.
+        assert_eq!(operations[0].uses, vec![None]);
         assert_ne!(operations[0].memory_in, operations[0].memory_out);
         assert_eq!(operations[1].memory_in, operations[0].memory_out);
     }

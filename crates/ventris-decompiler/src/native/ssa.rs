@@ -90,13 +90,14 @@ pub fn build_ssa(function: &NativeFunction) -> SsaFunction {
                 );
             }
 
-            let mut uses = record.uses.iter().copied();
             let mut data_uses = Vec::new();
             for (index, input) in operation.inputs.iter().copied().enumerate() {
                 if input.space == ventris_lifter::CONST_SPACE {
                     continue;
                 }
-                let Some(value) = uses.next() else {
+                // Uses are positional, so the version for this operand is at
+                // the operand's own index.
+                let Some(value) = record.uses.get(index).copied().flatten() else {
                     continue;
                 };
                 data_uses.push(value);
