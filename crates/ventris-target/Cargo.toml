@@ -3,8 +3,9 @@ name = "ventris-target"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Console target profiles and loader defaults"
 
 [dependencies]
-ventris-format = { path = "../ventris-format", version = "0.2.0" }
-ventris-lifter = { path = "../ventris-lifter", version = "0.2.0" }
+ventris-format = { path = "../ventris-format", version = "0.3.0" }
+ventris-lifter = { path = "../ventris-lifter", version = "0.3.0" }

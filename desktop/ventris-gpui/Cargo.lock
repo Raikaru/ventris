@@ -6390,11 +6390,11 @@ dependencies = [
 
 [[package]]
 name = "ventris-addr"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "ventris-db"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ventris-addr",
  "ventris-gen",
@@ -6403,14 +6403,14 @@ dependencies = [
 
 [[package]]
 name = "ventris-format"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ventris-addr",
 ]
 
 [[package]]
 name = "ventris-gen"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ventris-addr",
  "ventris-format",
@@ -6419,7 +6419,7 @@ dependencies = [
 
 [[package]]
 name = "ventris-gpui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "gpui",
  "gpui-component",
@@ -6428,22 +6428,31 @@ dependencies = [
 
 [[package]]
 name = "ventris-lifter"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ventris-format",
  "ventris-pcode",
+ "ventris-sleigh",
 ]
 
 [[package]]
 name = "ventris-log"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ventris-addr",
 ]
 
 [[package]]
 name = "ventris-pcode"
-version = "0.2.0"
+version = "0.3.0"
+
+[[package]]
+name = "ventris-sleigh"
+version = "0.3.0"
+dependencies = [
+ "miniz_oxide",
+ "ventris-pcode",
+]
 
 [[package]]
 name = "version_check"

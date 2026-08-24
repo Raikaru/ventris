@@ -135,6 +135,43 @@ fn raw_mips_ps2_source_reconstruction_smoke() {
 }
 
 #[test]
+fn ps1_target_decompile_renders_abi_parameter_prefix() {
+    let path = std::env::temp_dir().join(format!("ventris-ps1-abi-{}.bin", std::process::id()));
+    std::fs::write(
+        &path,
+        [
+            0x01, 0x00, 0xc2, 0x24, // addiu v0, a2, 1
+            0x08, 0x00, 0xe0, 0x03, // jr ra
+            0x00, 0x00, 0x00, 0x00, // delay slot
+        ],
+    )
+    .expect("write authored PS1 ABI fixture");
+    let output = run_owned(&[
+        "decompile".into(),
+        path.to_string_lossy().into_owned(),
+        "0x80010000".into(),
+        "--target".into(),
+        "ps1".into(),
+        "--raw".into(),
+        "--limit".into(),
+        "16".into(),
+        "--json".into(),
+    ]);
+    let _ = std::fs::remove_file(&path);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("uint32_t sub_80010000(uint32_t arg0, uint32_t arg1, uint32_t arg2)"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("return arg2 + 1;"), "{stdout}");
+}
+
+#[test]
 fn json_errors_use_stdout_without_usage_noise() {
     let output = run(&["inspect", "missing", "--json"]);
     assert_eq!(output.status.code(), Some(2));

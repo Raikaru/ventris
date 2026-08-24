@@ -1,7 +1,7 @@
 //! P-code: the IR every layer above L1 speaks.
 //!
 //! Opcode numbers are a **wire contract**, transcribed from
-//! `ghidra.program.model.pcode.PcodeOp` (Ghidra 12.1) rather than invented:
+//! `ghidra.program.model.pcode.PcodeOp` (Ghidra 12.1.3) rather than invented:
 //! the decompiler decodes `ATTRIB_CODE` as a raw integer and rejects anything
 //! outside `0..CPUI_MAX`.
 
@@ -9,10 +9,9 @@
 
 /// A varnode: a typed slice of an address space.
 ///
-/// `space` is an **index into the sleigh `<spaces>` table**, which is a
-/// different numbering from `ventris_addr::SpaceId` (an L0 container space).
-/// Conflating the two is a real hazard, so this crate does not depend on
-/// `ventris-addr` and the distinction stays visible in the type.
+/// `space` uses Ventris's canonical p-code space numbering. Compiled SLEIGH
+/// table indices are normalized at the decoder boundary so architecture-local
+/// spaces cannot displace `register`, `ram`, or `unique`.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Varnode {
     pub space: u32,
@@ -143,9 +142,13 @@ pub mod op {
     pub const MAX: i32 = 76;
 }
 
-/// Space indices as emitted in a `<sleigh>` translator spec. The constant space
-/// is inserted by the decompiler itself and is always index 0.
+/// Canonical p-code space indices. Ghidra language-local space tables are
+/// normalized to these stable values when semantics are emitted.
 pub const CONST_SPACE: u32 = 0;
+pub const OTHER_SPACE: u32 = 1;
+pub const UNIQUE_SPACE: u32 = 2;
+pub const RAM_SPACE: u32 = 3;
+pub const REGISTER_SPACE: u32 = 4;
 
 #[cfg(test)]
 mod tests {

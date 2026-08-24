@@ -1,6 +1,6 @@
 use ventris_lifter::{
-    AArch64, Architecture, Arm32, Flow, Lifter, M68k, M6502, Mips32, Mips32Be, N64, Ppc32, Ppc64,
-    Ps1, Rv32, Rv64, Sh2, Sh4, Spu, Thumb, X86_32, X86_64, Z80,
+    AArch64, Architecture, Arm32, Flow, GameCube, Lifter, M68k, M6502, Mips32, Mips32Be, N64,
+    Ppc32, Ppc64, Ps1, Ps2, Rv32, Rv64, Sh2, Sh4, Spu, Thumb, X86_32, X86_64, Z80,
 };
 use ventris_pcode::op;
 
@@ -103,6 +103,15 @@ const FIXTURES: &[Fixture] = &[
         bytes: &0x2402_002au32.to_le_bytes(),
         length: 4,
         flow: Flow::FallThrough(0x7004),
+        opcodes: &[op::COPY],
+    },
+    Fixture {
+        name: "ps2 add immediate",
+        architecture: Architecture::Ps2,
+        address: 0x7800,
+        bytes: &0x6402_002au32.to_le_bytes(),
+        length: 4,
+        flow: Flow::FallThrough(0x7804),
         opcodes: &[op::INT_ADD],
     },
     Fixture {
@@ -121,7 +130,7 @@ const FIXTURES: &[Fixture] = &[
         bytes: &0x3860_0001u32.to_be_bytes(),
         length: 4,
         flow: Flow::FallThrough(0x9004),
-        opcodes: &[op::INT_ADD],
+        opcodes: &[op::COPY],
     },
     Fixture {
         name: "x86_32 immediate",
@@ -139,7 +148,7 @@ const FIXTURES: &[Fixture] = &[
         bytes: &0x202au16.to_le_bytes(),
         length: 2,
         flow: Flow::FallThrough(0xb002),
-        opcodes: &[op::COPY],
+        opcodes: &[op::COPY, op::INT_SLESS, op::INT_EQUAL, op::COPY, op::COPY],
     },
     Fixture {
         name: "mips32 big-endian immediate",
@@ -157,7 +166,7 @@ const FIXTURES: &[Fixture] = &[
         bytes: &0x02a0_0513u32.to_le_bytes(),
         length: 4,
         flow: Flow::FallThrough(0xd004),
-        opcodes: &[op::COPY, op::INT_ADD],
+        opcodes: &[op::COPY, op::COPY],
     },
     Fixture {
         name: "m68k immediate",
@@ -166,7 +175,7 @@ const FIXTURES: &[Fixture] = &[
         bytes: &0x702au16.to_be_bytes(),
         length: 2,
         flow: Flow::FallThrough(0xe002),
-        opcodes: &[op::COPY],
+        opcodes: &[op::COPY, op::INT_SLESS, op::INT_EQUAL, op::COPY, op::COPY],
     },
     Fixture {
         name: "sh2 immediate",
@@ -184,7 +193,7 @@ const FIXTURES: &[Fixture] = &[
         bytes: &0xe02au16.to_le_bytes(),
         length: 2,
         flow: Flow::FallThrough(0x10002),
-        opcodes: &[op::COPY],
+        opcodes: &[op::COPY, op::COPY],
     },
     Fixture {
         name: "6502 immediate",
@@ -193,7 +202,7 @@ const FIXTURES: &[Fixture] = &[
         bytes: &[0xa9, 0x2a],
         length: 2,
         flow: Flow::FallThrough(0x11002),
-        opcodes: &[op::COPY],
+        opcodes: &[op::COPY, op::COPY, op::INT_EQUAL, op::INT_SLESS],
     },
     Fixture {
         name: "z80 immediate",
@@ -210,34 +219,23 @@ const FIXTURES: &[Fixture] = &[
         address: 0x13000,
         bytes: &[0x00, 0x00, 0x00, 0x00],
         length: 4,
-        flow: Flow::Return,
-        opcodes: &[op::RETURN],
+        flow: Flow::FallThrough(0x13004),
+        opcodes: &[op::CALLOTHER],
     },
 ];
 
 #[test]
-fn new_architectures_reject_unknown_opcodes() {
-    let ppc = Ppc64
-        .lift_instruction(0x14000, &[0xff, 0xff, 0xff, 0xff])
-        .unwrap_err();
-    assert!(matches!(
-        ppc,
-        ventris_lifter::LiftError::Unsupported {
-            architecture: Architecture::Ppc64,
-            ..
-        }
-    ));
-
-    let spu = Spu
-        .lift_instruction(0x14004, &[0xff, 0xff, 0xff, 0xff])
-        .unwrap_err();
-    assert!(matches!(
-        spu,
-        ventris_lifter::LiftError::Unsupported {
-            architecture: Architecture::Spu,
-            ..
-        }
-    ));
+fn every_architecture_rejects_truncated_input() {
+    for architecture in Architecture::ALL {
+        let error = ventris_lifter::lifter_for(architecture)
+            .lift_instruction(0x14000, &[])
+            .expect_err("empty input must be truncated");
+        assert!(matches!(
+            error,
+            ventris_lifter::LiftError::Truncated { .. }
+                | ventris_lifter::LiftError::Semantics { .. }
+        ));
+    }
 }
 
 fn lift(fixture: &Fixture) -> ventris_lifter::LiftedInstruction {
@@ -247,16 +245,16 @@ fn lift(fixture: &Fixture) -> ventris_lifter::LiftedInstruction {
         Architecture::AArch64 => AArch64.lift_instruction(fixture.address, fixture.bytes),
         Architecture::Arm32 => Arm32.lift_instruction(fixture.address, fixture.bytes),
         Architecture::Thumb => Thumb.lift_instruction(fixture.address, fixture.bytes),
-        Architecture::Mips32 | Architecture::Ps1 => {
-            Mips32.lift_instruction(fixture.address, fixture.bytes)
-        }
+        Architecture::Mips32 => Mips32.lift_instruction(fixture.address, fixture.bytes),
+        Architecture::Ps1 => Ps1.lift_instruction(fixture.address, fixture.bytes),
+        Architecture::Ps2 => Ps2.lift_instruction(fixture.address, fixture.bytes),
         Architecture::Mips32Be => Mips32Be.lift_instruction(fixture.address, fixture.bytes),
         Architecture::N64 => N64.lift_instruction(fixture.address, fixture.bytes),
         Architecture::Rv64 => Rv64.lift_instruction(fixture.address, fixture.bytes),
         Architecture::Rv32 => Rv32.lift_instruction(fixture.address, fixture.bytes),
         Architecture::Ppc32 => Ppc32.lift_instruction(fixture.address, fixture.bytes),
         Architecture::Ppc64 => Ppc64.lift_instruction(fixture.address, fixture.bytes),
-        Architecture::GameCube => Ppc32.lift_instruction(fixture.address, fixture.bytes),
+        Architecture::GameCube => GameCube.lift_instruction(fixture.address, fixture.bytes),
         Architecture::M68k => M68k.lift_instruction(fixture.address, fixture.bytes),
         Architecture::Sh2 => Sh2.lift_instruction(fixture.address, fixture.bytes),
         Architecture::Sh4 => Sh4.lift_instruction(fixture.address, fixture.bytes),
@@ -299,6 +297,143 @@ fn checked_in_instruction_corpus_is_stable() {
             .collect();
         assert_eq!(actual, fixture.opcodes, "{} p-code", fixture.name);
     }
+}
+
+#[test]
+fn architecture_return_encodings_are_recognized() {
+    assert_eq!(
+        AArch64
+            .lift_instruction(0x1000, &0xd65f_03c0u32.to_le_bytes())
+            .unwrap()
+            .flow,
+        Flow::Return
+    );
+    assert_eq!(
+        Mips32
+            .lift_instruction(0x1000, &0x03e0_0008u32.to_le_bytes())
+            .unwrap()
+            .flow,
+        Flow::Return
+    );
+    assert_eq!(
+        Ps1.lift_instruction(0x1000, &0x03e0_0008u32.to_le_bytes())
+            .unwrap()
+            .flow,
+        Flow::Return
+    );
+    assert_eq!(
+        N64.lift_instruction(0x1000, &0x03e0_0008u32.to_be_bytes())
+            .unwrap()
+            .flow,
+        Flow::Return
+    );
+    assert_eq!(
+        Ppc32
+            .lift_instruction(0x1000, &0x4e80_0020u32.to_be_bytes())
+            .unwrap()
+            .flow,
+        Flow::Return
+    );
+    assert_eq!(
+        GameCube
+            .lift_instruction(0x1000, &0x4e80_0020u32.to_be_bytes())
+            .unwrap()
+            .flow,
+        Flow::Return
+    );
+}
+
+#[test]
+fn mips_discovery_preserves_delay_slots_without_following_calls() {
+    let words = [0x0c00_0800u32, 0, 0x03e0_0008, 0];
+    let bytes = words
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect::<Vec<_>>();
+    let image = ventris_format::Image {
+        len: bytes.len() as u64,
+        format: ventris_format::Format::Pe(ventris_format::PeFacts {
+            machine: 0x166,
+            plus: false,
+            image_base: 0,
+        }),
+        segments: vec![ventris_format::Segment {
+            name: Some(".text".into()),
+            addr: 0x1000,
+            size: bytes.len() as u64,
+            file_off: 0,
+            file_size: bytes.len() as u64,
+            perms: ventris_format::Perms {
+                read: Some(true),
+                write: Some(false),
+                exec: Some(true),
+            },
+        }],
+        regions: Vec::new(),
+        entry: Some(0x1000),
+        symbol_count: 0,
+    };
+    let function = Mips32.discover(&image, &bytes, 0x1000, 8).unwrap();
+    assert_eq!(function.calls, [0x2000].into_iter().collect());
+    assert_eq!(
+        function.instructions.keys().copied().collect::<Vec<_>>(),
+        vec![0x1000, 0x1004, 0x1008, 0x100c]
+    );
+}
+
+#[test]
+fn thumb_bl_uses_thumb_context_and_both_halfwords() {
+    let instruction = Thumb
+        .lift_instruction(0x1000, &[0x00, 0xf0, 0x00, 0xf8])
+        .unwrap();
+    assert_eq!(instruction.pcode.len, 4);
+    assert!(
+        instruction
+            .pcode
+            .ops
+            .iter()
+            .any(|operation| { matches!(operation.opcode, op::CALL | op::CALLIND) })
+    );
+}
+
+#[test]
+fn gamecube_compiled_context_expands_gekko_operations() {
+    let store = GameCube
+        .lift_instruction(0x1000, &0xbec1_0020u32.to_be_bytes())
+        .unwrap();
+    let stored_registers = store
+        .pcode
+        .ops
+        .iter()
+        .filter(|operation| operation.opcode == op::STORE)
+        .map(|operation| operation.inputs[2].offset)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        stored_registers,
+        (22_u64..32)
+            .map(|register| register * 4)
+            .collect::<Vec<_>>()
+    );
+
+    let load = GameCube
+        .lift_instruction(0x1000, &0xbac1_0020u32.to_be_bytes())
+        .unwrap();
+    let loaded_registers = load
+        .pcode
+        .ops
+        .iter()
+        .filter(|operation| operation.opcode == op::LOAD)
+        .map(|operation| operation.output.unwrap().offset)
+        .collect::<Vec<_>>();
+    assert_eq!(loaded_registers, stored_registers);
+
+    let paired_single = GameCube
+        .lift_instruction(0x1000, &0xf3e1_0038u32.to_be_bytes())
+        .unwrap();
+    assert!(
+        paired_single.pcode.ops.len() > 8,
+        "Gekko paired-single semantics must not collapse to a placeholder"
+    );
 }
 
 #[test]

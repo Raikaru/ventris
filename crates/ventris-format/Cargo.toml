@@ -3,7 +3,8 @@ name = "ventris-format"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Bounds-checked executable and console image parsing"
 
 [dependencies]
-ventris-addr = { path = "../ventris-addr", version = "0.2.0" }
+ventris-addr = { path = "../ventris-addr", version = "0.3.0" }

@@ -34,6 +34,38 @@ class SmokeError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class ManifestCommand:
+    """One argv-based tool command from an entry-level toolchain profile."""
+
+    program: str
+    args: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class MnemonicAlias:
+    """A target-provided disassembler mnemonic alias."""
+
+    from_mnemonic: str
+    to_mnemonic: str
+
+
+@dataclass(frozen=True)
+class ManifestToolchain:
+    """Typed compiler/disassembler facts supplied by the corpus manifest."""
+
+    id: str
+    compiler: ManifestCommand
+    disassembler: ManifestCommand
+    disassembly_format: str
+    mnemonic_aliases: tuple[MnemonicAlias, ...]
+    call_mnemonics: tuple[str, ...]
+    retail_input: str
+    # These optional fields are accepted for forward-compatible manifests and
+    # are checked against the containing entry when present.
+    target: str | None = None
+    profile: str | None = None
+
+@dataclass(frozen=True)
 class ManifestFunction:
     name: str
     address: str
@@ -54,8 +86,11 @@ class ManifestEntry:
     binary_name: str
     binary_sha256: str | None
     binary_sha1: str | None
+    base: int | None
+    address_space: str | None
     functions: tuple[ManifestFunction, ...]
     metadata: dict[str, object] | None = None
+    toolchain: ManifestToolchain | None = None
 
 
 CommandRunner = Callable[[Sequence[str], Sequence[str]], tuple[str, str]]
@@ -71,7 +106,111 @@ def _parse_int(value: object, field: str) -> int:
             return int(value, 0)
         except ValueError as error:
             raise SmokeError(f"{field} is not an address or integer: {value!r}") from error
+
     raise SmokeError(f"{field} must be an integer or hexadecimal string")
+
+
+def _parse_string_list(value: object, field: str, *, allow_empty: bool = True) -> tuple[str, ...]:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise SmokeError(f"{field} must be an array of strings")
+    if not allow_empty and not value:
+        raise SmokeError(f"{field} must not be empty")
+    if any(not item for item in value):
+        raise SmokeError(f"{field} must not contain empty strings")
+    return tuple(value)
+
+
+def _parse_tool_command(value: object, field: str) -> ManifestCommand:
+    if not isinstance(value, dict):
+        raise SmokeError(f"{field} must be an object")
+    program = value.get("program")
+    if not isinstance(program, str) or not program:
+        raise SmokeError(f"{field}.program must be a non-empty string")
+    args = _parse_string_list(value.get("args"), f"{field}.args")
+    return ManifestCommand(program=program, args=args)
+
+
+def _parse_toolchain(value: object, entry_id: str, target: str) -> ManifestToolchain:
+    if not isinstance(value, dict):
+        raise SmokeError(f"{entry_id}: toolchain must be an object or null")
+    toolchain_id = value.get("id")
+    if not isinstance(toolchain_id, str) or not toolchain_id:
+        raise SmokeError(f"{entry_id}: toolchain.id must be a non-empty string")
+    disassembly_format = value.get("disassembly_format")
+    if not isinstance(disassembly_format, str):
+        raise SmokeError(f"{entry_id}: toolchain.disassembly_format must be a string")
+    disassembly_format = disassembly_format.lower()
+    if disassembly_format not in {"gnu", "llvm"}:
+        raise SmokeError(
+            f"{entry_id}: unknown disassembly dialect {disassembly_format!r}"
+        )
+    retail_input = value.get("retail_input")
+    if not isinstance(retail_input, str):
+        raise SmokeError(f"{entry_id}: toolchain.retail_input must be a string")
+    retail_input = retail_input.lower()
+    if retail_input not in {"image", "lifted-raw"}:
+        raise SmokeError(f"{entry_id}: unknown retail input {retail_input!r}")
+
+    raw_aliases = value.get("mnemonic_aliases")
+    if not isinstance(raw_aliases, list):
+        raise SmokeError(f"{entry_id}: toolchain.mnemonic_aliases must be an array")
+    aliases: list[MnemonicAlias] = []
+    seen_aliases: dict[str, str] = {}
+    for index, raw_alias in enumerate(raw_aliases):
+        if not isinstance(raw_alias, dict):
+            raise SmokeError(
+                f"{entry_id}: toolchain.mnemonic_aliases[{index}] must be an object"
+            )
+        from_mnemonic = raw_alias.get("from")
+        to_mnemonic = raw_alias.get("to")
+        if (
+            not isinstance(from_mnemonic, str)
+            or not from_mnemonic
+            or not isinstance(to_mnemonic, str)
+            or not to_mnemonic
+        ):
+            raise SmokeError(
+                f"{entry_id}: toolchain.mnemonic_aliases[{index}] needs non-empty from/to"
+            )
+        source = from_mnemonic.lower()
+        destination = to_mnemonic.lower()
+        previous = seen_aliases.get(source)
+        if previous is not None and previous != destination:
+            raise SmokeError(
+                f"{entry_id}: conflicting mnemonic aliases for {from_mnemonic!r}"
+            )
+        if previous is None:
+            aliases.append(MnemonicAlias(source, destination))
+            seen_aliases[source] = destination
+    call_mnemonics = tuple(
+        item.lower()
+        for item in _parse_string_list(
+            value.get("call_mnemonics"),
+            f"{entry_id}.toolchain.call_mnemonics",
+        )
+    )
+    target_hint = value.get("target")
+    profile_hint = value.get("profile")
+    for field, hint in (("target", target_hint), ("profile", profile_hint)):
+        if hint is not None and (
+            not isinstance(hint, str) or not hint or hint != target
+        ):
+            raise SmokeError(
+                f"{entry_id}: toolchain {field} does not match target {target!r}"
+            )
+    return ManifestToolchain(
+        id=toolchain_id,
+        compiler=_parse_tool_command(value.get("compiler"), f"{entry_id}.toolchain.compiler"),
+        disassembler=_parse_tool_command(
+            value.get("disassembler"), f"{entry_id}.toolchain.disassembler"
+        ),
+        disassembly_format=disassembly_format,
+        mnemonic_aliases=tuple(aliases),
+        call_mnemonics=call_mnemonics,
+        retail_input=retail_input,
+        target=target_hint,
+        profile=profile_hint,
+    )
 
 
 def _envelope(text: str, command: str) -> str:
@@ -108,10 +247,12 @@ def parse_manifest(text: str) -> tuple[ManifestEntry, ...]:
         binary_name = raw.get("binary_name")
         expected_hash = raw.get("binary_sha256")
         expected_sha1 = raw.get("binary_sha1")
+        raw_base = raw.get("base")
         source_url = raw.get("source_url")
         source_commit = raw.get("source_commit")
         source_license = raw.get("source_license")
         metadata = raw.get("metadata")
+        toolchain_raw = raw.get("toolchain")
         functions_raw = raw.get("functions")
         if not all(
             isinstance(value, str)
@@ -130,11 +271,22 @@ def parse_manifest(text: str) -> tuple[ManifestEntry, ...]:
             raise SmokeError(f"{entry_id}: binary_sha256 must be a string or null")
         if expected_sha1 is not None and not isinstance(expected_sha1, str):
             raise SmokeError(f"{entry_id}: binary_sha1 must be a string or null")
+        if raw_base is not None:
+            raw_base = _parse_int(raw_base, f"{entry_id}.base")
+        address_space = raw.get("address_space")
+        if address_space is not None and (
+            not isinstance(address_space, str) or not address_space
+        ):
+            raise SmokeError(f"{entry_id}: address_space must be a non-empty string or null")
         if metadata is not None and not isinstance(metadata, dict):
             raise SmokeError(f"{entry_id}: metadata must be an object or null")
+        toolchain = (
+            None
+            if toolchain_raw is None
+            else _parse_toolchain(toolchain_raw, entry_id, target)
+        )
         if not isinstance(functions_raw, list) or not functions_raw:
             raise SmokeError(f"{entry_id}: corpus entry has no representative function")
-
         functions: list[ManifestFunction] = []
         for raw_function in functions_raw:
             if not isinstance(raw_function, dict):
@@ -159,6 +311,15 @@ def parse_manifest(text: str) -> tuple[ManifestEntry, ...]:
                 raise SmokeError(
                     f"{entry_id}/{name}: compiler baseline must be an object or null"
                 )
+            if (
+                compiler_baseline is not None
+                and compiler_baseline.get("target") is not None
+                and compiler_baseline.get("target") != target
+            ):
+                raise SmokeError(
+                    f"{entry_id}/{name}: compiler baseline target does not match "
+                    f"entry target {target!r}"
+                )
             functions.append(
                 ManifestFunction(
                     name=name,
@@ -181,8 +342,11 @@ def parse_manifest(text: str) -> tuple[ManifestEntry, ...]:
                 binary_name=binary_name,
                 binary_sha256=expected_hash,
                 binary_sha1=expected_sha1,
-                metadata=metadata,
+                base=raw_base,
                 functions=tuple(functions),
+                metadata=metadata,
+                address_space=address_space,
+                toolchain=toolchain,
             )
         )
     return tuple(entries)
@@ -238,11 +402,13 @@ def sha1_file(path: Path) -> str:
             digest.update(chunk)
     return digest.hexdigest()
 
+
 def function_address(entry: ManifestEntry, function: ManifestFunction) -> str:
-    address = function.address
-    # The PS2 ELF exposes overlapping address spaces; qualify the manifest
-    # address so the runner checks the same EE RAM space every time.
-    return address if "::" in address or entry.target != "ps2" else f"ram::{address}"
+    """Qualify a manifest offset when the corpus pins an image space."""
+
+    if "::" in function.address or entry.address_space is None:
+        return function.address
+    return f"{entry.address_space}::{function.address}"
 
 
 def _hash_status(
@@ -293,10 +459,22 @@ def _strings(value: object, field: str) -> list[str]:
     return list(value)
 
 
-def _source_body(source: str, function_name: str) -> str | None:
-    signature = re.search(
-        rf"\b{re.escape(function_name)}\s*\([^;{{}}]*\)\s*\{{", source
+def _source_signature(source: str, function_name: str) -> re.Match[str] | None:
+    signatures = [
+        candidate
+        for candidate in re.finditer(
+            r"\b([A-Za-z_]\w*)\s*\(([^;{}]*)\)\s*\{", source
+        )
+        if candidate.group(1) not in {"if", "for", "while", "switch"}
+    ]
+    return next(
+        (candidate for candidate in signatures if candidate.group(1) == function_name),
+        signatures[0] if signatures else None,
     )
+
+
+def _source_body(source: str, function_name: str) -> str | None:
+    signature = _source_signature(source, function_name)
     if signature is None:
         return None
     start = source.find("{", signature.start())
@@ -340,10 +518,21 @@ def _source_declarations(source: str, function_name: str) -> list[str]:
         r"struct\s+\w+|\w+)\s+\**\s*([A-Za-z_]\w*)\s*(?:=[^;]*)?;\s*$"
     )
     for line in body.splitlines():
+        if re.match(r"\s*(?:return|if|for|while|switch)\b", line):
+            continue
         match = pattern.match(line)
         if match and match.group(1) not in {"return", "if", "for", "while", "switch"}:
             declarations.append(match.group(1))
     return declarations
+
+def _source_declaration_order(source: str, function_name: str) -> list[str]:
+    # Materialized call results preserve single evaluation but are renderer
+    # implementation details, not recovered source declaration evidence.
+    return [
+        name
+        for name in _source_declarations(source, function_name)
+        if re.fullmatch(r"call_[0-9a-f]+", name) is None
+    ]
 
 
 def _source_cast_count(source: str, function_name: str) -> int:
@@ -376,12 +565,10 @@ def _source_nominal_fields(source: str, function_name: str) -> list[str]:
 def _source_globals(source: str, function_name: str) -> list[str]:
     body = _source_body(source, function_name) or ""
     locals_ = set(_source_declarations(source, function_name))
-    signature = re.search(
-        rf"\b{re.escape(function_name)}\s*\((.*?)\)", source, re.DOTALL
-    )
+    signature = _source_signature(source, function_name)
     if signature:
         locals_.update(
-            re.findall(r"\b([A-Za-z_]\w*)\s*(?=,|$)", signature.group(1))
+            re.findall(r"\b([A-Za-z_]\w*)\s*(?=,|$)", signature.group(2))
         )
     calls = {
         match.group(1)
@@ -563,7 +750,7 @@ def _semantic_report(
         "recovered_accesses_types": _recovered_access_types(recovery or "", ""),
         "casts": _source_cast_count(source or "", function.name),
         "aggregate_copies": (source or "").count("__builtin_memcpy("),
-        "declaration_order": _source_declarations(source or "", function.name),
+        "declaration_order": _source_declaration_order(source or "", function.name),
         "nominal_fields": _source_nominal_fields(source or "", function.name),
         "reconstructed_source_structure": _source_structure(
             source or "", function.name
@@ -724,7 +911,10 @@ def smoke_entry(
             json.dumps(entry.metadata, sort_keys=True), encoding="utf-8"
         )
         metadata_args = ["--metadata", os.fspath(metadata_path)]
-    target_args = ["--target", entry.target, "--json"]
+    target_args = ["--target", entry.target]
+    if entry.base is not None:
+        target_args.extend(["--base", f"0x{entry.base:x}"])
+    target_args.append("--json")
     function_results: list[dict[str, object]] = []
     warnings: list[str] = []
 
@@ -774,7 +964,7 @@ def smoke_entry(
         analysis_args = [
             os.fspath(image),
             address,
-            *target_args[:2],
+            *target_args[:-1],
             "--limit",
             str(limit),
             "--json",

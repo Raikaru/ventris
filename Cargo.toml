@@ -9,6 +9,7 @@ members = [
     "crates/ventris-gen",
     "crates/ventris-log",
     "crates/ventris-pcode",
+    "crates/ventris-sleigh",
     "crates/ventris-target",
     "crates/ventris-lifter",
     "crates/ventris-game",
@@ -18,10 +19,10 @@ members = [
 [workspace.package]
 edition = "2024"
 rust-version = "1.98"
-version = "0.2.0"
+version = "0.3.0"
  license = "Apache-2.0"
+repository = "https://github.com/Raikaru/ventris"
 
-# No third-party dependencies anywhere in the scaffold. The dependency choices
-# named in ARCHITECTURE.md (object, gimli, pdb, rayon, wasmtime) are deliberate
-# omissions here: the point of this workspace is the *boundaries*, and adding
-# real crates would let dependency creep across them go unnoticed.
+# Third-party crates stay behind the stage that owns them. `ventris-sleigh`
+# depends on pure-Rust `miniz_oxide` solely for Ghidra's zlib-compressed SLA
+# container; higher analysis and public facade crates do not inherit it.

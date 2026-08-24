@@ -1,12 +1,15 @@
 import ghidra.app.script.GhidraScript;
+import ghidra.app.cmd.disassemble.DisassembleCommand;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.lang.Language;
+import ghidra.program.model.address.AddressSet;
 import ghidra.program.model.lang.Register;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.FunctionIterator;
 import ghidra.program.model.listing.Instruction;
 import ghidra.program.model.listing.InstructionIterator;
 import ghidra.program.model.pcode.PcodeOp;
+import ghidra.program.model.symbol.SourceType;
 import ghidra.program.model.pcode.Varnode;
 import java.io.File;
 import java.io.PrintWriter;
@@ -21,6 +24,7 @@ public class DumpCapsule extends GhidraScript {
         String outputPath = scriptArgs.length > 1
                 ? scriptArgs[1]
                 : new File(System.getProperty("java.io.tmpdir"), "ventris/capsule/capsule.txt").getPath();
+        Long explicitLength = scriptArgs.length > 2 ? Long.decode(scriptArgs[2]) : null;
 
         Function pick = null;
         FunctionIterator fit = currentProgram.getFunctionManager().getFunctions(true);
@@ -43,10 +47,36 @@ public class DumpCapsule extends GhidraScript {
         if (pick == null) {
             try {
                 Address start = toAddr(wanted);
-                disassemble(start);
-                pick = createFunction(start, null);
-            } catch (Exception ignored) {
-                // A symbolic query without an auto-discovered function remains absent.
+                if (explicitLength != null) {
+                    if (explicitLength.longValue() <= 0) {
+                        throw new IllegalArgumentException("explicit length must be positive");
+                    }
+                    AddressSet body = new AddressSet(
+                            start, start.addNoWrap(explicitLength.longValue() - 1));
+                    Address cursor = start;
+                    while (body.contains(cursor)) {
+                        Instruction instruction = currentProgram.getListing().getInstructionAt(cursor);
+                        if (instruction == null) {
+                            DisassembleCommand command =
+                                    new DisassembleCommand(cursor, body, false);
+                            command.applyTo(currentProgram, monitor);
+                            instruction = currentProgram.getListing().getInstructionAt(cursor);
+                        }
+                        if (instruction == null) {
+                            throw new IllegalStateException(
+                                    "failed to disassemble instruction at " + cursor);
+                        }
+                        cursor = instruction.getMaxAddress().next();
+                    }
+                    pick = currentProgram.getFunctionManager().createFunction(
+                            null, start, body, SourceType.USER_DEFINED);
+                }
+                else {
+                    disassemble(start);
+                    pick = createFunction(start, null);
+                }
+            } catch (Exception error) {
+                println("VENTRIS candidate creation failed: " + error.getMessage());
             }
         }
         if (pick == null) {

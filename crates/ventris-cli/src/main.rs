@@ -29,7 +29,7 @@ use ventris_lifter::{Architecture, Flow, Lifter, discover_functions};
 use ventris_target::TargetProfile;
 
 // Bump whenever native lifting/decompilation semantics change.
-const NATIVE_ANALYZER_CODE_VERSION: u32 = 8;
+const NATIVE_ANALYZER_CODE_VERSION: u32 = 9;
 const USAGE: &str = "Usage:
   ventris help
   ventris version
@@ -42,7 +42,7 @@ Commands:
   lift                Lift one function into architecture-neutral p-code.
   decompile           Load, lift, analyze, and render one function as C.
 
-  --arch <arch>       Explicit architecture: x86_64, x86_32, aarch64, arm32, thumb, mips32, mips32be, ps1, n64, rv64, rv32, ppc32, ppc64, gamecube, m68k, sh2, sh4, m6502, z80, or spu.
+  --arch <arch>       Explicit architecture: x86_64, x86_32, aarch64, arm32, thumb, mips32, mips32be, ps1, ps2, n64, rv64, rv32, ppc32, ppc64, gamecube, m68k, sh2, sh4, m6502, z80, or spu.
   --target <target>   Console profile supplying architecture, loader, ABI, and image parts.
   --loader <loader>   Image container: auto, raw, elf, pe, macho, coff, ihex, srec, n64-rom, dol, nds, ncch, psp-prx, vita-self, wiiu-rpl, xex, or ps3-self.
   --metadata <file>   Optional evidence sidecar with nominal types and assertions.
@@ -1004,6 +1004,7 @@ fn parse_architecture(value: &str) -> Result<Architecture, String> {
         "mips32" | "mips" => Ok(Architecture::Mips32),
         "mips32be" | "mips-be" | "mips32-big" => Ok(Architecture::Mips32Be),
         "ps1" | "playstation1" | "mips1" => Ok(Architecture::Ps1),
+        "ps2" | "playstation2" | "r5900" => Ok(Architecture::Ps2),
         "n64" | "mips64" | "r4300" => Ok(Architecture::N64),
         "rv64" | "riscv64" => Ok(Architecture::Rv64),
         "rv32" | "riscv32" => Ok(Architecture::Rv32),
@@ -1132,12 +1133,59 @@ fn corpus_compiler_value(baseline: Option<corpus::CorpusCompilerBaseline>) -> Va
         return Value::Null;
     };
     object([
-        ("compiler".into(), Value::string(baseline.compiler)),
         ("target".into(), Value::string(baseline.target)),
         (
             "minimum_mnemonic_lcs_ratio".into(),
             Value::number(baseline.minimum_mnemonic_lcs_ratio),
         ),
+    ])
+}
+
+fn corpus_toolchain_command_value(command: corpus::CorpusToolchainCommand) -> Value {
+    object([
+        ("program".into(), Value::string(command.program)),
+        ("args".into(), corpus_strings(command.args)),
+    ])
+}
+
+fn corpus_toolchain_value(toolchain: Option<corpus::CorpusToolchain>) -> Value {
+    let Some(toolchain) = toolchain else {
+        return Value::Null;
+    };
+    object([
+        ("id".into(), Value::string(toolchain.id)),
+        (
+            "compiler".into(),
+            corpus_toolchain_command_value(toolchain.compiler),
+        ),
+        (
+            "disassembler".into(),
+            corpus_toolchain_command_value(toolchain.disassembler),
+        ),
+        (
+            "disassembly_format".into(),
+            Value::string(toolchain.disassembly_format),
+        ),
+        (
+            "mnemonic_aliases".into(),
+            Value::Array(
+                toolchain
+                    .mnemonic_aliases
+                    .iter()
+                    .map(|alias| {
+                        object([
+                            ("from".into(), Value::string(alias.from)),
+                            ("to".into(), Value::string(alias.to)),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ),
+        (
+            "call_mnemonics".into(),
+            corpus_strings(toolchain.call_mnemonics),
+        ),
+        ("retail_input".into(), Value::string(toolchain.retail_input)),
     ])
 }
 
@@ -1173,11 +1221,26 @@ fn render_corpus(format: OutputFormat) -> String {
                         "binary_sha1".into(),
                         entry.binary_sha1.map(Value::string).unwrap_or(Value::Null),
                     ),
+                    (
+                        "base".into(),
+                        entry
+                            .base
+                            .map(|base| Value::string(format!("0x{base:x}")))
+                            .unwrap_or(Value::Null),
+                    ),
+                    (
+                        "address_space".into(),
+                        entry
+                            .address_space
+                            .map(Value::string)
+                            .unwrap_or(Value::Null),
+                    ),
                     ("status".into(), Value::string(entry.status)),
                     (
                         "metadata".into(),
                         corpus_metadata_value(entry.metadata_json),
                     ),
+                    ("toolchain".into(), corpus_toolchain_value(entry.toolchain)),
                     (
                         "functions".into(),
                         Value::Array(
@@ -1245,6 +1308,9 @@ fn render_corpus_entry(out: &mut String, entry: &corpus::CorpusEntry) {
     .unwrap();
     if let Some(hash) = entry.binary_sha256 {
         writeln!(out, "    sha256={hash}").unwrap();
+    }
+    if let Some(base) = entry.base {
+        writeln!(out, "    base=0x{base:x}").unwrap();
     }
     for function in entry.functions {
         writeln!(
@@ -4223,6 +4289,155 @@ mod tests {
     }
 
     #[test]
+    fn corpus_json_renders_optional_and_populated_toolchains() {
+        let output = run(Command::Corpus(OutputFormat::Json)).unwrap();
+        let envelope = json::parse(&output).unwrap();
+        let result = envelope
+            .get("result")
+            .and_then(Value::as_str)
+            .expect("corpus JSON envelope must contain a string result");
+        let Value::Array(entries) = json::parse(result).unwrap() else {
+            panic!("corpus result must be an entry array");
+        };
+        let find_entry = |id: &str| {
+            entries
+                .iter()
+                .find(|entry| entry.get("id").and_then(Value::as_str) == Some(id))
+                .expect("corpus entry missing")
+        };
+
+        let n64 = find_entry("n64-perfect-dark-ntsc-final");
+        assert!(matches!(n64.get("toolchain"), Some(Value::Null)));
+
+        let dungeon = find_entry("ps2-dungeon-game");
+        let Some(Value::Object(toolchain)) = dungeon.get("toolchain") else {
+            panic!("Dungeon Game must expose a toolchain profile");
+        };
+        assert_eq!(
+            toolchain.get("id").and_then(Value::as_str),
+            Some("clang-mipsel-o32-llvm")
+        );
+
+        let Some(Value::Object(compiler)) = toolchain.get("compiler") else {
+            panic!("toolchain compiler must be an object");
+        };
+        assert_eq!(
+            compiler.get("program").and_then(Value::as_str),
+            Some("clang")
+        );
+        let Some(Value::Array(compiler_args)) = compiler.get("args") else {
+            panic!("toolchain compiler args must be an array");
+        };
+        assert_eq!(
+            compiler_args
+                .iter()
+                .map(|value| value.as_str().expect("compiler argv must be strings"))
+                .collect::<Vec<_>>(),
+            vec![
+                "--target=mipsel-none-elf",
+                "-std=c11",
+                "-O2",
+                "-ffreestanding",
+                "-fno-pic",
+                "-mno-abicalls",
+                "-Wno-error=int-conversion",
+                "-c",
+                "{source}",
+                "-o",
+                "{object}",
+            ]
+        );
+
+        let Some(Value::Object(disassembler)) = toolchain.get("disassembler") else {
+            panic!("toolchain disassembler must be an object");
+        };
+        assert_eq!(
+            disassembler.get("program").and_then(Value::as_str),
+            Some("llvm-objdump")
+        );
+        let Some(Value::Array(disassembler_args)) = disassembler.get("args") else {
+            panic!("toolchain disassembler args must be an array");
+        };
+        assert_eq!(
+            disassembler_args
+                .iter()
+                .map(|value| value.as_str().expect("disassembler argv must be strings"))
+                .collect::<Vec<_>>(),
+            vec![
+                "-d",
+                "--no-show-raw-insn",
+                "--start-address={start}",
+                "--stop-address={stop}",
+                "{input}",
+            ]
+        );
+        assert_eq!(
+            toolchain.get("disassembly_format").and_then(Value::as_str),
+            Some("llvm")
+        );
+        let Some(Value::Array(aliases)) = toolchain.get("mnemonic_aliases") else {
+            panic!("mnemonic aliases must be an array");
+        };
+        assert_eq!(
+            aliases
+                .iter()
+                .map(|value| {
+                    let Value::Object(alias) = value else {
+                        panic!("mnemonic alias must be an object");
+                    };
+                    (
+                        alias
+                            .get("from")
+                            .and_then(Value::as_str)
+                            .expect("alias source must be a string"),
+                        alias
+                            .get("to")
+                            .and_then(Value::as_str)
+                            .expect("alias target must be a string"),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                ("move", "addu"),
+                ("b", "beq"),
+                ("beqz", "beq"),
+                ("bnez", "bne"),
+            ]
+        );
+        let Some(Value::Array(call_mnemonics)) = toolchain.get("call_mnemonics") else {
+            panic!("call mnemonics must be an array");
+        };
+        assert_eq!(
+            call_mnemonics
+                .iter()
+                .map(|value| value.as_str().expect("call mnemonic must be a string"))
+                .collect::<Vec<_>>(),
+            vec!["jal", "jalr", "bal", "bgezal", "bltzal"]
+        );
+        assert_eq!(
+            toolchain.get("retail_input").and_then(Value::as_str),
+            Some("image")
+        );
+
+        let Some(Value::Array(functions)) = dungeon.get("functions") else {
+            panic!("Dungeon Game functions must be an array");
+        };
+        let Some(baseline) =
+            functions
+                .iter()
+                .find_map(|function| match function.get("compiler_baseline") {
+                    Some(Value::Object(baseline)) => Some(baseline),
+                    _ => None,
+                })
+        else {
+            panic!("Dungeon Game must expose a compiler baseline");
+        };
+        assert_eq!(baseline.get("target").and_then(Value::as_str), Some("ps2"));
+        assert!(baseline.get("compiler").is_none());
+        assert!(baseline.get("minimum_mnemonic_lcs_ratio").is_some());
+    }
+
+    #[test]
     fn retired_commands_are_not_public() {
         for command in [
             "corpus", "project", "discover", "resolve", "diff", "batch", "serve",
@@ -4923,12 +5138,18 @@ mod tests {
     }
     #[test]
     fn decompile_native_supports_common_processor_raw_images() {
-        let cases: [(&str, Architecture, &[u8], &str); 13] = [
+        let cases: [(&str, Architecture, &[u8], &str); 14] = [
             (
                 "ps1",
                 Architecture::Ps1,
                 &[0x2a, 0x00, 0x02, 0x24, 0x08, 0x00, 0xe0, 0x03, 0, 0, 0, 0],
                 "uint32_t sub_1000",
+            ),
+            (
+                "ps2",
+                Architecture::Ps2,
+                &[0x2a, 0x00, 0x02, 0x24, 0x08, 0x00, 0xe0, 0x03, 0, 0, 0, 0],
+                "uint64_t sub_1000",
             ),
             (
                 "n64",

@@ -1,0 +1,11 @@
+[package]
+name = "ventris-sleigh"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Ghidra-compatible compiled SLEIGH reader and execution engine"
+
+[dependencies]
+miniz_oxide = "0.8"
+ventris-pcode = { path = "../ventris-pcode", version = "0.3.0" }

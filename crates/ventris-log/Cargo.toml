@@ -3,7 +3,8 @@ name = "ventris-log"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Immutable machine and human analysis event log"
 
 [dependencies]
-ventris-addr = { path = "../ventris-addr", version = "0.2.0" }
+ventris-addr = { path = "../ventris-addr", version = "0.3.0" }

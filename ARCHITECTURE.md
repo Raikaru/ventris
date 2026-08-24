@@ -41,6 +41,51 @@ create a second implementation of it.
    baseline. Accepting a regression requires an explicit reviewed baseline
    change.
 
+## Ghidra compatibility target
+
+Ghidra 12.1.3, upstream tag `Ghidra_12.1.3_build` and commit
+`8b4c91d4d5bd1549622bfbade0df199585b98365`, is the executable specification
+for the Rust decompiler port. Version drift is prohibited: p-code and
+decompiler-stage comparisons must use that exact release until the pin is
+changed together with reviewed differential results.
+
+The migration order follows Ghidra's own dependencies:
+
+```text
+SLEIGH -> p-code -> Heritage/SSA -> ActionDatabase/Rule passes
+       -> type propagation -> block-action structuring -> C printing
+```
+
+The source-port boundary is explicit:
+
+| Rust stage | Ghidra 12.1.3 source authority | Required lower layers |
+|---|---|---|
+| Compiled SLEIGH | `slaformat`, `marshal`, `compression` | packed records, address spaces |
+| Decode and p-code | `sleighbase`, `slghsymbol`, `slghpattern`, `slghpatexpress`, `semantics`, `context`, `sleigh` | compiled SLEIGH |
+| Heritage/SSA | `heritage`, `funcdata`, `prefersplit`, `block` | p-code and CFG |
+| Actions and rules | `action`, `coreaction`, `ruleaction`, `rangeutil`, `multiprecision` | Heritage/SSA |
+| Types | `type`, `typeop`, `cast`, `fspec` | action results and call facts |
+| Structuring | `blockaction`, `block`, `graph` | simplified typed CFG |
+| C output | `printlanguage`, `printc`, `comment` | structured block graph |
+
+These are algorithm boundaries, not a request to preserve Ghidra's C++ class
+layout. Rust modules may merge ownership plumbing, but may not skip an
+observable stage or invent a second semantic representation.
+
+Processor semantics come from pinned Ghidra-compatible SLEIGH language
+definitions rather than handwritten per-architecture decoders. The canonical
+`lifter_for` path executes compiled specifications for all 21 public
+architectures. Upstream Ghidra 12.1.3 supplies the standard processor
+definitions; pinned Apache-2.0 community definitions supply Gekko/Broadway and
+Cell SPU. Handwritten implementations remain only as direct regression
+subjects while their fixtures migrate; front ends cannot select them.
+
+The runtime resolves overlapping constructors with operand-validity
+backtracking, applies constructor context actions, recursively expands BUILDs,
+measures variable-length instructions from the resolved constructor tree, and
+inlines architecture-defined delay-slot p-code. The GameCube corpus additionally
+covers paired-single user operations and load/store-multiple expansion.
+
 ## Public API
 
 The `ventris` facade crate owns the canonical request path.
@@ -119,11 +164,11 @@ may hold more than one processor image.
 
 Owned by `ventris-lifter` and `ventris-pcode`.
 
-A lifter converts bounded native instructions into versioned,
-architecture-neutral p-code. It records instruction addresses, widths, branch
-and delay-slot behavior, register spaces, constants, and memory operations.
-Unsupported instructions remain explicit diagnostics; they are not silently
-replaced with no-ops.
+The target implementation is a Rust SLEIGH engine consuming Ghidra 12.1.3
+language definitions and producing versioned, architecture-neutral p-code.
+Instruction addresses, widths, flow behavior, register spaces, constants, and
+memory operations must match Ghidra's p-code contract. Unsupported semantics
+remain explicit diagnostics; they are never silently replaced with no-ops.
 
 ### Analysis
 
@@ -131,13 +176,17 @@ Owned by focused modules under `ventris-decompiler`.
 
 The native analysis boundary is intentionally modular:
 
-- `control_flow`: blocks, edges, structured regions, loop/condition recovery;
-- `ssa`: value versions, merges, constraints, and propagated facts;
-- `calls`: direct/indirect call sites, ABI arguments and returns, known callees;
-- `types`: width/sign/pointer/aggregate constraints and conservative merges;
-- `memory`: load/store interpretation and aggregate/field evidence;
+- `heritage`: CFG dominance, versioned definitions, phi inputs, and loop-carried
+  memory/value facts;
+- `ssa`: type constraints and conservative width/sign/pointer propagation over
+  Heritage versions;
+- `actions`: named, ordered rewrite groups with bounded fixed-point execution;
+- `structure`: block-action recovery for conditions, loops, switches, breaks,
+  and continues;
+- `control_flow`: expression and branch simplification that preserves effects;
+- `printer`: precedence-aware deterministic C AST rendering;
 - `c_score`: semantic comparison of rendered candidates;
-- `native`: orchestration only.
+- `native`: p-code lowering and orchestration across those stages.
 
 A module owns one kind of fact. No stage reparses rendered C to recover facts
 that existed earlier in the pipeline.
@@ -168,7 +217,7 @@ name or type.
 
 ### Rendering
 
-Owned by `ventris-decompiler` and `ventris-format`.
+Owned by `ventris-decompiler`.
 
 The C renderer consumes analyzed structure. It chooses deterministic names,
 emits includes and declarations, preserves required casts and aggregate
@@ -223,6 +272,11 @@ Unit and corpus fixtures check loader mappings, instruction semantics,
 control-flow edges, SSA/type facts, call behavior, and deterministic rendering.
 These identify which stage regressed.
 
+The live differential gate compares every public architecture against the
+pinned Ghidra executable at the instruction p-code boundary. Checked-in C
+oracles separately gate Heritage/SSA, rewrite, type, structuring, and printing
+behavior so a failure identifies the first divergent stage.
+
 ### Semantic baselines
 
 Source-backed legal corpus entries record expected control-flow constructs,
@@ -265,6 +319,8 @@ ventris-cli / adapters
   +-----+-------------------------------+
   |             |            |          |
 format/addr   target       lifter     game/db facts
+                              |
+                           sleigh
                               |
                             pcode
                               |

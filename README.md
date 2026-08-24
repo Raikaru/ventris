@@ -10,7 +10,7 @@ binary + function address + target facts
              C + diagnostics
 ```
 
-The core is a dependency-free Rust library pipeline. The CLI, Python package,
+The core is a Rust library pipeline. The CLI, Python package,
 and editor integrations are adapters over that same implementation; they do not
 own analysis logic.
 
@@ -31,16 +31,17 @@ The useful, tested path is:
 Supported containers include raw images, ELF, PE, COFF, Mach-O, Intel HEX,
 Motorola S-records, and the named console containers exposed by `--loader`.
 Explicit architecture paths include x86-32/64, ARM32/Thumb/AArch64, MIPS32
-little- and big-endian, PS1, N64, RISC-V32/64, PowerPC32/64, GameCube, 6502,
-Z80, M68K, SH-2/SH-4, and SPU. Console profiles provide the loader, ABI,
+little- and big-endian, PS1, PS2, N64, RISC-V32/64, PowerPC32/64, GameCube,
+6502, Z80, M68K, SH-2/SH-4, and SPU. Console profiles provide the loader, ABI,
 address-space, and image-part defaults for common systems from Atari 2600
 through PS3/Wii U/Vita/3DS.
 
 This breadth is not a uniform quality claim. Target profiles distinguish a full
 pipeline from lift-only support. Current quality evidence is function-specific:
 the checked-in legal PS2 corpus has eight source-backed semantic baselines and
-eight per-function compiler-comparison floors. Those floors prevent a function
-from silently regressing behind a global average.
+three per-function compiler-comparison floors, while the GameCube corpus has
+one source-backed semantic baseline. These gates prevent a function from
+silently regressing behind a global average.
 
 ## CLI
 
@@ -86,7 +87,7 @@ Front ends construct a `ventris::Pipeline` and call one of three operations:
 
 - `inspect`: load an image and report loader/address-space facts;
 - `lift`: resolve one function and return architecture-neutral p-code;
-- `decompile`: lift, analyze, and render one `DecompilationResult`.
+- `decompile`: lift, analyze, and render one `Decompilation`.
 
 The result carries the rendered C, structured intermediate facts, warnings,
 and verification metadata. See [ARCHITECTURE.md](ARCHITECTURE.md) for ownership
@@ -138,11 +139,28 @@ commands. Corpus checks require independently obtained images
 whose hashes match the checked-in metadata; no game image or copied game source
 is distributed.
 
+Ghidra differential development checks are pinned to Ghidra 12.1.3
+(`Ghidra_12.1.3_build`). Set `GHIDRA_INSTALL_DIR` or pass `--ghidra` to
+`tools/diff_ghidra.py`; other Ghidra versions are rejected so reference p-code
+cannot drift silently.
+
+To refresh an offline oracle, use `--write-ghidra-fixture <path>` together
+with a strict live comparison. The fixture is written directly from Ghidra's
+capsule before Ventris is invoked and records the pinned Ghidra release,
+language, source-image hash, function range, and function-byte hash. Checked-in
+GameCube p-code fixtures cover `TRK_memset`, a conditional branch,
+paired-single storage, and load/store-multiple expansion. Separate
+decompiler-stage fixtures cover `TRK_fill_mem`, `convert_partial_address`, and
+`__FrameCallback`, including recovered prototypes, direct calls, branches,
+loops, pointer arithmetic, globals, and mixed-width stores. Both fixture sets
+run without Ghidra or the game image during ordinary tests.
+
 ## Limits
 
 - A supported decoder or lifter does not imply mature C reconstruction.
-- Recovery is bounded to one requested function plus contextual facts supplied
-  to that request; Ventris does not manage a reverse-engineering project.
+- Recovery is bounded to one requested function. Direct callees may be decoded
+  only to recover their call prototypes; Ventris does not manage a
+  reverse-engineering project.
 - Unknown types, unresolved indirect calls, irreducible control flow, and
   target-specific instructions may remain explicit in the output.
 - Source reconstruction is semantic, not byte-identical matching C.

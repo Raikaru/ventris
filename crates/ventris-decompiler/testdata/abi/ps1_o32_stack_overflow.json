@@ -1,0 +1,21 @@
+{
+  "fixture": "ps1_o32_stack_overflow",
+  "license": "Apache-2.0; authored for Ventris; no game-derived material",
+  "target_profiles": ["ps1"],
+  "source_sha256": "50d85cb098192b393965e9c30165be488f9670d55df5a1cf03b4ea68ad700882",
+  "bytes_sha256": "1d2a2473fc76aeb3714ae0b02ec64ce4da0de281401bf29c8e17ab43baba5b42",
+  "compiler_identity": "clang version 21.1.7; llvm-objcopy 21.1.7",
+  "generation_method": "compiled from the checked-in source and extracted from the ELF .text section",
+  "target_triple": "mipsel-none-elf",
+  "cpu": "MIPS I",
+  "abi_flags": ["-mcpu=mips1", "-mabi=32", "-msoft-float", "-mno-abicalls", "-fno-pic", "-G0", "-ffreestanding", "-fno-builtin", "-fomit-frame-pointer"],
+  "compiler": {
+    "program": "clang",
+    "args": ["--target=mipsel-none-elf", "-mcpu=mips1", "-mabi=32", "-msoft-float", "-mno-abicalls", "-fno-pic", "-G0", "-O2", "-ffreestanding", "-fno-builtin", "-fomit-frame-pointer", "-c", "{source}", "-o", "{object}"]
+  },
+  "objcopy": {
+    "program": "llvm-objcopy",
+    "args": ["-O", "binary", "--only-section=.text", "{object}", "{binary}"]
+  },
+  "command": "clang --target=mipsel-none-elf -mcpu=mips1 -mabi=32 -msoft-float -mno-abicalls -fno-pic -G0 -O2 -ffreestanding -fno-builtin -fomit-frame-pointer -c ps1_o32_stack_overflow.c -o ps1_o32_stack_overflow.o && llvm-objcopy -O binary --only-section=.text ps1_o32_stack_overflow.o ps1_o32_stack_overflow.bin"
+}

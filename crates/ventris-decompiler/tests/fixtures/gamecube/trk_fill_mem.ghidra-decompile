@@ -1,0 +1,67 @@
+format ventris-ghidra-decompile-1
+function FUN_800a67d8
+language PowerPC:BE:32:Gekko_Broadway
+compiler default
+entry 2148165592
+length 188
+bytes 280500205484063e38c3ffff7c872378418000947cc030f8540307bf418200147ca328503463ffff9ce600014082fff8280700004182001c54e3c00e54e0801e54e4402e7c6003787c8003787ce7037854a4d97f3866fffd4182002c90e300043484ffff90e3000890e3000c90e3001090e3001490e3001890e3001c94e300204082ffdc54a4f77f418200103484ffff94e300044082fff83800000338c300037ca50038280500004d82002034a5ffff9ce600014082fff84e800020
+return void
+params 0
+calls 0
+c_begin
+
+void FUN_800a67d8(int param_1,byte param_2,uint param_3)
+
+{
+  uint uVar1;
+  uint *puVar2;
+  byte *pbVar3;
+  uint uVar4;
+
+  uVar4 = (uint)param_2;
+  pbVar3 = (byte *)(param_1 + -1);
+  if (0x1f < param_3) {
+    uVar1 = ~(uint)pbVar3 & 3;
+    if (uVar1 != 0) {
+      param_3 = param_3 - uVar1;
+      do {
+        uVar1 = uVar1 - 1;
+        pbVar3 = pbVar3 + 1;
+        *pbVar3 = param_2;
+      } while (uVar1 != 0);
+    }
+    if (param_2 != 0) {
+      uVar4 = uVar4 | uVar4 << 8 | (uint)param_2 << 0x18 | uVar4 << 0x10;
+    }
+    puVar2 = (uint *)(pbVar3 + -3);
+    for (uVar1 = param_3 >> 5; uVar1 != 0; uVar1 = uVar1 - 1) {
+      puVar2[1] = uVar4;
+      puVar2[2] = uVar4;
+      puVar2[3] = uVar4;
+      puVar2[4] = uVar4;
+      puVar2[5] = uVar4;
+      puVar2[6] = uVar4;
+      puVar2[7] = uVar4;
+      puVar2 = puVar2 + 8;
+      *puVar2 = uVar4;
+    }
+    for (uVar1 = param_3 >> 2 & 7; uVar1 != 0; uVar1 = uVar1 - 1) {
+      puVar2 = puVar2 + 1;
+      *puVar2 = uVar4;
+    }
+    pbVar3 = (byte *)((int)puVar2 + 3);
+    param_3 = param_3 & 3;
+  }
+  if (param_3 != 0) {
+    do {
+      param_3 = param_3 - 1;
+      pbVar3 = pbVar3 + 1;
+      *pbVar3 = (byte)uVar4;
+    } while (param_3 != 0);
+    return;
+  }
+  return;
+}
+
+
+c_end

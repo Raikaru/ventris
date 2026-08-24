@@ -1,0 +1,30 @@
+format ventris-ghidra-decompile-1
+function FUN_80005788
+language PowerPC:BE:32:Gekko_Broadway
+compiler default
+entry 2147506056
+length 96
+bytes 9421ffe07c0802a638e00000900100243881001038a1000c38c1000893e1001c7c7f1b784bffff1d2c0300004082001c8061000c800100085463e006540001fe7c630214480000087fe3fb788001002483e1001c7c0803a6382100204e800020
+return int
+params 0
+calls 1
+call 2147506092 CALL ram:2147505864:8 5 int undefined1_* int_* uint_* undefined4
+c_begin
+
+int FUN_80005788(int param_1)
+
+{
+  int iVar1;
+  uint uStack_18;
+  int iStack_14;
+  undefined1 auStack_10 [12];
+
+  iVar1 = func_0x800056c8(param_1,auStack_10,&iStack_14,&uStack_18,0);
+  if (iVar1 == 0) {
+    param_1 = iStack_14 * 0x10000000 + (uStack_18 & 0x1ffffff);
+  }
+  return param_1;
+}
+
+
+c_end

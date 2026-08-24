@@ -16,434 +16,11 @@ pub mod runtime;
 pub mod semantic;
 use std::collections::BTreeMap;
 use std::fmt::Write;
-use ventris_lifter::{Architecture, NativeFunction};
+use ventris_lifter::{Architecture, NativeFunction, RAM_SPACE, REGISTER_SPACE};
 use ventris_pcode::{CONST_SPACE, Varnode, op};
-use ventris_target::TargetProfile;
+use ventris_target::{Abi, TargetProfile};
 
-/// Whether a register class is known for a target ABI.
-///
-/// `Some(&[])` means the ABI explicitly has no registers in that class;
-/// `None` means the profile has not asserted the class yet. The distinction is
-/// important for vector and platform-specific FPU conventions.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub struct RegisterGroup {
-    pub names: Option<&'static [&'static str]>,
-    pub single: Option<&'static str>,
-}
-
-impl RegisterGroup {
-    pub const fn known(names: &'static [&'static str]) -> Self {
-        Self {
-            names: Some(names),
-            single: None,
-        }
-    }
-
-    pub const fn known_single(name: &'static str) -> Self {
-        Self {
-            names: None,
-            single: Some(name),
-        }
-    }
-
-    pub const fn unknown() -> Self {
-        Self {
-            names: None,
-            single: None,
-        }
-    }
-
-    pub fn is_known(self) -> bool {
-        self.names.is_some() || self.single.is_some()
-    }
-}
-
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub enum AbiRegisterClass {
-    Integer,
-    Floating,
-    Vector,
-}
-
-impl RegisterGroup {
-    /// Return the register spelling for an ABI argument/return slot.
-    pub fn at(self, index: usize) -> Option<&'static str> {
-        self.names
-            .and_then(|names| names.get(index).copied())
-            .or_else(|| (index == 0).then_some(self.single).flatten())
-    }
-
-    pub fn count(self) -> Option<usize> {
-        self.names
-            .map(|names| names.len())
-            .or_else(|| self.single.map(|_| 1))
-    }
-}
-
-impl AbiRegisterClasses {
-    pub const fn group(self, class: AbiRegisterClass) -> RegisterGroup {
-        match class {
-            AbiRegisterClass::Integer => self.integer,
-            AbiRegisterClass::Floating => self.floating,
-            AbiRegisterClass::Vector => self.vector,
-        }
-    }
-}
-
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub struct AbiRegisterClasses {
-    pub integer: RegisterGroup,
-    pub floating: RegisterGroup,
-    pub vector: RegisterGroup,
-}
-
-/// The ABI facts needed before rendering game C/C++.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub struct GameAbiProfile {
-    pub target: TargetProfile,
-    pub name: &'static str,
-    pub architecture: Architecture,
-    pub pointer_bits: u8,
-    pub stack_alignment: u8,
-    pub stack_pointer: &'static str,
-    pub frame_pointer: Option<&'static str>,
-    pub return_address: Option<&'static str>,
-    pub delay_slots: u8,
-    pub arguments: AbiRegisterClasses,
-    pub returns: AbiRegisterClasses,
-    pub caller_saved: RegisterGroup,
-    pub callee_saved: RegisterGroup,
-    pub small_struct_max_bytes: Option<u8>,
-    pub small_struct_returns: RegisterGroup,
-}
-
-const EMPTY: &[&str] = &[];
-const MIPS_ARGS: &[&str] = &["$a0", "$a1", "$a2", "$a3"];
-const MIPS_RETURNS: &[&str] = &["$v0", "$v1"];
-const MIPS_FLOAT_ARGS: &[&str] = &["$f12", "$f14"];
-const MIPS_FLOAT_RETURNS: &[&str] = &["$f0", "$f2"];
-const MIPS_CALLER: &[&str] = &[
-    "$v0", "$v1", "$a0", "$a1", "$a2", "$a3", "$t0", "$t1", "$t2", "$t3", "$t4", "$t5", "$t6",
-    "$t7", "$t8", "$t9",
-];
-const MIPS_CALLEE: &[&str] = &[
-    "$s0", "$s1", "$s2", "$s3", "$s4", "$s5", "$s6", "$s7", "$fp",
-];
-const ARM_ARGS: &[&str] = &["r0", "r1", "r2", "r3"];
-const ARM_RETURNS: &[&str] = &["r0", "r1"];
-const ARM_FLOAT_ARGS: &[&str] = &[
-    "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "s12", "s13", "s14",
-    "s15",
-];
-const ARM_FLOAT_RETURNS: &[&str] = &["s0", "s1"];
-const ARM_CALLER: &[&str] = &["r0", "r1", "r2", "r3", "r12", "lr"];
-const ARM_CALLEE: &[&str] = &["r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11"];
-const PPC_ARGS: &[&str] = &["r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10"];
-const PPC_RETURNS: &[&str] = &["r3", "r4"];
-const PPC_FLOAT_ARGS: &[&str] = &["f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8"];
-const PPC_FLOAT_RETURNS: &[&str] = &["f1", "f2"];
-const PPC_CALLER: &[&str] = &[
-    "r0", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "r12", "lr", "f0", "f1", "f2",
-    "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12", "f13",
-];
-const PPC_CALLEE: &[&str] = &[
-    "r14", "r15", "r16", "r17", "r18", "r19", "r20", "r21", "r22", "r23", "r24", "r25", "r26",
-    "r27", "r28", "r29", "r30", "r31",
-];
-
-fn classes(
-    integer: RegisterGroup,
-    floating: RegisterGroup,
-    vector: RegisterGroup,
-) -> AbiRegisterClasses {
-    AbiRegisterClasses {
-        integer,
-        floating,
-        vector,
-    }
-}
-
-impl GameAbiProfile {
-    /// Return the explicit ABI profile for a console target.
-    pub fn for_target(target: TargetProfile) -> Self {
-        match target {
-            TargetProfile::Ps2 => Self {
-                target,
-                name: "ps2-r5900-o32",
-                architecture: Architecture::Mips32,
-                pointer_bits: 32,
-                stack_alignment: 8,
-                stack_pointer: "$sp",
-                frame_pointer: Some("$fp"),
-                return_address: Some("$ra"),
-                delay_slots: 1,
-                arguments: classes(
-                    RegisterGroup::known(MIPS_ARGS),
-                    RegisterGroup::known(MIPS_FLOAT_ARGS),
-                    RegisterGroup::unknown(),
-                ),
-                returns: classes(
-                    RegisterGroup::known(MIPS_RETURNS),
-                    RegisterGroup::known(MIPS_FLOAT_RETURNS),
-                    RegisterGroup::unknown(),
-                ),
-                caller_saved: RegisterGroup::known(MIPS_CALLER),
-                callee_saved: RegisterGroup::known(MIPS_CALLEE),
-                small_struct_max_bytes: Some(8),
-                small_struct_returns: RegisterGroup::known(MIPS_RETURNS),
-            },
-            TargetProfile::Psp => Self {
-                target,
-                name: "psp-allegrex-o32",
-                architecture: Architecture::Mips32,
-                pointer_bits: 32,
-                stack_alignment: 8,
-                stack_pointer: "$sp",
-                frame_pointer: Some("$fp"),
-                return_address: Some("$ra"),
-                delay_slots: 1,
-                arguments: classes(
-                    RegisterGroup::known(MIPS_ARGS),
-                    RegisterGroup::known(MIPS_FLOAT_ARGS),
-                    RegisterGroup::unknown(),
-                ),
-                returns: classes(
-                    RegisterGroup::known(MIPS_RETURNS),
-                    RegisterGroup::known(MIPS_FLOAT_RETURNS),
-                    RegisterGroup::unknown(),
-                ),
-                caller_saved: RegisterGroup::known(MIPS_CALLER),
-                callee_saved: RegisterGroup::known(MIPS_CALLEE),
-                small_struct_max_bytes: Some(8),
-                small_struct_returns: RegisterGroup::known(MIPS_RETURNS),
-            },
-            TargetProfile::GameCube | TargetProfile::Wii | TargetProfile::WiiU => Self {
-                target,
-                name: "powerpc-eabi-game",
-                architecture: target.spec().architecture,
-                pointer_bits: 32,
-                stack_alignment: 16,
-                stack_pointer: "r1",
-                frame_pointer: None,
-                return_address: Some("lr"),
-                delay_slots: 0,
-                arguments: classes(
-                    RegisterGroup::known(PPC_ARGS),
-                    RegisterGroup::known(PPC_FLOAT_ARGS),
-                    RegisterGroup::unknown(),
-                ),
-                returns: classes(
-                    RegisterGroup::known(PPC_RETURNS),
-                    RegisterGroup::known(PPC_FLOAT_RETURNS),
-                    RegisterGroup::unknown(),
-                ),
-                caller_saved: RegisterGroup::known(PPC_CALLER),
-                callee_saved: RegisterGroup::known(PPC_CALLEE),
-                small_struct_max_bytes: Some(8),
-                small_struct_returns: RegisterGroup::known(PPC_RETURNS),
-            },
-            TargetProfile::Xbox360 => Self {
-                target,
-                name: "xbox360-xenon-pprc",
-                architecture: Architecture::Ppc32,
-                pointer_bits: 32,
-                stack_alignment: 16,
-                stack_pointer: "r1",
-                frame_pointer: None,
-                return_address: Some("lr"),
-                delay_slots: 0,
-                arguments: classes(
-                    RegisterGroup::known(PPC_ARGS),
-                    RegisterGroup::known(PPC_FLOAT_ARGS),
-                    RegisterGroup::unknown(),
-                ),
-                returns: classes(
-                    RegisterGroup::known(PPC_RETURNS),
-                    RegisterGroup::known(PPC_FLOAT_RETURNS),
-                    RegisterGroup::unknown(),
-                ),
-                caller_saved: RegisterGroup::known(PPC_CALLER),
-                callee_saved: RegisterGroup::known(PPC_CALLEE),
-                small_struct_max_bytes: Some(8),
-                small_struct_returns: RegisterGroup::known(PPC_RETURNS),
-            },
-            TargetProfile::Ps3Ppu => Self {
-                target,
-                name: "ps3-ppu-elfv2",
-                architecture: Architecture::Ppc64,
-                pointer_bits: 64,
-                stack_alignment: 16,
-                stack_pointer: "r1",
-                frame_pointer: None,
-                return_address: Some("lr"),
-                delay_slots: 0,
-                arguments: classes(
-                    RegisterGroup::known(PPC_ARGS),
-                    RegisterGroup::known(PPC_FLOAT_ARGS),
-                    RegisterGroup::unknown(),
-                ),
-                returns: classes(
-                    RegisterGroup::known(PPC_RETURNS),
-                    RegisterGroup::known(PPC_FLOAT_RETURNS),
-                    RegisterGroup::unknown(),
-                ),
-                caller_saved: RegisterGroup::known(PPC_CALLER),
-                callee_saved: RegisterGroup::known(PPC_CALLEE),
-                small_struct_max_bytes: Some(16),
-                small_struct_returns: RegisterGroup::known(PPC_RETURNS),
-            },
-            TargetProfile::Ps3Spu => Self {
-                target,
-                name: "ps3-spu-ls",
-                architecture: Architecture::Spu,
-                pointer_bits: 32,
-                stack_alignment: 16,
-                stack_pointer: "r1",
-                frame_pointer: None,
-                return_address: None,
-                delay_slots: 0,
-                arguments: classes(
-                    RegisterGroup::known(PPC_ARGS),
-                    RegisterGroup::unknown(),
-                    RegisterGroup::known(EMPTY),
-                ),
-                returns: classes(
-                    RegisterGroup::known(&["r3"]),
-                    RegisterGroup::unknown(),
-                    RegisterGroup::known(EMPTY),
-                ),
-                caller_saved: RegisterGroup::unknown(),
-                callee_saved: RegisterGroup::unknown(),
-                small_struct_max_bytes: None,
-                small_struct_returns: RegisterGroup::unknown(),
-            },
-            TargetProfile::NintendoDs
-            | TargetProfile::Nintendo3Ds
-            | TargetProfile::Vita
-            | TargetProfile::Gba => Self {
-                target,
-                name: "arm-aapcs-game",
-                architecture: target.spec().architecture,
-                pointer_bits: 32,
-                stack_alignment: if target == TargetProfile::Gba { 4 } else { 8 },
-                stack_pointer: "r13",
-                frame_pointer: Some("r11"),
-                return_address: Some("lr"),
-                delay_slots: 0,
-                arguments: classes(
-                    RegisterGroup::known(ARM_ARGS),
-                    RegisterGroup::known(ARM_FLOAT_ARGS),
-                    RegisterGroup::unknown(),
-                ),
-                returns: classes(
-                    RegisterGroup::known(ARM_RETURNS),
-                    RegisterGroup::known(ARM_FLOAT_RETURNS),
-                    RegisterGroup::unknown(),
-                ),
-                caller_saved: RegisterGroup::known(ARM_CALLER),
-                callee_saved: RegisterGroup::known(ARM_CALLEE),
-                small_struct_max_bytes: Some(4),
-                small_struct_returns: RegisterGroup::known(ARM_RETURNS),
-            },
-            TargetProfile::Ps1 => Self {
-                target,
-                name: "ps1-mips-o32",
-                architecture: Architecture::Ps1,
-                pointer_bits: 32,
-                stack_alignment: 8,
-                stack_pointer: "$sp",
-                frame_pointer: Some("$fp"),
-                return_address: Some("$ra"),
-                delay_slots: 1,
-                arguments: classes(
-                    RegisterGroup::known(MIPS_ARGS),
-                    RegisterGroup::unknown(),
-                    RegisterGroup::unknown(),
-                ),
-                returns: classes(
-                    RegisterGroup::known(MIPS_RETURNS),
-                    RegisterGroup::unknown(),
-                    RegisterGroup::unknown(),
-                ),
-                caller_saved: RegisterGroup::known(MIPS_CALLER),
-                callee_saved: RegisterGroup::known(MIPS_CALLEE),
-                small_struct_max_bytes: Some(8),
-                small_struct_returns: RegisterGroup::known(MIPS_RETURNS),
-            },
-            TargetProfile::N64 => Self {
-                target,
-                name: "n64-mips-n64",
-                architecture: Architecture::N64,
-                pointer_bits: 64,
-                stack_alignment: 16,
-                stack_pointer: "$sp",
-                frame_pointer: Some("$fp"),
-                return_address: Some("$ra"),
-                delay_slots: 1,
-                arguments: classes(
-                    RegisterGroup::known(MIPS_ARGS),
-                    RegisterGroup::known(MIPS_FLOAT_ARGS),
-                    RegisterGroup::unknown(),
-                ),
-                returns: classes(
-                    RegisterGroup::known(MIPS_RETURNS),
-                    RegisterGroup::known(MIPS_FLOAT_RETURNS),
-                    RegisterGroup::unknown(),
-                ),
-                caller_saved: RegisterGroup::known(MIPS_CALLER),
-                callee_saved: RegisterGroup::known(MIPS_CALLEE),
-                small_struct_max_bytes: Some(16),
-                small_struct_returns: RegisterGroup::known(MIPS_RETURNS),
-            },
-            _ => Self::generic(target),
-        }
-    }
-
-    fn generic(target: TargetProfile) -> Self {
-        let spec = target.spec();
-        Self {
-            target,
-            name: spec.abi.name,
-            architecture: spec.architecture,
-            pointer_bits: spec.abi.pointer_bits,
-            stack_alignment: spec.abi.stack_alignment,
-            stack_pointer: "sp",
-            frame_pointer: None,
-            return_address: None,
-            delay_slots: 0,
-            arguments: classes(
-                RegisterGroup::unknown(),
-                RegisterGroup::unknown(),
-                RegisterGroup::unknown(),
-            ),
-            returns: classes(
-                RegisterGroup::known_single(spec.abi.return_register),
-                RegisterGroup::unknown(),
-                RegisterGroup::unknown(),
-            ),
-            caller_saved: RegisterGroup::unknown(),
-            callee_saved: RegisterGroup::unknown(),
-            small_struct_max_bytes: None,
-            small_struct_returns: RegisterGroup::unknown(),
-        }
-    }
-    pub fn argument_register(&self, class: AbiRegisterClass, index: usize) -> Option<&'static str> {
-        self.arguments.group(class).at(index)
-    }
-
-    pub fn return_register(&self, class: AbiRegisterClass, index: usize) -> Option<&'static str> {
-        self.returns.group(class).at(index)
-    }
-
-    /// Return the byte offset of an overflow argument relative to the first
-    /// stack-passed argument, using pointer-sized ABI slots.
-    pub fn stack_argument_offset(&self, index: usize, width_bits: u32) -> u32 {
-        let pointer_bytes = u32::from(self.pointer_bits.div_ceil(8)).max(1);
-        let width_bytes = width_bits.div_ceil(8).max(1);
-        let slot_bytes = width_bytes.div_ceil(pointer_bytes) * pointer_bytes;
-        (index as u32).saturating_mul(slot_bytes)
-    }
-}
+pub use ventris_target::{AbiRegisterClass, AbiRegisterClasses, RegisterGroup};
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Confidence(u8);
@@ -1016,7 +593,7 @@ pub struct StructCandidate {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct RecoveredFunction {
     pub target: TargetProfile,
-    pub abi: GameAbiProfile,
+    pub abi: Abi,
     pub entry: u64,
     pub name: Option<String>,
     pub accesses: Vec<MemoryAccess>,
@@ -1265,13 +842,66 @@ fn access_evidence(
     evidence
 }
 
-fn collect_accesses(function: &NativeFunction) -> Vec<MemoryAccess> {
+fn is_ppc_frame_access(target: TargetProfile, address: &AddressFact) -> bool {
+    let AddressFact::BaseOffset { base, .. } = address else {
+        return false;
+    };
+    let register_size = match target.spec().architecture {
+        Architecture::Ppc32 | Architecture::GameCube => 4,
+        Architecture::Ppc64 => 8,
+        _ => return false,
+    };
+    base.space == REGISTER_SPACE
+        && base.offset == u64::from(register_size)
+        && base.size == register_size
+}
+
+fn collect_accesses(target: TargetProfile, function: &NativeFunction) -> Vec<MemoryAccess> {
     let mut values = BTreeMap::new();
     let mut accesses = Vec::new();
     for instruction in function.instructions.values() {
         for operation in &instruction.pcode.ops {
             match operation.opcode {
-                op::COPY | op::CAST | op::SUBPIECE | op::INT_ZEXT | op::INT_SEXT => set_copy(
+                op::COPY => {
+                    if let Some(input) = operation.inputs.first().filter(|v| v.space == RAM_SPACE) {
+                        accesses.push(MemoryAccess {
+                            instruction: instruction.address,
+                            kind: AccessKind::Read,
+                            width: input.size,
+                            address: AddressFact::Absolute {
+                                address: input.offset,
+                            },
+                            evidence: access_evidence(
+                                instruction.address,
+                                operation.opcode,
+                                AccessKind::Read,
+                                &[],
+                            ),
+                        });
+                    }
+                    if let Some(output) = operation.output.filter(|v| v.space == RAM_SPACE) {
+                        accesses.push(MemoryAccess {
+                            instruction: instruction.address,
+                            kind: AccessKind::Write,
+                            width: output.size,
+                            address: AddressFact::Absolute {
+                                address: output.offset,
+                            },
+                            evidence: access_evidence(
+                                instruction.address,
+                                operation.opcode,
+                                AccessKind::Write,
+                                &[],
+                            ),
+                        });
+                    }
+                    set_copy(
+                        operation.output,
+                        operation.inputs.first().copied(),
+                        &mut values,
+                    );
+                }
+                op::CAST | op::SUBPIECE | op::INT_ZEXT | op::INT_SEXT => set_copy(
                     operation.output,
                     operation.inputs.first().copied(),
                     &mut values,
@@ -1291,6 +921,9 @@ fn collect_accesses(function: &NativeFunction) -> Vec<MemoryAccess> {
                             expression.strides(),
                         );
                         let address = expression.fact();
+                        if is_ppc_frame_access(target, &address) {
+                            continue;
+                        }
                         let width = operation.output.map_or(0, |output| output.size);
                         accesses.push(MemoryAccess {
                             instruction: instruction.address,
@@ -1313,6 +946,9 @@ fn collect_accesses(function: &NativeFunction) -> Vec<MemoryAccess> {
                             expression.strides(),
                         );
                         let address = expression.fact();
+                        if is_ppc_frame_access(target, &address) {
+                            continue;
+                        }
                         accesses.push(MemoryAccess {
                             instruction: instruction.address,
                             kind: AccessKind::Write,
@@ -1732,8 +1368,8 @@ fn build_structs(input: &RecoveryInput<'_>, accesses: &[MemoryAccess]) -> Vec<St
 }
 /// Recover only facts supported by p-code and supplied metadata.
 pub fn recover_function(target: TargetProfile, input: RecoveryInput<'_>) -> RecoveredFunction {
-    let abi = GameAbiProfile::for_target(target);
-    let accesses = collect_accesses(input.function);
+    let abi = Abi::for_target(target);
+    let accesses = collect_accesses(target, input.function);
     let function_end = input
         .function
         .entry
@@ -2251,6 +1887,7 @@ mod tests {
                 ops,
             },
             flow: Flow::Return,
+            embedded_delay_slot_bytes: 0,
         };
         let mut instructions = BTreeMap::new();
         instructions.insert(instruction.address, instruction);
@@ -2264,20 +1901,20 @@ mod tests {
 
     #[test]
     fn console_profiles_keep_unknown_vector_conventions_explicit() {
-        let ps2 = GameAbiProfile::for_target(TargetProfile::Ps2);
+        let ps2 = Abi::for_target(TargetProfile::Ps2);
         assert_eq!(ps2.name, "ps2-r5900-o32");
         assert_eq!(ps2.delay_slots, 1);
         assert!(ps2.arguments.integer.is_known());
         assert!(!ps2.arguments.vector.is_known());
 
-        let xenon = GameAbiProfile::for_target(TargetProfile::Xbox360);
+        let xenon = Abi::for_target(TargetProfile::Xbox360);
         assert_eq!(xenon.stack_pointer, "r1");
-        assert_eq!(xenon.returns.integer.names, Some(PPC_RETURNS));
+        assert_eq!(xenon.returns.integer.names, Some(&["r3", "r4"][..]));
     }
 
     #[test]
     fn abi_register_and_stack_queries_preserve_classes() {
-        let ps2 = GameAbiProfile::for_target(TargetProfile::Ps2);
+        let ps2 = Abi::for_target(TargetProfile::Ps2);
         assert_eq!(
             ps2.argument_register(AbiRegisterClass::Integer, 0),
             Some("$a0")
@@ -2696,9 +2333,9 @@ mod tests {
             "abi.returns.integer: $v0,$v1\n",
             "abi.returns.floating: $f0,$f2\n",
             "abi.returns.vector: unknown\n",
-            "abi.caller_saved: $v0,$v1,$a0,$a1,$a2,$a3,$t0,$t1,$t2,$t3,$t4,$t5,$t6,$t7,$t8,$t9\n",
-            "abi.callee_saved: $s0,$s1,$s2,$s3,$s4,$s5,$s6,$s7,$fp\n",
-            "abi.small_struct: max_bytes=8 returns=$v0,$v1\n",
+            "abi.caller_saved: $v0,$v1,$a0,$a1,$a2,$a3,$t0,$t1,$t2,$t3,$t4,$t5,$t6,$t7,$t8,$t9,$ra,$f0,$f1,$f2,$f3,$f4,$f5,$f6,$f7,$f8,$f9,$f10,$f11,$f12,$f13,$f14,$f15,$f16,$f17,$f18,$f19\n",
+            "abi.callee_saved: $s0,$s1,$s2,$s3,$s4,$s5,$s6,$s7,$gp,$fp,$f20,$f21,$f22,$f23,$f24,$f25,$f26,$f27,$f28,$f29,$f30,$f31\n",
+            "abi.small_struct: max_bytes=unknown returns=unknown\n",
             "memory_accesses: 2\n",
             "  read @0x1000 width=4 base=(space=4 offset=0x10 size=4) offset=+0x10 stride=none\n",
             "  read @0x1004 width=4 base=(space=4 offset=0x10 size=4) offset=+0x14 stride=none\n",

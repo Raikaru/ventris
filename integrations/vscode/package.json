@@ -2,7 +2,7 @@
   "name": "ventris-binary-analysis",
   "displayName": "Ventris Binary Analysis",
   "description": "Inspect, lift, and decompile native functions with Ventris.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "ventris",
   "license": "Apache-2.0",
   "preview": true,

@@ -63,7 +63,7 @@ async function analysisSelector(argument, config) {
   const arch = argument && argument.arch !== undefined
     ? argument.arch
     : await vscode.window.showQuickPick(
-      ['x86_64', 'x86_32', 'aarch64', 'arm32', 'thumb', 'mips32', 'mips32be', 'ps1', 'n64', 'rv64', 'rv32', 'ppc32', 'ppc64', 'gamecube', 'm68k', 'sh2', 'sh4', 'm6502', 'z80', 'spu'],
+      ['x86_64', 'x86_32', 'aarch64', 'arm32', 'thumb', 'mips32', 'mips32be', 'ps1', 'ps2', 'n64', 'rv64', 'rv32', 'ppc32', 'ppc64', 'gamecube', 'm68k', 'sh2', 'sh4', 'm6502', 'z80', 'spu'],
       { placeHolder: 'Architecture' },
     );
   return arch ? ['--arch', String(arch)] : undefined;

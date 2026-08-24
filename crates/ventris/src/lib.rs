@@ -9,9 +9,11 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use ventris_addr::Addr;
-use ventris_decompiler::native::{NativeDecompiler, NativeDocument, NativeMemory};
+use ventris_decompiler::native::{
+    NativeCallPrototype, NativeDecompiler, NativeDocument, NativeMemory,
+};
 use ventris_format::{Image, ImageMetadata, LoadedImage, Loader};
-use ventris_game::reconstruction::SourceReconstruction;
+use ventris_game::reconstruction::{SourceParameter, SourceReconstruction, SourceSignature};
 use ventris_game::{
     AnnotationFact, Evidence, NominalType, RecoveredFunction, RecoveryInput, RelocationFact,
     SymbolFact, TypeAssertion, recover_function,
@@ -302,13 +304,23 @@ impl Pipeline {
             is_volatile: &is_volatile,
         };
         let resolve_symbol = |address| symbol_names.get(&address).cloned();
+        let abi = self.target.map(|target| &target.spec().abi);
+        let call_prototypes = self.direct_call_prototypes(
+            &function,
+            instruction_limit,
+            abi,
+            Some(&memory),
+            Some(&resolve_symbol),
+        );
         let mut decompiler = NativeDecompiler;
-        let document = decompiler.decompile_with_memory_and_symbols(
+        let document = decompiler.decompile_with_call_prototypes(
             self.architecture
                 .ok_or(PipelineError::ArchitectureRequired)?,
             &function,
+            abi,
             Some(&memory),
             Some(&resolve_symbol),
+            Some(&call_prototypes),
         );
         let recovered = self.target.map(|target| {
             recover_function(
@@ -331,6 +343,48 @@ impl Pipeline {
         })
     }
 
+    fn direct_call_prototypes(
+        &self,
+        caller: &NativeFunction,
+        instruction_limit: usize,
+        abi: Option<&ventris_target::Abi>,
+        memory: Option<&NativeMemory<'_>>,
+        symbols: Option<&dyn Fn(u64) -> Option<String>>,
+    ) -> BTreeMap<u64, NativeCallPrototype> {
+        let architecture = match self.architecture {
+            Some(architecture) => architecture,
+            None => return BTreeMap::new(),
+        };
+        caller
+            .calls
+            .iter()
+            .filter(|target| **target != caller.entry)
+            .filter_map(|target| {
+                let callee = self
+                    .lift_at(*target, instruction_limit.clamp(1, 1024))
+                    .ok()?;
+                let document = NativeDecompiler.decompile_with_abi_memory_and_symbols(
+                    architecture,
+                    &callee,
+                    abi,
+                    memory,
+                    symbols,
+                );
+                Some((
+                    *target,
+                    NativeCallPrototype {
+                        return_type: document.return_type,
+                        parameters: document
+                            .parameters
+                            .into_iter()
+                            .map(|parameter| parameter.ty)
+                            .collect(),
+                    },
+                ))
+            })
+            .collect()
+    }
+
     pub fn decompile(
         &self,
         address: &str,
@@ -339,10 +393,25 @@ impl Pipeline {
     ) -> Result<Decompilation, PipelineError> {
         let analysis = self.analyze(address, instruction_limit, hints)?;
         let native_source = analysis.document.render();
+        let native_signature = SourceSignature {
+            name: analysis.document.name.clone(),
+            return_type: analysis.document.return_type.c_name().to_owned(),
+            parameters: analysis
+                .document
+                .parameters
+                .iter()
+                .map(|parameter| SourceParameter {
+                    name: parameter.name.clone(),
+                    c_type: parameter.ty.c_name().to_owned(),
+                })
+                .collect(),
+        };
         let source = match analysis.recovered.as_ref() {
-            Some(report) => SourceReconstruction::from_report(report, native_source)
-                .map(|source| source.render())
-                .map_err(|error| PipelineError::Reconstruction(error.to_string()))?,
+            Some(report) => {
+                SourceReconstruction::from_signature(report, native_source, native_signature)
+                    .map(|source| source.render())
+                    .map_err(|error| PipelineError::Reconstruction(error.to_string()))?
+            }
             None => native_source,
         };
         Ok(Decompilation { analysis, source })
@@ -473,6 +542,64 @@ mod tests {
             pipeline.decompilation_support(),
             DecompilationSupport::Experimental
         );
+    }
+
+    #[test]
+    fn target_abi_parameters_survive_native_and_source_reconstruction() {
+        let pipeline = Pipeline::load(
+            [
+                0x01, 0x00, 0xc2, 0x24, // addiu v0, a2, 1
+                0x08, 0x00, 0xe0, 0x03, // jr ra
+                0x00, 0x00, 0x00, 0x00, // delay slot
+            ],
+            LoadOptions {
+                target: Some(TargetProfile::Ps1),
+                loader: Loader::Raw,
+                ..LoadOptions::default()
+            },
+        )
+        .unwrap();
+        let address = "0x80010000";
+        let expected = "uint32_t sub_80010000(uint32_t arg0, uint32_t arg1, uint32_t arg2)";
+        let analysis = pipeline.analyze(address, 32, &Hints::default()).unwrap();
+        assert!(analysis.document.render().contains(expected));
+        let source = pipeline
+            .decompile(address, 32, &Hints::default())
+            .unwrap()
+            .source;
+        assert!(source.contains(expected), "{source}");
+        assert!(source.contains("return arg2 + 1;"), "{source}");
+    }
+
+    #[test]
+    fn gamecube_pipeline_recovers_direct_callee_prototype() {
+        let mut source = vec![
+            0x48, 0x00, 0x00, 0x21, // bl 0x80003120
+            0x4e, 0x80, 0x00, 0x20, // blr
+        ];
+        source.resize(0x20, 0);
+        source.extend([
+            0x38, 0x63, 0x00, 0x01, // addi r3, r3, 1
+            0x4e, 0x80, 0x00, 0x20, // blr
+        ]);
+        let pipeline = Pipeline::load(
+            source,
+            LoadOptions {
+                target: Some(TargetProfile::GameCube),
+                loader: Loader::Raw,
+                base: Some(0x8000_3100),
+                ..LoadOptions::default()
+            },
+        )
+        .unwrap();
+
+        let source = pipeline
+            .decompile("0x80003100", 16, &Hints::default())
+            .unwrap()
+            .source;
+
+        assert!(source.contains("sub_80003120(arg0)"), "{source}");
+        assert!(source.contains("return"), "{source}");
     }
 
     #[test]

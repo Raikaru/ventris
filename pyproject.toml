@@ -1,19 +1,19 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "ventris-client"
-version = "0.2.0"
+version = "0.3.0"
 description = "Dependency-free Python adapter for the Ventris function pipeline"
  readme = "README.md"
  requires-python = ">=3.10"
- license = { file = "LICENSE" }
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
  classifiers = [
      "Development Status :: 3 - Alpha",
      "Intended Audience :: Developers",
      "Intended Audience :: Science/Research",
-     "License :: OSI Approved :: Apache Software License",
      "Operating System :: OS Independent",
      "Programming Language :: Python :: 3",
      "Programming Language :: Python :: 3 :: Only",

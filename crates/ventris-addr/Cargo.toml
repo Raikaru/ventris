@@ -3,6 +3,7 @@ name = "ventris-addr"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Address spaces and qualified binary addresses for Ventris"
 
 [dependencies]

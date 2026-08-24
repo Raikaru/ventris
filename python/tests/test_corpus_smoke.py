@@ -15,7 +15,16 @@ def envelope(command: str, result: str) -> str:
 
 class CorpusSmokeTests(unittest.TestCase):
     def manifest_output(
-        self, *, expected_hash: str, functions=None, semantic=None, metadata=None
+        self,
+        *,
+        expected_hash: str,
+        functions=None,
+        semantic=None,
+        metadata=None,
+        target="ps2",
+        toolchain=None,
+        base=None,
+        address_space=None,
     ) -> str:
         manifest_functions = functions or [
             {"name": "Game_Task", "address": "0x250190", "size": "0x1f0"}
@@ -32,14 +41,17 @@ class CorpusSmokeTests(unittest.TestCase):
             {
                 "id": "ps2-test",
                 "title": "PS2 test",
-                "target": "ps2",
+                "target": target,
                 "source_url": "https://example.invalid/repo",
                 "source_commit": "1" * 40,
                 "source_license": "AGPL-3.0",
                 "binary_name": "test.elf",
                 "binary_sha256": expected_hash,
                 "binary_sha1": None,
+                "base": base,
+                "address_space": address_space,
                 "metadata": metadata,
+                "toolchain": toolchain,
                 "functions": manifest_functions,
             }
         ]
@@ -52,6 +64,26 @@ class CorpusSmokeTests(unittest.TestCase):
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0].functions[0].size, 0x1F0)
         self.assertEqual(entries[0].binary_sha256, digest)
+
+
+    def test_parse_manifest_retains_raw_image_base_override(self):
+        entry = corpus_smoke.parse_manifest(
+            self.manifest_output(expected_hash="a" * 64, target="ps1", base="0x8000f800")
+        )[0]
+        self.assertEqual(entry.base, 0x8000F800)
+
+    def test_manifest_address_space_qualifies_function_commands(self):
+        entry = corpus_smoke.parse_manifest(
+            self.manifest_output(
+                expected_hash="a" * 64,
+                address_space="ram",
+            )
+        )[0]
+
+        self.assertEqual(
+            corpus_smoke.function_address(entry, entry.functions[0]),
+            "ram::0x250190",
+        )
 
     def test_parse_manifest_retains_embedded_source_metadata(self):
         metadata = {
@@ -66,6 +98,50 @@ class CorpusSmokeTests(unittest.TestCase):
             self.manifest_output(expected_hash="a" * 64, metadata=metadata)
         )[0]
         self.assertEqual(entry.metadata, metadata)
+    def test_parse_manifest_reads_typed_toolchain_for_non_ps2_targets(self):
+        toolchain = {
+            "id": "llvm-arm-thumb",
+            "compiler": {"program": "clang", "args": ["-c", "{source}", "-o", "{object}"]},
+            "disassembler": {
+                "program": "llvm-objdump",
+                "args": ["-d", "--start-address={start}", "--stop-address={stop}", "{input}"],
+            },
+            "disassembly_format": "llvm",
+            "mnemonic_aliases": [{"from": "b", "to": "bl"}],
+            "call_mnemonics": ["bl", "blx"],
+            "retail_input": "image",
+        }
+        entry = corpus_smoke.parse_manifest(
+            self.manifest_output(
+                expected_hash="a" * 64,
+                target="wii",
+                toolchain=toolchain,
+            )
+        )[0]
+        self.assertEqual(entry.target, "wii")
+        self.assertEqual(entry.toolchain.disassembly_format, "llvm")
+        self.assertEqual(entry.toolchain.call_mnemonics, ("bl", "blx"))
+        self.assertEqual(entry.toolchain.mnemonic_aliases[0].to_mnemonic, "bl")
+
+    def test_manifest_rejects_toolchain_profile_target_mismatch(self):
+        toolchain = {
+            "id": "bad",
+            "target": "ps2",
+            "compiler": {"program": "cc", "args": ["{source}", "{object}"]},
+            "disassembler": {"program": "objdump", "args": ["{input}"]},
+            "disassembly_format": "gnu",
+            "mnemonic_aliases": [],
+            "call_mnemonics": ["bl"],
+            "retail_input": "image",
+        }
+        with self.assertRaisesRegex(corpus_smoke.SmokeError, "does not match target"):
+            corpus_smoke.parse_manifest(
+                self.manifest_output(
+                    expected_hash="a" * 64,
+                    target="wii",
+                    toolchain=toolchain,
+                )
+            )
 
     def test_smoke_runs_every_manifest_function(self):
         data = b"real image"
@@ -79,7 +155,12 @@ class CorpusSmokeTests(unittest.TestCase):
         def fake_runner(command, args):
             calls.append(list(args))
             if args[0] == "corpus":
-                return self.manifest_output(expected_hash=digest, functions=functions), ""
+                return self.manifest_output(
+                    expected_hash=digest,
+                    functions=functions,
+                    target="ps1",
+                    base="0x8000f800",
+                ), ""
             if args[0] == "resolve":
                 address = args[2].split("::")[-1]
                 return envelope("resolve", f"space: ram\noffset: {address}\n"), ""
@@ -107,7 +188,13 @@ class CorpusSmokeTests(unittest.TestCase):
         self.assertEqual(len(analysis_calls), 4)
         self.assertEqual(
             [call[2] for call in analysis_calls],
-            ["ram::0x250190", "ram::0x250190", "ram::0x250380", "ram::0x250380"],
+            ["0x250190", "0x250190", "0x250380", "0x250380"],
+        )
+        self.assertTrue(
+            all(
+                call[call.index("--base") + 1] == "0x8000f800"
+                for call in analysis_calls
+            )
         )
 
     def test_function_failure_does_not_skip_remaining_functions(self):
@@ -144,7 +231,7 @@ class CorpusSmokeTests(unittest.TestCase):
             )
 
         self.assertFalse(report["ok"])
-        self.assertEqual(decompile_addresses, ["ram::0x250190", "ram::0x250380"])
+        self.assertEqual(decompile_addresses, ["0x250190", "0x250380"])
         self.assertEqual([item["status"] for item in report["entries"][0]["functions"]], ["fail", "pass"])
 
     def test_semantic_exact_match_is_distinguished(self):
@@ -228,6 +315,40 @@ class CorpusSmokeTests(unittest.TestCase):
             metadata["provenance"],
         )
 
+    def test_source_body_uses_address_name_when_source_symbol_is_unavailable(self):
+        source = (
+            "#include <stdint.h>\n"
+            "uint32_t sub_800034e0(uint32_t arg0) "
+            "{ callee(); return arg0; }\n"
+        )
+        self.assertEqual(
+            corpus_smoke._source_structure(source, "TRK_memset"),
+            (["return"], ["call", "return"]),
+        )
+        self.assertEqual(
+            corpus_smoke._source_declarations(source, "TRK_memset"),
+            [],
+        )
+        self.assertEqual(corpus_smoke._source_globals(source, "TRK_memset"), [])
+
+    def test_source_declaration_order_ignores_materialized_call_results(self):
+        source = (
+            "uint32_t f(void) {\n"
+            "uint32_t first = 1;\n"
+            "uint32_t call_800034f4 = callee();\n"
+            "uint32_t second = call_800034f4;\n"
+            "return second;\n"
+            "}\n"
+        )
+        self.assertEqual(
+            corpus_smoke._source_declaration_order(source, "f"),
+            ["first", "second"],
+        )
+        self.assertEqual(
+            corpus_smoke._source_declarations(source, "f"),
+            ["first", "call_800034f4", "second"],
+        )
+
     def test_source_structure_ignores_only_unlabelled_terminal_void_return(self):
         plain = "void f(void) { value = 0; return; }"
         labelled = "void f(void) { if (value) goto loc_10; loc_10: return; }"
@@ -251,10 +372,17 @@ class CorpusSmokeTests(unittest.TestCase):
             "nominal_fields": ["gValue.field"],
             "source_structure": ["call", "return"],
         }
+        calls = []
 
         def fake_runner(command, args):
+            calls.append(list(args))
             if args[0] == "corpus":
-                return self.manifest_output(expected_hash=digest, semantic=semantic), ""
+                return self.manifest_output(
+                    expected_hash=digest,
+                    semantic=semantic,
+                    target="ps1",
+                    base="0x8000f800",
+                ), ""
             if args[0] == "resolve":
                 return envelope("resolve", "space: ram\noffset: 0x250190\n"), ""
             if args[0] == "decompile-native":
@@ -298,6 +426,8 @@ class CorpusSmokeTests(unittest.TestCase):
             ["lift"],
         )
         self.assertEqual(call_dimension["observed"], [])
+        lift_call = next(call for call in calls if call[0] == "lift")
+        self.assertEqual(lift_call[lift_call.index("--base") + 1], "0x8000f800")
 
     def test_valid_lift_without_calls_line_observes_an_empty_call_set(self):
         size, calls = corpus_smoke._lift_summary(
@@ -482,8 +612,8 @@ class CorpusSmokeTests(unittest.TestCase):
 
         self.assertTrue(report["ok"])
         self.assertEqual(report["entries"][0]["hash_status"], "verified")
-        self.assertIn("ram::0x250190", calls[1])
-        self.assertIn("ram::0x250190", calls[2])
+        self.assertIn("0x250190", calls[1])
+        self.assertIn("0x250190", calls[2])
         self.assertEqual(report["entries"][0]["warnings"], ["warning"])
 
     def test_hash_mismatch_fails_entry_without_running_analysis(self):

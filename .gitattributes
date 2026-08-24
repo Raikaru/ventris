@@ -11,6 +11,7 @@
 *.elf binary
 *.dol binary
 *.z64 binary
+*.sla binary
 
 /target export-ignore
 /integrations/vscode/dist export-ignore

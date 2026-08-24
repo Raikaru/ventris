@@ -56,7 +56,7 @@ release tag.
 From the repository root:
 
 ```text
-python -S tools/release_check.py --version 0.2.0
+python -S tools/release_check.py --version 0.3.0
 cargo fmt --all -- --check
 cargo fmt --manifest-path desktop/ventris-gpui/Cargo.toml -- --check
 cargo test --workspace
@@ -64,8 +64,8 @@ cargo test --manifest-path desktop/ventris-gpui/Cargo.toml --locked
 cargo build --workspace --locked
 cargo build --release --locked -p ventris-cli
 PYTHONPATH=python python -S -m unittest discover -s python/tests
-python -S tools/native_smoke.py --binary target/release/ventris.exe --fixture integrations/vscode/acceptance/fixture.exe --semantic-spec integrations/vscode/acceptance/semantic.json --version 0.2.0
-python -S tools/clean_host_smoke.py --binary target/release/ventris.exe --fixture integrations/vscode/acceptance/fixture.exe --semantic-spec integrations/vscode/acceptance/semantic.json --version 0.2.0
+python -S tools/native_smoke.py --binary target/release/ventris.exe --fixture integrations/vscode/acceptance/fixture.exe --semantic-spec integrations/vscode/acceptance/semantic.json --version 0.3.0
+python -S tools/clean_host_smoke.py --binary target/release/ventris.exe --fixture integrations/vscode/acceptance/fixture.exe --semantic-spec integrations/vscode/acceptance/semantic.json --version 0.3.0
 ```
 
 Build and inspect the Python distribution in a fresh environment. The chosen
@@ -76,10 +76,10 @@ archive, with `VENTRIS_BIN` or `PATH` selecting that executable.
 ```text
 python -m pip install --disable-pip-version-check build
 python -m build --wheel --sdist --outdir .release/python
-python -S tools/verify_python_artifact.py --wheel .release/python/ventris_client-0.2.0-py3-none-any.whl --version 0.2.0
-python -S tools/verify_python_source.py --source .release/python/ventris_client-0.2.0.tar.gz --version 0.2.0
+python -S tools/verify_python_artifact.py --wheel .release/python/ventris_client-0.3.0-py3-none-any.whl --version 0.3.0
+python -S tools/verify_python_source.py --source .release/python/ventris_client-0.3.0.tar.gz --version 0.3.0
 python -m venv .release/venv
-.release/venv/Scripts/python -m pip install --no-deps .release/python/ventris_client-0.2.0-py3-none-any.whl
+.release/venv/Scripts/python -m pip install --no-deps .release/python/ventris_client-0.3.0-py3-none-any.whl
 set VENTRIS_BIN=%CD%\target\release\ventris.exe
 .release/venv/Scripts/python -c "from ventris import version; print(version())"
 ```
@@ -109,7 +109,7 @@ Manual dispatches build and verify every release artifact without publishing by
 default:
 
 ```text
-gh workflow run release.yml -f version=0.2.0 -f publish=false
+gh workflow run release.yml -f version=0.3.0 -f publish=false
 ```
 
 Inspect the completed run and download every artifact before tagging. Setting

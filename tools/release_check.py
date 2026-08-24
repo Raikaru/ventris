@@ -116,8 +116,10 @@ def check(root: Path, version: str) -> None:
         fail("pyproject version is not synchronized")
     if 'readme = "README.md"' not in pyproject:
         fail("Python package does not declare its README")
-    if "license = { file = \"LICENSE\" }" not in pyproject:
-        fail("Python package does not declare its license file")
+    if not re.search(r'^\s*license\s*=\s*"Apache-2\.0"\s*$', pyproject, re.MULTILINE):
+        fail("Python package license is not Apache-2.0")
+    if not re.search(r'^\s*license-files\s*=\s*\[[^\]]*"LICENSE"', pyproject, re.MULTILINE):
+        fail("Python package does not include its license file")
 
     python_init = read(root, "python/ventris/__init__.py")
     require_version(python_init, "Python package", f'__version__ = "{version}"')

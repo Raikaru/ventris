@@ -15,6 +15,29 @@ pub struct CorpusFunction {
     pub note: &'static str,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct CorpusToolchainCommand {
+    pub program: &'static str,
+    pub args: &'static [&'static str],
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct CorpusMnemonicAlias {
+    pub from: &'static str,
+    pub to: &'static str,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct CorpusToolchain {
+    pub id: &'static str,
+    pub compiler: CorpusToolchainCommand,
+    pub disassembler: CorpusToolchainCommand,
+    pub disassembly_format: &'static str,
+    pub mnemonic_aliases: &'static [CorpusMnemonicAlias],
+    pub call_mnemonics: &'static [&'static str],
+    pub retail_input: &'static str,
+}
+
 /// Reviewable source-derived facts used by the opt-in semantic corpus gate.
 ///
 /// These are facts, not copied source. An empty dimension means the pinned
@@ -33,12 +56,68 @@ pub struct CorpusSemanticBaseline {
 }
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct CorpusCompilerBaseline {
-    pub compiler: &'static str,
     pub target: &'static str,
     pub minimum_mnemonic_lcs_ratio: f64,
 }
 
-const CLANG_MIPSEL: &str = "clang --target=mipsel-none-elf -O2";
+const DUNGEON_GAME_COMPILER_ARGS: &[&str] = &[
+    "--target=mipsel-none-elf",
+    "-std=c11",
+    "-O2",
+    "-ffreestanding",
+    "-fno-pic",
+    "-mno-abicalls",
+    "-Wno-error=int-conversion",
+    "-c",
+    "{source}",
+    "-o",
+    "{object}",
+];
+
+const DUNGEON_GAME_DISASSEMBLER_ARGS: &[&str] = &[
+    "-d",
+    "--no-show-raw-insn",
+    "--start-address={start}",
+    "--stop-address={stop}",
+    "{input}",
+];
+
+const DUNGEON_GAME_MNEMONIC_ALIASES: &[CorpusMnemonicAlias] = &[
+    CorpusMnemonicAlias {
+        from: "move",
+        to: "addu",
+    },
+    CorpusMnemonicAlias {
+        from: "b",
+        to: "beq",
+    },
+    CorpusMnemonicAlias {
+        from: "beqz",
+        to: "beq",
+    },
+    CorpusMnemonicAlias {
+        from: "bnez",
+        to: "bne",
+    },
+];
+
+const DUNGEON_GAME_CALL_MNEMONICS: &[&str] = &["jal", "jalr", "bal", "bgezal", "bltzal"];
+
+const DUNGEON_GAME_TOOLCHAIN: CorpusToolchain = CorpusToolchain {
+    id: "clang-mipsel-o32-llvm",
+    compiler: CorpusToolchainCommand {
+        program: "clang",
+        args: DUNGEON_GAME_COMPILER_ARGS,
+    },
+    disassembler: CorpusToolchainCommand {
+        program: "llvm-objdump",
+        args: DUNGEON_GAME_DISASSEMBLER_ARGS,
+    },
+    disassembly_format: "llvm",
+    mnemonic_aliases: DUNGEON_GAME_MNEMONIC_ALIASES,
+    call_mnemonics: DUNGEON_GAME_CALL_MNEMONICS,
+    retail_input: "image",
+};
 
 const DUNGEON_FADE_BASELINE: CorpusSemanticBaseline = CorpusSemanticBaseline {
     control_flow: &["if", "return"],
@@ -94,6 +173,18 @@ const fn dungeon_alloc_baseline(nominal_fields: &'static [&'static str]) -> Corp
     }
 }
 
+const ANIMAL_CROSSING_TRK_MEMSET_BASELINE: CorpusSemanticBaseline = CorpusSemanticBaseline {
+    control_flow: &["return"],
+    calls: &["TRK_fill_mem@0x800a67d8"],
+    globals: &[],
+    access_types: &[],
+    casts: 0,
+    aggregate_copies: 0,
+    declaration_order: &[],
+    nominal_fields: &[],
+    source_structure: &["call", "return"],
+};
+
 /// Source-controlled facts consumed by `recover-types` and
 /// `reconstruct-source` for the public Dungeon Game acceptance corpus.
 pub const DUNGEON_GAME_METADATA_JSON: &str = r#"{
@@ -134,8 +225,8 @@ pub const DUNGEON_GAME_METADATA_JSON: &str = r#"{
   }],
   "assertions": [{
     "space": 4,
-    "base": 16,
-    "size": 4,
+    "base": 32,
+    "size": 8,
     "offset": 0,
     "name": "this_",
     "type": {"kind": "nominal", "id": 1, "name": "GameWorld", "size": 22224},
@@ -145,6 +236,9 @@ pub const DUNGEON_GAME_METADATA_JSON: &str = r#"{
 
 pub fn semantic_baseline(entry_id: &str, function: &str) -> Option<CorpusSemanticBaseline> {
     match (entry_id, function) {
+        ("gamecube-animal-crossing-gafe01", "TRK_memset") => {
+            Some(ANIMAL_CROSSING_TRK_MEMSET_BASELINE)
+        }
         ("ps2-dungeon-game", "_ZN9GameWorld12beginFadeOutEv")
         | ("ps2-dungeon-game", "_ZN9GameWorld11beginFadeInEv") => Some(DUNGEON_FADE_BASELINE),
         ("ps2-dungeon-game", "_ZN9GameWorld16onFadeInFinishedEv") => {
@@ -168,20 +262,15 @@ pub fn semantic_baseline(entry_id: &str, function: &str) -> Option<CorpusSemanti
         _ => None,
     }
 }
+/// Returns floors only where the configured disassembler decodes every retail instruction.
 pub fn compiler_baseline(entry_id: &str, function: &str) -> Option<CorpusCompilerBaseline> {
     let minimum_mnemonic_lcs_ratio = match (entry_id, function) {
         ("ps2-dungeon-game", "_ZN9GameWorld12beginFadeOutEv") => 3.0 / 13.0,
         ("ps2-dungeon-game", "_ZN9GameWorld11beginFadeInEv") => 2.0 / 13.0,
         ("ps2-dungeon-game", "_ZN9GameWorld16onFadeInFinishedEv") => 1.0 / 6.0,
-        ("ps2-dungeon-game", "_ZN9GameWorld16allocEnemyEntityEv")
-        | ("ps2-dungeon-game", "_ZN9GameWorld17allocRenderEntityEv")
-        | ("ps2-dungeon-game", "_ZN9GameWorld15allocShadowBlobEv")
-        | ("ps2-dungeon-game", "_ZN9GameWorld13allocLightmapEv")
-        | ("ps2-dungeon-game", "_ZN9GameWorld20allocParticleEmitterEv") => 0.5,
         _ => return None,
     };
     Some(CorpusCompilerBaseline {
-        compiler: CLANG_MIPSEL,
         target: "ps2",
         minimum_mnemonic_lcs_ratio,
     })
@@ -198,8 +287,15 @@ pub struct CorpusEntry {
     pub binary_name: &'static str,
     pub binary_sha256: Option<&'static str>,
     pub binary_sha1: Option<&'static str>,
+    /// Optional raw-image base override. This is used when a container header
+    /// remains in the supplied image but the target profile intentionally uses
+    /// the raw loader.
+    pub base: Option<u64>,
+    /// Optional address-space qualifier for unqualified function offsets.
+    pub address_space: Option<&'static str>,
     pub status: &'static str,
     pub metadata_json: Option<&'static str>,
+    pub toolchain: Option<CorpusToolchain>,
     pub functions: &'static [CorpusFunction],
 }
 
@@ -241,6 +337,160 @@ const ANIMAL_CROSSING_FUNCTIONS: &[CorpusFunction] = &[
         address: 0x8000_34e0,
         size: 0x30,
         note: "GAFE01_00 symbol map entry",
+    },
+    CorpusFunction {
+        name: "TRK_fill_mem",
+        source_path: "src/static/TRK_MINNOW_DOLPHIN/mem_TRK.c",
+        address: 0x800a_67d8,
+        size: 0xbc,
+        note: "pinned GAFE01_00 symbols.txt entry; callee-prototype recovery coverage",
+    },
+    CorpusFunction {
+        name: "convert_partial_address",
+        source_path: "src/static/boot.c",
+        address: 0x8000_5788,
+        size: 0x60,
+        note: "pinned GAFE01_00 symbols.txt entry",
+    },
+    CorpusFunction {
+        name: "__FrameCallback__Fl",
+        source_path: "src/static/jaudio_NES/game/emusound.c",
+        address: 0x8000_b580,
+        size: 0x124,
+        note: "pinned GAFE01_00 symbols.txt entry; exercises Gekko paired singles",
+    },
+    CorpusFunction {
+        name: "Sou_BgmTenkiConv__FUc",
+        source_path: "src/static/jaudio_NES/game/game64.c",
+        address: 0x8000_c16c,
+        size: 0x164,
+        note: "pinned GAFE01_00 symbols.txt entry",
+    },
+    CorpusFunction {
+        name: "Na_CheckRestartReady",
+        source_path: "src/static/jaudio_NES/game/game64.c",
+        address: 0x8001_4290,
+        size: 0x24,
+        note: "pinned GAFE01_00 symbols.txt entry",
+    },
+    CorpusFunction {
+        name: "Emem_KillSwMember__Fv",
+        source_path: "src/static/jaudio_NES/internal/memory.c",
+        address: 0x8002_0200,
+        size: 0x124,
+        note: "pinned GAFE01_00 symbols.txt entry",
+    },
+    CorpusFunction {
+        name: "ksNesDrawBG__FP18ksNesCommonWorkObjP13ksNesStateObj",
+        source_path: "src/static/Famicom/ks_nes_draw.cpp",
+        address: 0x8003_ea0c,
+        size: 0x818,
+        note: "pinned GAFE01_00 symbols.txt entry",
+    },
+    CorpusFunction {
+        name: "mGcgba_InitVar",
+        source_path: "src/static/GBA2/JoyBoot.c",
+        address: 0x8004_97bc,
+        size: 0x30,
+        note: "pinned GAFE01_00 symbols.txt entry",
+    },
+    CorpusFunction {
+        name: "dl_G_MOVEWORD__5emu64Fv",
+        source_path: "src/static/libforest/emu64/emu64.c",
+        address: 0x8005_76c0,
+        size: 0x224,
+        note: "pinned GAFE01_00 symbols.txt entry",
+    },
+    CorpusFunction {
+        name: "__osRealloc",
+        source_path: "src/static/libc64/__osMalloc.c",
+        address: 0x8005_c53c,
+        size: 0x22c,
+        note: "pinned GAFE01_00 symbols.txt entry",
+    },
+    CorpusFunction {
+        name: "osContGetReadData",
+        source_path: "src/static/libultra/contreaddata.c",
+        address: 0x8006_0668,
+        size: 0x70,
+        note: "pinned GAFE01_00 symbols.txt entry",
+    },
+    CorpusFunction {
+        name: "JC__JKRDetachResource",
+        source_path: "src/static/libjsys/jsyswrapper.cpp",
+        address: 0x8006_19d8,
+        size: 0x24,
+        note: "pinned GAFE01_00 symbols.txt entry",
+    },
+    CorpusFunction {
+        name: "changeGroupID__7JKRHeapFUc",
+        source_path: "src/static/JSystem/JKernel/JKRHeap.cpp",
+        address: 0x8006_3cb8,
+        size: 0x2c,
+        note: "pinned GAFE01_00 symbols.txt entry",
+    },
+    CorpusFunction {
+        name: "__sinit_JKRAram_cpp",
+        source_path: "src/static/JSystem/JKernel/JKRAram.cpp",
+        address: 0x8006_6dec,
+        size: 0x44,
+        note: "pinned GAFE01_00 symbols.txt entry",
+    },
+    CorpusFunction {
+        name: "getFirstFile__10JKRArchiveCFPCc",
+        source_path: "src/static/JSystem/JKernel/JKRArchivePub.cpp",
+        address: 0x8006_8e24,
+        size: 0xac,
+        note: "pinned GAFE01_00 symbols.txt entry",
+    },
+    CorpusFunction {
+        name: "decompSZS_subroutine__FPUcPUc",
+        source_path: "src/static/JSystem/JKernel/JKRDvdRipper.cpp",
+        address: 0x8006_c42c,
+        size: 0x294,
+        note: "pinned GAFE01_00 symbols.txt entry",
+    },
+    CorpusFunction {
+        name: "__ct__10JUTResFontFPC7ResFONTP7JKRHeap",
+        source_path: "src/static/JSystem/JUtility/JUTResFont.cpp",
+        address: 0x8006_ec88,
+        size: 0x64,
+        note: "pinned GAFE01_00 symbols.txt entry",
+    },
+    CorpusFunction {
+        name: "queryMapAddress_single__12JUTExceptionFPcUllPUlPUlPcUlbb",
+        source_path: "src/static/JSystem/JUtility/JUTException.cpp",
+        address: 0x8007_2c88,
+        size: 0x340,
+        note: "pinned GAFE01_00 symbols.txt entry",
+    },
+    CorpusFunction {
+        name: "JUTReportConsole_f_va",
+        source_path: "src/static/JSystem/JUtility/JUTConsole.cpp",
+        address: 0x8007_709c,
+        size: 0x88,
+        note: "pinned GAFE01_00 symbols.txt entry",
+    },
+    CorpusFunction {
+        name: "fwrite",
+        source_path: "src/static/MSL_C.PPCEABI.bare.H/direct_io.c",
+        address: 0x8009_c9cc,
+        size: 0x20,
+        note: "pinned GAFE01_00 symbols.txt entry",
+    },
+    CorpusFunction {
+        name: "TRKResetBuffer",
+        source_path: "src/static/TRK_MINNOW_DOLPHIN/msgbuf.c",
+        address: 0x800a_2e90,
+        size: 0x40,
+        note: "pinned GAFE01_00 symbols.txt entry",
+    },
+    CorpusFunction {
+        name: "DBGEXIImm",
+        source_path: "src/static/dolphin/OdemuExi2/DebuggerDriver.c",
+        address: 0x800a_94d8,
+        size: 0x298,
+        note: "pinned GAFE01_00 symbols.txt entry",
     },
 ];
 
@@ -372,6 +622,44 @@ const POKEMON_EMERALD_FUNCTIONS: &[CorpusFunction] = &[
     },
 ];
 
+const SILENT_HILL_FUNCTIONS: &[CorpusFunction] = &[
+    CorpusFunction {
+        name: "Rng_Rand32",
+        source_path: "src/main/rng.c",
+        address: 0x8001_20b8,
+        size: 0x2c,
+        note: "USA sym.main.txt @ d77836cd; size is the next-symbol span",
+    },
+    CorpusFunction {
+        name: "Rng_Rand16",
+        source_path: "src/main/rng.c",
+        address: 0x8001_20e4,
+        size: 0x20,
+        note: "USA sym.main.txt @ d77836cd; size is the next-symbol span",
+    },
+    CorpusFunction {
+        name: "Rng_GetSeed",
+        source_path: "src/main/rng.c",
+        address: 0x8001_2104,
+        size: 0x0c,
+        note: "USA sym.main.txt @ d77836cd; size is the next-symbol span",
+    },
+    CorpusFunction {
+        name: "Rng_SetSeed",
+        source_path: "src/main/rng.c",
+        address: 0x8001_2110,
+        size: 0x0c,
+        note: "USA sym.main.txt @ d77836cd; size is the next-symbol span",
+    },
+    CorpusFunction {
+        name: "Rng_Rand12",
+        source_path: "src/main/rng.c",
+        address: 0x8001_211c,
+        size: 0x20,
+        note: "USA sym.main.txt @ d77836cd; size is the next-segment span",
+    },
+];
+
 /// Public corpus metadata with pinned symbols and source revisions.
 ///
 /// The license field is factual metadata. A missing explicit license is not
@@ -391,6 +679,9 @@ pub const CORPUS: &[CorpusEntry] = &[
         binary_sha256: Some("4e51142acac686d96861cecc58cf7cb7c3b06b21733b7f8ed609a709dc039a21"),
         binary_sha1: None,
         metadata_json: None,
+        toolchain: None,
+        base: None,
+        address_space: None,
         status: "licensed-source-metadata",
         functions: PERFECT_DARK_FUNCTIONS,
     },
@@ -405,6 +696,9 @@ pub const CORPUS: &[CorpusEntry] = &[
         binary_sha256: Some("e3166b15b810ff20397784fc83b2eb053db5d0c2a9e22ac2ead63a645881d150"),
         binary_sha1: None,
         metadata_json: None,
+        toolchain: None,
+        base: None,
+        address_space: None,
         status: "licensed-source-metadata",
         functions: ANIMAL_CROSSING_FUNCTIONS,
     },
@@ -419,6 +713,9 @@ pub const CORPUS: &[CorpusEntry] = &[
         binary_sha256: None,
         binary_sha1: Some("cf58495054c31ad852175c66e9ca04d5094f000e"),
         metadata_json: None,
+        toolchain: None,
+        base: None,
+        address_space: Some("ram"),
         status: "licensed-source-metadata",
         functions: STREET_FIGHTER_FUNCTIONS,
     },
@@ -433,6 +730,9 @@ pub const CORPUS: &[CorpusEntry] = &[
         binary_sha256: Some("25faee2f98483f7f86d0dd7043e7b506c998728989347c8a38ae8af49c0a1af4"),
         binary_sha1: None,
         metadata_json: Some(DUNGEON_GAME_METADATA_JSON),
+        toolchain: Some(DUNGEON_GAME_TOOLCHAIN),
+        base: None,
+        address_space: Some("ram"),
         status: "public-reference",
         functions: DUNGEON_GAME_FUNCTIONS,
     },
@@ -447,8 +747,28 @@ pub const CORPUS: &[CorpusEntry] = &[
         binary_sha256: Some("a9dec84dfe7f62ab2220bafaef7479da0929d066ece16a6885f6226db19085af"),
         binary_sha1: None,
         metadata_json: None,
+        toolchain: None,
+        base: None,
+        address_space: None,
         status: "public-reference",
         functions: POKEMON_EMERALD_FUNCTIONS,
+    },
+    CorpusEntry {
+        id: "ps1-silent-hill-usa",
+        title: "Silent Hill (PS1, USA)",
+        target: TargetProfile::Ps1,
+        source_url: "https://github.com/shdecompilations/silent-hill-decomp",
+        source_commit: "d77836cddfefbaf54ed844463fe348ba38338a4f",
+        source_license: "GPL-3.0",
+        binary_name: "SLUS_007.07",
+        binary_sha256: Some("e73859ccd2e8000d259c6fe640bb8a6d55fed6044f67fbf071e3d86c0f202398"),
+        binary_sha1: Some("f38344565fb731befc52fd968eb5a667be37acf3"),
+        base: Some(0x8000_f800),
+        address_space: None,
+        metadata_json: None,
+        toolchain: None,
+        status: "licensed-source-metadata",
+        functions: SILENT_HILL_FUNCTIONS,
     },
 ];
 
@@ -473,8 +793,9 @@ mod tests {
                 match entry.target {
                     TargetProfile::N64 => Architecture::N64,
                     TargetProfile::GameCube => Architecture::GameCube,
-                    TargetProfile::Ps2 => Architecture::Mips32,
+                    TargetProfile::Ps2 => Architecture::Ps2,
                     TargetProfile::Gba => Architecture::Thumb,
+                    TargetProfile::Ps1 => Architecture::Ps1,
                     _ => unreachable!(),
                 }
             );
@@ -520,6 +841,49 @@ mod tests {
         assert_eq!(entry.source_license, "unspecified");
         assert_eq!(entry.status, "public-reference");
     }
+    #[test]
+    fn ps1_reference_pins_executable_layout_and_rng_symbols() {
+        let entry = CORPUS
+            .iter()
+            .find(|entry| entry.id == "ps1-silent-hill-usa")
+            .unwrap();
+        assert_eq!(entry.binary_name, "SLUS_007.07");
+        assert_eq!(entry.base, Some(0x8000_f800));
+        assert_eq!(
+            entry.binary_sha256,
+            Some("e73859ccd2e8000d259c6fe640bb8a6d55fed6044f67fbf071e3d86c0f202398")
+        );
+        assert_eq!(
+            entry
+                .functions
+                .iter()
+                .map(|function| (function.name, function.address, function.size))
+                .collect::<Vec<_>>(),
+            vec![
+                ("Rng_Rand32", 0x8001_20b8, 0x2c),
+                ("Rng_Rand16", 0x8001_20e4, 0x20),
+                ("Rng_GetSeed", 0x8001_2104, 0x0c),
+                ("Rng_SetSeed", 0x8001_2110, 0x0c),
+                ("Rng_Rand12", 0x8001_211c, 0x20),
+            ]
+        );
+    }
+
+    #[test]
+    fn gamecube_reference_pins_valid_source_and_trk_memset_semantics() {
+        let entry = CORPUS
+            .iter()
+            .find(|entry| entry.id == "gamecube-animal-crossing-gafe01")
+            .unwrap();
+        assert_eq!(
+            entry.source_commit,
+            "09ca8e8b5b24e6ab44047ee980cf0088ad7ecb4c"
+        );
+        let baseline = semantic_baseline(entry.id, "TRK_memset").unwrap();
+        assert_eq!(baseline.calls, &["TRK_fill_mem@0x800a67d8"]);
+        assert_eq!(baseline.control_flow, &["return"]);
+    }
+
     #[test]
     fn ps2_reference_is_pinned_to_the_source_project_image() {
         let entry = CORPUS
@@ -581,7 +945,7 @@ mod tests {
                 .iter()
                 .filter(|function| compiler_baseline(entry.id, function.name).is_some())
                 .count(),
-            8
+            3
         );
         assert_eq!(
             compiler_baseline(entry.id, "_ZN9GameWorld12beginFadeOutEv")
@@ -598,6 +962,79 @@ mod tests {
         assert!(entry.metadata_json.is_some());
     }
 
+    #[test]
+    fn corpus_toolchain_profile_is_optional_and_entry_scoped() {
+        let dungeon = CORPUS
+            .iter()
+            .find(|entry| entry.id == "ps2-dungeon-game")
+            .unwrap();
+        let profile = dungeon.toolchain.unwrap();
+        assert_eq!(profile.id, "clang-mipsel-o32-llvm");
+        assert_eq!(profile.compiler.program, "clang");
+        assert_eq!(
+            profile.compiler.args,
+            &[
+                "--target=mipsel-none-elf",
+                "-std=c11",
+                "-O2",
+                "-ffreestanding",
+                "-fno-pic",
+                "-mno-abicalls",
+                "-Wno-error=int-conversion",
+                "-c",
+                "{source}",
+                "-o",
+                "{object}",
+            ]
+        );
+        assert_eq!(profile.disassembler.program, "llvm-objdump");
+        assert_eq!(
+            profile.disassembler.args,
+            &[
+                "-d",
+                "--no-show-raw-insn",
+                "--start-address={start}",
+                "--stop-address={stop}",
+                "{input}",
+            ]
+        );
+        assert_eq!(profile.disassembly_format, "llvm");
+        assert_eq!(
+            profile.mnemonic_aliases,
+            &[
+                CorpusMnemonicAlias {
+                    from: "move",
+                    to: "addu",
+                },
+                CorpusMnemonicAlias {
+                    from: "b",
+                    to: "beq",
+                },
+                CorpusMnemonicAlias {
+                    from: "beqz",
+                    to: "beq",
+                },
+                CorpusMnemonicAlias {
+                    from: "bnez",
+                    to: "bne",
+                },
+            ]
+        );
+        assert_eq!(
+            profile.call_mnemonics,
+            &["jal", "jalr", "bal", "bgezal", "bltzal"]
+        );
+        assert_eq!(profile.retail_input, "image");
+        assert!(
+            CORPUS
+                .iter()
+                .filter(|entry| entry.id != dungeon.id)
+                .all(|entry| entry.toolchain.is_none())
+        );
+        let baseline = compiler_baseline(dungeon.id, dungeon.functions[0].name).unwrap();
+        assert_eq!(baseline.target, "ps2");
+    }
+
     fn recover_fixture<L: ventris_lifter::Lifter>(
         target: TargetProfile,
         bytes: &[u8],
@@ -610,6 +1047,22 @@ mod tests {
             .discover(&loaded.image, &loaded.bytes, base, 32)
             .unwrap();
         crate::recover_function(target, crate::RecoveryInput::new(&function))
+    }
+
+    #[test]
+    fn ppc_machine_frame_accesses_do_not_become_recovered_fields() {
+        let bytes = include_str!("../../ventris-decompiler/testdata/abi/ppc_eabi_frame_call.hex")
+            .split_whitespace()
+            .map(|byte| u8::from_str_radix(byte, 16).unwrap())
+            .collect::<Vec<_>>();
+        let gamecube = recover_fixture(
+            TargetProfile::GameCube,
+            &bytes,
+            0x1000,
+            ventris_lifter::GameCube,
+        );
+        assert!(gamecube.accesses.is_empty(), "{:#?}", gamecube.accesses);
+        assert!(gamecube.structs.is_empty(), "{:#?}", gamecube.structs);
     }
 
     #[test]
@@ -663,7 +1116,10 @@ mod tests {
             0x0800_0554,
             ventris_lifter::Thumb,
         );
-        assert_eq!(gba.abi.architecture, ventris_lifter::Architecture::Thumb);
+        assert_eq!(
+            gba.target.spec().architecture,
+            ventris_lifter::Architecture::Thumb
+        );
         assert_eq!(gba.abi.stack_alignment, 4);
         assert_eq!(gba.accesses.len(), 2);
     }

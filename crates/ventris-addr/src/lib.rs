@@ -39,13 +39,12 @@ pub mod hash {
     /// Stable 64-bit hash with fixed constants and byte order.
     pub fn stable64(bytes: &[u8]) -> u64 {
         let mut h = P1 ^ (bytes.len() as u64).wrapping_mul(P2);
-        let mut chunks = bytes.chunks_exact(8);
-        for chunk in &mut chunks {
-            let lane = u64::from_le_bytes(chunk.try_into().expect("chunks_exact width"));
+        let (chunks, tail) = bytes.as_chunks::<8>();
+        for chunk in chunks {
+            let lane = u64::from_le_bytes(*chunk);
             h ^= avalanche(lane.wrapping_add(P3));
             h = h.rotate_left(27).wrapping_mul(P1).wrapping_add(P4);
         }
-        let tail = chunks.remainder();
         if !tail.is_empty() {
             let mut lane = 0u64;
             for (shift, byte) in tail.iter().copied().enumerate() {

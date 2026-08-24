@@ -4,4 +4,4 @@ from .cli import VentrisError, decompile, inspect, lift, run, version
 
 __all__ = ["VentrisError", "decompile", "inspect", "lift", "run", "version"]
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

@@ -11,6 +11,7 @@ opcodes, operand order, address-space kind, offsets, and widths remain strict.
 from __future__ import annotations
 
 import argparse
+import hashlib
 from dataclasses import dataclass
 import json
 import os
@@ -21,6 +22,11 @@ import subprocess
 import sys
 import tempfile
 from typing import Iterable, Sequence
+
+GHIDRA_VERSION = "12.1.3"
+GHIDRA_RELEASE_TAG = "Ghidra_12.1.3_build"
+GHIDRA_SOURCE_COMMIT = "8b4c91d4d5bd1549622bfbade0df199585b98365"
+GHIDRA_RELEASE_SHA256 = "93a5d11a9ad510622acaaf908c556a7b9b764d338e78a7567f3689bf5081fd54"
 
 
 @dataclass(frozen=True)
@@ -151,6 +157,49 @@ def parse_capsule(path: Path) -> Capsule:
     return parse_capsule_text(path.read_text(encoding="utf-8"))
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def write_ghidra_fixture(
+    args: argparse.Namespace,
+    capsule_path: Path,
+    capsule: Capsule,
+    destination: Path,
+) -> None:
+    """Persist only Ghidra-authored p-code plus immutable oracle provenance."""
+    metadata = [
+        "# ventris-ghidra-fixture 1",
+        "# oracle=Ghidra",
+        f"# ghidra_version={GHIDRA_VERSION}",
+        f"# ghidra_release_tag={GHIDRA_RELEASE_TAG}",
+        f"# ghidra_source_commit={GHIDRA_SOURCE_COMMIT}",
+        f"# ghidra_release_sha256={GHIDRA_RELEASE_SHA256}",
+        f"# language={capsule.language}",
+        f"# architecture={args.arch}",
+        f"# source_image={args.image.name}",
+        f"# source_image_sha256={sha256_file(args.image)}",
+        f"# function={capsule.function}",
+        f"# entry={capsule.entry:#x}",
+        f"# length={capsule.length:#x}",
+        f"# function_bytes_sha256={hashlib.sha256(capsule.image).hexdigest()}",
+        "# generated_by=tools/diff_ghidra.py",
+        "",
+    ]
+    capsule_lines = [
+        line
+        for line in capsule_path.read_text(encoding="utf-8").splitlines()
+        if not line.startswith(("reg ", "userop "))
+    ]
+    body = "\n".join(capsule_lines) + "\n"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text("\n".join(metadata) + body, encoding="utf-8", newline="\n")
+
+
 def parse_native_varnodes(text: str) -> list[Varnode]:
     return [Varnode(int(space), int(offset), int(size)) for space, offset, size in VAR_NODE.findall(text)]
 
@@ -231,22 +280,51 @@ def repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def ghidra_version(root: Path) -> str:
+    properties = root / "Ghidra" / "application.properties"
+    if not properties.is_file():
+        raise RuntimeError(f"Ghidra install has no application metadata: {properties}")
+    for line in properties.read_text(encoding="utf-8").splitlines():
+        if line.startswith("application.version="):
+            return line.partition("=")[2].strip()
+    raise RuntimeError(f"Ghidra install does not declare application.version: {properties}")
+
+
+def validate_ghidra(root: Path) -> Path:
+    if not (root / "support" / "analyzeHeadless.bat").is_file() and not (
+        root / "support" / "analyzeHeadless"
+    ).is_file():
+        raise RuntimeError(f"Ghidra install has no headless launcher: {root}")
+    version = ghidra_version(root)
+    if version != GHIDRA_VERSION:
+        raise RuntimeError(
+            f"Ghidra {GHIDRA_VERSION} is required; {root} contains {version}"
+        )
+    return root
+
+
 def find_ghidra(explicit: str | None) -> Path:
     if explicit:
-        root = Path(explicit)
-        if not (root / "support" / "analyzeHeadless.bat").is_file() and not (
-            root / "support" / "analyzeHeadless"
-        ).is_file():
-            raise RuntimeError(f"Ghidra install has no headless launcher: {root}")
-        return root
+        return validate_ghidra(Path(explicit))
     env_root = os.environ.get("GHIDRA_INSTALL_DIR")
     if env_root:
         return find_ghidra(env_root)
-    candidates = sorted(Path("C:/Tools").glob("ghidra*")) if Path("C:/Tools").is_dir() else []
+    candidates = (
+        sorted(Path("C:/Tools").glob("ghidra*"), reverse=True)
+        if Path("C:/Tools").is_dir()
+        else []
+    )
+    mismatches = []
     for candidate in candidates:
-        if (candidate / "support" / "analyzeHeadless.bat").is_file():
-            return candidate
-    raise RuntimeError("Ghidra not found; pass --ghidra or set GHIDRA_INSTALL_DIR")
+        try:
+            return validate_ghidra(candidate)
+        except RuntimeError as error:
+            mismatches.append(str(error))
+    detail = f": {'; '.join(mismatches)}" if mismatches else ""
+    raise RuntimeError(
+        f"Ghidra {GHIDRA_VERSION} not found; pass --ghidra or set "
+        f"GHIDRA_INSTALL_DIR{detail}"
+    )
 
 
 def find_ventris(explicit: str | None) -> list[str]:
@@ -283,6 +361,10 @@ def run_ghidra(args: argparse.Namespace, capsule_path: Path) -> tuple[str, str]:
                     hex(args.entry),
                 ]
             )
+        if args.arch == "gamecube" and not args.raw:
+            # GameCubeLoader otherwise opens a Swing symbol-map prompt when no
+            # adjacent map exists, which deadlocks analyzeHeadless.
+            command.extend(["-loader-autoloadMaps", "false"])
         command.extend(
             [
                 "-scriptPath",
@@ -291,9 +373,11 @@ def run_ghidra(args: argparse.Namespace, capsule_path: Path) -> tuple[str, str]:
                 script.name,
                 args.function,
                 str(capsule_path),
-                "-deleteProject",
             ]
         )
+        if args.length is not None:
+            command.append(str(args.length))
+        command.append("-deleteProject")
         completed = subprocess.run(command, text=True, capture_output=True, check=False)
     if completed.returncode:
         raise RuntimeError(
@@ -316,6 +400,10 @@ def run_native(args: argparse.Namespace, entry: int, limit: int) -> str:
     ]
     if args.raw:
         command.append("--raw")
+    elif args.arch == "gamecube":
+        # DOL has no container magic; the architecture alone cannot make
+        # Ventris's loader auto-detect it.
+        command.extend(["--loader", "dol"])
     completed = subprocess.run(command, text=True, capture_output=True, check=False)
     if completed.returncode:
         raise RuntimeError(
@@ -335,6 +423,8 @@ def report_dict(capsule: Capsule, native: Sequence[Instruction], diffs: Sequence
             {"address": hex(diff.address), "kind": diff.kind, "detail": diff.detail} for diff in diffs
         ],
         "matched": not diffs,
+        "ghidra_version": GHIDRA_VERSION,
+        "ghidra_release_tag": GHIDRA_RELEASE_TAG,
     }
 
 
@@ -361,6 +451,23 @@ def self_test() -> None:
         )
     )
     assert not compare(capsule, native)
+    with tempfile.TemporaryDirectory(prefix="ventris-ghidra-version-") as work:
+        root = Path(work)
+        (root / "Ghidra").mkdir()
+        (root / "support").mkdir()
+        (root / "support" / "analyzeHeadless.bat").touch()
+        properties = root / "Ghidra" / "application.properties"
+        properties.write_text(
+            f"application.version={GHIDRA_VERSION}\n", encoding="utf-8"
+        )
+        assert validate_ghidra(root) == root
+        properties.write_text("application.version=12.1\n", encoding="utf-8")
+        try:
+            validate_ghidra(root)
+        except RuntimeError as error:
+            assert f"Ghidra {GHIDRA_VERSION} is required" in str(error)
+        else:
+            raise AssertionError("version mismatch was accepted")
     print("diff_ghidra self-test: ok")
 
 
@@ -372,15 +479,33 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--arch",
         default="x86_64",
-        choices=["x86_64", "x86_32", "aarch64", "arm32", "thumb", "mips32", "mips32be", "ps1", "n64", "rv64", "rv32", "ppc32", "gamecube", "m68k", "sh2", "sh4", "m6502", "z80"],
+        choices=["x86_64", "x86_32", "aarch64", "arm32", "thumb", "mips32", "mips32be", "ps1", "ps2", "n64", "rv64", "rv32", "ppc32", "ppc64", "gamecube", "m68k", "sh2", "sh4", "m6502", "z80", "spu"],
     )
     parser.add_argument("--processor", help="Ghidra processor language for --raw imports")
     parser.add_argument("--raw", action="store_true", help="import image as raw bytes")
-    parser.add_argument("--ghidra", help="Ghidra installation directory")
+    parser.add_argument(
+        "--ghidra",
+        help=f"Ghidra {GHIDRA_VERSION} installation directory",
+    )
     parser.add_argument("--ventris", help="Ventris executable")
     parser.add_argument("--limit", type=int, default=4096)
+    parser.add_argument(
+        "--length",
+        type=parse_int,
+        help="explicit raw function byte length; disassembles only that bounded range",
+    )
     parser.add_argument("--strict", action="store_true", help="return non-zero when p-code differs")
     parser.add_argument("--json", action="store_true", help="emit the report as JSON")
+    parser.add_argument(
+        "--summary-json",
+        action="store_true",
+        help="emit compact JSON with difference counts instead of full details",
+    )
+    parser.add_argument(
+        "--write-ghidra-fixture",
+        type=Path,
+        help="write the Ghidra capsule and pinned provenance before comparing Ventris",
+    )
     parser.add_argument("--self-test", action="store_true")
     return parser
 
@@ -403,14 +528,34 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.entry = 0
     if args.raw and args.entry == 0:
         parser.error("--raw requires --entry")
+    if args.length is not None and args.length <= 0:
+        parser.error("--length must be positive")
     with tempfile.TemporaryDirectory(prefix="ventris-diff-") as work:
         capsule_path = Path(work) / "capsule.txt"
         ghidra_stdout, ghidra_stderr = run_ghidra(args, capsule_path)
         capsule = parse_capsule(capsule_path)
+        if args.write_ghidra_fixture is not None:
+            write_ghidra_fixture(args, capsule_path, capsule, args.write_ghidra_fixture)
         native_text = run_native(args, capsule.entry, len(capsule.instructions))
         native = parse_lift(native_text)
+        if args.length is not None:
+            stop = capsule.entry + capsule.length
+            native = [
+                instruction
+                for instruction in native
+                if capsule.entry <= instruction.address < stop
+            ]
     report = report_dict(capsule, native, compare(capsule, native))
-    if args.json:
+    if args.summary_json:
+        kinds: dict[str, int] = {}
+        for difference in report["differences"]:
+            kind = difference["kind"]
+            kinds[kind] = kinds.get(kind, 0) + 1
+        summary = {key: value for key, value in report.items() if key != "differences"}
+        summary["difference_count"] = len(report["differences"])
+        summary["difference_kinds"] = kinds
+        print(json.dumps(summary, indent=2, sort_keys=True))
+    elif args.json:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(

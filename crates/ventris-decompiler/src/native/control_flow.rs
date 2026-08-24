@@ -21,7 +21,7 @@ pub(super) fn simplify(value: Expr) -> Expr {
             if matches!(binary, BinaryOp::Xor | BinaryOp::Sub) && left == right {
                 return Expr::constant(0, 8);
             }
-            if matches!(binary, BinaryOp::And) && left == right {
+            if matches!(binary, BinaryOp::And | BinaryOp::Or) && left == right {
                 return left;
             }
             if matches!(binary, BinaryOp::Add | BinaryOp::Or | BinaryOp::Xor) && right.is_zero() {
@@ -66,12 +66,14 @@ pub(super) fn simplify(value: Expr) -> Expr {
         value => value,
     }
 }
+#[cfg(test)]
 fn invert_condition(value: Expr) -> Expr {
     match value {
         Expr::Not(inner) => *inner,
         value => Expr::Not(Box::new(value)),
     }
 }
+#[cfg(test)]
 fn has_other_branch_to(
     statements: &[NativeStatement],
     excluded_indices: &[usize],
@@ -91,6 +93,7 @@ fn has_other_branch_to(
     })
 }
 
+#[cfg(test)]
 pub(super) fn structure_control_flow(statements: Vec<NativeStatement>) -> Vec<NativeStatement> {
     let mut structured = Vec::with_capacity(statements.len());
     let mut index = 0usize;
