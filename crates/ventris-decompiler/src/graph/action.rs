@@ -484,14 +484,71 @@ pub fn default_pipeline() -> Box<dyn Action> {
     for rule in super::expr_rules::all() {
         expression = expression.add_rule(rule);
     }
+    let dropped: Vec<String> = std::env::var("VENTRIS_SKIP_RULE")
+        .map(|value| {
+            value
+                .split(',')
+                .map(|entry| entry.trim().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    for rule in super::expr_rules2::all() {
+        if dropped.iter().any(|name| name == rule.name()) {
+            continue;
+        }
+        expression = expression.add_rule(rule);
+    }
     // Copy propagation and indirect collapse run last: they remove the
     // operations the other rules match on, so running them earlier hides work.
     expression = expression
         .add_rule(Box::new(RulePropagateCopy))
         .add_rule(Box::new(RuleIndirectCollapse));
-    Box::new(
-        ActionGroup::new("source-pipeline").add(Box::new(FixedPoint::new(Box::new(expression)))),
-    )
+    // Prototype and parameter recovery runs before the expression set: an
+    // argument list decides which values are live at a call, and the rules
+    // rewrite what they can see.
+    let mut prototypes = ActionGroup::new("prototypes");
+    for (name, action) in [
+        (
+            "active-param",
+            Box::new(super::callproto::ActionActiveParam) as Box<dyn Action>,
+        ),
+        (
+            "active-return",
+            Box::new(super::callproto::ActionActiveReturn) as Box<dyn Action>,
+        ),
+        (
+            "func-link",
+            Box::new(super::callproto::ActionFuncLink) as Box<dyn Action>,
+        ),
+        (
+            "param-double",
+            Box::new(super::callproto::ActionParamDouble) as Box<dyn Action>,
+        ),
+    ] {
+        if std::env::var("VENTRIS_SKIP_ACTION")
+            .map(|value| value.split(',').any(|entry| entry.trim() == name))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        prototypes = prototypes.add(action);
+    }
+    let skip = |name: &str| {
+        std::env::var("VENTRIS_SKIP_GROUP")
+            .map(|value| value.split(',').any(|entry| entry.trim() == name))
+            .unwrap_or(false)
+    };
+    let mut pipeline = ActionGroup::new("source-pipeline");
+    if !skip("prototypes") {
+        pipeline = pipeline.add(Box::new(prototypes));
+    }
+    if !skip("expression") {
+        pipeline = pipeline.add(Box::new(FixedPoint::new(Box::new(expression))));
+    }
+    if !skip("infer-types-rich") {
+        pipeline = pipeline.add(Box::new(super::typefactory::ActionInferTypes));
+    }
+    Box::new(pipeline)
 }
 
 #[cfg(test)]

@@ -41,7 +41,6 @@ use ventris_pcode::op;
 use crate::native::Type;
 
 use super::action::Action;
-use super::mergeaction::merge_all;
 use super::{Funcdata, OpId, VarnodeId};
 
 const INT_BITS: u32 = 32;
@@ -211,114 +210,13 @@ pub fn check_cycle(data: &Funcdata, value: VarnodeId) -> bool {
     }
     false
 }
-/// Camel-case compatibility spelling used when referring directly to the
-/// source helper name.
-#[allow(non_snake_case)]
-pub fn checkCycle(data: &Funcdata, value: VarnodeId) -> bool {
-    check_cycle(data, value)
-}
-
-impl ActionMarkImplied {
-    /// Compatibility spelling for callers referring to the C++ helper name.
-    pub fn check_cycle(data: &Funcdata, value: VarnodeId) -> bool {
-        check_cycle(data, value)
-    }
-
-    /// Compatibility spelling retained for source-oriented tests/documentation.
-    #[allow(non_snake_case)]
-    pub fn checkCycle(data: &Funcdata, value: VarnodeId) -> bool {
-        check_cycle(data, value)
-    }
-}
-
 /// Preliminary explicit-value marking.
-pub struct ActionMarkExplicit;
-
-impl Action for ActionMarkExplicit {
-    fn name(&self) -> &'static str {
-        "markexplicit"
-    }
-
-    fn apply(&self, data: &mut Funcdata) -> usize {
-        let _ = Explicit::of(data);
-        0
-    }
-}
 
 /// Converse implied-value marking, with cycle protection.
-pub struct ActionMarkImplied;
-
-fn implied_candidate_count(data: &Funcdata) -> usize {
-    let explicit = Explicit::of(data);
-    (0..data.varnode_count())
-        .map(|index| VarnodeId(index as u32))
-        .filter(|value| {
-            let varnode = data.varnode(*value);
-            varnode.def.is_some() && !explicit.is_explicit(*value) && !check_cycle(data, *value)
-        })
-        .count()
-}
-
-impl Action for ActionMarkImplied {
-    fn name(&self) -> &'static str {
-        "markimplied"
-    }
-
-    fn apply(&self, data: &mut Funcdata) -> usize {
-        let _ = implied_candidate_count(data);
-        0
-    }
-}
-
-/// Count COPY operations whose two sides are in one recovered variable.
-///
-/// The count is useful for tests and diagnostics, but GraphOp has no
-/// non-printing flag into which the C++ mark could be written.
-fn internal_copy_count(data: &Funcdata) -> usize {
-    let variables = merge_all(data);
-    data.live_ops()
-        .filter(|(_, operation)| operation.opcode == op::COPY)
-        .filter_map(|(_, operation)| {
-            let output = operation.output?;
-            let input = operation.inputs.first().copied()?;
-            variables.same(output, input).then_some(())
-        })
-        .count()
-}
 
 /// Hide duplicate shadow definitions when the graph can identify them.
-pub struct ActionHideShadow;
-
-impl Action for ActionHideShadow {
-    fn name(&self) -> &'static str {
-        "hideshadow"
-    }
-
-    fn apply(&self, data: &mut Funcdata) -> usize {
-        // `Merge::hideShadows` needs HighVariable covers and rewrites COPY
-        // inputs.  GraphOp has no shadow/non-printing bit, so the candidate
-        // count is intentionally not returned as a graph change.
-        let _ = internal_copy_count(data);
-        0
-    }
-}
 
 /// Mark internal copies as non-printing when variable metadata is available.
-pub struct ActionCopyMarker;
-
-impl Action for ActionCopyMarker {
-    fn name(&self) -> &'static str {
-        "copymarker"
-    }
-
-    fn apply(&self, data: &mut Funcdata) -> usize {
-        // `Merge::markInternalCopies` marks the operation itself.  GraphOp has
-        // no non-printing bit, so count candidates for analysis but report no
-        // mutation rather than conflating that state with `dead`.
-        let _ = internal_copy_count(data);
-        0
-    }
-}
 
 /// A register location that the ABI says is trash after the function call.
 pub type TrashRegister = (u32, u64, u32);
@@ -818,16 +716,6 @@ pub fn int_promotion_for_extension(data: &Funcdata, value: VarnodeId, ty: &Type)
     required == EXT_UNKNOWN || (extension & required) == 0
 }
 
-fn is_zext_cast(out: &Type, input: &Type) -> bool {
-    matches!(out, Type::Unsigned(_) | Type::Signed(_))
-        && matches!(input, Type::Unsigned(_) | Type::Bool)
-}
-
-fn is_sext_cast(out: &Type, input: &Type) -> bool {
-    matches!(out, Type::Unsigned(_) | Type::Signed(_))
-        && matches!(input, Type::Signed(_) | Type::Bool)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -908,62 +796,16 @@ mod tests {
     }
 
     #[test]
-    fn implied_pass_has_a_foldable_case_and_declines_explicit_values() {
-        let mut data = Funcdata::default();
-        let block = data.new_block(0x1000);
-        let left = data.new_constant(2, 4);
-        let right = data.new_constant(3, 4);
-        let add = data.new_op(op::INT_ADD, seq(0x1000, 0), vec![left, right]);
-        let value = data.new_unique(4);
-        data.op_set_output(add, Some(value));
-        data.op_insert_end(add, block);
-        let ret = data.new_op(op::RETURN, seq(0x1004, 0), vec![value]);
-        data.op_insert_end(ret, block);
-        assert_eq!(implied_candidate_count(&data), 1);
-        let second = data.new_op(op::RETURN, seq(0x1008, 0), vec![value]);
-        data.op_insert_end(second, block);
-        assert_eq!(implied_candidate_count(&data), 0);
-    }
-
-    #[test]
-    fn copy_marker_candidates_fire_only_for_same_recovered_variable() {
-        let mut data = Funcdata::default();
-        let block = data.new_block(0x1000);
-        let input = data.new_varnode(REGISTER_SPACE, 0, 4);
-        data.mark_input(input);
-        let first_copy = data.new_op(op::COPY, seq(0x1000, 0), vec![input]);
-        let first = data.new_varnode(REGISTER_SPACE, 0, 4);
-        data.op_set_output(first_copy, Some(first));
-        data.op_insert_end(first_copy, block);
-        let second_copy = data.new_op(op::COPY, seq(0x1004, 0), vec![first]);
-        let second = data.new_varnode(REGISTER_SPACE, 0, 4);
-        data.op_set_output(second_copy, Some(second));
-        data.op_insert_end(second_copy, block);
-        let ret = data.new_op(op::RETURN, seq(0x1008, 0), vec![second]);
-        data.op_insert_end(ret, block);
-        assert_eq!(internal_copy_count(&data), 1);
-
-        let mut constants = Funcdata::default();
-        let constant_block = constants.new_block(0x2000);
-        let constant = constants.new_constant(1, 4);
-        let constant_copy = constants.new_op(op::COPY, seq(0x2000, 0), vec![constant]);
-        let constant_output = constants.new_unique(4);
-        constants.op_set_output(constant_copy, Some(constant_output));
-        constants.op_insert_end(constant_copy, constant_block);
-        assert_eq!(internal_copy_count(&constants), 0);
-    }
-
-    #[test]
     fn cycle_guard_rejects_a_value_reaching_itself() {
         let mut data = Funcdata::default();
         let plain = data.new_unique(4);
-        assert!(!ActionMarkImplied::check_cycle(&data, plain));
+        assert!(!check_cycle(&data, plain));
         let block = data.new_block(0x1000);
         let value = data.new_unique(4);
         let copy = data.new_op(op::COPY, seq(0x1000, 0), vec![value]);
         data.op_set_output(copy, Some(value));
         data.op_insert_end(copy, block);
-        assert!(ActionMarkImplied::check_cycle(&data, value));
+        assert!(check_cycle(&data, value));
         assert!(Explicit::of(&data).is_explicit(value));
     }
 
@@ -982,13 +824,5 @@ mod tests {
         let action = ActionLikelyTrash::new([(REGISTER_SPACE, 8, 4)]);
         assert_eq!(action.apply(&mut data), 1);
         assert_eq!(data.varnode(data.op(indirect).inputs[0]).offset, 0);
-    }
-
-    #[test]
-    fn zext_and_sext_cast_predicates_follow_input_signedness() {
-        assert!(is_zext_cast(&Type::Unsigned(32), &Type::Unsigned(8)));
-        assert!(!is_zext_cast(&Type::Unsigned(32), &Type::Signed(8)));
-        assert!(is_sext_cast(&Type::Signed(32), &Type::Signed(8)));
-        assert!(!is_sext_cast(&Type::Signed(32), &Type::Unsigned(8)));
     }
 }

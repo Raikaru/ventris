@@ -18,7 +18,6 @@ use std::collections::BTreeSet;
 use ventris_pcode::op;
 
 use super::action::Rule;
-use super::nonzero::NonzeroMasks;
 use super::{Funcdata, OpId, VarnodeId};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -732,8 +731,8 @@ impl Rule for RuleSubvarShift {
         if shift >= 64 {
             return 0;
         }
-        let masks = NonzeroMasks::of(data);
-        let mask = masks.mask(value);
+        let masks = data.nonzero_masks();
+        let mask = masks[value.0 as usize];
         if ((mask >> shift) != 1) || (mask & (1u64 << shift)) == 0 {
             return 0;
         }
@@ -764,8 +763,8 @@ impl Rule for RuleSubvarCompZero {
         let Some(value) = current.inputs.get(1 - constant_slot).copied() else {
             return 0;
         };
-        let masks = NonzeroMasks::of(data);
-        let mask = masks.mask(value);
+        let masks = data.nonzero_masks();
+        let mask = masks[value.0 as usize];
         if mask == 0 || mask.count_ones() != 1 {
             return 0;
         }

@@ -21,6 +21,9 @@ pub struct NonzeroMasks {
 
 impl NonzeroMasks {
     /// Calculate masks to a graph fixpoint.
+    ///
+    /// Prefer `Funcdata::nonzero_masks`, which caches this. Recomputing per
+    /// rule application is what made the expression fixpoint quadratic.
     pub fn of(data: &Funcdata) -> Self {
         let mut masks = Vec::with_capacity(data.varnode_count());
         for index in 0..data.varnode_count() {
@@ -432,4 +435,9 @@ mod tests {
         assert!(ActionNonzeroMask.apply(&mut data) >= 1);
         let _ = UNIQUE_SPACE;
     }
+}
+
+/// The fixpoint mask table, for `Funcdata`'s cache.
+pub(crate) fn compute_masks(data: &Funcdata) -> Vec<u64> {
+    NonzeroMasks::of(data).masks
 }

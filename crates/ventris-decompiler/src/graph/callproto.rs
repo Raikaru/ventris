@@ -691,6 +691,17 @@ impl Action for ActionActiveParam {
             let mut inputs = Vec::with_capacity(arguments.len() + 1);
             inputs.push(target);
             inputs.extend(arguments);
+            // Never shorten a call. Ghidra does not remove an argument whose
+            // ancestry it could not justify: `checkInputTrialUse` marks that
+            // trial no-use and the slot becomes a zero constant, so the operand
+            // count is preserved (`fspec.cc` 5645-5651). Rebuilding the list
+            // instead dropped arguments this analysis merely failed to explain,
+            // and because a dropped operand was often a value's only use, the
+            // stores and loads feeding it were then eliminated as dead. That
+            // turned two functions into stubs with no memory accesses at all.
+            if inputs.len() < data.op(call).inputs.len() {
+                continue;
+            }
             if inputs != data.op(call).inputs {
                 data.op_set_inputs(call, inputs);
                 changed += 1;
@@ -1002,5 +1013,37 @@ mod tests {
         assert!(data.op(first).output.is_none());
         assert!(data.op(second).output.is_some());
         assert_eq!(ActionActiveReturn.apply(&mut data), 0);
+    }
+
+    #[test]
+    fn active_param_never_shortens_a_call() {
+        // An argument this analysis cannot justify is not an argument that is
+        // absent. Dropping the operand removes a value's only use, so the
+        // stores feeding it are eliminated as dead and the function loses real
+        // work. Ghidra keeps the slot and substitutes a zero constant.
+        let mut data = Funcdata::default();
+        let block = data.new_block(0x1000);
+        let target = data.new_constant(0x2000, 4);
+        let first = data.new_varnode(REGISTER_SPACE, 0, 4);
+        let second = data.new_varnode(REGISTER_SPACE, 8, 4);
+        data.mark_input(first);
+        data.mark_input(second);
+        let call = data.new_op(
+            op::CALL,
+            SeqNum {
+                address: 0x1000,
+                order: 0,
+            },
+            vec![target, first, second],
+        );
+        data.op_insert_end(call, block);
+
+        let before = data.op(call).inputs.len();
+        ActionActiveParam.apply(&mut data);
+        assert!(
+            data.op(call).inputs.len() >= before,
+            "the call lost an argument: {:?}",
+            data.op(call).inputs
+        );
     }
 }

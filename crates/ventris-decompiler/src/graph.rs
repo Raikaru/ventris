@@ -151,9 +151,35 @@ pub struct Funcdata {
     /// Interning table so one machine location yields one varnode per version.
     located: BTreeMap<(u32, u64, u32), Vec<VarnodeId>>,
     next_unique: u64,
+    /// Cached "may be non-zero" masks, cleared whenever the graph changes.
+    ///
+    /// Ghidra caches this on the varnode because rules consult it constantly and
+    /// two rules disagreeing about one value's mask is not a precision
+    /// difference but a correctness bug: `RuleHumptyOr` and `RuleAndDistribute`
+    /// are exact inverses whose guards are complements, so two mask
+    /// implementations made both fire and the fixpoint never converged.
+    masks: std::cell::RefCell<Option<std::rc::Rc<Vec<u64>>>>,
 }
 
 impl Funcdata {
+    /// The cached "may be non-zero" mask of every value.
+    ///
+    /// Every rule that reasons about which bits can be set MUST read this, so
+    /// that two rules never disagree about one value.
+    pub fn nonzero_masks(&self) -> std::rc::Rc<Vec<u64>> {
+        if let Some(cached) = self.masks.borrow().as_ref() {
+            return cached.clone();
+        }
+        let computed = std::rc::Rc::new(crate::graph::nonzero::compute_masks(self));
+        *self.masks.borrow_mut() = Some(computed.clone());
+        computed
+    }
+
+    /// Drops the mask cache. Called by every mutator.
+    fn invalidate_masks(&self) {
+        self.masks.borrow_mut().take();
+    }
+
     pub fn varnode(&self, id: VarnodeId) -> &GraphVarnode {
         &self.varnodes[id.0 as usize]
     }
@@ -193,6 +219,7 @@ impl Funcdata {
     /// Creates a value at a machine location. Each call produces a distinct
     /// varnode, because SSA needs one identity per definition of a location.
     pub fn new_varnode(&mut self, space: u32, offset: u64, size: u32) -> VarnodeId {
+        self.invalidate_masks();
         let id = VarnodeId(self.varnodes.len() as u32);
         self.varnodes.push(GraphVarnode {
             space,
@@ -214,12 +241,14 @@ impl Funcdata {
 
     /// Creates a fresh temporary, as Ghidra's `newUnique` does.
     pub fn new_unique(&mut self, size: u32) -> VarnodeId {
+        self.invalidate_masks();
         let offset = self.next_unique;
         self.next_unique = self.next_unique.saturating_add(u64::from(size).max(1));
         self.new_varnode(UNIQUE_SPACE, offset, size)
     }
 
     pub fn new_constant(&mut self, value: u64, size: u32) -> VarnodeId {
+        self.invalidate_masks();
         let id = self.new_varnode(CONST_SPACE, value, size);
         self.varnodes[id.0 as usize].flags.constant = true;
         id
@@ -227,6 +256,7 @@ impl Funcdata {
 
     /// Marks a value as entering the function without a definition.
     pub fn mark_input(&mut self, id: VarnodeId) {
+        self.invalidate_masks();
         self.varnodes[id.0 as usize].flags.input = true;
     }
 
@@ -248,6 +278,7 @@ impl Funcdata {
     }
 
     pub fn new_block(&mut self, start: u64) -> GraphBlockId {
+        self.invalidate_masks();
         let id = GraphBlockId(self.blocks.len() as u32);
         self.blocks.push(GraphBlock {
             start,
@@ -257,6 +288,7 @@ impl Funcdata {
     }
 
     pub fn add_edge(&mut self, from: GraphBlockId, to: GraphBlockId) {
+        self.invalidate_masks();
         let successors = &mut self.blocks[from.0 as usize].successors;
         if !successors.contains(&to) {
             successors.push(to);
@@ -269,6 +301,7 @@ impl Funcdata {
 
     /// Creates an unattached operation. It becomes live once inserted.
     pub fn new_op(&mut self, opcode: i32, seq: SeqNum, inputs: Vec<VarnodeId>) -> OpId {
+        self.invalidate_masks();
         let id = OpId(self.ops.len() as u32);
         self.ops.push(GraphOp {
             opcode,
@@ -301,11 +334,13 @@ impl Funcdata {
 
     /// Retypes an operation, keeping its operands and output.
     pub fn op_set_opcode(&mut self, op: OpId, opcode: i32) {
+        self.invalidate_masks();
         self.ops[op.0 as usize].opcode = opcode;
     }
 
     /// Replaces every operand, releasing the readers of the old ones.
     pub fn op_set_inputs(&mut self, op: OpId, inputs: Vec<VarnodeId>) {
+        self.invalidate_masks();
         for existing in self.ops[op.0 as usize].inputs.clone() {
             self.varnodes[existing.0 as usize].descendants.remove(&op);
         }
@@ -316,6 +351,7 @@ impl Funcdata {
     }
 
     pub fn op_set_input(&mut self, op: OpId, value: VarnodeId, slot: usize) {
+        self.invalidate_masks();
         let previous = self.ops[op.0 as usize].inputs.get(slot).copied();
         if let Some(previous) = previous
             && previous != value
@@ -337,6 +373,7 @@ impl Funcdata {
 
     /// Assigns the operation's result, recording the definition on the value.
     pub fn op_set_output(&mut self, op: OpId, value: Option<VarnodeId>) {
+        self.invalidate_masks();
         if let Some(previous) = self.ops[op.0 as usize].output {
             let varnode = &mut self.varnodes[previous.0 as usize];
             varnode.def = None;
@@ -352,6 +389,7 @@ impl Funcdata {
 
     /// Places an operation immediately before another in its block.
     pub fn op_insert_before(&mut self, op: OpId, before: OpId) {
+        self.invalidate_masks();
         let Some(parent) = self.ops[before.0 as usize].parent else {
             return;
         };
@@ -366,6 +404,7 @@ impl Funcdata {
 
     /// Places an operation immediately after another in its block.
     pub fn op_insert_after(&mut self, op: OpId, after: OpId) {
+        self.invalidate_masks();
         let Some(parent) = self.ops[after.0 as usize].parent else {
             return;
         };
@@ -383,18 +422,21 @@ impl Funcdata {
     /// Phi operations must precede all other operations in their block, which
     /// is what lets a predecessor find them by scanning from the block start.
     pub fn op_insert_front(&mut self, op: OpId, block: GraphBlockId) {
+        self.invalidate_masks();
         self.ops[op.0 as usize].parent = Some(block);
         self.blocks[block.0 as usize].ops.insert(0, op);
     }
 
     /// Appends an operation to the end of a block.
     pub fn op_insert_end(&mut self, op: OpId, block: GraphBlockId) {
+        self.invalidate_masks();
         self.ops[op.0 as usize].parent = Some(block);
         self.blocks[block.0 as usize].ops.push(op);
     }
 
     /// Removes an operation from the graph, releasing its operand links.
     pub fn op_destroy(&mut self, op: OpId) {
+        self.invalidate_masks();
         let inputs = std::mem::take(&mut self.ops[op.0 as usize].inputs);
         for input in inputs {
             self.varnodes[input.0 as usize].descendants.remove(&op);
@@ -413,6 +455,7 @@ impl Funcdata {
     /// This is Ghidra's `totalReplace`, the operation that makes a rewrite rule
     /// a local edit instead of a whole-function rebuild.
     pub fn total_replace(&mut self, old: VarnodeId, new: VarnodeId) {
+        self.invalidate_masks();
         let readers: Vec<OpId> = self.varnode(old).descendants.iter().copied().collect();
         for reader in readers {
             let slots: Vec<usize> = self.ops[reader.0 as usize]
@@ -435,6 +478,7 @@ impl Funcdata {
     /// list: leaving a stale operand would silently reassign every later path's
     /// value to the wrong edge.
     pub fn remove_edge(&mut self, from: GraphBlockId, to: GraphBlockId) -> bool {
+        self.invalidate_masks();
         if !self.blocks[from.0 as usize].successors.contains(&to) {
             return false;
         }
@@ -454,6 +498,7 @@ impl Funcdata {
     /// Refuses when the block merges values, has other than one successor, or
     /// is the entry, since each of those makes the removal observable.
     pub fn splice_block(&mut self, block: GraphBlockId) -> bool {
+        self.invalidate_masks();
         let candidate = &self.blocks[block.0 as usize];
         if candidate.dead || candidate.successors.len() != 1 || candidate.start == self.entry {
             return false;
@@ -517,6 +562,7 @@ impl Funcdata {
     /// merge at its successors, which keeps operand slots aligned with the
     /// predecessor list renaming relies on.
     pub fn remove_unreachable_blocks(&mut self) -> usize {
+        self.invalidate_masks();
         let entry = self
             .blocks()
             .find(|(_, block)| block.start == self.entry)

@@ -70,124 +70,14 @@ fn leastsigbit_set(value: u64) -> Option<u32> {
 /// recursion is deliberately conservative at unknown definitions: returning
 /// the full mask prevents a rewrite from assuming a bit is dead merely because
 /// the graph lacks the analysis needed to prove it.
-fn nonzero_mask(data: &Funcdata, value: VarnodeId, depth: u32) -> u64 {
-    let varnode = data.varnode(value);
-    let full = calc_mask(varnode.size);
-    if varnode.flags.constant {
-        return varnode.offset & full;
-    }
-    if depth == 0 {
-        return full;
-    }
-    let Some(def) = varnode.def else {
-        return full;
-    };
-    let operation = data.op(def);
-    let mask_of = |slot: usize| {
-        operation
-            .inputs
-            .get(slot)
-            .copied()
-            .map(|input| nonzero_mask(data, input, depth - 1))
-            .unwrap_or(full)
-    };
-    match operation.opcode {
-        op::COPY | op::CAST | op::INT_ZEXT => mask_of(0) & full,
-        op::INT_SEXT => full,
-        op::INT_AND => mask_of(0) & mask_of(1) & full,
-        op::INT_OR | op::INT_XOR => (mask_of(0) | mask_of(1)) & full,
-        op::INT_ADD | op::INT_SUB => full,
-        op::INT_MULT => {
-            let left = mask_of(0);
-            let right = mask_of(1);
-            let right_constant = operation
-                .inputs
-                .get(1)
-                .copied()
-                .filter(|input| data.varnode(*input).flags.constant);
-            let left_constant = operation
-                .inputs
-                .first()
-                .copied()
-                .filter(|input| data.varnode(*input).flags.constant);
-            if let Some(constant) = right_constant {
-                let coefficient = data.varnode(constant).offset;
-                if coefficient == 0 {
-                    0
-                } else if coefficient.is_power_of_two() {
-                    shift_left(left, u64::from(coefficient.trailing_zeros()), varnode.size)
-                } else {
-                    full
-                }
-            } else if let Some(constant) = left_constant {
-                let coefficient = data.varnode(constant).offset;
-                if coefficient == 0 {
-                    0
-                } else if coefficient.is_power_of_two() {
-                    shift_left(right, u64::from(coefficient.trailing_zeros()), varnode.size)
-                } else {
-                    full
-                }
-            } else {
-                full
-            }
-        }
-        op::MULTIEQUAL => {
-            operation
-                .inputs
-                .iter()
-                .copied()
-                .filter(|input| *input != value)
-                .map(|input| nonzero_mask(data, input, depth - 1))
-                .fold(0, |acc, mask| acc | mask)
-                & full
-        }
-        op::INT_LEFT => {
-            let amount = operation
-                .inputs
-                .get(1)
-                .copied()
-                .filter(|input| data.varnode(*input).flags.constant)
-                .map(|input| data.varnode(input).offset)
-                .unwrap_or(64);
-            shift_left(mask_of(0), amount, varnode.size)
-        }
-        op::INT_RIGHT | op::INT_SRIGHT => {
-            let amount = operation
-                .inputs
-                .get(1)
-                .copied()
-                .filter(|input| data.varnode(*input).flags.constant)
-                .map(|input| data.varnode(input).offset)
-                .unwrap_or(64);
-            shift_right(mask_of(0), amount, varnode.size)
-        }
-        op::SUBPIECE => {
-            let amount = operation
-                .inputs
-                .get(1)
-                .copied()
-                .filter(|input| data.varnode(*input).flags.constant)
-                .and_then(|input| data.varnode(input).offset.checked_mul(8))
-                .unwrap_or(64);
-            shift_right(mask_of(0), amount, varnode.size)
-        }
-        op::INT_EQUAL
-        | op::INT_NOTEQUAL
-        | op::INT_LESS
-        | op::INT_LESSEQUAL
-        | op::INT_SLESS
-        | op::INT_SLESSEQUAL
-        | op::BOOL_AND
-        | op::BOOL_OR
-        | op::BOOL_XOR
-        | op::BOOL_NEGATE
-        | op::FLOAT_EQUAL
-        | op::FLOAT_NOTEQUAL
-        | op::FLOAT_LESS
-        | op::FLOAT_LESSEQUAL => 1,
-        _ => full,
-    }
+/// The "may be non-zero" mask of a value.
+///
+/// One implementation, read through the graph's cache. A second, less precise
+/// one used to exist here; because `RuleHumptyOr` and `RuleAndDistribute` are
+/// exact inverses guarded by complementary mask tests, the disagreement made
+/// both fire on the same operation forever.
+fn nonzero_mask(data: &Funcdata, value: VarnodeId, _depth: u32) -> u64 {
+    data.nonzero_masks()[value.0 as usize]
 }
 
 fn inputs2(data: &Funcdata, id: OpId) -> Option<(VarnodeId, VarnodeId)> {
@@ -657,6 +547,13 @@ impl Rule for RuleAndDistribute {
         let mut selected = None;
         for (or_slot, or_value) in [(0usize, left), (1usize, right)] {
             let other = if or_slot == 0 { right } else { left };
+            // Ghidra requires every operand's definition to have reached this
+            // value before distributing. Without these three checks the rule
+            // fires on values whose masks are still the initial full mask, and
+            // `RuleHumptyOr` — its exact inverse — then reverses it forever.
+            if !heritage_known(data, other) {
+                continue;
+            }
             let Some(or_id) = data.varnode(or_value).def else {
                 continue;
             };
@@ -666,6 +563,9 @@ impl Rule for RuleAndDistribute {
             let Some((or_left, or_right)) = inputs2(data, or_id) else {
                 continue;
             };
+            if !heritage_known(data, or_left) || !heritage_known(data, or_right) {
+                continue;
+            }
             let other_mask = nonzero_mask(data, other, MASK_DEPTH);
             if other_mask == 0 || other_mask == full {
                 continue;

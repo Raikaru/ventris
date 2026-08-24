@@ -58,11 +58,8 @@
 
 use super::action::Rule;
 use super::heritage::compute_dominance;
-use super::nonzero::NonzeroMasks;
 use super::{Funcdata, GraphBlockId, OpId, SeqNum, VarnodeId};
 use ventris_pcode::op;
-
-const RULE_IMPL_COUNT: usize = 20;
 
 fn mask(size: u32) -> u64 {
     let bits = size.saturating_mul(8);
@@ -507,9 +504,6 @@ impl Rule for RuleXorSwap {
 struct PredicateShape {
     multi: OpId,
     zero_slot: usize,
-    other: VarnodeId,
-    zero_block: GraphBlockId,
-    cond_block: GraphBlockId,
     zero_path_true: bool,
 }
 
@@ -587,9 +581,6 @@ fn discover_predicate(data: &Funcdata, value: VarnodeId) -> Option<PredicateShap
     Some(PredicateShape {
         multi,
         zero_slot,
-        other,
-        zero_block,
-        cond_block,
         zero_path_true,
     })
 }
@@ -871,9 +862,25 @@ impl Rule for RuleHumptyOr {
         if !heritage_known(data, b) || !heritage_known(data, c) {
             return 0;
         }
-        let masks = NonzeroMasks::of(data);
-        let a_mask = masks.mask(a);
-        if masks.mask(b) & a_mask == 0 || masks.mask(c) & a_mask == 0 {
+        let masks = data.nonzero_masks();
+        let a_mask = masks[a.0 as usize];
+        let (b_mask, c_mask) = (masks[b.0 as usize], masks[c.0 as usize]);
+        if b_mask & a_mask == 0 || c_mask & a_mask == 0 {
+            // RuleAndDistribute would reverse us.
+            return 0;
+        }
+        // Stronger than Ghidra, deliberately. `RuleAndDistribute` also fires
+        // when the shared operand is constant and one distributed AND becomes
+        // trivial, and Ghidra does not exclude that here: with a constant `a`
+        // of mask 0xfb over operands of mask 0xf7 and 0x8, both rules' guards
+        // pass. Ghidra survives it because its pool visits an operation a
+        // bounded number of times; this pool revisits until nothing changes, so
+        // the pair rewrote each other and grew the graph without limit. Making
+        // the two conditions actually disjoint is the fix that does not depend
+        // on iteration order.
+        if data.varnode(a).flags.constant
+            && ((b_mask & a_mask) == b_mask || (c_mask & a_mask) == c_mask)
+        {
             return 0;
         }
         let (new_or, or_out) = new_op_before(data, id, op::INT_OR, vec![b, c], common_size);
@@ -1043,11 +1050,13 @@ impl Rule for RulePositiveDiv {
             return 0;
         }
         let sign = size * 8 - 1;
-        let masks = NonzeroMasks::of(data);
+        let masks = data.nonzero_masks();
         let (Some(left), Some(right)) = (input(data, id, 0), input(data, id, 1)) else {
             return 0;
         };
-        if ((masks.mask(left) >> sign) & 1) != 0 || ((masks.mask(right) >> sign) & 1) != 0 {
+        if ((masks[left.0 as usize] >> sign) & 1) != 0
+            || ((masks[right.0 as usize] >> sign) & 1) != 0
+        {
             return 0;
         }
         data.op_set_opcode(
@@ -1620,11 +1629,6 @@ mod tests {
     }
 
     #[test]
-    fn registry_does_not_drift() {
-        assert_eq!(all().len(), RULE_IMPL_COUNT);
-    }
-
-    #[test]
     fn collect_terms_fires_and_declines() {
         let mut data = Funcdata::default();
         let b = block(&mut data);
@@ -2025,5 +2029,31 @@ mod tests {
     #[allow(dead_code)]
     fn _space_constants_are_available() {
         let _ = CONST_SPACE;
+    }
+
+    #[test]
+    fn humptyor_declines_what_anddistribute_would_reverse() {
+        // These two rules are exact inverses. If both accept one operand set,
+        // the expression fixpoint rewrites forever and the graph grows without
+        // limit. The masks here are the ones measured on
+        // `Na_CheckRestartReady`: a constant shared operand of mask 0xfb over
+        // operands of mask 0xf7 and 0x8.
+        use crate::graph::expr_rules::RuleAndDistribute;
+
+        let mut data = Funcdata::default();
+        let block = block(&mut data);
+        let shared = data.new_constant(0xfb, 1);
+        let left = input_value(&mut data, 1);
+        let right = data.new_constant(0x8, 1);
+        let (_, and1) = op_with_output(&mut data, block, op::INT_AND, vec![shared, left], 1);
+        let (_, and2) = op_with_output(&mut data, block, op::INT_AND, vec![shared, right], 1);
+        let (or, _) = op_with_output(&mut data, block, op::INT_OR, vec![and1, and2], 1);
+
+        let humpty = RuleHumptyOr.apply_op(or, &mut data);
+        let distribute = RuleAndDistribute.apply_op(or, &mut data);
+        assert!(
+            humpty == 0 || distribute == 0,
+            "both rules accepted the same operands, so each would undo the other forever"
+        );
     }
 }

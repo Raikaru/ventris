@@ -249,6 +249,35 @@ All notable Ventris changes are documented here.
 - Measured against Ghidra on the corpus, the graph path improves to
   `unstructured-control-flow` 10 (from 13) and `missing-loop-or-switch` 4, against
   15 and 11 on the address-ordered default.
+- Wired the third wave of ported passes into the graph pipeline: the twenty
+  further expression rules, prototype and parameter recovery, and rich type
+  inference with structure and array recovery. `excess-casts` and
+  `missing-parameters` both improve; the graph path now leads the address-ordered
+  default on six families and ties on three.
+- `RuleHumptyOr` now declines the case `RuleAndDistribute` would reverse.
+  They are exact inverses, and with a constant shared operand both guards
+  passed, so each undid the other and the graph grew without bound: one function
+  never finished. Ghidra survives the same pair because its pool visits an
+  operation a bounded number of times; this pool iterates to a fixpoint, so the
+  conditions have to be genuinely disjoint. This is deliberately stronger than
+  Ghidra's rule.
+- One "may be non-zero" mask implementation, cached on the graph and invalidated
+  by every mutator. There were two, and rules reading different ones disagreed
+  about the same value — which is what let the pair above both fire. Recomputing
+  the fixpoint per rule application was also the reason the expression phase was
+  quadratic.
+- `ActionActiveParam` no longer shortens a call. An argument whose ancestry the
+  analysis cannot justify is not an absent argument: Ghidra marks that trial
+  no-use and substitutes a zero constant, keeping the operand. Rebuilding the
+  list dropped real arguments, and since a dropped operand was often a value's
+  only use, the stores feeding it were then removed as dead — two functions were
+  reduced to stubs with no memory accesses at all.
+- Removed four `marking` actions that computed an analysis and discarded the
+  result. They mutated nothing, so they could only cost time, and one recomputed
+  an explicit-value analysis per value: a single function took 198 seconds, and
+  the corpus census 496. Both are now 2.2 seconds and 12 seconds. The module's
+  real analysis — `Explicit`, `cast_standard`, the promotion helpers and
+  `ActionLikelyTrash` — is kept for the renderer to consult.
 
 - Added `LiftedInstruction::skips_delay_slot`, which reports the MIPS
   likely-branch shape so consumers stop treating its sequential successor as
