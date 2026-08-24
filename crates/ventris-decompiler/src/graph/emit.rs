@@ -17,11 +17,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use ventris_lifter::RAM_SPACE;
 use ventris_pcode::op;
 
 use super::value::{Naming, Resolver, mark_explicit};
 use super::{Funcdata, GraphBlockId, OpId};
-use crate::native::{Expr, NativeStatement};
+use crate::native::{Expr, NativeStatement, Type};
 
 /// Emits statements for a heritage'd graph.
 pub fn emit(
@@ -46,10 +47,14 @@ struct Emitter<'a> {
 
 impl Emitter<'_> {
     fn run(&self) -> Vec<NativeStatement> {
-        let labels = self.labels();
         let mut phi_copies: BTreeMap<GraphBlockId, Vec<NativeStatement>> = BTreeMap::new();
         for (block, copy) in self.resolver.phi_copies() {
-            phi_copies.entry(block).or_default().push(copy);
+            let copies = phi_copies.entry(block).or_default();
+            // A block that reaches a join on two edges contributes the same
+            // value twice; one assignment already says it.
+            if !copies.contains(&copy) {
+                copies.push(copy);
+            }
         }
 
         // Blocks are emitted in address order so that a fallthrough stays
@@ -61,50 +66,68 @@ impl Emitter<'_> {
             .collect();
         blocks.sort_by_key(|(_, start)| *start);
 
-        let mut statements = Vec::new();
+        let mut emitted: Vec<(u64, Vec<NativeStatement>)> = Vec::new();
         for (index, (block, start)) in blocks.iter().copied().enumerate() {
-            if labels.contains(&start) {
+            let mut body = Vec::new();
+            let terminator = self.emit_body(block, &mut body);
+            if let Some(copies) = phi_copies.get(&block) {
+                body.extend(copies.iter().cloned());
+            }
+            body.extend(terminator);
+            let next = blocks.get(index + 1).map(|(_, start)| *start);
+            if let Some(target) = self.explicit_fallthrough(block, next, &body) {
+                body.push(NativeStatement::Goto(target));
+            }
+            emitted.push((start, body));
+        }
+
+        // A label is needed exactly where control arrives other than by
+        // falling through: at every address some emitted transfer names.
+        let targets: BTreeSet<u64> = emitted
+            .iter()
+            .flat_map(|(_, body)| body.iter())
+            .filter_map(|statement| match statement {
+                NativeStatement::Goto(target) | NativeStatement::IfGoto { target, .. } => {
+                    Some(*target)
+                }
+                _ => None,
+            })
+            .collect();
+
+        let mut statements = self.phi_declarations();
+        for (start, body) in emitted {
+            if targets.contains(&start) {
                 statements.push(NativeStatement::Label(start));
             }
-            let terminator = self.emit_body(block, &mut statements);
-            // Phi assignments belong after the block's computation but before
-            // control leaves it, so the join sees this path's value.
-            if let Some(copies) = phi_copies.get(&block) {
-                let insert_at = statements.len() - terminator.len();
-                for (offset, copy) in copies.iter().cloned().enumerate() {
-                    statements.insert(insert_at + offset, copy);
-                }
-            }
-            statements.extend(terminator);
-            let next = blocks.get(index + 1).map(|(_, start)| *start);
-            if let Some(target) = self.explicit_fallthrough(block, next) {
-                statements.push(NativeStatement::Goto(target));
-            }
+            statements.extend(body);
         }
         statements
     }
 
-    /// Addresses that need a label: every block reached other than by falling
-    /// through from the textually preceding block.
-    fn labels(&self) -> BTreeSet<u64> {
-        let mut labels = BTreeSet::new();
-        for (id, block) in self.data.blocks() {
-            for predecessor in block.predecessors.iter().copied() {
-                let sequential = self
-                    .data
-                    .block(predecessor)
-                    .ops
-                    .last()
-                    .map(|op| self.data.op(*op).seq.address);
-                if predecessor == id || sequential.is_none_or(|address| address >= block.start) {
-                    labels.insert(block.start);
-                }
+    /// Declares every merged value at function scope.
+    ///
+    /// A phi's value depends on the path taken, so its name must be visible to
+    /// each assignment and to the join that reads it. C spells that as one
+    /// declaration dominating every assignment.
+    fn phi_declarations(&self) -> Vec<NativeStatement> {
+        let mut declarations = Vec::new();
+        for (_, operation) in self.data.live_ops() {
+            if operation.opcode != op::MULTIEQUAL {
+                continue;
             }
-            if block.predecessors.len() > 1 {
-                labels.insert(block.start);
-            }
+            let Some(output) = operation.output else {
+                continue;
+            };
+            let Some(name) = self.naming.name_of(output) else {
+                continue;
+            };
+            let width = self.data.varnode(output).size;
+            declarations.push(NativeStatement::DeclareLocal {
+                name: name.to_string(),
+                ty: Type::Unsigned(width.saturating_mul(8)),
+            });
         }
-        labels
+        declarations
     }
 
     /// Emits the block's non-terminator statements, returning the terminator so
@@ -147,19 +170,16 @@ impl Emitter<'_> {
             }
             op::CALL | op::CALLIND => {
                 let call = self.call_expression(op);
-                match operation.output {
-                    Some(output) => match self.naming.name_of(output) {
-                        Some(name) => Emission::Body(NativeStatement::Copy {
-                            destination: Expr::Temporary {
-                                name: name.to_string(),
-                                width: self.data.varnode(output).size,
-                            },
-                            source: call,
-                            width: self.data.varnode(output).size,
-                            volatile: false,
-                        }),
-                        None => Emission::Body(NativeStatement::Call(call)),
-                    },
+                match operation.output.and_then(|output| {
+                    self.naming
+                        .name_of(output)
+                        .map(|name| (name.to_string(), self.data.varnode(output).size))
+                }) {
+                    Some((name, width)) => Emission::Body(NativeStatement::Declare {
+                        name,
+                        ty: Type::Unsigned(width.saturating_mul(8)),
+                        value: call,
+                    }),
                     None => Emission::Body(NativeStatement::Call(call)),
                 }
             }
@@ -209,11 +229,10 @@ impl Emitter<'_> {
             .expect("caller checked the value is named")
             .to_string();
         let width = self.data.varnode(output).size;
-        NativeStatement::Copy {
-            destination: Expr::Temporary { name, width },
-            source: self.resolver.resolve_definition(output),
-            width,
-            volatile: false,
+        NativeStatement::Declare {
+            name,
+            ty: Type::Unsigned(width.saturating_mul(8)),
+            value: self.resolver.resolve_definition(output),
         }
     }
 
@@ -223,8 +242,8 @@ impl Emitter<'_> {
         let destination = inputs.next();
         let args: Vec<Expr> = inputs.map(|value| self.resolver.resolve(value)).collect();
         match destination {
-            Some(destination) if self.data.varnode(destination).flags.constant => Expr::Call {
-                target: Some(self.data.varnode(destination).offset),
+            Some(_) if self.branch_target(op, 0).is_some() => Expr::Call {
+                target: self.branch_target(op, 0),
                 callee: None,
                 args,
             },
@@ -241,32 +260,59 @@ impl Emitter<'_> {
         }
     }
 
+    /// The address a branch or call names.
+    ///
+    /// A code address is a `ram` space varnode whose offset is the address, not
+    /// a `const` space constant. Treating only constants as targets loses every
+    /// direct branch and call, which is how a conditional branch first came out
+    /// as an unconditional one.
     fn branch_target(&self, op: OpId, slot: usize) -> Option<u64> {
         let value = self.data.op(op).inputs.get(slot).copied()?;
         let varnode = self.data.varnode(value);
-        varnode.flags.constant.then_some(varnode.offset)
+        let is_address = varnode.flags.constant
+            || (varnode.space == RAM_SPACE && varnode.def.is_none() && varnode.size > 0);
+        is_address.then_some(varnode.offset)
     }
 
-    /// A block whose successor is not the next block in address order needs an
-    /// explicit jump, unless it already ends in one.
-    fn explicit_fallthrough(&self, block: GraphBlockId, next: Option<u64>) -> Option<u64> {
-        let terminates = self
-            .data
-            .block(block)
-            .ops
-            .last()
-            .map(|op| self.data.op(*op).opcode)
-            .is_some_and(|opcode| matches!(opcode, op::BRANCH | op::BRANCHIND | op::RETURN));
-        if terminates {
+    /// The jump a block needs because its remaining successor is not the block
+    /// emitted next.
+    ///
+    /// Successors an emitted transfer already names are excluded: a conditional
+    /// branch's taken target is reached by its own `IfGoto`, so only the
+    /// untaken edge can need a jump.
+    fn explicit_fallthrough(
+        &self,
+        block: GraphBlockId,
+        next: Option<u64>,
+        emitted: &[NativeStatement],
+    ) -> Option<u64> {
+        let leaves = emitted.iter().any(|statement| {
+            matches!(
+                statement,
+                NativeStatement::Goto(_)
+                    | NativeStatement::IndirectGoto(_)
+                    | NativeStatement::Return(_)
+            )
+        });
+        if leaves {
             return None;
         }
-        let successors = &self.data.block(block).successors;
-        let fallthrough = successors
+        let named: BTreeSet<u64> = emitted
+            .iter()
+            .filter_map(|statement| match statement {
+                NativeStatement::IfGoto { target, .. } | NativeStatement::Goto(target) => {
+                    Some(*target)
+                }
+                _ => None,
+            })
+            .collect();
+        self.data
+            .block(block)
+            .successors
             .iter()
             .copied()
             .map(|successor| self.data.block(successor).start)
-            .find(|start| Some(*start) != next)?;
-        (successors.len() == 1 || Some(fallthrough) != next).then_some(fallthrough)
+            .find(|start| !named.contains(start) && Some(*start) != next)
     }
 }
 
@@ -389,9 +435,15 @@ mod tests {
         heritage(&mut data);
         let statements = emit(&data, &names);
 
+        assert!(
+            statements
+                .iter()
+                .any(|statement| matches!(statement, NativeStatement::DeclareLocal { .. })),
+            "the merged value is declared once"
+        );
         let assignments: Vec<&NativeStatement> = statements
             .iter()
-            .filter(|statement| matches!(statement, NativeStatement::Copy { .. }))
+            .filter(|statement| matches!(statement, NativeStatement::Assign { .. }))
             .collect();
         assert_eq!(assignments.len(), 2, "each path assigns the merged value");
         let NativeStatement::Return(Some(Expr::Temporary { name, .. })) = statements
@@ -403,7 +455,7 @@ mod tests {
             panic!("the merged value must be returned by name, not dropped");
         };
         for assignment in assignments {
-            let NativeStatement::Copy { destination, .. } = assignment else {
+            let NativeStatement::Assign { destination, .. } = assignment else {
                 unreachable!()
             };
             assert_eq!(
@@ -457,11 +509,11 @@ mod tests {
         }
 
         let statements = emit(&data, &names);
-        let assignments = statements
+        let declarations = statements
             .iter()
-            .filter(|statement| matches!(statement, NativeStatement::Copy { .. }))
+            .filter(|statement| matches!(statement, NativeStatement::Declare { .. }))
             .count();
-        assert_eq!(assignments, 1, "the computation is spelled once");
+        assert_eq!(declarations, 1, "the computation is spelled once");
         for statement in &statements {
             if let NativeStatement::Store { address, value, .. } = statement {
                 assert!(matches!(address, Expr::Temporary { .. }));

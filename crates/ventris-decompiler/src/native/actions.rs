@@ -472,10 +472,15 @@ fn rewrite_statement_expressions_in_place<R: FnMut(Expr) -> Expr + Copy>(
             destination,
             source,
             ..
+        }
+        | NativeStatement::Assign {
+            destination,
+            source,
         } => {
             *destination = rewrite(destination.clone());
             *source = rewrite(source.clone());
         }
+        NativeStatement::DeclareLocal { .. } => {}
         NativeStatement::Call(call)
         | NativeStatement::IndirectGoto(call)
         | NativeStatement::Expression(call) => {
@@ -1813,6 +1818,8 @@ fn contains_control_flow(statements: &[NativeStatement]) -> bool {
         | NativeStatement::Continue => true,
         NativeStatement::Store { .. }
         | NativeStatement::Copy { .. }
+        | NativeStatement::Assign { .. }
+        | NativeStatement::DeclareLocal { .. }
         | NativeStatement::Call(_)
         | NativeStatement::Declare { .. }
         | NativeStatement::Return(_)
@@ -1843,12 +1850,17 @@ pub(super) fn statement_temporary_uses(statement: &NativeStatement) -> BTreeSet<
             destination,
             source,
             ..
+        }
+        | NativeStatement::Assign {
+            destination,
+            source,
         } => {
             if !matches!(destination, Expr::Temporary { .. }) {
                 collect_temporary_uses(destination, &mut uses);
             }
             collect_temporary_uses(source, &mut uses);
         }
+        NativeStatement::DeclareLocal { .. } => {}
         NativeStatement::Call(call)
         | NativeStatement::IndirectGoto(call)
         | NativeStatement::Expression(call) => collect_temporary_uses(call, &mut uses),
@@ -2232,6 +2244,7 @@ fn resolve_label(label: u64, aliases: &BTreeMap<u64, u64>) -> u64 {
 fn remap_targets(statements: &mut [NativeStatement], aliases: &BTreeMap<u64, u64>) {
     for statement in statements {
         match statement {
+            NativeStatement::DeclareLocal { .. } | NativeStatement::Assign { .. } => {}
             NativeStatement::Goto(target) => *target = resolve_label(*target, aliases),
             NativeStatement::IfGoto { target, .. } => *target = resolve_label(*target, aliases),
             NativeStatement::IfElse {

@@ -22,6 +22,7 @@ mod printer;
 mod ssa;
 mod structure;
 
+use crate::graph;
 use actions::{expression_width, type_width};
 pub use c_score::{CScore, score_c};
 use control_flow::simplify;
@@ -229,6 +230,20 @@ pub enum NativeStatement {
         name: String,
         ty: Type,
         value: Expr,
+    },
+    /// A local whose value depends on the path taken, so it is declared where
+    /// every assignment to it is dominated and assigned on each path. This is
+    /// how a `MULTIEQUAL` is spelled in C.
+    DeclareLocal {
+        name: String,
+        ty: Type,
+    },
+    /// An assignment to an already-declared location. Distinct from `Copy`,
+    /// which is a block memory copy, and from `Declare`, which introduces a
+    /// name at its single definition site.
+    Assign {
+        destination: Expr,
+        source: Expr,
     },
     IfGoto {
         condition: Expr,
@@ -438,6 +453,14 @@ fn materialize_result_casts_statement(statement: NativeStatement) -> NativeState
             value: materialize_result_casts_expr(value),
             width,
             volatile,
+        },
+        NativeStatement::DeclareLocal { name, ty } => NativeStatement::DeclareLocal { name, ty },
+        NativeStatement::Assign {
+            destination,
+            source,
+        } => NativeStatement::Assign {
+            destination: materialize_result_casts_expr(destination),
+            source: materialize_result_casts_expr(source),
         },
         NativeStatement::Copy {
             destination,
@@ -1210,10 +1233,15 @@ fn collect_statement_parameters(statement: &NativeStatement, used: &mut BTreeMap
             destination,
             source,
             ..
+        }
+        | NativeStatement::Assign {
+            destination,
+            source,
         } => {
             collect_expr_parameters(destination, used);
             collect_expr_parameters(source, used);
         }
+        NativeStatement::DeclareLocal { .. } => {}
         NativeStatement::Call(value)
         | NativeStatement::IndirectGoto(value)
         | NativeStatement::Expression(value) => collect_expr_parameters(value, used),
@@ -1737,6 +1765,65 @@ impl NativeDecompiler {
             warnings,
         }
     }
+    /// Decompiles through the SSA graph rather than the address-ordered pass.
+    ///
+    /// This is the ported pipeline: build the graph, refine overlapping
+    /// locations, guard indirect effects, construct SSA with real `MULTIEQUAL`
+    /// ops, then resolve and emit. Structuring and the action database are
+    /// shared with the address-ordered path so the comparison isolates value
+    /// resolution.
+    pub fn decompile_via_graph(
+        &mut self,
+        architecture: Architecture,
+        function: &NativeFunction,
+        abi: Option<&Abi>,
+    ) -> NativeDocument {
+        let ssa = build_ssa(function);
+        let mut solver = TypeSolver::default();
+        for constraint in &ssa.constraints {
+            solver.constrain(constraint.value, constraint.ty.clone());
+        }
+        let types = solver.solve();
+
+        let mut data = graph::Funcdata::from_lifted(function);
+        // Only registers are guarded here. Memory locations are named by their
+        // loads and stores, and guarding them without alias analysis invents a
+        // merge for every address the function mentions.
+        let mut locations = graph::guard::heritaged_locations(&data);
+        locations.retain(|location| location.space == REGISTER_SPACE);
+        let mut effects = graph::guard::CallEffects::default();
+        if let Some(abi) = abi {
+            for name in [Some(abi.stack_pointer), abi.frame_pointer]
+                .into_iter()
+                .flatten()
+            {
+                if let Some(vnode) = abi_register_vnode(architecture, name, abi.pointer_bits) {
+                    effects.preserved.insert((vnode.space, vnode.offset));
+                }
+            }
+        }
+        graph::guard::guard_calls(&mut data, &locations, &effects);
+        graph::heritage::heritage(&mut data);
+        graph::deadcode::eliminate_dead_code(&mut data);
+
+        let naming = |space: u32, offset: u64, _size: u32| -> Option<String> {
+            (space == REGISTER_SPACE).then(|| register_name(architecture, offset))
+        };
+        let mut statements = graph::emit::emit(&data, &naming);
+        statements = structure::structure_graph(statements);
+        statements = actions::run_action_database(statements);
+        let parameters = recover_parameters(abi, &statements);
+        NativeDocument {
+            name: format!("sub_{:x}", function.entry),
+            return_type: default_return_type(architecture),
+            parameters,
+            statements,
+            ssa,
+            types,
+            warnings: Vec::new(),
+        }
+    }
+
     fn synthetic_call_frame_store(
         architecture: Architecture,
         flow: &ventris_lifter::Flow,

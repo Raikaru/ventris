@@ -41,6 +41,18 @@ All notable Ventris changes are documented here.
   computation is spelled once and reused. No join repair, path-invariance proof,
   or predecessor-state intersection is needed, because the graph already records
   which values merge.
+- Added dead code elimination, ported from `ActionDeadCode`: bit-level consumed
+  masks propagate backwards from stores, calls, branches, and returns, so a byte
+  extracted from a word keeps only that byte live. A call keeps its effect and
+  loses only its unread result. Guarding and SSA construction over-approximate
+  by design, and this is what removes the merges nothing reads.
+- Added `NativeStatement::Assign` and `NativeStatement::DeclareLocal`. A merged
+  value needs one declaration dominating an assignment on each path, which
+  neither `Declare` (single definition site) nor `Copy` (block memory copy)
+  could express; phi lowering previously rendered as `__builtin_memcpy`.
+- Added `NativeDecompiler::decompile_via_graph`, the ported pipeline end to end.
+  Branch and call targets are read as `ram` space addresses rather than `const`
+  constants, which is what a direct call and a conditional branch actually are.
 
 - Added `LiftedInstruction::skips_delay_slot`, which reports the MIPS
   likely-branch shape so consumers stop treating its sequential successor as

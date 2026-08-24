@@ -108,6 +108,23 @@ fn render_statement(statement: &NativeStatement, out: &mut String, depth: usize)
         NativeStatement::Call(call) | NativeStatement::Expression(call) => {
             write_line(out, depth + 1, &format!("{};", render_expr(call, 0)));
         }
+        NativeStatement::DeclareLocal { name, ty } => {
+            write_line(out, depth + 1, &format!("{} {};", ty.c_name(), name));
+        }
+        NativeStatement::Assign {
+            destination,
+            source,
+        } => {
+            write_line(
+                out,
+                depth + 1,
+                &format!(
+                    "{} = {};",
+                    render_expr(destination, 0),
+                    render_expr(source, 0)
+                ),
+            );
+        }
         NativeStatement::Declare { name, ty, value } => {
             write_line(
                 out,
@@ -276,6 +293,17 @@ fn render_for_clause(statement: &NativeStatement) -> String {
             format!("__builtin_memcpy({destination}, {source}, {width}){qualifier}")
         }
         NativeStatement::Call(call) | NativeStatement::Expression(call) => render_expr(call, 0),
+        NativeStatement::DeclareLocal { name, ty } => format!("{} {}", ty.c_name(), name),
+        NativeStatement::Assign {
+            destination,
+            source,
+        } => {
+            format!(
+                "{} = {}",
+                render_expr(destination, 0),
+                render_expr(source, 0)
+            )
+        }
         NativeStatement::Declare { name, ty, value } => {
             format!("{} {} = {}", ty.c_name(), name, render_expr(value, 0))
         }

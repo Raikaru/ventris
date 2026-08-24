@@ -16,6 +16,7 @@
 //! Source authority: `varnode.hh`, `op.hh`, `funcdata.hh`, `funcdata_varnode.cc`,
 //! `funcdata_op.cc` at commit `8b4c91d4d5bd1549622bfbade0df199585b98365`.
 
+pub mod deadcode;
 pub mod emit;
 pub mod guard;
 pub mod heritage;
@@ -25,7 +26,7 @@ pub mod value;
 use std::collections::{BTreeMap, BTreeSet};
 
 use ventris_lifter::{CONST_SPACE, NativeFunction, UNIQUE_SPACE};
-use ventris_pcode::{PcodeOp, Varnode};
+use ventris_pcode::Varnode;
 
 /// Index of a varnode in a [`Funcdata`] arena.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -473,6 +474,7 @@ fn enclosing_block(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ventris_pcode::PcodeOp;
     use ventris_pcode::op;
 
     fn lifted() -> NativeFunction {

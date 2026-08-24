@@ -127,6 +127,14 @@ fn survey_statement(
             }
             survey_expr(value, frame_registers, survey);
         }
+        NativeStatement::DeclareLocal { .. } => {}
+        NativeStatement::Assign {
+            destination,
+            source,
+        } => {
+            survey_expr(destination, frame_registers, survey);
+            survey_expr(source, frame_registers, survey);
+        }
         NativeStatement::Copy {
             destination,
             source,
@@ -351,10 +359,15 @@ fn rewrite_statement(
             destination,
             source,
             ..
+        }
+        | NativeStatement::Assign {
+            destination,
+            source,
         } => {
             rewrite_expr(destination, frame_registers, slots);
             rewrite_expr(source, frame_registers, slots);
         }
+        NativeStatement::DeclareLocal { .. } => {}
         NativeStatement::Call(value)
         | NativeStatement::IndirectGoto(value)
         | NativeStatement::Expression(value)

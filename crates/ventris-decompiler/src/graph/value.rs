@@ -280,14 +280,12 @@ impl<'a> Resolver<'a> {
                 };
                 copies.push((
                     predecessor,
-                    NativeStatement::Copy {
+                    NativeStatement::Assign {
                         destination: Expr::Temporary {
                             name: name.to_string(),
                             width,
                         },
                         source: self.resolve(operand),
-                        width,
-                        volatile: false,
                     },
                 ));
             }
@@ -420,10 +418,9 @@ mod tests {
         let mut sources: Vec<u64> = Vec::new();
         for (block, statement) in &copies {
             assert!(*block == left || *block == right);
-            let NativeStatement::Copy {
+            let NativeStatement::Assign {
                 destination,
                 source,
-                ..
             } = statement
             else {
                 panic!("expected an assignment");
