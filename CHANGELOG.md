@@ -214,6 +214,18 @@ All notable Ventris changes are documented here.
   construct is the only way in. `finish` additionally guarantees every live block
   appears in the tree, so a rule that mishandles an edge can no longer silently
   drop part of a function.
+- Removed unreachable-code pruning from graph emission entirely. It looked safe,
+  since nothing after an unconditional transfer runs, but a block reached only by
+  falling through carries no label, so one spurious jump made the rest of a body
+  look dead. It was deleting whole inner loops and the calls inside them: on
+  `Emem_KillSwMember__Fv` it removed one of two calls to the same callee. An ugly
+  jump is cosmetic; deleting a reachable statement is a wrong answer.
+- Loops now drop jumps to their own header from their body. A surrendered back
+  edge and a recovered loop state the same thing, and keeping both left a jump
+  contradicting the construct wrapped around it — which is what made the
+  following statements look unreachable in the first place.
+- Added `VENTRIS_SKIP_PASS`, a comma-separated list of pass names to disable, so
+  a defect can be attributed to one pass without a rebuild per guess.
 
 - Added `LiftedInstruction::skips_delay_slot`, which reports the MIPS
   likely-branch shape so consumers stop treating its sequential successor as

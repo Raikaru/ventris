@@ -427,8 +427,14 @@ impl<'a> Graph<'a> {
         if self.nodes[node].successors.len() != 1 || self.nodes[node].successors[0] != node {
             return false;
         }
+        // A jump to this node's own entry is what the loop already says. Left in
+        // the body it contradicts the construct, and every statement after it
+        // reads as dead code.
+        let head = self.nodes[node].entry;
+        let mut inner = self.nodes[node].body.clone();
+        drop_jumps_to(&mut inner, head);
         let body = Structured::InfLoop {
-            body: Box::new(self.nodes[node].body.clone()),
+            body: Box::new(inner),
         };
         self.nodes[node].successors.clear();
         self.nodes[node]
@@ -560,11 +566,14 @@ impl<'a> Graph<'a> {
             if self.nodes[body].successors[0] != node {
                 continue;
             }
+            let head = self.nodes[node].entry;
+            let mut inner = self.nodes[body].body.clone();
+            drop_jumps_to(&mut inner, head);
             let structured = Structured::WhileDo {
                 header: Box::new(self.nodes[node].body.clone()),
                 test: self.condition_for(node),
                 body_taken: index == 0,
-                body: Box::new(self.nodes[body].body.clone()),
+                body: Box::new(inner),
             };
             self.absorb(node, &[body], structured);
             return true;
@@ -580,8 +589,11 @@ impl<'a> Graph<'a> {
         let Some(self_index) = self.self_edge(node) else {
             return false;
         };
+        let head = self.nodes[node].entry;
+        let mut inner = self.nodes[node].body.clone();
+        drop_jumps_to(&mut inner, head);
         let body = Structured::DoWhile {
-            body: Box::new(self.nodes[node].body.clone()),
+            body: Box::new(inner),
             test: self.condition_for(node),
             body_taken: self_index == 0,
         };
@@ -856,6 +868,48 @@ impl<'a> Graph<'a> {
         members.extend(missing.into_iter().map(Structured::Basic));
         let _ = &self.of_block;
         Structured::List(members)
+    }
+}
+
+/// Removes jumps to `head` from inside a loop body.
+///
+/// A surrendered back edge and a recovered loop say the same thing. Keeping both
+/// leaves a jump in the middle of the body that contradicts the construct
+/// wrapped around it.
+fn drop_jumps_to(node: &mut Structured, head: GraphBlockId) {
+    match node {
+        Structured::List(members) => {
+            members.retain(|member| {
+                !matches!(
+                    member,
+                    Structured::Goto { target, .. } | Structured::IfGoto { target, .. }
+                        if *target == head
+                )
+            });
+            for member in members.iter_mut() {
+                drop_jumps_to(member, head);
+            }
+        }
+        Structured::IfElse {
+            header,
+            then_body,
+            else_body,
+            ..
+        } => {
+            drop_jumps_to(header, head);
+            drop_jumps_to(then_body, head);
+            if let Some(body) = else_body {
+                drop_jumps_to(body, head);
+            }
+        }
+        Structured::WhileDo { header, body, .. } => {
+            drop_jumps_to(header, head);
+            drop_jumps_to(body, head);
+        }
+        Structured::DoWhile { body, .. } | Structured::InfLoop { body } => {
+            drop_jumps_to(body, head)
+        }
+        Structured::Basic(_) | Structured::Goto { .. } | Structured::IfGoto { .. } => {}
     }
 }
 

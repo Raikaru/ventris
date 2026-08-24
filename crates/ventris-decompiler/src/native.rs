@@ -1923,6 +1923,11 @@ impl NativeDecompiler {
         // statements, so they run before simplification consumes the guards.
         graph::action::Action::apply(&graph::protoaction::ActionReturnRecovery, &mut data);
         graph::action::Action::apply(&graph::protoaction::ActionActiveReturn, &mut data);
+        // A comma-separated `VENTRIS_SKIP_PASS` disables named passes, so a
+        // defect can be attributed to one pass without rebuilding per guess.
+        let skipped_passes: Vec<String> = std::env::var("VENTRIS_SKIP_PASS")
+            .map(|value| value.split(',').map(str::trim).map(str::to_owned).collect())
+            .unwrap_or_default();
         let pipeline = graph::action::default_pipeline();
         let control_flow: [&dyn graph::action::Action; 10] = [
             &graph::branchaction::ActionDeterminedBranch,
@@ -1941,6 +1946,9 @@ impl NativeDecompiler {
         for _ in 0..GRAPH_PIPELINE_ROUNDS {
             let mut changed = graph::action::Action::apply(pipeline.as_ref(), &mut data);
             for pass in control_flow {
+                if skipped_passes.iter().any(|name| name == pass.name()) {
+                    continue;
+                }
                 changed += pass.apply(&mut data);
             }
             changed += graph::deadcode::eliminate_dead_code(&mut data);

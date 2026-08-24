@@ -250,38 +250,6 @@ fn drop_gotos_to_next_statement(statements: &mut Vec<NativeStatement>) {
     }
 }
 
-/// Drops statements that follow an unconditional transfer.
-///
-/// A node that surrendered an edge as a `goto` has no fallthrough, but the
-/// collapsing graph can still attach a successor after it. Anything past the
-/// transfer cannot execute, and emitting it claims control flow that does not
-/// exist.
-fn after_transfer_is_unreachable(statements: Vec<NativeStatement>) -> Vec<NativeStatement> {
-    let mut kept = Vec::with_capacity(statements.len());
-    let mut reachable = true;
-    for statement in statements {
-        // A label is reached by a jump from elsewhere, so control resumes
-        // there regardless of what preceded it.
-        if matches!(statement, NativeStatement::Label(_)) {
-            reachable = true;
-        }
-        if !reachable {
-            continue;
-        }
-        let transfers = matches!(
-            statement,
-            NativeStatement::Goto(_)
-                | NativeStatement::Return(_)
-                | NativeStatement::IndirectGoto(_)
-        );
-        kept.push(statement);
-        if transfers {
-            reachable = false;
-        }
-    }
-    kept
-}
-
 /// Blocks a surviving `goto` still names, which therefore need labels.
 fn goto_targets(tree: &super::structure::Structured) -> BTreeSet<GraphBlockId> {
     use super::structure::Structured;
@@ -342,7 +310,14 @@ impl Emitter<'_> {
         phi_copies: &BTreeMap<GraphBlockId, Vec<NativeStatement>>,
         targets: &BTreeSet<GraphBlockId>,
     ) -> Vec<NativeStatement> {
-        after_transfer_is_unreachable(self.emit_construct(node, scoped, phi_copies, targets))
+        // No unreachable-code pruning happens here. It looks safe — nothing
+        // after an unconditional transfer can run — but a block reached only by
+        // falling through carries no label, so a spurious `goto` anywhere in a
+        // body made the whole rest of that body look dead. That deleted real
+        // code, including entire inner loops and the calls inside them. An ugly
+        // jump is a cosmetic defect; deleting a reachable statement is a wrong
+        // answer, so the jump stays and gets fixed at its source instead.
+        self.emit_construct(node, scoped, phi_copies, targets)
     }
 
     fn emit_construct(
