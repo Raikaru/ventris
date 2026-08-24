@@ -834,8 +834,62 @@ impl<'a> Graph<'a> {
             })
             .collect();
         remaining.sort_by_key(|(entry, _)| self.data.block(*entry).start);
+        let mut members: Vec<Structured> = remaining.into_iter().map(|(_, body)| body).collect();
+
+        // Every live block must appear exactly once. A rule that absorbs a node
+        // whose body another composite already owns, or that leaves a stale
+        // edge, can otherwise drop a block from the tree entirely — which reads
+        // as a function that simply stops, with the rest of its body silently
+        // missing. Recovering the block as its own region keeps the output
+        // honest: unstructured, but complete.
+        let mut present: BTreeSet<GraphBlockId> = BTreeSet::new();
+        for member in &members {
+            collect_blocks(member, &mut present);
+        }
+        let mut missing: Vec<GraphBlockId> = self
+            .data
+            .blocks()
+            .map(|(id, _)| id)
+            .filter(|id| !present.contains(id))
+            .collect();
+        missing.sort_by_key(|id| self.data.block(*id).start);
+        members.extend(missing.into_iter().map(Structured::Basic));
         let _ = &self.of_block;
-        Structured::List(remaining.into_iter().map(|(_, body)| body).collect())
+        Structured::List(members)
+    }
+}
+
+/// Every basic block a construct tree mentions.
+fn collect_blocks(node: &Structured, into: &mut BTreeSet<GraphBlockId>) {
+    match node {
+        Structured::Basic(block) => {
+            into.insert(*block);
+        }
+        Structured::List(members) => {
+            for member in members {
+                collect_blocks(member, into);
+            }
+        }
+        Structured::IfElse {
+            header,
+            then_body,
+            else_body,
+            ..
+        } => {
+            collect_blocks(header, into);
+            collect_blocks(then_body, into);
+            if let Some(body) = else_body {
+                collect_blocks(body, into);
+            }
+        }
+        Structured::WhileDo { header, body, .. } => {
+            collect_blocks(header, into);
+            collect_blocks(body, into);
+        }
+        Structured::DoWhile { body, .. } | Structured::InfLoop { body } => {
+            collect_blocks(body, into)
+        }
+        Structured::Goto { .. } | Structured::IfGoto { .. } => {}
     }
 }
 

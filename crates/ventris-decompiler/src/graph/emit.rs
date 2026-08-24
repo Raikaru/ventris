@@ -84,7 +84,11 @@ pub fn emit_structured(
     }
     let mut statements = emitter.phi_declarations();
     let targets = goto_targets(&tree);
-    statements.extend(emitter.emit_tree(&tree, &scoped, &phi_copies, &targets));
+    // The root is not pruned. Its members are independent regions, each
+    // reached by a jump from elsewhere, so a statement after a transfer there
+    // is reachable even without a label of its own. Pruning applies inside a
+    // construct's body, where the only way in is through the construct.
+    statements.extend(emitter.emit_construct(&tree, &scoped, &phi_copies, &targets));
     drop_gotos_to_next_statement(&mut statements);
     drop_trailing_gotos_to_following_label(&mut statements);
     prefer_non_empty_then(&mut statements);
@@ -371,7 +375,7 @@ impl Emitter<'_> {
             }
             Structured::List(members) => members
                 .iter()
-                .flat_map(|member| self.emit_tree(member, scoped, phi_copies, targets))
+                .flat_map(|member| self.emit_construct(member, scoped, phi_copies, targets))
                 .collect(),
             Structured::IfElse {
                 header,
@@ -779,8 +783,13 @@ impl Emitter<'_> {
     fn branch_target(&self, op: OpId, slot: usize) -> Option<u64> {
         let value = self.data.op(op).inputs.get(slot).copied()?;
         let varnode = self.data.varnode(value);
-        let is_address = varnode.flags.constant
-            || (varnode.space == RAM_SPACE && varnode.def.is_none() && varnode.size > 0);
+        // Only a `ram` space operand names a code address. A `const` space
+        // operand on a branch is a p-code-relative offset for a branch *within*
+        // one instruction's expansion, which the lifter has already resolved.
+        // Reading it as an address produced jumps to nonsense addresses like
+        // `loc_2`, and because a jump terminates the block, everything after it
+        // was dropped as unreachable.
+        let is_address = varnode.space == RAM_SPACE && varnode.def.is_none() && varnode.size > 0;
         is_address.then_some(varnode.offset)
     }
 
@@ -875,7 +884,8 @@ mod tests {
     fn a_direct_call_names_its_target_and_arguments() {
         let mut data = Funcdata::default();
         let block = data.new_block(0x1000);
-        let target = data.new_constant(0x3000, 4);
+        // A call's target is a code address, which lives in the `ram` space.
+        let target = data.new_varnode(ventris_lifter::RAM_SPACE, 0x3000, 4);
         let argument = data.new_constant(1, 4);
         let call = data.new_op(op::CALL, seq(0x1000), vec![target, argument]);
         data.op_insert_end(call, block);
@@ -990,7 +1000,7 @@ mod tests {
         data.add_edge(entry, join);
         data.add_edge(left, join);
         let condition = data.new_constant(1, 1);
-        let target = data.new_constant(0x1020, 4);
+        let target = data.new_varnode(ventris_lifter::RAM_SPACE, 0x1020, 4);
         let branch = data.new_op(op::CBRANCH, seq(0x1000), vec![target, condition]);
         data.op_insert_end(branch, entry);
         let ret = data.new_op(op::RETURN, seq(0x1020), vec![]);

@@ -35,19 +35,43 @@ Heritage/SSA -> ActionDatabase/Rule passes`. The lifter was a genuine port; the
 back half was not, and could not be, because Ghidra's passes rewrite a mutable
 p-code graph while Ventris built C expressions directly.
 
-`ventris_decompiler::graph` is that back half, ported stage by stage from Ghidra
-12.1.3: the mutable graph object model, location refinement, call/store/return
-guards, Heritage with real `MULTIEQUAL` placement and renaming, the Action and
-Rule framework, `ActionDeadCode`, `ActionInferTypes`, `FuncProto` argument
-recovery, `Merge`/`HighVariable`, `ActionSetCasts`, the `ruleaction` expression
-rules, and `CollapseStructure`.
+`ventris_decompiler::graph` is that back half, ported from Ghidra 12.1.3: the
+mutable graph object model, location refinement, call/store/return guards,
+Heritage with real `MULTIEQUAL` placement and renaming, the Action and Rule
+framework, `ActionDeadCode` including dead frame stores, `ActionNonzeroMask`,
+`SubvariableFlow` with the `RuleSubvar*` family, `ActionInferTypes`, `FuncProto`
+argument recovery, `Cover` live ranges with `ActionMergeCopy`/`MergeAdjacent`/
+`MergeType`, `ActionSetCasts`, 38 `ruleaction` expression rules,
+`ActionDeterminedBranch`/`RedundBranch`/`Unreachable`/`DoNothing`/
+`NormalizeBranches`/`Cse`/`MultiCse`, `ActionReturnRecovery`/`ActiveReturn`,
+`ActionNameVars`, `JumpBasic` table recovery with `ActionSwitchNorm`,
+`ActionStackPtrFlow`, `ActionConditionalConst`/`ConditionalExe`/`Deindirect`/
+`ConstantPtr`, and `CollapseStructure` with natural-loop analysis
+(`labelLoops`, `LoopBody::findBase`/`findExit`, `markExitsAsGotos`).
+
+That is 38 of Ghidra's 168 `Rule` subclasses and 25 of its 76 `Action`
+subclasses. The remainder, and what each needs, is tracked in `CHANGELOG.md`.
 
 Select it with `VENTRIS_PIPELINE=graph`. It is **not** the default. Measured
 against the Ghidra oracle across all 37 hash-verified corpus functions with
-`tools/quality_census.py`, the address-ordered path agrees on 19 functions and
-the graph path on 6. The graph path leads on nothing yet; its remaining gaps are
-concentrated in `unstructured-control-flow` (17 vs 15), `excess-casts` (12 vs 5),
-and `unreduced-flag-expression` (11 vs 1, the PowerPC condition-register idiom).
+`tools/quality_census.py`:
+
+| Defect family | Address-ordered | Ported graph |
+|---|---:|---:|
+| agrees (no classified difference) | 19 | 14 |
+| unstructured-control-flow | 15 | 14 |
+| missing-loop-or-switch | 11 | 4 |
+| excess-casts | 5 | 7 |
+| return-presence | 3 | 1 |
+| oversized-expression | 3 | 0 |
+| missing-conditional | 2 | 3 |
+| unresolved-value | 1 | 0 |
+| unreduced-flag-expression | 1 | 0 |
+| call-census | 1 | 5 |
+| missing-parameters | 1 | 3 |
+
+The graph path leads on six families and trails on five. `agrees` requires zero
+classified differences, so it lags until the remaining five close.
 
 What the graph path already does that the address-ordered path cannot: name a
 value that differs per path instead of dropping it, resolve a definition

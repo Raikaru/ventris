@@ -254,6 +254,9 @@ impl Rule for RuleAddMultCollapse {
         let Some((inner_base, inner_const)) = inputs2(data, subop) else {
             return 0;
         };
+        if !heritage_known(data, inner_base) {
+            return 0;
+        }
         if !is_constant(data, inner_const) {
             // The remaining C++ branch is specifically for spacebase and
             // symbol metadata, which this graph intentionally does not model.
@@ -435,6 +438,9 @@ impl Rule for RuleDoubleShift {
         let Some((inner_input, inner_amount)) = inputs2(data, inner_id) else {
             return 0;
         };
+        if !heritage_known(data, inner_input) {
+            return 0;
+        }
         if !is_constant(data, inner_amount) {
             return 0;
         }
@@ -543,6 +549,9 @@ impl Rule for RuleSubRight {
         let Some((base, offset_vn)) = inputs2(data, id) else {
             return 0;
         };
+        if !heritage_known(data, base) {
+            return 0;
+        }
         if !is_constant(data, offset_vn) {
             return 0;
         }
@@ -901,6 +910,9 @@ impl Rule for RuleAndCompare {
             }
             _ => return 0,
         };
+        if !heritage_known(data, base) {
+            return 0;
+        }
         if data.varnode(and_const).offset == calc_mask(data.varnode(compared).size) {
             return 0;
         }
@@ -994,6 +1006,9 @@ impl Rule for RuleShiftSub {
         let Some((input, shift_amount)) = inputs2(data, shift_id) else {
             return 0;
         };
+        if !heritage_known(data, input) {
+            return 0;
+        }
         if !is_constant(data, shift_amount) || !is_constant(data, offset) {
             return 0;
         }
@@ -1073,6 +1088,9 @@ impl Rule for RuleConcatShift {
         let Some((high, low)) = inputs2(data, concat_id) else {
             return 0;
         };
+        if !heritage_known(data, high) {
+            return 0;
+        }
         let low_bits = u64::from(data.varnode(low).size) * 8;
         let mut shift = data.varnode(amount).offset;
         if shift < low_bits {
@@ -1486,6 +1504,9 @@ impl Rule for RuleLessNotEqual {
         let Some((a, b)) = inputs2(data, less_id) else {
             return 0;
         };
+        if !heritage_known(data, a) || !heritage_known(data, b) {
+            return 0;
+        }
         let Some((ea, eb)) = inputs2(data, equal_id) else {
             return 0;
         };
@@ -1706,6 +1727,9 @@ impl Rule for RuleZextEliminate {
         let Some(source) = data.op(zext_id).inputs.first().copied() else {
             return 0;
         };
+        if !heritage_known(data, source) {
+            return 0;
+        }
         let small_size = data.varnode(source).size;
         let value = data.varnode(constant).offset;
         if small_size < 8 && value >> (small_size * 8) != 0 {
@@ -1750,6 +1774,9 @@ impl Rule for RuleZextSless {
         let Some(source) = data.op(zext_id).inputs.first().copied() else {
             return 0;
         };
+        if !heritage_known(data, source) {
+            return 0;
+        }
         let small_size = data.varnode(source).size;
         if small_size == 0 {
             return 0;
@@ -1801,6 +1828,11 @@ impl Rule for RuleZextCommute {
         let Some(source) = data.op(zext_id).inputs.first().copied() else {
             return 0;
         };
+        if !heritage_known(data, source)
+            || (!is_constant(data, amount) && !heritage_known(data, amount))
+        {
+            return 0;
+        }
         let size = data.varnode(source).size;
         let seq = data.op(id).seq;
         let inner = data.new_op(op::INT_RIGHT, seq, vec![source, amount]);
@@ -1837,6 +1869,9 @@ impl Rule for RuleSubZext {
             let Some((base, offset)) = inputs2(data, sub_id) else {
                 return 0;
             };
+            if !heritage_known(data, base) {
+                return 0;
+            }
             let Some(output) = data.op(id).output else {
                 return 0;
             };
@@ -1884,6 +1919,9 @@ impl Rule for RuleSubZext {
         let Some((base, offset)) = inputs2(data, sub_id) else {
             return 0;
         };
+        if !heritage_known(data, base) {
+            return 0;
+        }
         if !is_constant(data, offset) {
             return 0;
         }
@@ -1957,6 +1995,9 @@ impl Rule for RuleSubCancel {
             let Some((through, mask)) = inputs2(data, ext_id) else {
                 return 0;
             };
+            if !heritage_known(data, through) {
+                return 0;
+            }
             if offset == 0
                 && is_constant(data, mask)
                 && data.varnode(mask).offset == calc_mask(output_size)
@@ -1971,6 +2012,9 @@ impl Rule for RuleSubCancel {
         };
         let input_size = data.varnode(through).size;
         let mut new_opcode = ext_code;
+        if !heritage_known(data, through) {
+            return 0;
+        }
         let mut new_input = through;
         if offset == 0 {
             if output_size == input_size {
