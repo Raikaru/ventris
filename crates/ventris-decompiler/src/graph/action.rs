@@ -433,6 +433,12 @@ pub fn default_pipeline() -> Box<dyn Action> {
         .add_rule(Box::new(RuleMultiCollapse))
         .add_rule(Box::new(RuleCollapseConstants))
         .add_rule(Box::new(RuleTrivialArith))
+        .add_rule(Box::new(super::rules::RuleAndMask))
+        .add_rule(Box::new(super::rules::RuleTrivialBool))
+        .add_rule(Box::new(super::rules::RuleEquality))
+        .add_rule(Box::new(super::rules::RuleEqual2Zero))
+        .add_rule(Box::new(super::rules::RuleSubExtComm))
+        .add_rule(Box::new(super::rules::RuleBoolNegate))
         .add_rule(Box::new(RulePropagateCopy))
         .add_rule(Box::new(RuleIndirectCollapse));
     Box::new(

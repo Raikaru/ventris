@@ -95,6 +95,12 @@ All notable Ventris changes are documented here.
   implicit; crossing between integers and pointers, changing a pointer's target,
   and float conversions are spelled. A value already recovered as a pointer no
   longer carries `(uintptr_t)` at every dereference.
+- Added expression rules ported from `ruleaction.cc`: `RuleBoolNegate`,
+  `RuleEquality`, `RuleAndMask`, `RuleTrivialBool`, `RuleSubExtComm`, and
+  `RuleEqual2Zero`, with the non-zero-bit analysis from `Varnode::getNZMask`
+  that two of them need. These recognise machine idioms — a comparison against
+  zero of a difference, a mask that cannot clear a bit, a negated comparison —
+  and rewrite them to what the source said.
 
 - Added `LiftedInstruction::skips_delay_slot`, which reports the MIPS
   likely-branch shape so consumers stop treating its sequential successor as
