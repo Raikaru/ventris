@@ -443,10 +443,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"quality-census: FAIL {error}", file=sys.stderr)
         return 1
 
+    # Count functions, not findings: a function that loses a `for` and a `while`
+    # is one function to fix, and reporting two overstated the family's reach.
     families: Counter = Counter()
     for row in rows:
-        for finding in row.findings:
-            families[finding.family] += 1
+        for family in {finding.family for finding in row.findings}:
+            families[family] += 1
 
     report = {
         "functions": len(rows),

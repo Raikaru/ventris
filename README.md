@@ -50,11 +50,14 @@ command a user runs, and supplies no metadata, so both sides rely on their own
 inference.
 
 On the 37 currently verified functions, 19 show no classified difference,
-including 9 of the 10 PS2 functions. The dominant remaining defect is loop
-recovery: 22 functions lose a loop or switch that Ghidra recovers. The loop
-reducer itself is not at fault — it reduces the same loops in isolation — but it
-requires a single-entry, single-exit region, so one forward branch past a loop
-keeps a whole function in label-and-goto form.
+including 9 of the 10 PS2 functions.
+
+The dominant remaining defect is structuring: 15 functions render explicit
+labels and `goto` where Ghidra renders nested statements, and the 11 functions
+that also lose a loop or switch are all within that set. The loop reducer itself
+is not at fault — it reduces the same loops in isolation — but it requires a
+single-entry, single-exit region, so one forward branch past a loop keeps a
+whole function in label-and-goto form.
 
 Frame slots are named locals when they are provably private scalars. The
 remaining cast differences come from slots written a byte at a time and read as
