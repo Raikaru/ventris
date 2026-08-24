@@ -72,13 +72,23 @@ pub fn mark_explicit(data: &Funcdata) -> Naming {
     Naming { names }
 }
 
+/// A name unique to one value.
+///
+/// The width belongs in the name: one location can hold values of different
+/// widths at the same address, and naming them alike produced two C
+/// declarations of the same identifier with different types.
 fn value_name(data: &Funcdata, def: OpId, value: VarnodeId) -> String {
     let seq = data.op(def).seq;
     let varnode = data.varnode(value);
-    match data.op(def).opcode {
-        op::MULTIEQUAL => format!("phi_{:x}_{:x}", seq.address, varnode.offset),
-        _ => format!("v_{:x}_{:x}", seq.address, varnode.offset),
-    }
+    let prefix = if data.op(def).opcode == op::MULTIEQUAL {
+        "phi"
+    } else {
+        "v"
+    };
+    format!(
+        "{prefix}_{:x}_{:x}_{}",
+        seq.address, varnode.offset, varnode.size
+    )
 }
 
 /// Resolves values to expressions by following definition edges.

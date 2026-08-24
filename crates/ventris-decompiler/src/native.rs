@@ -1815,6 +1815,21 @@ impl NativeDecompiler {
         }
         graph::guard::guard_calls(&mut data, &locations, &effects);
         graph::heritage::heritage(&mut data);
+        // Arguments must be recovered while the guards that name each
+        // location's value at the call still exist: simplification collapses
+        // them once nothing distinguishes their effect.
+        if let Some(abi) = abi {
+            let argument_locations: Vec<graph::guard::Location> =
+                abi_argument_vnodes(architecture, abi)
+                    .into_iter()
+                    .map(|vnode| graph::guard::Location {
+                        space: vnode.space,
+                        offset: vnode.offset,
+                        size: vnode.size,
+                    })
+                    .collect();
+            graph::proto::recover_call_arguments(&mut data, &argument_locations);
+        }
         // Simplification, unreachable-block removal, and dead code each expose
         // work for the others: folding a condition orphans a block, removing a
         // block leaves a merge with one operand, and collapsing that merge

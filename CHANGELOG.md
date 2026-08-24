@@ -75,6 +75,14 @@ All notable Ventris changes are documented here.
   discovered at a dereference reaches the argument register it arrived in and
   the base a field access started from. The previous solver only merged
   constraints per value, which could not carry a type upward at all.
+- Added call prototype recovery, ported from `ParamActive::registerTrial`,
+  `FuncCallSpecs::checkInputTrialUse`, and `buildInputFromTrials`: one trial per
+  convention parameter location, read from the guard that names the location's
+  value at the call, kept when the function actually produced that value. A call
+  through the graph pipeline now carries arguments instead of none.
+- Fixed graph value names colliding when one location holds values of different
+  widths at one address, which emitted two C declarations of the same identifier
+  with different types.
 
 - Added `LiftedInstruction::skips_delay_slot`, which reports the MIPS
   likely-branch shape so consumers stop treating its sequential successor as

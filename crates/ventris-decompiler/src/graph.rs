@@ -21,6 +21,7 @@ pub mod deadcode;
 pub mod emit;
 pub mod guard;
 pub mod heritage;
+pub mod proto;
 pub mod refine;
 pub mod types;
 pub mod value;

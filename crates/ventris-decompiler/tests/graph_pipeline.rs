@@ -106,7 +106,7 @@ fn direct_calls_and_conditionals_survive_the_graph_pipeline() {
     // every direct call into an indirect one.
     let source = render_via_graph(GET_BUILT_IN_TEXTURE, 0x124fa8);
     assert!(
-        source.contains("sub_1253f8()"),
+        source.contains("sub_1253f8("),
         "the direct call target is named\n{source}"
     );
     assert!(
@@ -123,5 +123,23 @@ fn a_dereferenced_stack_value_is_declared_as_a_pointer() {
     assert!(
         source.contains("uintptr_t"),
         "no pointer type was recovered\n{source}"
+    );
+}
+
+#[test]
+fn recovered_calls_carry_their_arguments() {
+    // Every call here is `memcmp(candidate, name, length)`. Without prototype
+    // recovery a call instruction names no operands at all, and the graph path
+    // rendered `sub_1253f8()`.
+    let source = render_via_graph(GET_BUILT_IN_TEXTURE, 0x124fa8);
+    let calls: Vec<&str> = source
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.contains("sub_1253f8("))
+        .collect();
+    assert!(!calls.is_empty(), "no call was emitted\n{source}");
+    assert!(
+        calls.iter().all(|line| !line.contains("sub_1253f8()")),
+        "a call was emitted with no arguments\n{source}"
     );
 }
