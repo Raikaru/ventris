@@ -1569,6 +1569,7 @@ impl NativeDecompiler {
                 }
                 if !handled_by_branch_join && predecessors.get(address).copied().unwrap_or(0) > 1 {
                     definitions = merge_join_contributions(
+                        architecture,
                         predecessors[address],
                         join_states.get(address).map(Vec::as_slice).unwrap_or(&[]),
                         &definitions,
@@ -2513,18 +2514,24 @@ fn is_path_invariant(value: &Expr, stable_registers: &BTreeSet<String>) -> bool 
 /// value depends on the path is dropped, so a later use reads the register
 /// rather than one path's value.
 fn merge_join_contributions(
+    architecture: Architecture,
     predecessor_count: usize,
     contributions: &[(usize, BTreeMap<ValueKey, Expr>)],
     incoming: &BTreeMap<ValueKey, Expr>,
     stable_registers: &BTreeSet<String>,
 ) -> BTreeMap<ValueKey, Expr> {
     if contributions.len() != predecessor_count || contributions.is_empty() {
-        // Not every path has been translated yet, so a value that any path can
-        // change cannot be carried across. A value built only from the entry
-        // state survives: no path can alter it.
+        // Not every path has been translated yet. A definition survives only if
+        // no path could have written a different value into its register *and*
+        // the value itself does not depend on the path. Keeping a per-path
+        // constant because constants look stable is what makes a merge adopt
+        // one branch's value.
         return incoming
             .iter()
-            .filter(|(_, value)| is_path_invariant(value, stable_registers))
+            .filter(|(key, value)| {
+                stable_registers.contains(&register_name(architecture, key.offset))
+                    && is_path_invariant(value, stable_registers)
+            })
             .map(|(key, value)| (*key, value.clone()))
             .collect();
     }

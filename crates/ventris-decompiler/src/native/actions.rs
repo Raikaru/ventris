@@ -1972,6 +1972,7 @@ fn collect_temporary_uses(value: &Expr, uses: &mut BTreeSet<String>) {
 }
 
 fn cleanup_labels_and_gotos(statements: &mut Vec<NativeStatement>) -> bool {
+    let mut changed = inline_trivial_return_targets(statements);
     let mut aliases = BTreeMap::new();
     // An indirect transfer may compute any label address. Keep every label
     // identity in that case; only remove a fall-through goto whose target
@@ -1980,13 +1981,152 @@ fn cleanup_labels_and_gotos(statements: &mut Vec<NativeStatement>) -> bool {
         collect_label_aliases(statements, &mut aliases);
     }
     if aliases.is_empty() {
-        return remove_redundant_gotos(statements, &BTreeMap::new());
+        return remove_redundant_gotos(statements, &BTreeMap::new()) || changed;
     }
 
     remap_targets(statements, &aliases);
-    let mut changed = remove_duplicate_labels(statements);
+    changed |= remove_duplicate_labels(statements);
     changed |= remove_redundant_gotos(statements, &aliases);
     changed
+}
+
+/// Replaces a jump to a bare `return` with the return itself.
+///
+/// Compilers give a function one epilogue and jump to it from everywhere. The
+/// shared block carries no work, so every jump to it reads better as the return
+/// it performs, and removing the jumps lets the structurer see a plain
+/// sequence of early returns instead of a web of labels.
+fn inline_trivial_return_targets(statements: &mut [NativeStatement]) -> bool {
+    let mut returns: BTreeMap<u64, Option<Expr>> = BTreeMap::new();
+    let mut index = 0usize;
+    while index < statements.len() {
+        let NativeStatement::Label(label) = statements[index] else {
+            index += 1;
+            continue;
+        };
+        let mut next = index + 1;
+        while matches!(statements.get(next), Some(NativeStatement::Label(_))) {
+            next += 1;
+        }
+        if let Some(NativeStatement::Return(value)) = statements.get(next) {
+            returns.insert(label, value.clone());
+        }
+        index = next.max(index + 1);
+    }
+    if returns.is_empty() {
+        return false;
+    }
+    let mut changed = false;
+    for statement in statements.iter_mut() {
+        changed |= inline_return_in_statement(statement, &returns);
+    }
+    changed
+}
+
+fn inline_return_in_statement(
+    statement: &mut NativeStatement,
+    returns: &BTreeMap<u64, Option<Expr>>,
+) -> bool {
+    match statement {
+        NativeStatement::Goto(target) => match returns.get(target) {
+            Some(value) => {
+                *statement = NativeStatement::Return(value.clone());
+                true
+            }
+            None => false,
+        },
+        NativeStatement::IfGoto { condition, target } => match returns.get(target) {
+            Some(value) => {
+                *statement = NativeStatement::IfReturn {
+                    condition: condition.clone(),
+                    value: value.clone(),
+                };
+                true
+            }
+            None => false,
+        },
+        NativeStatement::IfElse {
+            then_body,
+            else_body,
+            ..
+        } => {
+            let mut changed = false;
+            for nested in then_body.iter_mut().chain(else_body) {
+                changed |= inline_return_in_statement(nested, returns);
+            }
+            changed
+        }
+        NativeStatement::While { body, .. }
+        | NativeStatement::DoWhile { body, .. }
+        | NativeStatement::For { body, .. } => {
+            let mut changed = false;
+            for nested in body {
+                changed |= inline_return_in_statement(nested, returns);
+            }
+            changed
+        }
+        NativeStatement::Switch { cases, default, .. } => {
+            let mut changed = false;
+            for (_, body) in cases {
+                for nested in body {
+                    changed |= inline_return_in_statement(nested, returns);
+                }
+            }
+            for nested in default {
+                changed |= inline_return_in_statement(nested, returns);
+            }
+            changed
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod epilogue_tests {
+    use super::*;
+
+    #[test]
+    fn a_jump_to_a_bare_return_becomes_that_return() {
+        let mut statements = vec![
+            NativeStatement::IfGoto {
+                condition: Expr::constant(1, 1),
+                target: 0x2000,
+            },
+            NativeStatement::Goto(0x2000),
+            NativeStatement::Label(0x2000),
+            NativeStatement::Return(Some(Expr::constant(7, 4))),
+        ];
+        assert!(inline_trivial_return_targets(&mut statements));
+        assert_eq!(
+            statements[0],
+            NativeStatement::IfReturn {
+                condition: Expr::constant(1, 1),
+                value: Some(Expr::constant(7, 4)),
+            }
+        );
+        assert_eq!(
+            statements[1],
+            NativeStatement::Return(Some(Expr::constant(7, 4)))
+        );
+    }
+
+    #[test]
+    fn a_jump_to_a_block_that_does_work_is_left_alone() {
+        let statements = vec![
+            NativeStatement::Goto(0x2000),
+            NativeStatement::Label(0x2000),
+            NativeStatement::Store {
+                address: Expr::constant(0x3000, 4),
+                value: Expr::constant(1, 4),
+                width: 4,
+                volatile: false,
+            },
+            NativeStatement::Return(None),
+        ];
+        let mut candidate = statements.clone();
+        assert_eq!(inline_trivial_return_targets(&mut candidate), false);
+        assert_eq!(candidate, statements);
+    }
 }
 
 fn contains_indirect_goto(statements: &[NativeStatement]) -> bool {

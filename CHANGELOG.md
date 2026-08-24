@@ -13,6 +13,8 @@ All notable Ventris changes are documented here.
   narrows is declared at the narrow type instead.
 - Added PS2 retail regressions pinned to real Dungeon Game bytes covering
   memory ordering, likely-branch flow, and merge points.
+- Added epilogue inlining: a jump to a block that only returns becomes that
+  return, so a shared epilogue no longer turns every path into a label.
 - Added frame-slot promotion: a stack slot that is provably a private scalar is
   declared and named as a local instead of rendered as `sp`-relative memory. A
   slot whose address escapes, whose bytes are accessed at more than one width,

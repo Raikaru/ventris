@@ -49,7 +49,7 @@ by how many functions each affects. It drives the same public `decompile`
 command a user runs, and supplies no metadata, so both sides rely on their own
 inference.
 
-On the 37 currently verified functions, 18 show no classified difference,
+On the 37 currently verified functions, 19 show no classified difference,
 including 9 of the 10 PS2 functions. The dominant remaining defect is loop
 recovery: 22 functions lose a loop or switch that Ghidra recovers. The loop
 reducer itself is not at fault — it reduces the same loops in isolation — but it
@@ -59,6 +59,11 @@ keeps a whole function in label-and-goto form.
 Frame slots are named locals when they are provably private scalars. The
 remaining cast differences come from slots written a byte at a time and read as
 a word, which one name cannot describe.
+
+One limitation is deliberate. A label whose predecessors are translated after it
+cannot be given a merged value, so a register that differs per path is dropped
+rather than guessed. Such a function reports no return value instead of one
+path's value; `getBuiltInTexture` is the current example.
 
 ## CLI
 
