@@ -21,7 +21,7 @@ use ventris_pcode::op;
 
 use super::action::Action;
 use super::heritage::compute_dominance;
-use super::{Funcdata, GraphBlockId, OpId, SeqNum, VarnodeId};
+use super::{Funcdata, GraphBlockId, OpId, VarnodeId};
 
 fn last_live_op(data: &Funcdata, block: GraphBlockId) -> Option<OpId> {
     data.block(block)
@@ -314,6 +314,17 @@ impl Action for ActionNormalizeBranches {
             let Some(inverse) = inverse_test(data, def) else {
                 continue;
             };
+            let original = data.op(def).opcode;
+            if matches!(
+                original,
+                op::INT_SLESS | op::INT_SLESSEQUAL | op::INT_LESS | op::INT_LESSEQUAL
+            ) {
+                let mut inputs = data.op(def).inputs.clone();
+                if inputs.len() >= 2 {
+                    inputs.swap(0, 1);
+                    data.op_set_inputs(def, inputs);
+                }
+            }
             data.op_set_opcode(def, inverse);
             set_branch_target(data, branch, other, size);
             changed += 1;
@@ -345,8 +356,11 @@ fn same_value(data: &Funcdata, left: VarnodeId, right: VarnodeId) -> bool {
     }
     let left = data.varnode(left);
     let right = data.varnode(right);
-    left.flags.constant
-        && right.flags.constant
+    if left.flags.constant && right.flags.constant {
+        return left.space == right.space && left.offset == right.offset && left.size == right.size;
+    }
+    left.def.is_none()
+        && right.def.is_none()
         && left.space == right.space
         && left.offset == right.offset
         && left.size == right.size
@@ -492,6 +506,7 @@ impl Action for ActionMultiCse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::SeqNum;
 
     fn seq(address: u64, order: u32) -> SeqNum {
         SeqNum { address, order }
@@ -672,8 +687,13 @@ mod tests {
     #[test]
     fn cse_collapses_a_dominated_identical_add() {
         let (mut data, first, second) = two_adds();
+        let second_out = data.op(second).output.expect("second result");
+        let second_block = data.op(second).parent.expect("second block");
+        let use_op = data.new_op(op::INT_NEGATE, seq(0x1010, 1), vec![second_out]);
+        data.op_insert_end(use_op, second_block);
         assert_eq!(ActionCse.apply(&mut data), 1);
-        assert!(data.op(first).output.is_some());
+        let first_out = data.op(first).output.expect("first result");
+        assert_eq!(data.op(use_op).inputs, vec![first_out]);
         assert!(data.op(second).dead);
     }
 

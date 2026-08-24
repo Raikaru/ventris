@@ -182,12 +182,14 @@ fn sub_mask(left: u64, right: u64, output_size: u32) -> u64 {
     }
 
     // Subtraction preserves the common trailing zeroes, but a borrow may
-    // affect every more-significant bit.  This is the subtraction analogue of
-    // Ghidra's carry widening for INT_ADD.
+    // affect every more-significant bit.  Start with the covering mask of the
+    // operands, then widen through the complete borrow range.
     let low = least_set(left)
         .unwrap_or(0)
         .min(least_set(right).unwrap_or(0));
-    full & !low_mask(low)
+    let covered = covering_mask(left | right);
+    let borrow_range = full & !low_mask(low);
+    borrow_range | (covered & borrow_range)
 }
 
 fn multiply_mask(left: u64, right: u64, output_size: u32) -> u64 {

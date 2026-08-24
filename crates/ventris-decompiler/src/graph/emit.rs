@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use ventris_lifter::RAM_SPACE;
 use ventris_pcode::op;
 
-use super::merge::merge_required;
+use super::mergeaction::merge_all;
 use super::structure::Condition;
 use super::types::Types;
 use super::value::{Naming, Resolver, mark_explicit_with};
@@ -41,7 +41,7 @@ pub fn emit_with_types(
     register_name: &dyn Fn(u32, u64, u32) -> Option<String>,
     types: &Types,
 ) -> Vec<NativeStatement> {
-    let naming = mark_explicit_with(data, merge_required(data));
+    let naming = mark_explicit_with(data, merge_all(data));
     let resolver = Resolver::with_types(data, &naming, register_name, types);
     Emitter {
         data,
@@ -63,7 +63,7 @@ pub fn emit_structured(
     types: &Types,
     parameters: &BTreeMap<(u32, u64), (String, Type)>,
 ) -> Vec<NativeStatement> {
-    let naming = mark_explicit_with(data, merge_required(data));
+    let naming = mark_explicit_with(data, merge_all(data));
     let resolver =
         Resolver::with_types(data, &naming, register_name, types).with_parameters(parameters);
     let emitter = Emitter {
@@ -85,7 +85,39 @@ pub fn emit_structured(
     let targets = goto_targets(&tree);
     statements.extend(emitter.emit_tree(&tree, &scoped, &phi_copies, &targets));
     drop_gotos_to_next_statement(&mut statements);
+    drop_self_assignments(&mut statements);
     statements
+}
+
+/// Removes assignments whose two sides are the same variable.
+///
+/// Merging is what creates these: two SSA values that a `COPY` related become
+/// one C variable, and the copy between them then reads and writes the same
+/// name. The statement carries no information once that has happened.
+fn drop_self_assignments(statements: &mut Vec<NativeStatement>) {
+    statements.retain(|statement| match statement {
+        NativeStatement::Assign {
+            destination,
+            source,
+        } => destination != source,
+        _ => true,
+    });
+    for statement in statements.iter_mut() {
+        match statement {
+            NativeStatement::IfElse {
+                then_body,
+                else_body,
+                ..
+            } => {
+                drop_self_assignments(then_body);
+                drop_self_assignments(else_body);
+            }
+            NativeStatement::While { body, .. } | NativeStatement::DoWhile { body, .. } => {
+                drop_self_assignments(body);
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Removes a jump to the label that immediately follows it.

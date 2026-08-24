@@ -365,8 +365,25 @@ impl Rule for RuleTrivialArith {
         let right = operation.inputs[1];
         let opcode = operation.opcode;
         let right_value = data.varnode(right);
+        let left_value = data.varnode(left);
         let right_zero = right_value.flags.constant && right_value.offset == 0;
         let right_one = right_value.flags.constant && right_value.offset == 1;
+        // Ghidra canonicalises a commutative operation's constant onto the
+        // second slot before these identities run. Nothing here does that yet,
+        // so an identity written the other way round has to be recognised
+        // directly or `0 | x` survives into the output.
+        let left_zero = left_value.flags.constant && left_value.offset == 0;
+        let left_one = left_value.flags.constant && left_value.offset == 1;
+        if matches!(opcode, op::INT_ADD | op::INT_OR | op::INT_XOR) && left_zero {
+            data.op_set_opcode(id, op::COPY);
+            data.op_set_inputs(id, vec![right]);
+            return 1;
+        }
+        if opcode == op::INT_MULT && left_one {
+            data.op_set_opcode(id, op::COPY);
+            data.op_set_inputs(id, vec![right]);
+            return 1;
+        }
         let identity = match opcode {
             op::INT_ADD | op::INT_SUB | op::INT_LEFT | op::INT_RIGHT => right_zero,
             op::INT_MULT => right_one,
@@ -438,8 +455,12 @@ impl Rule for RuleIndirectCollapse {
 }
 
 /// The default source-level pipeline for the graph.
+///
+/// The order mirrors Ghidra's `ActionDatabase`: the sub-lane rules run with the
+/// rest of the expression set rather than in their own phase, because reducing a
+/// packed flag word exposes ordinary arithmetic underneath it and vice versa.
 pub fn default_pipeline() -> Box<dyn Action> {
-    let expression = ActionPool::new("expression-rules")
+    let mut expression = ActionPool::new("expression-rules")
         .add_rule(Box::new(RuleMultiCollapse))
         .add_rule(Box::new(RuleCollapseConstants))
         .add_rule(Box::new(RuleTrivialArith))
@@ -449,6 +470,23 @@ pub fn default_pipeline() -> Box<dyn Action> {
         .add_rule(Box::new(super::rules::RuleEqual2Zero))
         .add_rule(Box::new(super::rules::RuleSubExtComm))
         .add_rule(Box::new(super::rules::RuleBoolNegate))
+        // Sub-lane extraction: a comparison packed into a flag word is only a
+        // comparison again once the shift-and-mask that reads one bit is
+        // reduced away.
+        .add_rule(Box::new(super::subflow::RuleSubvarAnd))
+        .add_rule(Box::new(super::subflow::RuleSubvarSubpiece))
+        .add_rule(Box::new(super::subflow::RuleSubvarShift))
+        .add_rule(Box::new(super::subflow::RuleSubvarCompZero))
+        .add_rule(Box::new(super::subflow::RuleSubvarZext))
+        .add_rule(Box::new(super::subflow::RuleSubvarSext))
+        .add_rule(Box::new(super::subflow::RuleBoolZext))
+        .add_rule(Box::new(super::subflow::RuleLogic2Bool));
+    for rule in super::expr_rules::all() {
+        expression = expression.add_rule(rule);
+    }
+    // Copy propagation and indirect collapse run last: they remove the
+    // operations the other rules match on, so running them earlier hides work.
+    expression = expression
         .add_rule(Box::new(RulePropagateCopy))
         .add_rule(Box::new(RuleIndirectCollapse));
     Box::new(

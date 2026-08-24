@@ -1917,11 +1917,26 @@ impl NativeDecompiler {
         // work for the others: folding a condition orphans a block, removing a
         // block leaves a merge with one operand, and collapsing that merge
         // leaves a copy nothing reads. Ghidra runs them in one fixed point.
-        graph::guard::drop_undefined_return_values(&mut data);
+        // Whether the function returns a value is `ActionReturnRecovery`'s
+        // decision, and whether a callee's result is used is
+        // `ActionActiveReturn`'s. Both read the graph rather than the emitted
+        // statements, so they run before simplification consumes the guards.
+        graph::action::Action::apply(&graph::protoaction::ActionReturnRecovery, &mut data);
+        graph::action::Action::apply(&graph::protoaction::ActionActiveReturn, &mut data);
         let pipeline = graph::action::default_pipeline();
+        let control_flow: [&dyn graph::action::Action; 6] = [
+            &graph::branchaction::ActionDeterminedBranch,
+            &graph::branchaction::ActionRedundBranch,
+            &graph::branchaction::ActionDoNothing,
+            &graph::branchaction::ActionUnreachable,
+            &graph::branchaction::ActionCse,
+            &graph::branchaction::ActionMultiCse,
+        ];
         for _ in 0..GRAPH_PIPELINE_ROUNDS {
             let mut changed = graph::action::Action::apply(pipeline.as_ref(), &mut data);
-            changed += data.remove_unreachable_blocks();
+            for pass in control_flow {
+                changed += pass.apply(&mut data);
+            }
             changed += graph::deadcode::eliminate_dead_code(&mut data);
             if let Some(abi) = abi
                 && let Some(vnode) =

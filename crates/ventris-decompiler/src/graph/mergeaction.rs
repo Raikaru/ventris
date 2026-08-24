@@ -150,6 +150,19 @@ fn groups_intersect(
     false
 }
 
+/// Whether any value already in this variable is a function input.
+///
+/// The test is on the whole group, not the one candidate, because a merge is
+/// transitive: joining a group that already contains an input would smuggle the
+/// input in through a value that is not itself one.
+fn group_holds_input(data: &Funcdata, variables: &Variables, value: VarnodeId) -> bool {
+    let group = variables.high_of(value);
+    (0..data.varnode_count()).any(|index| {
+        let candidate = VarnodeId(index as u32);
+        variables.high_of(candidate) == group && data.varnode(candidate).flags.input
+    })
+}
+
 fn speculative_union(
     data: &Funcdata,
     variables: &mut Variables,
@@ -159,6 +172,14 @@ fn speculative_union(
     covers: &[Cover],
 ) -> bool {
     if !can_merge(data, left) || !can_merge(data, right) {
+        return false;
+    }
+    // `Merge::mergeTestSpeculative` refuses to merge anything speculatively
+    // with a function input. An input is the only evidence that a location
+    // carries a parameter, and folding it into a variable the function later
+    // overwrites destroys that evidence: the recovered prototype loses the
+    // argument and every read of it renders as a local.
+    if group_holds_input(data, variables, left) || group_holds_input(data, variables, right) {
         return false;
     }
     if !same_type(data, types, left, right) {
@@ -230,7 +251,7 @@ fn merge_type(data: &Funcdata, variables: &mut Variables, types: &Types, covers:
     }
 }
 
-/// Compute required, COPY, adjacent, and same-width speculative merges.
+/// Compute required, COPY, adjacent, and same-type speculative merges.
 ///
 /// This is intentionally a pure side computation. The action wrappers below
 /// return zero because applying them cannot mutate a partition held elsewhere;
@@ -374,12 +395,43 @@ mod tests {
     }
 
     #[test]
+    fn a_function_input_is_never_merged_speculatively() {
+        // An input is the only evidence a location carries a parameter. Folding
+        // it into a variable the function overwrites loses the argument from the
+        // recovered prototype, which is what `Merge::mergeTestSpeculative`
+        // prevents.
+        let mut data = Funcdata::default();
+        data.entry = 0x1000;
+        let block = data.new_block(0x1000);
+        let argument = data.new_varnode(REGISTER_SPACE, 0, 4);
+        data.mark_input(argument);
+        let copy = data.new_op(op::COPY, seq(0x1000), vec![argument]);
+        let local = data.new_varnode(REGISTER_SPACE, 0, 4);
+        data.op_set_output(copy, Some(local));
+        data.op_insert_end(copy, block);
+        let read = data.new_op(op::RETURN, seq(0x1004), vec![local]);
+        data.op_insert_end(read, block);
+
+        let variables = merge_all(&data);
+        assert!(
+            !variables.same(argument, local),
+            "the parameter must keep its own identity"
+        );
+    }
+
+    #[test]
     fn adjacent_merge_requires_a_non_call_operation() {
         let mut data = Funcdata::default();
         data.entry = 0x2000;
         let block = data.new_block(0x2000);
+        // Deliberately not a function input: `Merge::mergeTestSpeculative`
+        // refuses to merge an input speculatively, so an input here would make
+        // the adjacency test unobservable.
+        let seed_value = data.new_constant(3, 4);
+        let seeded = data.new_op(op::COPY, seq(0x1ffc), vec![seed_value]);
         let input = data.new_varnode(REGISTER_SPACE, 0, 4);
-        data.mark_input(input);
+        data.op_set_output(seeded, Some(input));
+        data.op_insert_end(seeded, block);
         let constant = data.new_constant(1, 4);
         let add = data.new_op(op::INT_ADD, seq(0x2000), vec![input, constant]);
         let output = data.new_varnode(REGISTER_SPACE, 0, 4);

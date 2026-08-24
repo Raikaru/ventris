@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use ventris_pcode::op;
 
 use super::casts::needs_cast;
-use super::merge::{HighId, HighVariables, merge_required};
+use super::mergeaction::{Variables, merge_all};
 use super::types::Types;
 use super::{Funcdata, OpId, VarnodeId};
 use crate::native::{BinaryOp, Expr, NativeStatement, Type};
@@ -36,8 +36,8 @@ use crate::native::{BinaryOp, Expr, NativeStatement, Type};
 /// itself disappear from the output.
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
 pub struct Naming {
-    names: BTreeMap<HighId, String>,
-    highs: HighVariables,
+    names: BTreeMap<u32, String>,
+    highs: Variables,
 }
 
 impl Naming {
@@ -75,12 +75,12 @@ fn empty_parameters() -> &'static BTreeMap<(u32, u64), (String, Type)> {
 /// phi result. Duplicating a call or a load would duplicate an observable
 /// effect, and a phi has no expression spelling at all, so both must be named.
 pub fn mark_explicit(data: &Funcdata) -> Naming {
-    mark_explicit_with(data, merge_required(data))
+    mark_explicit_with(data, merge_all(data))
 }
 
 /// As [`mark_explicit`], with a variable partition supplied by the caller.
-pub fn mark_explicit_with(data: &Funcdata, highs: HighVariables) -> Naming {
-    let mut names: BTreeMap<HighId, String> = BTreeMap::new();
+pub fn mark_explicit_with(data: &Funcdata, highs: Variables) -> Naming {
+    let mut names: BTreeMap<u32, String> = BTreeMap::new();
     for (id, op) in data.live_ops() {
         let Some(output) = op.output else { continue };
         let varnode = data.varnode(output);

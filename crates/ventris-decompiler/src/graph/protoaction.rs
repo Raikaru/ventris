@@ -4,8 +4,8 @@
 //! `ActionOutputPrototype::apply`, `ActionReturnRecovery::apply`,
 //! `ActionActiveParam::apply`, `ActionActiveReturn::apply`, and
 //! `ActionDefaultParams::apply` in `coreaction.cc`, plus
-//! `FuncProto::deriveInputMap`, `FuncProto::deriveOutputMap`,
-//! `FuncCallSpecs::finalInputCheck`, and
+//! `FuncProto::deriveInputMap` and `FuncProto::deriveOutputMap` in
+//! `fspec.hh`, and `FuncCallSpecs::finalInputCheck` and
 //! `FuncCallSpecs::checkOutputTrialUse` in `fspec.cc`, at Ghidra commit
 //! `8b4c91d4d5bd1549622bfbade0df199585b98365`.
 //!
@@ -199,35 +199,6 @@ pub fn call_result_consumed(data: &Funcdata, call: OpId) -> bool {
         return false;
     };
     consumed_value(data, output, &mut BTreeSet::new())
-}
-
-/// Reports input prototype activity through [`input_locations`].
-pub struct ActionInputPrototype;
-
-impl Action for ActionInputPrototype {
-    fn name(&self) -> &'static str {
-        "input-prototype"
-    }
-
-    fn apply(&self, _data: &mut Funcdata) -> usize {
-        // The convention's candidate list is supplied by the caller of the
-        // pure helper; Funcdata has no prototype model to mutate here.
-        0
-    }
-}
-
-/// Reports output prototype activity through [`returns_value`] and
-/// [`return_location`].
-pub struct ActionOutputPrototype;
-
-impl Action for ActionOutputPrototype {
-    fn name(&self) -> &'static str {
-        "output-prototype"
-    }
-
-    fn apply(&self, _data: &mut Funcdata) -> usize {
-        0
-    }
 }
 
 /// Removes return operands that are merely values left by a callee.

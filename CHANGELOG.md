@@ -140,6 +140,33 @@ All notable Ventris changes are documented here.
   it, and made the last-resort edge surrender prefer edges into multi-predecessor
   joins, which is the state Ghidra reaches by marking edges unstructured before
   its main loop.
+- Ported a batch of Ghidra passes onto the graph and registered them in the
+  pipeline:
+  - `ActionNonzeroMask` with `Varnode::getNZMask` as a real forward fixpoint
+    (`graph/nonzero.rs`).
+  - `SubvariableFlow` and the `RuleSubvar*` family, plus `RuleBoolZext` and
+    `RuleLogic2Bool` (`graph/subflow.rs`). This reduces a comparison packed into
+    a condition-register field back to the comparison, which took the
+    `unreduced-flag-expression` family from 11 of 37 corpus functions to none.
+  - `Cover`/`CoverBlock` live ranges with Ghidra's boundary-vs-interval
+    intersection semantics (`graph/cover.rs`), and `ActionMergeCopy`,
+    `ActionMergeAdjacent`, `ActionMergeType` speculative merging gated on them
+    (`graph/mergeaction.rs`). The renderer now names variables from this
+    partition instead of required merges alone.
+  - 27 `ruleaction.cc` expression rules (`graph/expr_rules.rs`).
+  - `ActionDeterminedBranch`, `ActionRedundBranch`, `ActionUnreachable`,
+    `ActionDoNothing`, `ActionNormalizeBranches`, `ActionCse`, `ActionMultiCse`
+    (`graph/branchaction.rs`).
+  - `ActionReturnRecovery` and `ActionActiveReturn`, with report-only helpers for
+    `ActionInputPrototype` and `ActionOutputPrototype` (`graph/protoaction.rs`).
+  `ActionReturnRecovery` replaces the hand-rolled return-value check that
+  previously lived in `graph/guard.rs`, which has been removed.
+- Fixed speculative merging folding function inputs into variables the function
+  overwrites, which lost the argument from every recovered prototype;
+  `Merge::mergeTestSpeculative` refuses this and now so does the port.
+- Commutative identities are recognised with the constant on either operand,
+  since nothing yet canonicalises constants onto the second slot the way Ghidra
+  does before those rules run.
 
 - Added `LiftedInstruction::skips_delay_slot`, which reports the MIPS
   likely-branch shape so consumers stop treating its sequential successor as
