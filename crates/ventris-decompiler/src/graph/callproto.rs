@@ -133,9 +133,7 @@ impl ParamActive {
             match ancestor_verdict(data, value) {
                 AncestorVerdict::Realistic => trial.mark_active(),
                 AncestorVerdict::UntouchedInput => trial.mark_inactive(),
-                AncestorVerdict::CalleeLeftBehind | AncestorVerdict::Unknown => {
-                    trial.mark_no_use()
-                }
+                AncestorVerdict::CalleeLeftBehind | AncestorVerdict::Unknown => trial.mark_no_use(),
             }
         }
     }
@@ -244,25 +242,37 @@ fn ancestor_walk(
         op::CALL | op::CALLIND | op::CALLOTHER => AncestorVerdict::CalleeLeftBehind,
         // Guards preserve the value operand's ancestry. The cause operand is
         // an annotation, not data-flow, and is deliberately ignored.
-        op::INDIRECT => inputs.first().copied().map_or(AncestorVerdict::Unknown, |input| {
-            ancestor_walk(data, input, depth + 1, seen)
-        }),
+        op::INDIRECT => inputs
+            .first()
+            .copied()
+            .map_or(AncestorVerdict::Unknown, |input| {
+                ancestor_walk(data, input, depth + 1, seen)
+            }),
         // Phi values require every incoming path to be plausible. An
         // untouched or callee-left path therefore cannot be hidden by a
         // computed sibling; this is the conservative result of
         // `uponPop(pop_fail)` and `uponPop(pop_failkill)`.
-        op::MULTIEQUAL => combine_ancestry(inputs.iter().copied().map(|input| {
-            ancestor_walk(data, input, depth + 1, seen)
-        })),
+        op::MULTIEQUAL => combine_ancestry(
+            inputs
+                .iter()
+                .copied()
+                .map(|input| ancestor_walk(data, input, depth + 1, seen)),
+        ),
         // Transparent copies and pieces are the graph equivalents of the
         // recursive COPY/SUBPIECE cases in `enterNode`; they must not turn a
         // prior call result or untouched input into a real argument.
-        op::COPY | op::SUBPIECE => inputs.first().copied().map_or(AncestorVerdict::Unknown, |input| {
-            ancestor_walk(data, input, depth + 1, seen)
-        }),
-        op::PIECE => combine_ancestry(inputs.iter().copied().map(|input| {
-            ancestor_walk(data, input, depth + 1, seen)
-        })),
+        op::COPY | op::SUBPIECE => inputs
+            .first()
+            .copied()
+            .map_or(AncestorVerdict::Unknown, |input| {
+                ancestor_walk(data, input, depth + 1, seen)
+            }),
+        op::PIECE => combine_ancestry(
+            inputs
+                .iter()
+                .copied()
+                .map(|input| ancestor_walk(data, input, depth + 1, seen)),
+        ),
         // LOAD and arithmetic/logical operations are `pop_solid` in Ghidra:
         // the function performed a real operation even if its source is an
         // ordinary incoming value.
@@ -313,9 +323,7 @@ fn incoming_value(data: &Funcdata, call: OpId, location: Location) -> Option<Var
             continue;
         };
         let out = data.varnode(output);
-        if out.space == location.space
-            && out.offset == location.offset
-            && out.size == location.size
+        if out.space == location.space && out.offset == location.offset && out.size == location.size
         {
             return operation.inputs.first().copied();
         }
@@ -444,6 +452,11 @@ fn calls(data: &Funcdata) -> Vec<OpId> {
 }
 
 fn collapse_piece(data: &Funcdata, first: VarnodeId, second: VarnodeId) -> Option<VarnodeId> {
+    // Ghidra also accepts a model-approved SplitVarnode pair even before a
+    // PIECE/SUBPIECE is explicit (`coreaction.cc` 1665-1689). Requiring an
+    // explicit graph relation is STRONGER than that check: without a
+    // PrototypeModel this lane may decline a legitimate pair rather than
+    // inventing a wider value.
     // If both halves are SUBPIECEs of the same whole, the whole is the one
     // logical parameter. This mirrors `ActionParamDouble`'s `SplitVarnode`
     // join branch without requiring a target endianness object.
@@ -545,7 +558,11 @@ fn trial_values(
         active.register(location);
         let value = incoming_value(data, call, location);
         let Some(value) = value else {
-            active.trials_mut().last_mut().expect("registered trial").mark_no_use();
+            active
+                .trials_mut()
+                .last_mut()
+                .expect("registered trial")
+                .mark_no_use();
             break;
         };
         let trial = active.trials_mut().last_mut().expect("registered trial");
@@ -579,7 +596,10 @@ fn trial_values(
             values.push(value);
         }
     }
-    (active, collapse_wide_arguments(data, argument_locations, &values))
+    (
+        active,
+        collapse_wide_arguments(data, argument_locations, &values),
+    )
 }
 
 /// Every call site with its recovered argument values in convention order.
@@ -773,11 +793,7 @@ impl Action for ActionParamDouble {
                 let first = old_inputs[index + 1];
                 if index + 1 < locations.len()
                     && adjacent(locations[index], locations[index + 1])
-                    && let Some(whole) = collapse_piece(
-                        data,
-                        first,
-                        old_inputs[index + 2],
-                    )
+                    && let Some(whole) = collapse_piece(data, first, old_inputs[index + 2])
                 {
                     new_inputs.push(whole);
                     index += 2;
@@ -798,9 +814,9 @@ impl Action for ActionParamDouble {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::guard::{guard_calls, CallEffects};
-    use crate::graph::heritage::heritage;
     use crate::graph::SeqNum;
+    use crate::graph::guard::{CallEffects, guard_calls};
+    use crate::graph::heritage::heritage;
     use std::collections::BTreeSet;
     use ventris_lifter::{RAM_SPACE, REGISTER_SPACE};
 
@@ -899,20 +915,12 @@ mod tests {
         data.op_insert_end(piece, block);
         let sub_lo = data.new_varnode(REGISTER_SPACE, loc_lo.offset, 4);
         let lo_zero = data.new_constant(0, 4);
-        let lo_op = data.new_op(
-            op::SUBPIECE,
-            seq(0x1000, 1),
-            vec![whole, lo_zero],
-        );
+        let lo_op = data.new_op(op::SUBPIECE, seq(0x1000, 1), vec![whole, lo_zero]);
         data.op_set_output(lo_op, Some(sub_lo));
         data.op_insert_end(lo_op, block);
         let sub_hi = data.new_varnode(REGISTER_SPACE, loc_hi.offset, 4);
         let hi_four = data.new_constant(4, 4);
-        let hi_op = data.new_op(
-            op::SUBPIECE,
-            seq(0x1000, 2),
-            vec![whole, hi_four],
-        );
+        let hi_op = data.new_op(op::SUBPIECE, seq(0x1000, 2), vec![whole, hi_four]);
         data.op_set_output(hi_op, Some(sub_hi));
         data.op_insert_end(hi_op, block);
         let target = data.new_varnode(RAM_SPACE, 0x3000, 4);

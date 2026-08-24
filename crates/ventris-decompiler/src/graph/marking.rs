@@ -127,16 +127,15 @@ impl Explicit {
 fn cannot_duplicate(opcode: i32) -> bool {
     matches!(
         opcode,
-        op::LOAD
-            | op::CALL
-            | op::CALLIND
-            | op::CALLOTHER
-            | op::MULTIEQUAL
-            | op::INDIRECT
+        op::LOAD | op::CALL | op::CALLIND | op::CALLOTHER | op::MULTIEQUAL | op::INDIRECT
     )
 }
 
-fn expression_terms(data: &Funcdata, value: VarnodeId, active: &mut BTreeSet<VarnodeId>) -> Option<usize> {
+fn expression_terms(
+    data: &Funcdata,
+    value: VarnodeId,
+    active: &mut BTreeSet<VarnodeId>,
+) -> Option<usize> {
     if !active.insert(value) {
         return Some(MAX_DUPLICATED_TERMS + 1);
     }
@@ -160,7 +159,11 @@ fn expression_terms(data: &Funcdata, value: VarnodeId, active: &mut BTreeSet<Var
     Some(terms)
 }
 
-fn expression_depth(data: &Funcdata, value: VarnodeId, active: &mut BTreeSet<VarnodeId>) -> Option<usize> {
+fn expression_depth(
+    data: &Funcdata,
+    value: VarnodeId,
+    active: &mut BTreeSet<VarnodeId>,
+) -> Option<usize> {
     if !active.insert(value) {
         return Some(MAX_EXPRESSION_DEPTH + 1);
     }
@@ -172,7 +175,9 @@ fn expression_depth(data: &Funcdata, value: VarnodeId, active: &mut BTreeSet<Var
                 .inputs
                 .iter()
                 .copied()
-                .map(|input| expression_depth(data, input, active).unwrap_or(MAX_EXPRESSION_DEPTH + 1))
+                .map(|input| {
+                    expression_depth(data, input, active).unwrap_or(MAX_EXPRESSION_DEPTH + 1)
+                })
                 .max()
                 .unwrap_or(0)
                 .saturating_add(1)
@@ -243,22 +248,42 @@ impl Action for ActionMarkExplicit {
 /// Converse implied-value marking, with cycle protection.
 pub struct ActionMarkImplied;
 
+fn implied_candidate_count(data: &Funcdata) -> usize {
+    let explicit = Explicit::of(data);
+    (0..data.varnode_count())
+        .map(|index| VarnodeId(index as u32))
+        .filter(|value| {
+            let varnode = data.varnode(*value);
+            varnode.def.is_some() && !explicit.is_explicit(*value) && !check_cycle(data, *value)
+        })
+        .count()
+}
+
 impl Action for ActionMarkImplied {
     fn name(&self) -> &'static str {
         "markimplied"
     }
 
     fn apply(&self, data: &mut Funcdata) -> usize {
-        let explicit = Explicit::of(data);
-        let _ = (0..data.varnode_count())
-            .map(|index| VarnodeId(index as u32))
-            .filter(|value| {
-                let varnode = data.varnode(*value);
-                varnode.def.is_some() && !explicit.is_explicit(*value) && !check_cycle(data, *value)
-            })
-            .count();
+        let _ = implied_candidate_count(data);
         0
     }
+}
+
+/// Count COPY operations whose two sides are in one recovered variable.
+///
+/// The count is useful for tests and diagnostics, but GraphOp has no
+/// non-printing flag into which the C++ mark could be written.
+fn internal_copy_count(data: &Funcdata) -> usize {
+    let variables = merge_all(data);
+    data.live_ops()
+        .filter(|(_, operation)| operation.opcode == op::COPY)
+        .filter_map(|(_, operation)| {
+            let output = operation.output?;
+            let input = operation.inputs.first().copied()?;
+            variables.same(output, input).then_some(())
+        })
+        .count()
 }
 
 /// Hide duplicate shadow definitions when the graph can identify them.
@@ -273,16 +298,7 @@ impl Action for ActionHideShadow {
         // `Merge::hideShadows` needs HighVariable covers and rewrites COPY
         // inputs.  GraphOp has no shadow/non-printing bit, so the candidate
         // count is intentionally not returned as a graph change.
-        let variables = merge_all(data);
-        let _ = data
-            .live_ops()
-            .filter(|(_, operation)| operation.opcode == op::COPY)
-            .filter_map(|(_, operation)| {
-                let output = operation.output?;
-                let input = operation.inputs.first().copied()?;
-                variables.same(output, input).then_some(())
-            })
-            .count();
+        let _ = internal_copy_count(data);
         0
     }
 }
@@ -299,16 +315,7 @@ impl Action for ActionCopyMarker {
         // `Merge::markInternalCopies` marks the operation itself.  GraphOp has
         // no non-printing bit, so count candidates for analysis but report no
         // mutation rather than conflating that state with `dead`.
-        let variables = merge_all(data);
-        let _ = data
-            .live_ops()
-            .filter(|(_, operation)| operation.opcode == op::COPY)
-            .filter_map(|(_, operation)| {
-                let output = operation.output?;
-                let input = operation.inputs.first().copied()?;
-                variables.same(output, input).then_some(())
-            })
-            .count();
+        let _ = internal_copy_count(data);
         0
     }
 }
@@ -358,7 +365,9 @@ impl Action for ActionLikelyTrash {
         let roots: Vec<VarnodeId> = self
             .trash
             .iter()
-            .flat_map(|(space, offset, size)| data.at_location(*space, *offset, *size).iter().copied())
+            .flat_map(|(space, offset, size)| {
+                data.at_location(*space, *offset, *size).iter().copied()
+            })
             .collect();
         let mut terminals = BTreeMap::<OpId, i32>::new();
         for root in roots {
@@ -366,7 +375,9 @@ impl Action for ActionLikelyTrash {
                 continue;
             };
             for terminal in found {
-                terminals.entry(terminal).or_insert(data.op(terminal).opcode);
+                terminals
+                    .entry(terminal)
+                    .or_insert(data.op(terminal).opcode);
             }
         }
 
@@ -469,7 +480,12 @@ pub fn trace_trash(data: &Funcdata, root: VarnodeId) -> Option<BTreeSet<OpId>> {
         return None;
     }
     for id in routes {
-        if !data.op(id).inputs.iter().all(|input| marked.contains(input)) {
+        if !data
+            .op(id)
+            .inputs
+            .iter()
+            .all(|input| marked.contains(input))
+        {
             return None;
         }
     }
@@ -487,7 +503,11 @@ fn top_byte_mask(data: &Funcdata, operation: &super::GraphOp) -> bool {
     let full = full_mask(mask_vn.size);
     let value = mask_vn.offset & full;
     [8u32, 16, 32].iter().any(|shift| {
-        let shifted = if *shift >= 64 { 0 } else { (full << shift) & full };
+        let shifted = if *shift >= 64 {
+            0
+        } else {
+            (full << shift) & full
+        };
         value == shifted
     })
 }
@@ -532,7 +552,8 @@ pub fn cast_standard(
         return None;
     }
 
-    if let (Some(required_bits), Some(current_bits)) = (storage_bits(required), storage_bits(current))
+    if let (Some(required_bits), Some(current_bits)) =
+        (storage_bits(required), storage_bits(current))
         && required_bits != current_bits
     {
         return Some(to.clone());
@@ -635,8 +656,14 @@ fn promotion_extension(data: &Funcdata, value: VarnodeId, ty: &Type) -> u8 {
         op::BOOL_NEGATE | op::BOOL_XOR | op::BOOL_AND | op::BOOL_OR => EXT_NONE,
         // These operations introduce a value whose source-level integer
         // promotion is not represented by this p-code edge.
-        op::COPY | op::MULTIEQUAL | op::INDIRECT | op::CAST | op::LOAD | op::CALL
-        | op::CALLIND | op::CALLOTHER => EXT_NONE,
+        op::COPY
+        | op::MULTIEQUAL
+        | op::INDIRECT
+        | op::CAST
+        | op::LOAD
+        | op::CALL
+        | op::CALLIND
+        | op::CALLOTHER => EXT_NONE,
         op::INT_AND => {
             let operation = data.op(def);
             let mut result = EXT_UNKNOWN;
@@ -699,27 +726,25 @@ fn promotion_extension(data: &Funcdata, value: VarnodeId, ty: &Type) -> u8 {
                 EXT_UNKNOWN
             }
         }
-        op::INT_NEGATE | op::INT_2COMP => data
-            .op(def)
-            .inputs
-            .first()
-            .copied()
-            .map_or(EXT_UNKNOWN, |input| {
-                let ext = local_extension_context(data, input);
-                if ext & EXT_SIGNED != 0 {
-                    EXT_SIGNED
-                } else {
-                    EXT_UNKNOWN
-                }
-            }),
+        op::INT_NEGATE | op::INT_2COMP => {
+            data.op(def)
+                .inputs
+                .first()
+                .copied()
+                .map_or(EXT_UNKNOWN, |input| {
+                    let ext = local_extension_context(data, input);
+                    if ext & EXT_SIGNED != 0 {
+                        EXT_SIGNED
+                    } else {
+                        EXT_UNKNOWN
+                    }
+                })
+        }
         // Addition, subtraction, multiplication, and left shift do not let
         // CastStrategyC prove an extension direction from one edge.
-        op::INT_ADD
-        | op::INT_SUB
-        | op::INT_MULT
-        | op::INT_LEFT
-        | op::PTRADD
-        | op::PTRSUB => EXT_UNKNOWN,
+        op::INT_ADD | op::INT_SUB | op::INT_MULT | op::INT_LEFT | op::PTRADD | op::PTRSUB => {
+            EXT_UNKNOWN
+        }
         _ => EXT_NONE,
     }
 }
@@ -875,12 +900,64 @@ mod tests {
         // comparing it with signed int requires a cast, while an explicit
         // zero extension agrees with it.
         assert!(int_promotion_for_compare(&data, narrow, &Type::Signed(32)));
-        assert!(!int_promotion_for_extension(&data, narrow, &Type::Unsigned(8)));
+        assert!(!int_promotion_for_extension(
+            &data,
+            narrow,
+            &Type::Unsigned(8)
+        ));
+    }
+
+    #[test]
+    fn implied_pass_has_a_foldable_case_and_declines_explicit_values() {
+        let mut data = Funcdata::default();
+        let block = data.new_block(0x1000);
+        let left = data.new_constant(2, 4);
+        let right = data.new_constant(3, 4);
+        let add = data.new_op(op::INT_ADD, seq(0x1000, 0), vec![left, right]);
+        let value = data.new_unique(4);
+        data.op_set_output(add, Some(value));
+        data.op_insert_end(add, block);
+        let ret = data.new_op(op::RETURN, seq(0x1004, 0), vec![value]);
+        data.op_insert_end(ret, block);
+        assert_eq!(implied_candidate_count(&data), 1);
+        let second = data.new_op(op::RETURN, seq(0x1008, 0), vec![value]);
+        data.op_insert_end(second, block);
+        assert_eq!(implied_candidate_count(&data), 0);
+    }
+
+    #[test]
+    fn copy_marker_candidates_fire_only_for_same_recovered_variable() {
+        let mut data = Funcdata::default();
+        let block = data.new_block(0x1000);
+        let input = data.new_varnode(REGISTER_SPACE, 0, 4);
+        data.mark_input(input);
+        let first_copy = data.new_op(op::COPY, seq(0x1000, 0), vec![input]);
+        let first = data.new_varnode(REGISTER_SPACE, 0, 4);
+        data.op_set_output(first_copy, Some(first));
+        data.op_insert_end(first_copy, block);
+        let second_copy = data.new_op(op::COPY, seq(0x1004, 0), vec![first]);
+        let second = data.new_varnode(REGISTER_SPACE, 0, 4);
+        data.op_set_output(second_copy, Some(second));
+        data.op_insert_end(second_copy, block);
+        let ret = data.new_op(op::RETURN, seq(0x1008, 0), vec![second]);
+        data.op_insert_end(ret, block);
+        assert_eq!(internal_copy_count(&data), 1);
+
+        let mut constants = Funcdata::default();
+        let constant_block = constants.new_block(0x2000);
+        let constant = constants.new_constant(1, 4);
+        let constant_copy = constants.new_op(op::COPY, seq(0x2000, 0), vec![constant]);
+        let constant_output = constants.new_unique(4);
+        constants.op_set_output(constant_copy, Some(constant_output));
+        constants.op_insert_end(constant_copy, constant_block);
+        assert_eq!(internal_copy_count(&constants), 0);
     }
 
     #[test]
     fn cycle_guard_rejects_a_value_reaching_itself() {
         let mut data = Funcdata::default();
+        let plain = data.new_unique(4);
+        assert!(!ActionMarkImplied::check_cycle(&data, plain));
         let block = data.new_block(0x1000);
         let value = data.new_unique(4);
         let copy = data.new_op(op::COPY, seq(0x1000, 0), vec![value]);

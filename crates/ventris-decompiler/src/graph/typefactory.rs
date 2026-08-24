@@ -46,12 +46,24 @@ pub struct Field {
 pub enum DataType {
     Unknown(u32),
     Bool,
-    Int { bits: u32, signed: bool },
+    Int {
+        bits: u32,
+        signed: bool,
+    },
     Float(u32),
     Void,
-    Pointer { to: Box<DataType>, bits: u32 },
-    Array { element: Box<DataType>, count: usize },
-    Struct { name: String, fields: Vec<Field> },
+    Pointer {
+        to: Box<DataType>,
+        bits: u32,
+    },
+    Array {
+        element: Box<DataType>,
+        count: usize,
+    },
+    Struct {
+        name: String,
+        fields: Vec<Field>,
+    },
 }
 
 /// A small interning factory mirroring the identity-sharing role of Ghidra's
@@ -139,8 +151,7 @@ impl TypeFactory {
             DataType::Array { element, count } => {
                 let stride = byte_width(element).max(1);
                 if *count != 0
-                    && u64::from(offset)
-                        >= u64::from(stride).saturating_mul(*count as u64)
+                    && u64::from(offset) >= u64::from(stride).saturating_mul(*count as u64)
                 {
                     return None;
                 }
@@ -215,10 +226,13 @@ pub fn infer(
         if value.def.is_none() && value.descendants.is_empty() {
             continue;
         }
-        types.insert(id, DataType::Int {
-            bits: value.size.saturating_mul(8),
-            signed: false,
-        });
+        types.insert(
+            id,
+            DataType::Int {
+                bits: value.size.saturating_mul(8),
+                signed: false,
+            },
+        );
     }
     let locks = seed.clone();
     for (id, ty) in seed {
@@ -279,9 +293,7 @@ pub fn to_native(ty: &DataType) -> crate::native::Type {
         }
         DataType::Float(bits) => crate::native::Type::Float(*bits),
         DataType::Void => crate::native::Type::Void,
-        DataType::Pointer { to, .. } => {
-            crate::native::Type::Pointer(Box::new(to_native(to)))
-        }
+        DataType::Pointer { to, .. } => crate::native::Type::Pointer(Box::new(to_native(to))),
         DataType::Array { element, .. } => to_native(element),
         DataType::Struct { .. } => crate::native::Type::Unknown,
     }
@@ -637,7 +649,8 @@ fn propagate_op(
                 }
             }
             if let Some(output_type) = types.get(&output).cloned() {
-                let pointer = pointer_to_value(factory, output_type, pointer_bits(factory, types, address));
+                let pointer =
+                    pointer_to_value(factory, output_type, pointer_bits(factory, types, address));
                 set_here!(address, pointer);
             }
         }
@@ -657,7 +670,8 @@ fn propagate_op(
                 }
             }
             if let Some(value_type) = types.get(&value).cloned() {
-                let pointer = pointer_to_value(factory, value_type, pointer_bits(factory, types, address));
+                let pointer =
+                    pointer_to_value(factory, value_type, pointer_bits(factory, types, address));
                 set_here!(address, pointer);
             }
         }
@@ -671,13 +685,9 @@ fn propagate_op(
                     if !matches!(input_type, DataType::Pointer { .. }) {
                         continue;
                     }
-                    if let Some(new_type) = pointer_after_arithmetic(
-                        data,
-                        &operation,
-                        slot,
-                        factory,
-                        &input_type,
-                    ) {
+                    if let Some(new_type) =
+                        pointer_after_arithmetic(data, &operation, slot, factory, &input_type)
+                    {
                         set_here!(output, new_type);
                     }
                 }
@@ -728,18 +738,22 @@ fn propagate_op(
         | op::INT_2COMP
         | op::INT_NEGATE => {
             if let Some(output) = operation.output {
-                set_here!(output,
-                DataType::Int {
-                    bits: data.varnode(output).size.saturating_mul(8),
-                    signed: true,
-                });
+                set_here!(
+                    output,
+                    DataType::Int {
+                        bits: data.varnode(output).size.saturating_mul(8),
+                        signed: true,
+                    }
+                );
             }
             if let Some(input) = operation.inputs.first().copied() {
-                set_here!(input,
-                DataType::Int {
-                    bits: data.varnode(input).size.saturating_mul(8),
-                    signed: true,
-                });
+                set_here!(
+                    input,
+                    DataType::Int {
+                        bits: data.varnode(input).size.saturating_mul(8),
+                        signed: true,
+                    }
+                );
             }
         }
         op::FLOAT_ADD
@@ -755,15 +769,24 @@ fn propagate_op(
         | op::FLOAT_FLOOR
         | op::FLOAT_ROUND => {
             if let Some(output) = operation.output {
-                set_here!(output, DataType::Float(data.varnode(output).size.saturating_mul(8)));
+                set_here!(
+                    output,
+                    DataType::Float(data.varnode(output).size.saturating_mul(8))
+                );
             }
             for input in operation.inputs {
-                set_here!(input, DataType::Float(data.varnode(input).size.saturating_mul(8)));
+                set_here!(
+                    input,
+                    DataType::Float(data.varnode(input).size.saturating_mul(8))
+                );
             }
         }
         op::FLOAT_INT2FLOAT => {
             if let Some(output) = operation.output {
-                set_here!(output, DataType::Float(data.varnode(output).size.saturating_mul(8)));
+                set_here!(
+                    output,
+                    DataType::Float(data.varnode(output).size.saturating_mul(8))
+                );
             }
         }
         op::CBRANCH => {
@@ -811,7 +834,10 @@ fn pointer_after_arithmetic(
     }
     match operation.opcode {
         op::PTRSUB => {
-            let offset = operation.inputs.get(1).and_then(|id| constant_value(data, *id))?;
+            let offset = operation
+                .inputs
+                .get(1)
+                .and_then(|id| constant_value(data, *id))?;
             if offset == 0 {
                 Some(pointer.clone())
             } else {
@@ -819,21 +845,27 @@ fn pointer_after_arithmetic(
             }
         }
         op::PTRADD => {
-            let index = operation.inputs.get(1).and_then(|id| constant_value(data, *id));
-            let stride = operation.inputs.get(2).and_then(|id| constant_value(data, *id));
+            let index = operation
+                .inputs
+                .get(1)
+                .and_then(|id| constant_value(data, *id));
+            let stride = operation
+                .inputs
+                .get(2)
+                .and_then(|id| constant_value(data, *id));
             match (index, stride) {
                 (Some(index), Some(stride)) => factory
                     .down_chain(
                         pointer,
-                        index
-                            .saturating_mul(stride)
-                            .min(u64::from(u32::MAX)) as u32,
+                        index.saturating_mul(stride).min(u64::from(u32::MAX)) as u32,
                     )
                     .or_else(|| (index.saturating_mul(stride) == 0).then(|| pointer.clone())),
                 (None, Some(_)) => match pointer {
                     DataType::Pointer { to, bits } => {
                         if let DataType::Array { element, .. } = to.as_ref() {
-                            Some(factory.get_type_pointer_with_bits(element.as_ref().clone(), *bits))
+                            Some(
+                                factory.get_type_pointer_with_bits(element.as_ref().clone(), *bits),
+                            )
                         } else {
                             Some(pointer.clone())
                         }
@@ -844,14 +876,21 @@ fn pointer_after_arithmetic(
             }
         }
         op::INT_ADD => {
-            let other = operation.inputs.get(1).and_then(|id| constant_value(data, *id));
+            let other = operation
+                .inputs
+                .get(1)
+                .and_then(|id| constant_value(data, *id));
             if let Some(offset) = other {
                 if offset == 0 {
                     return Some(pointer.clone());
                 }
                 return factory.down_chain(pointer, offset.min(u64::from(u32::MAX)) as u32);
             }
-            if operation.inputs.get(1).is_some_and(|id| scaled_index(data, *id).is_some()) {
+            if operation
+                .inputs
+                .get(1)
+                .is_some_and(|id| scaled_index(data, *id).is_some())
+            {
                 return Some(pointer.clone());
             }
             None
@@ -962,10 +1001,7 @@ fn recover_access_types(
     changed
 }
 
-fn collect_accesses(
-    data: &Funcdata,
-    types: &BTreeMap<VarnodeId, DataType>,
-) -> Vec<Access> {
+fn collect_accesses(data: &Funcdata, types: &BTreeMap<VarnodeId, DataType>) -> Vec<Access> {
     let mut accesses = Vec::new();
     for (_, operation) in data.live_ops() {
         let (address, value) = match operation.opcode {
@@ -998,7 +1034,11 @@ fn collect_accesses(
     accesses
 }
 
-fn trace_address(data: &Funcdata, value: VarnodeId, seen: &mut BTreeSet<VarnodeId>) -> AddressShape {
+fn trace_address(
+    data: &Funcdata,
+    value: VarnodeId,
+    seen: &mut BTreeSet<VarnodeId>,
+) -> AddressShape {
     if !seen.insert(value) {
         return AddressShape {
             root: value,
@@ -1032,7 +1072,10 @@ fn trace_address(data: &Funcdata, value: VarnodeId, seen: &mut BTreeSet<VarnodeI
             let Some(base) = operation.inputs.first().copied() else {
                 return direct_shape(value);
             };
-            let Some(offset) = operation.inputs.get(1).and_then(|id| constant_value(data, *id))
+            let Some(offset) = operation
+                .inputs
+                .get(1)
+                .and_then(|id| constant_value(data, *id))
             else {
                 return direct_shape(value);
             };
@@ -1043,8 +1086,14 @@ fn trace_address(data: &Funcdata, value: VarnodeId, seen: &mut BTreeSet<VarnodeI
                 return direct_shape(value);
             };
             let mut shape = trace_address(data, base, seen);
-            let index = operation.inputs.get(1).and_then(|id| constant_value(data, *id));
-            let stride = operation.inputs.get(2).and_then(|id| constant_value(data, *id));
+            let index = operation
+                .inputs
+                .get(1)
+                .and_then(|id| constant_value(data, *id));
+            let stride = operation
+                .inputs
+                .get(2)
+                .and_then(|id| constant_value(data, *id));
             match (index, stride) {
                 (Some(index), Some(stride)) => {
                     add_shape(&mut shape, index.saturating_mul(stride));
@@ -1114,10 +1163,16 @@ fn scaled_index(data: &Funcdata, value: VarnodeId) -> Option<(VarnodeId, u32)> {
         return None;
     }
     if let Some(multiplier) = constant_value(data, operation.inputs[0]) {
-        return Some((operation.inputs[1], multiplier.min(u64::from(u32::MAX)) as u32));
+        return Some((
+            operation.inputs[1],
+            multiplier.min(u64::from(u32::MAX)) as u32,
+        ));
     }
     if let Some(multiplier) = constant_value(data, operation.inputs[1]) {
-        return Some((operation.inputs[0], multiplier.min(u64::from(u32::MAX)) as u32));
+        return Some((
+            operation.inputs[0],
+            multiplier.min(u64::from(u32::MAX)) as u32,
+        ));
     }
     None
 }
@@ -1140,12 +1195,20 @@ mod tests {
     ) -> (VarnodeId, VarnodeId) {
         let displacement = data.new_constant(offset, 4);
         let ptr = data.new_unique(4);
-        let ptrsub = data.new_op(op::PTRSUB, seq(0x1000 + u64::from(order) * 8, order), vec![base, displacement]);
+        let ptrsub = data.new_op(
+            op::PTRSUB,
+            seq(0x1000 + u64::from(order) * 8, order),
+            vec![base, displacement],
+        );
         data.op_set_output(ptrsub, Some(ptr));
         data.op_insert_end(ptrsub, block);
         let space = data.new_constant(0, 4);
         let value = data.new_unique(4);
-        let load = data.new_op(op::LOAD, seq(0x1004 + u64::from(order) * 8, order), vec![space, ptr]);
+        let load = data.new_op(
+            op::LOAD,
+            seq(0x1004 + u64::from(order) * 8, order),
+            vec![space, ptr],
+        );
         data.op_set_output(load, Some(value));
         data.op_insert_end(load, block);
         (ptr, value)
@@ -1164,14 +1227,20 @@ mod tests {
         let factory = TypeFactory::new(32);
         let recovered = infer(&data, &factory, &BTreeMap::new());
         let Some(DataType::Pointer { to, .. }) = recovered.get(base) else {
-            panic!("base was not recovered as a pointer: {:?}", recovered.get(base));
+            panic!(
+                "base was not recovered as a pointer: {:?}",
+                recovered.get(base)
+            );
         };
         let DataType::Struct { fields, .. } = to.as_ref() else {
             panic!("constant accesses must recover a struct, got {to:?}");
         };
         assert_eq!(fields.len(), 3);
         assert_eq!(
-            fields.iter().map(|field| field.name.as_str()).collect::<Vec<_>>(),
+            fields
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["field_0", "field_4", "field_8"]
         );
         assert!(fields.iter().all(|field| matches!(
@@ -1182,7 +1251,11 @@ mod tests {
             }
         )));
         assert!(factory.sub_type(to, 12).is_none());
-        assert!(factory.down_chain(recovered.get(base).unwrap(), 4).is_some());
+        assert!(
+            factory
+                .down_chain(recovered.get(base).unwrap(), 4)
+                .is_some()
+        );
     }
 
     #[test]
@@ -1233,11 +1306,7 @@ mod tests {
         data.mark_input(index);
         let stride = data.new_constant(4, 4);
         let address = data.new_unique(4);
-        let ptradd = data.new_op(
-            op::PTRADD,
-            seq(0x3000, 0),
-            vec![base, index, stride],
-        );
+        let ptradd = data.new_op(op::PTRADD, seq(0x3000, 0), vec![base, index, stride]);
         data.op_set_output(ptradd, Some(address));
         data.op_insert_end(ptradd, block);
         let space = data.new_constant(0, 4);

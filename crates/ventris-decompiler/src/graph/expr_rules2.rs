@@ -42,22 +42,25 @@
 //! lacks a Ghidra side table.  They decline more often (a stronger precondition,
 //! never an eager rewrite): `RuleCollectTerms` accepts the direct two-multiply
 //! form rather than the full `TermOrder` tree; `RulePullsubMulti` accepts one
-//! partial SUBPIECE use and rejects loop/consume cases; `RuleSelectCse` accepts
-//! byte-for-byte operand-identical expressions rather than Ghidra's functional
-//! CSE hash; `RuleOrPredicate` accepts the single-MULTIEQUAL, unflipped-CBRANCH
-//! form; `RuleBooleanNegate` proves booleanness from one-byte boolean-producing
-//! operations because the graph has no type lock; and `RuleDivTermAdd` limits
-//! its constant arithmetic to the graph's 64-bit constant representation.
+//! partial SUBPIECE use and rejects loop/consume cases; `RuleBooleanNegate`
+//! proves booleanness from one-byte boolean-producing operations because the
+//! graph has no type lock; and `RuleDivTermAdd` limits its constant arithmetic
+//! to the graph's 64-bit constant representation.
 //!
-//! `is_free` and `heritage_known` intentionally mirror the two independent
-//! `Varnode` predicates.  A constant is heritage-known and free; these are not
-//! complements.
-
-use ventris_pcode::op;
+//! Four preconditions are necessarily weaker because the graph omits metadata
+//! that Ghidra tests: `RulePullsubMulti` and `RuleSubNormal` cannot inspect
+//! precise-high/precise-low flags, `RuleOrPredicate` cannot inspect the
+//! CBRANCH boolean-flip bit, and `RuleSelectCse` cannot inspect Ghidra's CSE
+//! hash/side tables.  Those forms may fire where the C++ rule declines; the
+//! implementations otherwise use structural guards and do not pretend the
+//! metadata exists.
+//!
 
 use super::action::Rule;
+use super::heritage::compute_dominance;
 use super::nonzero::NonzeroMasks;
 use super::{Funcdata, GraphBlockId, OpId, SeqNum, VarnodeId};
+use ventris_pcode::op;
 
 const RULE_IMPL_COUNT: usize = 20;
 
@@ -86,6 +89,47 @@ fn is_free(data: &Funcdata, value: VarnodeId) -> bool {
 fn heritage_known(data: &Funcdata, value: VarnodeId) -> bool {
     let node = data.varnode(value);
     node.flags.constant || node.flags.input || node.def.is_some()
+}
+/// Detect a natural-loop back edge without relying on block-address ordering.
+/// `BlockBasic::hasLoopIn` is represented by a predecessor dominated by the
+/// candidate header; this is the graph fact available to `RulePullsubMulti`.
+fn has_loop_in(data: &Funcdata, block: GraphBlockId) -> bool {
+    let dominance = compute_dominance(data);
+    let max_steps = data.blocks().count();
+    for predecessor in data.block(block).predecessors.iter().copied() {
+        let mut current = predecessor;
+        for _ in 0..=max_steps {
+            if current == block {
+                return true;
+            }
+            let Some(next) = dominance.immediate.get(&current).copied().flatten() else {
+                break;
+            };
+            if next == current {
+                break;
+            }
+            current = next;
+        }
+    }
+    false
+}
+fn block_dominates(data: &Funcdata, dominator: GraphBlockId, block: GraphBlockId) -> bool {
+    let dominance = compute_dominance(data);
+    let max_steps = data.blocks().count();
+    let mut current = block;
+    for _ in 0..=max_steps {
+        if current == dominator {
+            return true;
+        }
+        let Some(next) = dominance.immediate.get(&current).copied().flatten() else {
+            break;
+        };
+        if next == current {
+            break;
+        }
+        current = next;
+    }
+    false
 }
 
 fn def(data: &Funcdata, value: VarnodeId) -> Option<OpId> {
@@ -119,11 +163,15 @@ fn new_op_before(
 }
 
 fn is_zero_copy(data: &Funcdata, value: VarnodeId) -> bool {
-    let Some(copy) = def(data, value) else { return false };
+    let Some(copy) = def(data, value) else {
+        return false;
+    };
     if data.opcode_of(copy) != Some(op::COPY) {
         return false;
     }
-    let Some(source) = input(data, copy, 0) else { return false };
+    let Some(source) = input(data, copy, 0) else {
+        return false;
+    };
     is_constant(data, source) && data.varnode(source).offset == 0
 }
 
@@ -159,20 +207,22 @@ fn boolean_value(data: &Funcdata, value: VarnodeId) -> bool {
 pub struct RuleCollectTerms;
 
 impl Rule for RuleCollectTerms {
-    fn name(&self) -> &'static str { "collectterms" }
+    fn name(&self) -> &'static str {
+        "collectterms"
+    }
 
-    fn op_list(&self) -> Vec<i32> { vec![op::INT_ADD] }
+    fn op_list(&self) -> Vec<i32> {
+        vec![op::INT_ADD]
+    }
 
     fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
         if data.opcode_of(id) != Some(op::INT_ADD) {
             return 0;
         }
-        let Some(out) = output(data, id) else { return 0 };
-        if data
-            .lone_descend(out)
-            .and_then(|next| data.opcode_of(next))
-            == Some(op::INT_ADD)
-        {
+        let Some(out) = output(data, id) else {
+            return 0;
+        };
+        if data.lone_descend(out).and_then(|next| data.opcode_of(next)) == Some(op::INT_ADD) {
             return 0;
         }
         let (Some(left), Some(right)) = (input(data, id, 0), input(data, id, 1)) else {
@@ -206,11 +256,10 @@ impl Rule for RuleCollectTerms {
             .offset
             .wrapping_add(data.varnode(coef_right).offset)
             & mask(size);
-        data.op_set_opcode(id, op::INT_MULT);
-        let coefficient_vn = data.new_constant(coefficient, size);
-        data.op_set_inputs(id, vec![base_left, coefficient_vn]);
-        data.op_destroy(left_def);
-        data.op_destroy(right_def);
+        let zero_coefficient = data.new_constant(0, size);
+        let combined_coefficient = data.new_constant(coefficient, size);
+        data.op_set_input(left_def, zero_coefficient, 1);
+        data.op_set_input(right_def, combined_coefficient, 1);
         1
     }
 }
@@ -221,22 +270,25 @@ impl Rule for RuleCollectTerms {
 pub struct RulePullsubMulti;
 
 impl Rule for RulePullsubMulti {
-    fn name(&self) -> &'static str { "pullsubmulti" }
+    fn name(&self) -> &'static str {
+        "pullsubmulti"
+    }
 
-    fn op_list(&self) -> Vec<i32> { vec![op::SUBPIECE] }
+    fn op_list(&self) -> Vec<i32> {
+        vec![op::SUBPIECE]
+    }
 
     fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
         if data.opcode_of(id) != Some(op::SUBPIECE) {
             return 0;
         }
-        let (Some(vn), Some(offset_vn), Some(out)) = (
-            input(data, id, 0),
-            input(data, id, 1),
-            output(data, id),
-        ) else {
+        let (Some(vn), Some(offset_vn), Some(out)) =
+            (input(data, id, 0), input(data, id, 1), output(data, id))
+        else {
             return 0;
         };
-        let Some(offset) = is_constant(data, offset_vn).then(|| data.varnode(offset_vn).offset) else {
+        let Some(offset) = is_constant(data, offset_vn).then(|| data.varnode(offset_vn).offset)
+        else {
             return 0;
         };
         let Some(phi) = def(data, vn) else { return 0 };
@@ -246,15 +298,12 @@ impl Rule for RulePullsubMulti {
         if data.lone_descend(vn) != Some(id) {
             return 0;
         }
-        let Some(parent) = data.op(phi).parent else { return 0 };
-        // A back-edge is the graph's available approximation of Ghidra's
-        // `hasLoopIn`; declining it is safer than splitting a loop-carried phi.
-        if data
-            .block(parent)
-            .predecessors
-            .iter()
-            .any(|pred| data.block(*pred).start >= data.block(parent).start)
-        {
+        let Some(parent) = data.op(phi).parent else {
+            return 0;
+        };
+        // Do not split a loop-carried phi: Ghidra's `hasLoopIn` is the
+        // natural-loop back-edge fact, recovered here from dominance.
+        if has_loop_in(data, parent) {
             return 0;
         }
         let out_size = data.varnode(out).size;
@@ -267,11 +316,36 @@ impl Rule for RulePullsubMulti {
             return 0;
         }
         let old_inputs = data.op(phi).inputs.clone();
-        if old_inputs
-            .iter()
-            .any(|value| data.varnode(*value).size < offset as u32 + out_size || !heritage_known(data, *value))
-        {
+        let selected_end = offset.saturating_add(u64::from(out_size));
+        if old_inputs.iter().any(|value| {
+            data.varnode(*value).size < selected_end as u32 || !heritage_known(data, *value)
+        }) {
             return 0;
+        }
+        // Ghidra's `minMaxUse`/consume check protects bytes still observed
+        // by immediate descendants.  The graph has no consume mask, so reject
+        for value in &old_inputs {
+            for descendant in data.varnode(*value).descendants.iter().copied() {
+                if descendant == phi {
+                    continue;
+                }
+                let Some(desc_offset) = input(data, descendant, 1)
+                    .filter(|offset_vn| is_constant(data, *offset_vn))
+                    .map(|offset_vn| data.varnode(offset_vn).offset)
+                else {
+                    return 0;
+                };
+                let Some(desc_out) = output(data, descendant) else {
+                    return 0;
+                };
+                let desc_end = desc_offset.saturating_add(u64::from(data.varnode(desc_out).size));
+                if data.opcode_of(descendant) != Some(op::SUBPIECE)
+                    || desc_offset < offset
+                    || desc_end > selected_end
+                {
+                    return 0;
+                }
+            }
         }
         let new_phi = data.new_op(op::MULTIEQUAL, seq(data, phi), Vec::new());
         let new_out = data.new_unique(out_size);
@@ -297,7 +371,9 @@ impl Rule for RulePullsubMulti {
 pub struct RuleTermOrder;
 
 impl Rule for RuleTermOrder {
-    fn name(&self) -> &'static str { "termorder" }
+    fn name(&self) -> &'static str {
+        "termorder"
+    }
 
     fn op_list(&self) -> Vec<i32> {
         vec![
@@ -336,12 +412,18 @@ impl Rule for RuleTermOrder {
 pub struct RuleSelectCse;
 
 impl Rule for RuleSelectCse {
-    fn name(&self) -> &'static str { "selectcse" }
+    fn name(&self) -> &'static str {
+        "selectcse"
+    }
 
-    fn op_list(&self) -> Vec<i32> { vec![op::SUBPIECE, op::INT_SRIGHT] }
+    fn op_list(&self) -> Vec<i32> {
+        vec![op::SUBPIECE, op::INT_SRIGHT]
+    }
 
     fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
-        let Some(opcode) = data.opcode_of(id) else { return 0 };
+        let Some(opcode) = data.opcode_of(id) else {
+            return 0;
+        };
         if opcode != op::SUBPIECE && opcode != op::INT_SRIGHT {
             return 0;
         }
@@ -349,6 +431,7 @@ impl Rule for RuleSelectCse {
             return 0;
         };
         let current_seq = seq(data, id);
+        let current_parent = data.op(id).parent;
         let readers: Vec<OpId> = data.varnode(source).descendants.iter().copied().collect();
         let Some(previous) = readers.into_iter().find(|candidate| {
             *candidate != id
@@ -356,10 +439,18 @@ impl Rule for RuleSelectCse {
                 && output(data, *candidate).is_some()
                 && seq(data, *candidate) < current_seq
                 && data.op(*candidate).inputs == data.op(id).inputs
+                && match (data.op(*candidate).parent, current_parent) {
+                    (Some(candidate_parent), Some(current_parent)) => {
+                        block_dominates(data, candidate_parent, current_parent)
+                    }
+                    _ => false,
+                }
         }) else {
             return 0;
         };
-        let Some(new_out) = output(data, previous) else { return 0 };
+        let Some(new_out) = output(data, previous) else {
+            return 0;
+        };
         data.total_replace(old_out, new_out);
         data.op_destroy(id);
         1
@@ -372,18 +463,28 @@ impl Rule for RuleSelectCse {
 pub struct RuleXorSwap;
 
 impl Rule for RuleXorSwap {
-    fn name(&self) -> &'static str { "xorswap" }
+    fn name(&self) -> &'static str {
+        "xorswap"
+    }
 
-    fn op_list(&self) -> Vec<i32> { vec![op::INT_XOR] }
+    fn op_list(&self) -> Vec<i32> {
+        vec![op::INT_XOR]
+    }
 
     fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
         for slot in 0..2 {
-            let Some(candidate) = input(data, id, slot) else { continue };
-            let Some(inner) = def(data, candidate) else { continue };
+            let Some(candidate) = input(data, id, slot) else {
+                continue;
+            };
+            let Some(inner) = def(data, candidate) else {
+                continue;
+            };
             if data.opcode_of(inner) != Some(op::INT_XOR) {
                 continue;
             }
-            let Some(other) = input(data, id, 1 - slot) else { continue };
+            let Some(other) = input(data, id, 1 - slot) else {
+                continue;
+            };
             let (Some(a), Some(b)) = (input(data, inner, 0), input(data, inner, 1)) else {
                 continue;
             };
@@ -468,7 +569,13 @@ fn discover_predicate(data: &Funcdata, value: VarnodeId) -> Option<PredicateShap
         return None;
     }
     let (left, right) = (input(data, compare, 0)?, input(data, compare, 1)?);
-    let zero = if left == other { right } else if right == other { left } else { return None };
+    let zero = if left == other {
+        right
+    } else if right == other {
+        left
+    } else {
+        return None;
+    };
     if !is_constant(data, zero) || data.varnode(zero).offset != 0 {
         return None;
     }
@@ -490,9 +597,13 @@ fn discover_predicate(data: &Funcdata, value: VarnodeId) -> Option<PredicateShap
 pub struct RuleOrPredicate;
 
 impl Rule for RuleOrPredicate {
-    fn name(&self) -> &'static str { "orpredicate" }
+    fn name(&self) -> &'static str {
+        "orpredicate"
+    }
 
-    fn op_list(&self) -> Vec<i32> { vec![op::INT_OR, op::INT_XOR] }
+    fn op_list(&self) -> Vec<i32> {
+        vec![op::INT_OR, op::INT_XOR]
+    }
 
     fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
         let (Some(left), Some(right)) = (input(data, id, 0), input(data, id, 1)) else {
@@ -505,7 +616,9 @@ impl Rule for RuleOrPredicate {
             (None, Some(shape)) => (shape, left),
             _ => return 0,
         };
-        let Some(multi_out) = output(data, shape.multi) else { return 0 };
+        let Some(multi_out) = output(data, shape.multi) else {
+            return 0;
+        };
         if shape.zero_path_true || data.lone_descend(multi_out) != Some(id) {
             return 0;
         }
@@ -522,16 +635,25 @@ impl Rule for RuleOrPredicate {
 pub struct RuleBooleanNegate;
 
 impl Rule for RuleBooleanNegate {
-    fn name(&self) -> &'static str { "booleannegate" }
+    fn name(&self) -> &'static str {
+        "booleannegate"
+    }
 
-    fn op_list(&self) -> Vec<i32> { vec![op::INT_NOTEQUAL, op::INT_EQUAL] }
+    fn op_list(&self) -> Vec<i32> {
+        vec![op::INT_NOTEQUAL, op::INT_EQUAL]
+    }
 
     fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
-        let Some(opcode) = data.opcode_of(id) else { return 0 };
+        let Some(opcode) = data.opcode_of(id) else {
+            return 0;
+        };
         let (Some(subbool), Some(constant)) = (input(data, id, 0), input(data, id, 1)) else {
             return 0;
         };
-        if !is_constant(data, constant) || data.varnode(constant).offset > 1 || !boolean_value(data, subbool) {
+        if !is_constant(data, constant)
+            || data.varnode(constant).offset > 1
+            || !boolean_value(data, subbool)
+        {
             return 0;
         }
         let mut negate = opcode == op::INT_NOTEQUAL;
@@ -550,20 +672,30 @@ impl Rule for RuleBooleanNegate {
 pub struct RuleDoubleSub;
 
 impl Rule for RuleDoubleSub {
-    fn name(&self) -> &'static str { "doublesub" }
+    fn name(&self) -> &'static str {
+        "doublesub"
+    }
 
-    fn op_list(&self) -> Vec<i32> { vec![op::SUBPIECE] }
+    fn op_list(&self) -> Vec<i32> {
+        vec![op::SUBPIECE]
+    }
 
     fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
         let (Some(mid), Some(outer_offset)) = (input(data, id, 0), input(data, id, 1)) else {
             return 0;
         };
-        let Some(inner) = def(data, mid) else { return 0 };
+        let Some(inner) = def(data, mid) else {
+            return 0;
+        };
         if data.opcode_of(inner) != Some(op::SUBPIECE) || !is_constant(data, outer_offset) {
             return 0;
         }
-        let Some(root) = input(data, inner, 0) else { return 0 };
-        let Some(inner_offset) = input(data, inner, 1) else { return 0 };
+        let Some(root) = input(data, inner, 0) else {
+            return 0;
+        };
+        let Some(inner_offset) = input(data, inner, 1) else {
+            return 0;
+        };
         if !is_constant(data, inner_offset) || is_free(data, root) {
             return 0;
         }
@@ -580,16 +712,23 @@ impl Rule for RuleDoubleSub {
 pub struct RuleHumptyDumpty;
 
 impl Rule for RuleHumptyDumpty {
-    fn name(&self) -> &'static str { "humptydumpty" }
+    fn name(&self) -> &'static str {
+        "humptydumpty"
+    }
 
-    fn op_list(&self) -> Vec<i32> { vec![op::PIECE] }
+    fn op_list(&self) -> Vec<i32> {
+        vec![op::PIECE]
+    }
 
     fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
         let (Some(first), Some(second)) = (input(data, id, 0), input(data, id, 1)) else {
             return 0;
         };
-        let (Some(sub1), Some(sub2)) = (def(data, first), def(data, second)) else { return 0 };
-        if data.opcode_of(sub1) != Some(op::SUBPIECE) || data.opcode_of(sub2) != Some(op::SUBPIECE) {
+        let (Some(sub1), Some(sub2)) = (def(data, first), def(data, second)) else {
+            return 0;
+        };
+        if data.opcode_of(sub1) != Some(op::SUBPIECE) || data.opcode_of(sub2) != Some(op::SUBPIECE)
+        {
             return 0;
         }
         let (Some(root1), Some(root2), Some(pos1), Some(pos2)) = (
@@ -625,15 +764,23 @@ impl Rule for RuleHumptyDumpty {
 pub struct RuleDumptyHump;
 
 impl Rule for RuleDumptyHump {
-    fn name(&self) -> &'static str { "dumptyhump" }
+    fn name(&self) -> &'static str {
+        "dumptyhump"
+    }
 
-    fn op_list(&self) -> Vec<i32> { vec![op::SUBPIECE] }
+    fn op_list(&self) -> Vec<i32> {
+        vec![op::SUBPIECE]
+    }
 
     fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
-        let (Some(base), Some(offset_vn), Some(out)) = (input(data, id, 0), input(data, id, 1), output(data, id)) else {
+        let (Some(base), Some(offset_vn), Some(out)) =
+            (input(data, id, 0), input(data, id, 1), output(data, id))
+        else {
             return 0;
         };
-        let Some(piece) = def(data, base) else { return 0 };
+        let Some(piece) = def(data, base) else {
+            return 0;
+        };
         if data.opcode_of(piece) != Some(op::PIECE) || !is_constant(data, offset_vn) {
             return 0;
         }
@@ -668,21 +815,32 @@ impl Rule for RuleDumptyHump {
 pub struct RuleHumptyOr;
 
 impl Rule for RuleHumptyOr {
-    fn name(&self) -> &'static str { "humptyor" }
+    fn name(&self) -> &'static str {
+        "humptyor"
+    }
 
-    fn op_list(&self) -> Vec<i32> { vec![op::INT_OR] }
+    fn op_list(&self) -> Vec<i32> {
+        vec![op::INT_OR]
+    }
 
     fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
         let (Some(left), Some(right)) = (input(data, id, 0), input(data, id, 1)) else {
             return 0;
         };
-        let (Some(and1), Some(and2)) = (def(data, left), def(data, right)) else { return 0 };
+        let (Some(and1), Some(and2)) = (def(data, left), def(data, right)) else {
+            return 0;
+        };
         if data.opcode_of(and1) != Some(op::INT_AND) || data.opcode_of(and2) != Some(op::INT_AND) {
             return 0;
         }
-        let (Some(mut a), Some(mut b), Some(mut c), Some(mut d)) = (
-            input(data, and1, 0), input(data, and1, 1), input(data, and2, 0), input(data, and2, 1),
-        ) else { return 0 };
+        let (Some(mut a), Some(mut b), Some(mut c), Some(d)) = (
+            input(data, and1, 0),
+            input(data, and1, 1),
+            input(data, and2, 0),
+            input(data, and2, 1),
+        ) else {
+            return 0;
+        };
         if a == c {
             c = d;
         } else if a == d {
@@ -729,16 +887,26 @@ impl Rule for RuleHumptyOr {
 pub struct RuleNegateIdentity;
 
 impl Rule for RuleNegateIdentity {
-    fn name(&self) -> &'static str { "negateidentity" }
+    fn name(&self) -> &'static str {
+        "negateidentity"
+    }
 
-    fn op_list(&self) -> Vec<i32> { vec![op::INT_NEGATE] }
+    fn op_list(&self) -> Vec<i32> {
+        vec![op::INT_NEGATE]
+    }
 
     fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
-        let Some(value) = input(data, id, 0) else { return 0 };
-        let Some(negated) = output(data, id) else { return 0 };
+        let Some(value) = input(data, id, 0) else {
+            return 0;
+        };
+        let Some(negated) = output(data, id) else {
+            return 0;
+        };
         let descendants: Vec<OpId> = data.varnode(negated).descendants.iter().copied().collect();
         for logic in descendants {
-            let Some(logic_code) = data.opcode_of(logic) else { continue };
+            let Some(logic_code) = data.opcode_of(logic) else {
+                continue;
+            };
             if logic_code != op::INT_AND && logic_code != op::INT_OR && logic_code != op::INT_XOR {
                 continue;
             }
@@ -748,7 +916,11 @@ impl Rule for RuleNegateIdentity {
             if left != value && right != value {
                 continue;
             }
-            let result = if logic_code == op::INT_AND { 0 } else { mask(data.varnode(value).size) };
+            let result = if logic_code == op::INT_AND {
+                0
+            } else {
+                mask(data.varnode(value).size)
+            };
             data.op_set_opcode(logic, op::COPY);
             let result_vn = data.new_constant(result, data.varnode(value).size);
             data.op_set_inputs(logic, vec![result_vn]);
@@ -764,9 +936,13 @@ impl Rule for RuleNegateIdentity {
 pub struct RuleSubNormal;
 
 impl Rule for RuleSubNormal {
-    fn name(&self) -> &'static str { "subnormal" }
+    fn name(&self) -> &'static str {
+        "subnormal"
+    }
 
-    fn op_list(&self) -> Vec<i32> { vec![op::SUBPIECE] }
+    fn op_list(&self) -> Vec<i32> {
+        vec![op::SUBPIECE]
+    }
 
     fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
         let (Some(shift_out), Some(c_vn), Some(out)) =
@@ -774,12 +950,15 @@ impl Rule for RuleSubNormal {
         else {
             return 0;
         };
-        let Some(shift_op) = def(data, shift_out) else { return 0 };
+        let Some(shift_op) = def(data, shift_out) else {
+            return 0;
+        };
         let shift_code = data.opcode_of(shift_op);
         if shift_code != Some(op::INT_RIGHT) && shift_code != Some(op::INT_SRIGHT) {
             return 0;
         }
-        let (Some(shift_vn), Some(n_vn)) = (input(data, shift_op, 0), input(data, shift_op, 1)) else {
+        let (Some(shift_vn), Some(n_vn)) = (input(data, shift_op, 0), input(data, shift_op, 1))
+        else {
             return 0;
         };
         if !is_constant(data, n_vn) || !is_constant(data, c_vn) || is_free(data, shift_vn) {
@@ -801,8 +980,13 @@ impl Rule for RuleSubNormal {
             let trunc_size = in_size - c - k;
             if n == k * 8 && trunc_size > 0 && trunc_size.is_power_of_two() {
                 let cut = data.new_constant(c + k, 4);
-                let (_, new_out) =
-                    new_op_before(data, id, op::SUBPIECE, vec![shift_vn, cut], trunc_size as u32);
+                let (_, new_out) = new_op_before(
+                    data,
+                    id,
+                    op::SUBPIECE,
+                    vec![shift_vn, cut],
+                    trunc_size as u32,
+                );
                 data.op_set_opcode(
                     id,
                     if shift_code == Some(op::INT_SRIGHT) {
@@ -842,23 +1026,38 @@ impl Rule for RuleSubNormal {
 pub struct RulePositiveDiv;
 
 impl Rule for RulePositiveDiv {
-    fn name(&self) -> &'static str { "positivediv" }
+    fn name(&self) -> &'static str {
+        "positivediv"
+    }
 
-    fn op_list(&self) -> Vec<i32> { vec![op::INT_SDIV, op::INT_SREM] }
+    fn op_list(&self) -> Vec<i32> {
+        vec![op::INT_SDIV, op::INT_SREM]
+    }
 
     fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
-        let Some(out) = output(data, id) else { return 0 };
+        let Some(out) = output(data, id) else {
+            return 0;
+        };
         let size = data.varnode(out).size;
         if size == 0 || size > 8 {
             return 0;
         }
         let sign = size * 8 - 1;
         let masks = NonzeroMasks::of(data);
-        let (Some(left), Some(right)) = (input(data, id, 0), input(data, id, 1)) else { return 0 };
+        let (Some(left), Some(right)) = (input(data, id, 0), input(data, id, 1)) else {
+            return 0;
+        };
         if ((masks.mask(left) >> sign) & 1) != 0 || ((masks.mask(right) >> sign) & 1) != 0 {
             return 0;
         }
-        data.op_set_opcode(id, if data.opcode_of(id) == Some(op::INT_SDIV) { op::INT_DIV } else { op::INT_REM });
+        data.op_set_opcode(
+            id,
+            if data.opcode_of(id) == Some(op::INT_SDIV) {
+                op::INT_DIV
+            } else {
+                op::INT_REM
+            },
+        );
         1
     }
 }
@@ -880,7 +1079,10 @@ fn find_subshift(data: &Funcdata, id: OpId) -> Option<(OpId, u64, i32)> {
     };
     let cut = input(data, sub, 1)?;
     let whole = input(data, sub, 0)?;
-    if !is_constant(data, cut) || u64::from(data.varnode(output(data, sub)?).size).saturating_add(data.varnode(cut).offset) != u64::from(data.varnode(whole).size) {
+    if !is_constant(data, cut)
+        || u64::from(data.varnode(output(data, sub)?).size).saturating_add(data.varnode(cut).offset)
+            != u64::from(data.varnode(whole).size)
+    {
         return None;
     }
     n = n.saturating_add(8 * data.varnode(cut).offset);
@@ -890,26 +1092,42 @@ fn find_subshift(data: &Funcdata, id: OpId) -> Option<(OpId, u64, i32)> {
 pub struct RuleDivTermAdd;
 
 impl Rule for RuleDivTermAdd {
-    fn name(&self) -> &'static str { "divtermadd" }
+    fn name(&self) -> &'static str {
+        "divtermadd"
+    }
 
-    fn op_list(&self) -> Vec<i32> { vec![op::SUBPIECE, op::INT_RIGHT, op::INT_SRIGHT] }
+    fn op_list(&self) -> Vec<i32> {
+        vec![op::SUBPIECE, op::INT_RIGHT, op::INT_SRIGHT]
+    }
 
     fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
-        let Some((sub, n, mut shift_code)) = find_subshift(data, id) else { return 0 };
+        let Some((sub, n, mut shift_code)) = find_subshift(data, id) else {
+            return 0;
+        };
         if n > 63 {
             return 0;
         }
-        let Some(mult_vn) = input(data, sub, 0) else { return 0 };
-        let Some(mult) = def(data, mult_vn) else { return 0 };
+        let Some(mult_vn) = input(data, sub, 0) else {
+            return 0;
+        };
+        let Some(mult) = def(data, mult_vn) else {
+            return 0;
+        };
         if data.opcode_of(mult) != Some(op::INT_MULT) {
             return 0;
         }
-        let (Some(ext_vn), Some(mult_const)) = (input(data, mult, 0), input(data, mult, 1)) else { return 0 };
+        let (Some(ext_vn), Some(mult_const)) = (input(data, mult, 0), input(data, mult, 1)) else {
+            return 0;
+        };
         if !is_constant(data, mult_const) {
             return 0;
         }
-        let Some(ext) = def(data, ext_vn) else { return 0 };
-        let Some(ext_code) = data.opcode_of(ext) else { return 0 };
+        let Some(ext) = def(data, ext_vn) else {
+            return 0;
+        };
+        let Some(ext_code) = data.opcode_of(ext) else {
+            return 0;
+        };
         if ext_code != op::INT_ZEXT && ext_code != op::INT_SEXT {
             return 0;
         }
@@ -919,28 +1137,45 @@ impl Rule for RuleDivTermAdd {
             return 0;
         }
         let power = 1u64 << n;
-        let new_constant = data.varnode(mult_const).offset.wrapping_add(power) & mask(data.varnode(ext_vn).size);
-        let Some(out) = output(data, id) else { return 0 };
+        let new_constant =
+            data.varnode(mult_const).offset.wrapping_add(power) & mask(data.varnode(ext_vn).size);
+        let Some(out) = output(data, id) else {
+            return 0;
+        };
         let descendants: Vec<OpId> = data.varnode(out).descendants.iter().copied().collect();
         for add in descendants {
             if data.opcode_of(add) != Some(op::INT_ADD) {
                 continue;
             }
-            let Some(left) = input(data, add, 0) else { continue };
-            let Some(right) = input(data, add, 1) else { continue };
+            let Some(left) = input(data, add, 0) else {
+                continue;
+            };
+            let Some(right) = input(data, add, 1) else {
+                continue;
+            };
             if left != ext_vn && right != ext_vn {
                 continue;
             }
             let mult_factor = data.new_constant(new_constant, data.varnode(ext_vn).size);
-            let (new_mult, mult_out) =
-                new_op_before(data, id, op::INT_MULT, vec![ext_vn, mult_factor], data.varnode(ext_vn).size);
+            let (new_mult, mult_out) = new_op_before(
+                data,
+                id,
+                op::INT_MULT,
+                vec![ext_vn, mult_factor],
+                data.varnode(ext_vn).size,
+            );
             let _ = new_mult;
             if shift_code == op::MAX {
                 shift_code = op::INT_RIGHT;
             }
             let shift_amount = data.new_constant(n, 4);
-            let (_, shift_out) =
-                new_op_before(data, id, shift_code, vec![mult_out, shift_amount], data.varnode(ext_vn).size);
+            let (_, shift_out) = new_op_before(
+                data,
+                id,
+                shift_code,
+                vec![mult_out, shift_amount],
+                data.varnode(ext_vn).size,
+            );
             let zero = data.new_constant(0, 4);
             data.op_set_opcode(add, op::SUBPIECE);
             data.op_set_inputs(add, vec![shift_out, zero]);
@@ -956,19 +1191,27 @@ impl Rule for RuleDivTermAdd {
 pub struct RuleSignForm;
 
 impl Rule for RuleSignForm {
-    fn name(&self) -> &'static str { "signform" }
+    fn name(&self) -> &'static str {
+        "signform"
+    }
 
-    fn op_list(&self) -> Vec<i32> { vec![op::SUBPIECE] }
+    fn op_list(&self) -> Vec<i32> {
+        vec![op::SUBPIECE]
+    }
 
     fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
         let (Some(sext_out), Some(c_vn)) = (input(data, id, 0), input(data, id, 1)) else {
             return 0;
         };
-        let Some(sext) = def(data, sext_out) else { return 0 };
+        let Some(sext) = def(data, sext_out) else {
+            return 0;
+        };
         if data.opcode_of(sext) != Some(op::INT_SEXT) || !is_constant(data, c_vn) {
             return 0;
         }
-        let Some(a) = input(data, sext, 0) else { return 0 };
+        let Some(a) = input(data, sext, 0) else {
+            return 0;
+        };
         let c = data.varnode(c_vn).offset;
         if c < u64::from(data.varnode(a).size) || is_free(data, a) {
             return 0;
@@ -984,33 +1227,59 @@ impl Rule for RuleSignForm {
 pub struct RuleSignDiv2;
 
 impl Rule for RuleSignDiv2 {
-    fn name(&self) -> &'static str { "signdiv2" }
-    fn op_list(&self) -> Vec<i32> { vec![op::INT_SRIGHT] }
+    fn name(&self) -> &'static str {
+        "signdiv2"
+    }
+    fn op_list(&self) -> Vec<i32> {
+        vec![op::INT_SRIGHT]
+    }
     fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
-        let Some(shift_amount) = input(data, id, 1) else { return 0 };
+        let Some(shift_amount) = input(data, id, 1) else {
+            return 0;
+        };
         if !is_constant(data, shift_amount) || data.varnode(shift_amount).offset != 1 {
             return 0;
         }
-        let Some(add_out) = input(data, id, 0) else { return 0 };
-        let Some(add) = def(data, add_out) else { return 0 };
+        let Some(add_out) = input(data, id, 0) else {
+            return 0;
+        };
+        let Some(add) = def(data, add_out) else {
+            return 0;
+        };
         if data.opcode_of(add) != Some(op::INT_ADD) {
             return 0;
         }
         for slot in 0..2 {
-            let Some(mult_out) = input(data, add, slot) else { continue };
-            let Some(mult) = def(data, mult_out) else { continue };
-            let Some(coefficient) = input(data, mult, 1) else { continue };
+            let Some(mult_out) = input(data, add, slot) else {
+                continue;
+            };
+            let Some(mult) = def(data, mult_out) else {
+                continue;
+            };
+            let Some(coefficient) = input(data, mult, 1) else {
+                continue;
+            };
             if data.opcode_of(mult) != Some(op::INT_MULT) || !is_constant(data, coefficient) {
                 continue;
             }
             if data.varnode(coefficient).offset != mask(data.varnode(coefficient).size) {
                 continue;
             }
-            let Some(shift_out) = input(data, mult, 0) else { continue };
-            let Some(shift) = def(data, shift_out) else { continue };
-            let Some(shift_amount_vn) = input(data, shift, 1) else { continue };
-            let Some(value) = input(data, shift, 0) else { continue };
-            let Some(other_add) = input(data, add, 1 - slot) else { continue };
+            let Some(shift_out) = input(data, mult, 0) else {
+                continue;
+            };
+            let Some(shift) = def(data, shift_out) else {
+                continue;
+            };
+            let Some(shift_amount_vn) = input(data, shift, 1) else {
+                continue;
+            };
+            let Some(value) = input(data, shift, 0) else {
+                continue;
+            };
+            let Some(other_add) = input(data, add, 1 - slot) else {
+                continue;
+            };
             if data.opcode_of(shift) != Some(op::INT_SRIGHT)
                 || !is_constant(data, shift_amount_vn)
                 || value != other_add
@@ -1032,9 +1301,13 @@ impl Rule for RuleSignDiv2 {
 pub struct RuleSignNearMult;
 
 impl Rule for RuleSignNearMult {
-    fn name(&self) -> &'static str { "signnearmult" }
+    fn name(&self) -> &'static str {
+        "signnearmult"
+    }
 
-    fn op_list(&self) -> Vec<i32> { vec![op::INT_AND] }
+    fn op_list(&self) -> Vec<i32> {
+        vec![op::INT_AND]
+    }
 
     fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
         let (Some(add_out), Some(and_mask)) = (input(data, id, 0), input(data, id, 1)) else {
@@ -1043,28 +1316,42 @@ impl Rule for RuleSignNearMult {
         if !is_constant(data, and_mask) {
             return 0;
         }
-        let Some(add) = def(data, add_out) else { return 0 };
+        let Some(add) = def(data, add_out) else {
+            return 0;
+        };
         if data.opcode_of(add) != Some(op::INT_ADD) {
             return 0;
         }
         let mut shift = None;
         let mut x = None;
         for slot in 0..2 {
-            let Some(value) = input(data, add, slot) else { continue };
-            let Some(defop) = def(data, value) else { continue };
-            let Some(amount_vn) = input(data, defop, 1) else { continue };
+            let Some(value) = input(data, add, slot) else {
+                continue;
+            };
+            let Some(defop) = def(data, value) else {
+                continue;
+            };
+            let Some(amount_vn) = input(data, defop, 1) else {
+                continue;
+            };
             if data.opcode_of(defop) == Some(op::INT_RIGHT) && is_constant(data, amount_vn) {
                 shift = Some(defop);
                 x = input(data, add, 1 - slot);
                 break;
             }
         }
-        let (Some(shift), Some(x)) = (shift, x) else { return 0 };
+        let (Some(shift), Some(x)) = (shift, x) else {
+            return 0;
+        };
         if is_free(data, x) {
             return 0;
         }
-        let Some(amount_vn) = input(data, shift, 1) else { return 0 };
-        let Some(shifted_vn) = input(data, shift, 0) else { return 0 };
+        let Some(amount_vn) = input(data, shift, 1) else {
+            return 0;
+        };
+        let Some(shifted_vn) = input(data, shift, 0) else {
+            return 0;
+        };
         let amount = data.varnode(amount_vn).offset;
         if amount == 0 {
             return 0;
@@ -1074,8 +1361,12 @@ impl Rule for RuleSignNearMult {
         if n == 0 || ((mask(size) << n) & mask(size)) != data.varnode(and_mask).offset {
             return 0;
         }
-        let Some(sign_shift) = input(data, shift, 0) else { return 0 };
-        let Some(sign_op) = def(data, sign_shift) else { return 0 };
+        let Some(sign_shift) = input(data, shift, 0) else {
+            return 0;
+        };
+        let Some(sign_op) = def(data, sign_shift) else {
+            return 0;
+        };
         let (Some(sign_amount), Some(sign_value)) =
             (input(data, sign_op, 1), input(data, sign_op, 0))
         else {
@@ -1088,7 +1379,9 @@ impl Rule for RuleSignNearMult {
         {
             return 0;
         }
-        let Some(power) = 1u64.checked_shl(n as u32) else { return 0 };
+        let Some(power) = 1u64.checked_shl(n as u32) else {
+            return 0;
+        };
         let divisor = data.new_constant(power, data.varnode(x).size);
         let (_, div_out) = new_op_before(
             data,
@@ -1107,9 +1400,13 @@ impl Rule for RuleSignNearMult {
 pub struct RuleModOpt;
 
 impl Rule for RuleModOpt {
-    fn name(&self) -> &'static str { "modopt" }
+    fn name(&self) -> &'static str {
+        "modopt"
+    }
 
-    fn op_list(&self) -> Vec<i32> { vec![op::INT_DIV, op::INT_SDIV] }
+    fn op_list(&self) -> Vec<i32> {
+        vec![op::INT_DIV, op::INT_SDIV]
+    }
 
     fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
         let (Some(x), Some(divisor), Some(out)) =
@@ -1143,7 +1440,9 @@ impl Rule for RuleModOpt {
             if !divisor_matches {
                 continue;
             }
-            let Some(mult_out) = output(data, mult) else { continue };
+            let Some(mult_out) = output(data, mult) else {
+                continue;
+            };
             let adds: Vec<OpId> = data.varnode(mult_out).descendants.iter().copied().collect();
             for add in adds {
                 if data.opcode_of(add) != Some(op::INT_ADD) {
@@ -1182,25 +1481,39 @@ impl Rule for RuleModOpt {
 pub struct RuleFloatCast;
 
 impl Rule for RuleFloatCast {
-    fn name(&self) -> &'static str { "floatcast" }
+    fn name(&self) -> &'static str {
+        "floatcast"
+    }
 
-    fn op_list(&self) -> Vec<i32> { vec![op::FLOAT_FLOAT2FLOAT, op::FLOAT_TRUNC] }
+    fn op_list(&self) -> Vec<i32> {
+        vec![op::FLOAT_FLOAT2FLOAT, op::FLOAT_TRUNC]
+    }
 
     fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
-        let Some(opcode1) = data.opcode_of(id) else { return 0 };
-        let Some(vn1) = input(data, id, 0) else { return 0 };
+        let Some(opcode1) = data.opcode_of(id) else {
+            return 0;
+        };
+        let Some(vn1) = input(data, id, 0) else {
+            return 0;
+        };
         let Some(cast) = def(data, vn1) else { return 0 };
-        let Some(opcode2) = data.opcode_of(cast) else { return 0 };
+        let Some(opcode2) = data.opcode_of(cast) else {
+            return 0;
+        };
         if opcode2 != op::FLOAT_FLOAT2FLOAT && opcode2 != op::FLOAT_INT2FLOAT {
             return 0;
         }
-        let Some(vn2) = input(data, cast, 0) else { return 0 };
+        let Some(vn2) = input(data, cast, 0) else {
+            return 0;
+        };
         if is_free(data, vn2) {
             return 0;
         }
         let in_size1 = data.varnode(vn1).size;
         let in_size2 = data.varnode(vn2).size;
-        let Some(out_vn) = output(data, id) else { return 0 };
+        let Some(out_vn) = output(data, id) else {
+            return 0;
+        };
         let out_size = data.varnode(out_vn).size;
         if opcode2 == op::FLOAT_FLOAT2FLOAT && opcode1 == op::FLOAT_FLOAT2FLOAT {
             if in_size1 > out_size {
@@ -1276,7 +1589,10 @@ mod tests {
     ) -> (OpId, VarnodeId) {
         let id = data.new_op(
             opcode,
-            SeqNum { address: 0x1000 + data.op_count() as u64 * 4, order: 0 },
+            SeqNum {
+                address: 0x1000 + data.op_count() as u64 * 4,
+                order: 0,
+            },
             inputs,
         );
         let output = data.new_unique(size);
@@ -1285,10 +1601,18 @@ mod tests {
         (id, output)
     }
 
-    fn no_output(data: &mut Funcdata, block: GraphBlockId, opcode: i32, inputs: Vec<VarnodeId>) -> OpId {
+    fn no_output(
+        data: &mut Funcdata,
+        block: GraphBlockId,
+        opcode: i32,
+        inputs: Vec<VarnodeId>,
+    ) -> OpId {
         let id = data.new_op(
             opcode,
-            SeqNum { address: 0x1000 + data.op_count() as u64 * 4, order: 0 },
+            SeqNum {
+                address: 0x1000 + data.op_count() as u64 * 4,
+                order: 0,
+            },
             inputs,
         );
         data.op_insert_end(id, block);
@@ -1311,7 +1635,19 @@ mod tests {
         let (_, m2) = op_with_output(&mut data, b, op::INT_MULT, vec![x, c4], 4);
         let (add, _) = op_with_output(&mut data, b, op::INT_ADD, vec![m1, m2], 4);
         assert_eq!(RuleCollectTerms.apply_op(add, &mut data), 1);
-        assert_eq!(data.op(add).opcode, op::INT_MULT);
+        assert_eq!(data.op(add).opcode, op::INT_ADD);
+        assert_eq!(
+            data.varnode(data.op(add).inputs[0])
+                .def
+                .map(|op| data.varnode(data.op(op).inputs[1]).offset),
+            Some(0)
+        );
+        assert_eq!(
+            data.varnode(data.op(add).inputs[1])
+                .def
+                .map(|op| data.varnode(data.op(op).inputs[1]).offset),
+            Some(7)
+        );
         let y = input_value(&mut data, 4);
         let (_, m3) = op_with_output(&mut data, b, op::INT_MULT, vec![y, c4], 4);
         let (bad, _) = op_with_output(&mut data, b, op::INT_ADD, vec![m1, m3], 4);
@@ -1324,7 +1660,14 @@ mod tests {
         let b = block(&mut data);
         let a = input_value(&mut data, 4);
         let c = input_value(&mut data, 4);
-        let phi = data.new_op(op::MULTIEQUAL, SeqNum { address: 0x1000, order: 0 }, vec![a, c]);
+        let phi = data.new_op(
+            op::MULTIEQUAL,
+            SeqNum {
+                address: 0x1000,
+                order: 0,
+            },
+            vec![a, c],
+        );
         let p = data.new_unique(4);
         data.op_set_output(phi, Some(p));
         data.op_insert_end(phi, b);
@@ -1472,12 +1815,18 @@ mod tests {
         let x = input_value(&mut data, 4);
         let (_, neg) = op_with_output(&mut data, b, op::INT_NEGATE, vec![x], 4);
         let (logic, _) = op_with_output(&mut data, b, op::INT_AND, vec![x, neg], 4);
-        assert_eq!(RuleNegateIdentity.apply_op(data.varnode(neg).def.unwrap(), &mut data), 1);
+        assert_eq!(
+            RuleNegateIdentity.apply_op(data.varnode(neg).def.unwrap(), &mut data),
+            1
+        );
         assert_eq!(data.op(logic).opcode, op::COPY);
         let (_, neg2) = op_with_output(&mut data, b, op::INT_NEGATE, vec![x], 4);
         let y = input_value(&mut data, 4);
         let (bad, _) = op_with_output(&mut data, b, op::INT_ADD, vec![neg2, y], 4);
-        assert_eq!(RuleNegateIdentity.apply_op(data.varnode(neg2).def.unwrap(), &mut data), 0);
+        assert_eq!(
+            RuleNegateIdentity.apply_op(data.varnode(neg2).def.unwrap(), &mut data),
+            0
+        );
         assert_eq!(data.op(bad).opcode, op::INT_ADD);
     }
 
@@ -1493,7 +1842,8 @@ mod tests {
         assert_eq!(RuleSubNormal.apply_op(sub, &mut data), 1);
         let free = data.new_varnode(REGISTER_SPACE, 0x800, 8);
         let eight_bad_shift = data.new_constant(8, 4);
-        let (_, bad_shift) = op_with_output(&mut data, b, op::INT_RIGHT, vec![free, eight_bad_shift], 8);
+        let (_, bad_shift) =
+            op_with_output(&mut data, b, op::INT_RIGHT, vec![free, eight_bad_shift], 8);
         let zero_bad_sub = data.new_constant(0, 4);
         let (bad, _) = op_with_output(&mut data, b, op::SUBPIECE, vec![bad_shift, zero_bad_sub], 4);
         assert_eq!(RuleSubNormal.apply_op(bad, &mut data), 0);
@@ -1523,7 +1873,7 @@ mod tests {
         let (_, mult) = op_with_output(&mut data, b, op::INT_MULT, vec![ext, three_mult], 4);
         let three_sub = data.new_constant(3, 4);
         let (sub, sub_out) = op_with_output(&mut data, b, op::SUBPIECE, vec![mult, three_sub], 1);
-        let (add, _) = op_with_output(&mut data, b, op::INT_ADD, vec![sub_out, x], 1);
+        let (add, _) = op_with_output(&mut data, b, op::INT_ADD, vec![sub_out, ext], 1);
         assert_eq!(RuleDivTermAdd.apply_op(sub, &mut data), 1);
         assert_eq!(data.op(add).opcode, op::SUBPIECE);
         let two_bad_div = data.new_constant(2, 4);
@@ -1619,26 +1969,57 @@ mod tests {
     }
 
     #[test]
-    fn or_predicate_declines_without_cfg_and_fires_on_single_shape() {
+    fn or_predicate_fires_and_declines() {
         let mut data = Funcdata::default();
-        let b = block(&mut data);
+        let cond = data.new_block(0x1100);
+        let zero_block = data.new_block(0x1200);
+        let other_block = data.new_block(0x1300);
+        let merge = data.new_block(0x1400);
+        data.add_edge(cond, other_block);
+        data.add_edge(cond, zero_block);
+        data.add_edge(zero_block, merge);
+        data.add_edge(other_block, merge);
         let x = input_value(&mut data, 1);
         let y = input_value(&mut data, 1);
-        let zero_for_copy = data.new_constant(0, 1);
-        let (_, zero_copy) = op_with_output(&mut data, b, op::COPY, vec![zero_for_copy], 1);
-        let (_, other_copy) = op_with_output(&mut data, b, op::COPY, vec![x], 1);
-        let phi = data.new_op(op::MULTIEQUAL, SeqNum { address: 0x1100, order: 0 }, vec![zero_copy, other_copy]);
+        let zero = data.new_constant(0, 1);
+        let (_, compare_out) = op_with_output(&mut data, cond, op::INT_EQUAL, vec![x, zero], 1);
+        let branch_target = data.new_constant(0x1200, 4);
+        no_output(
+            &mut data,
+            cond,
+            op::CBRANCH,
+            vec![branch_target, compare_out],
+        );
+        let zero_copy_input = data.new_constant(0, 1);
+        let (_, zero_copy) =
+            op_with_output(&mut data, zero_block, op::COPY, vec![zero_copy_input], 1);
+        let phi = data.new_op(
+            op::MULTIEQUAL,
+            SeqNum {
+                address: 0x1400,
+                order: 0,
+            },
+            vec![zero_copy, x],
+        );
         let phi_out = data.new_unique(1);
         data.op_set_output(phi, Some(phi_out));
-        data.op_insert_end(phi, b);
-        let (or, _) = op_with_output(&mut data, b, op::INT_OR, vec![phi_out, y], 1);
-        assert_eq!(RuleOrPredicate.apply_op(data.varnode(phi_out).def.unwrap(), &mut data), 0);
-        assert_eq!(RuleOrPredicate.apply_op(or, &mut data), 0);
+        data.op_insert_end(phi, merge);
+        let (or, _) = op_with_output(&mut data, merge, op::INT_OR, vec![phi_out, y], 1);
+        assert_eq!(RuleOrPredicate.apply_op(or, &mut data), 1);
+        assert_eq!(data.op(or).opcode, op::COPY);
+        assert_eq!(data.op(or).inputs, vec![phi_out]);
+
+        let (unrelated, _) = op_with_output(&mut data, merge, op::INT_OR, vec![x, y], 1);
+        assert_eq!(RuleOrPredicate.apply_op(unrelated, &mut data), 0);
     }
 
     #[test]
     fn all_registry_rules_are_nonempty() {
-        assert!(all().iter().all(|rule| !rule.name().is_empty() && !rule.op_list().is_empty()));
+        assert!(
+            all()
+                .iter()
+                .all(|rule| !rule.name().is_empty() && !rule.op_list().is_empty())
+        );
     }
 
     #[allow(dead_code)]

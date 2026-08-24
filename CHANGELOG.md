@@ -232,6 +232,23 @@ All notable Ventris changes are documented here.
   such claim is needed. This is the whole of the measured `excess-casts` gap
   against Ghidra: on `changeGroupID__7JKRHeapFUc` every one of our two casts is a
   memory-access spelling where Ghidra names a field.
+- A construct no longer prints the jump its header surrendered. The header's
+  edges belong to the construct that claimed them, so a jump left on the header
+  put an `if` directly after an unconditional transfer — output that says the
+  test never runs. On `getBuiltInTexture` this removed every remaining `goto`,
+  and `Na_CheckRestartReady` now renders as nested `if` and `do/while` with none
+  at all.
+- Labels are now emitted wherever control can arrive other than by falling
+  through, then removed again when neither a jump nor a post-transfer position
+  needs one. Deciding per block is not possible, because whether a label is
+  needed depends on what is emitted before it, and emission order does not have
+  to follow the control-flow graph.
+- Jump targets are collected from surviving block branches as well as from
+  explicit goto nodes. Only the second kind was counted, so a surrendered branch
+  could print a jump to a label that was never emitted.
+- Measured against Ghidra on the corpus, the graph path improves to
+  `unstructured-control-flow` 10 (from 13) and `missing-loop-or-switch` 4, against
+  15 and 11 on the address-ordered default.
 
 - Added `LiftedInstruction::skips_delay_slot`, which reports the MIPS
   likely-branch shape so consumers stop treating its sequential successor as

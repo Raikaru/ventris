@@ -18,23 +18,22 @@
 
 pub mod action;
 pub mod branchaction;
+pub mod callproto;
 pub mod casts;
 pub mod condprop;
 pub mod cover;
 pub mod deadcode;
 pub mod emit;
 pub mod expr_rules;
+pub mod expr_rules2;
 pub mod guard;
 pub mod heritage;
 pub mod jumptable;
+pub mod marking;
 pub mod merge;
 pub mod mergeaction;
 pub mod namevars;
 pub mod nonzero;
-pub mod typefactory;
-pub mod expr_rules2;
-pub mod marking;
-pub mod callproto;
 pub mod proto;
 pub mod protoaction;
 pub mod refine;
@@ -42,6 +41,7 @@ pub mod rules;
 pub mod stackframe;
 pub mod structure;
 pub mod subflow;
+pub mod typefactory;
 pub mod types;
 pub mod value;
 

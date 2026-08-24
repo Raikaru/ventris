@@ -671,9 +671,9 @@ fn expression_type(value: &Expr, architecture: Architecture) -> Type {
         Expr::Parameter { ty, .. } => ty.clone(),
         Expr::Constant { width, .. } => Type::from_width(*width),
         Expr::Call { .. } => default_return_type(architecture),
-        Expr::Global { width, .. }
-        | Expr::Load { width, .. }
-        | Expr::Field { width, .. } => Type::from_width(*width),
+        Expr::Global { width, .. } | Expr::Load { width, .. } | Expr::Field { width, .. } => {
+            Type::from_width(*width)
+        }
         Expr::Builtin { .. } => Type::Unsigned(32),
         Expr::Typed { ty, .. } => ty.clone(),
         Expr::Register { width, .. } | Expr::Temporary { width, .. } => Type::from_width(*width),
@@ -2844,9 +2844,7 @@ fn is_path_invariant(value: &Expr, stable_registers: &BTreeSet<String>) -> bool 
                 && is_path_invariant(when_true, stable_registers)
                 && is_path_invariant(when_false, stable_registers)
         }
-        Expr::Load { .. } | Expr::Field { .. } | Expr::Call { .. } | Expr::Builtin { .. } => {
-            false
-        }
+        Expr::Load { .. } | Expr::Field { .. } | Expr::Call { .. } | Expr::Builtin { .. } => false,
     }
 }
 

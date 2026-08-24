@@ -83,7 +83,7 @@ pub fn emit_structured(
         }
     }
     let mut statements = emitter.phi_declarations();
-    let targets = goto_targets(&tree);
+    let targets = goto_targets(data, &tree);
     // The root is not pruned. Its members are independent regions, each
     // reached by a jump from elsewhere, so a statement after a transfer there
     // is reachable even without a label of its own. Pruning applies inside a
@@ -93,7 +93,85 @@ pub fn emit_structured(
     drop_trailing_gotos_to_following_label(&mut statements);
     prefer_non_empty_then(&mut statements);
     drop_self_assignments(&mut statements);
+    drop_labels_nothing_needs(&mut statements);
     statements
+}
+
+/// Removes labels no jump names and no transfer strands.
+///
+/// A block is labelled whenever control could arrive other than by falling
+/// through, which is deliberately generous: emission order does not have to
+/// follow the control-flow graph, so a block reached by fallthrough in the
+/// graph can land after an unrelated jump in the output. Labelling it is the
+/// only honest way to say it is still reachable. This pass then drops the ones
+/// that turned out to be unnecessary, so the generosity costs nothing in the
+/// common case.
+fn drop_labels_nothing_needs(statements: &mut Vec<NativeStatement>) {
+    let mut named = BTreeSet::new();
+    collect_jump_targets(statements, &mut named);
+    retain_needed_labels(statements, &named, true);
+}
+
+fn collect_jump_targets(statements: &[NativeStatement], named: &mut BTreeSet<u64>) {
+    for statement in statements {
+        match statement {
+            NativeStatement::Goto(target) | NativeStatement::IfGoto { target, .. } => {
+                named.insert(*target);
+            }
+            NativeStatement::IfElse {
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_jump_targets(then_body, named);
+                collect_jump_targets(else_body, named);
+            }
+            NativeStatement::While { body, .. } | NativeStatement::DoWhile { body, .. } => {
+                collect_jump_targets(body, named);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn retain_needed_labels(
+    statements: &mut Vec<NativeStatement>,
+    named: &BTreeSet<u64>,
+    mut after_transfer: bool,
+) {
+    let mut index = 0;
+    while index < statements.len() {
+        let drop = match &statements[index] {
+            // A label right after a transfer is what makes the statements
+            // following it reachable, so it stays whether or not a jump in
+            // this function names it.
+            NativeStatement::Label(label) => !named.contains(label) && !after_transfer,
+            _ => false,
+        };
+        if drop {
+            statements.remove(index);
+            continue;
+        }
+        after_transfer = match &mut statements[index] {
+            NativeStatement::Goto(_) | NativeStatement::Return(_) => true,
+            NativeStatement::IfElse {
+                then_body,
+                else_body,
+                ..
+            } => {
+                retain_needed_labels(then_body, named, false);
+                retain_needed_labels(else_body, named, false);
+                false
+            }
+            NativeStatement::While { body, .. } | NativeStatement::DoWhile { body, .. } => {
+                retain_needed_labels(body, named, false);
+                false
+            }
+            NativeStatement::Label(_) => after_transfer,
+            _ => false,
+        };
+        index += 1;
+    }
 }
 
 /// Removes a jump at the end of a construct's body when the label it names is
@@ -126,6 +204,17 @@ fn drop_trailing_gotos_to_following_label(statements: &mut Vec<NativeStatement>)
             }
             _ => {}
         }
+    }
+}
+
+/// Removes an unconditional jump left at the end of a construct's header.
+///
+/// The construct decides where control goes from its header, so a jump the
+/// header still carries describes an edge the construct already claimed. It is
+/// not a reachability question: the test after it always runs.
+fn drop_stale_header_transfer(statements: &mut Vec<NativeStatement>) {
+    while matches!(statements.last(), Some(NativeStatement::Goto(_))) {
+        statements.pop();
     }
 }
 
@@ -251,7 +340,12 @@ fn drop_gotos_to_next_statement(statements: &mut Vec<NativeStatement>) {
 }
 
 /// Blocks a surviving `goto` still names, which therefore need labels.
-fn goto_targets(tree: &super::structure::Structured) -> BTreeSet<GraphBlockId> {
+///
+/// A jump reaches the tree two ways. The structurer can leave an explicit
+/// `Goto` node, and a basic block can keep its own branch because no construct
+/// claimed that edge. Both print a `goto`, so both need the target labelled;
+/// collecting only the first kind emits a jump to a label that does not exist.
+fn goto_targets(data: &Funcdata, tree: &super::structure::Structured) -> BTreeSet<GraphBlockId> {
     use super::structure::Structured;
     let mut targets = BTreeSet::new();
     let mut pending = vec![tree];
@@ -278,10 +372,35 @@ fn goto_targets(tree: &super::structure::Structured) -> BTreeSet<GraphBlockId> {
                 pending.push(body);
             }
             Structured::DoWhile { body, .. } | Structured::InfLoop { body } => pending.push(body),
-            Structured::Basic(_) => {}
+            Structured::Basic(block) => {
+                // An unclaimed branch stays in the block that owns it, so its
+                // target needs a label just as much as an explicit `Goto`'s.
+                targets.extend(unclaimed_branch_targets(data, *block));
+            }
         }
     }
     targets
+}
+
+/// The blocks a basic block's own surviving branch still names.
+fn unclaimed_branch_targets(data: &Funcdata, block: GraphBlockId) -> Vec<GraphBlockId> {
+    let branches = data
+        .block(block)
+        .ops
+        .iter()
+        .rev()
+        .find(|id| !data.op(**id).dead)
+        .map(|id| {
+            matches!(
+                data.op(*id).opcode,
+                op::BRANCH | op::CBRANCH | op::BRANCHIND
+            )
+        })
+        .unwrap_or(false);
+    if !branches {
+        return Vec::new();
+    }
+    data.block(block).successors.clone()
 }
 
 struct Emitter<'a> {
@@ -331,7 +450,12 @@ impl Emitter<'_> {
         match node {
             Structured::Basic(block) => {
                 let mut statements = Vec::new();
-                if targets.contains(block) {
+                // Every block that anything reaches is labelled here, and
+                // `drop_labels_nothing_needs` removes the ones that turn out
+                // to be unnecessary. Deciding locally is not possible: whether
+                // a block needs a label depends on what ends up emitted before
+                // it, which this recursion cannot see.
+                if targets.contains(block) || !self.data.block(*block).predecessors.is_empty() {
                     statements.push(NativeStatement::Label(self.data.block(*block).start));
                 }
                 let terminator = self.emit_body(*block, scoped, &mut statements);
@@ -360,6 +484,11 @@ impl Emitter<'_> {
                 else_body,
             } => {
                 let mut statements = self.emit_tree(header, scoped, phi_copies, targets);
+                // The construct claimed both of the header's edges, so a jump
+                // the header still carries is stale. Printing it puts an `if`
+                // after an unconditional transfer, which claims the test never
+                // runs.
+                drop_stale_header_transfer(&mut statements);
                 statements.push(NativeStatement::IfElse {
                     condition: self.condition_of(test, *taken_first),
                     then_body: self.emit_tree(then_body, scoped, phi_copies, targets),
@@ -380,8 +509,11 @@ impl Emitter<'_> {
                 // iteration, so it appears twice: once ahead of the loop and
                 // once at the end of the body.
                 let mut statements = self.emit_tree(header, scoped, phi_copies, targets);
+                drop_stale_header_transfer(&mut statements);
                 let mut inner = self.emit_tree(body, scoped, phi_copies, targets);
-                inner.extend(self.emit_tree(header, scoped, phi_copies, targets));
+                let mut repeat = self.emit_tree(header, scoped, phi_copies, targets);
+                drop_stale_header_transfer(&mut repeat);
+                inner.extend(repeat);
                 statements.push(NativeStatement::While {
                     condition: self.condition_of(test, *body_taken),
                     body: inner,

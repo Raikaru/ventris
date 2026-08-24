@@ -449,6 +449,10 @@ impl<'a> Graph<'a> {
         if self.nodes[node].successors.len() != 1 {
             return false;
         }
+        // A construct that always jumps has no fallthrough to concatenate onto.
+        if ends_in_transfer(&self.nodes[node].body) {
+            return false;
+        }
         let next = self.nodes[node].successors[0];
         if next == node {
             return false;
@@ -476,6 +480,10 @@ impl<'a> Graph<'a> {
     /// A two-way branch whose clauses each rejoin at one place.
     fn rule_if_else(&mut self, node: NodeId) -> bool {
         if self.nodes[node].successors.len() != 2 {
+            return false;
+        }
+        // A header that always jumps never reaches its own test.
+        if ends_in_transfer(&self.nodes[node].body) {
             return false;
         }
         let (taken, fallthrough) = (
@@ -511,6 +519,10 @@ impl<'a> Graph<'a> {
     /// A two-way branch where one side is a clause that rejoins the other.
     fn rule_if_no_exit(&mut self, node: NodeId) -> bool {
         if self.nodes[node].successors.len() != 2 {
+            return false;
+        }
+        // A header that always jumps never reaches its own test.
+        if ends_in_transfer(&self.nodes[node].body) {
             return false;
         }
         let (taken, fallthrough) = (
@@ -1322,5 +1334,30 @@ mod tests {
                 Structured::IfElse { else_body, .. } if else_body.is_some() == with_else
             )
         })
+    }
+}
+
+/// Whether a recovered construct's flow always leaves through a jump.
+///
+/// A construct that ends in an unconditional transfer has no fallthrough, so
+/// nothing may be concatenated after it and it cannot serve as the header of a
+/// construct that then evaluates a test. Ignoring this produced an `if` printed
+/// directly after a `goto`, which claims flow that does not exist.
+fn ends_in_transfer(node: &Structured) -> bool {
+    match node {
+        Structured::Goto { .. } => true,
+        Structured::List(members) => members.last().is_some_and(ends_in_transfer),
+        Structured::IfElse {
+            then_body,
+            else_body,
+            ..
+        } => else_body
+            .as_ref()
+            .is_some_and(|other| ends_in_transfer(then_body) && ends_in_transfer(other)),
+        Structured::Basic(_)
+        | Structured::IfGoto { .. }
+        | Structured::WhileDo { .. }
+        | Structured::DoWhile { .. }
+        | Structured::InfLoop { .. } => false,
     }
 }
