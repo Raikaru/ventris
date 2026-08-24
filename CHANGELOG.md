@@ -89,6 +89,12 @@ All notable Ventris changes are documented here.
   Names belong to variables rather than SSA values, a merged variable is
   declared once at function scope, and writes to it are assignments rather than
   redeclarations.
+- Added cast placement, ported from `ActionSetCasts` and `CastStrategyC`: a cast
+  is emitted only where C would not perform the conversion itself. Integer
+  widening and signedness changes, and testing any scalar as a condition, are
+  implicit; crossing between integers and pointers, changing a pointer's target,
+  and float conversions are spelled. A value already recovered as a pointer no
+  longer carries `(uintptr_t)` at every dereference.
 
 - Added `LiftedInstruction::skips_delay_slot`, which reports the MIPS
   likely-branch shape so consumers stop treating its sequential successor as

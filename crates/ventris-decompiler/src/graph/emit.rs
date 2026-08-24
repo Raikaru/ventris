@@ -41,7 +41,7 @@ pub fn emit_with_types(
     types: &Types,
 ) -> Vec<NativeStatement> {
     let naming = mark_explicit_with(data, merge_required(data));
-    let resolver = Resolver::new(data, &naming, register_name);
+    let resolver = Resolver::with_types(data, &naming, register_name, types);
     Emitter {
         data,
         naming: &naming,
@@ -206,7 +206,9 @@ impl Emitter<'_> {
                     return Emission::Skip;
                 };
                 Emission::Body(NativeStatement::Store {
-                    address: self.resolver.resolve(address),
+                    address: self
+                        .resolver
+                        .as_address(address, self.resolver.resolve(address)),
                     value: self.resolver.resolve(value),
                     width: self.data.varnode(value).size,
                     volatile: false,

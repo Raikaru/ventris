@@ -344,10 +344,23 @@ fn render_store_clause(address: &Expr, value: &Expr, width: u32, volatile: bool)
 fn render_memory_lvalue(address: &Expr, width: u32, volatile: bool) -> String {
     let ty = render_type(&Type::from_width(width));
     let qualifier = if volatile { "volatile " } else { "" };
-    format!(
-        "*({qualifier}{ty} *)(uintptr_t)({})",
-        render_expr(address, 0)
-    )
+    // A value already typed as a pointer is already an address. Spelling the
+    // integer conversion again is noise on every memory access.
+    let integer = if is_pointer_expression(address) {
+        ""
+    } else {
+        "(uintptr_t)"
+    };
+    format!("*({qualifier}{ty} *){integer}({})", render_expr(address, 0))
+}
+
+/// Whether an expression already has pointer type, so no conversion is needed.
+fn is_pointer_expression(value: &Expr) -> bool {
+    match value {
+        Expr::Cast { ty, .. } | Expr::Typed { ty, .. } => matches!(ty, Type::Pointer(_)),
+        Expr::Binary { left, .. } => is_pointer_expression(left),
+        _ => false,
+    }
 }
 
 fn render_memory_store(
@@ -474,8 +487,13 @@ fn render_expr(value: &Expr, parent_precedence: u8) -> String {
             if let Expr::Constant { value, .. } = address.as_ref() {
                 render_global_name("", *value)
             } else {
+                let integer = if is_pointer_expression(address) {
+                    ""
+                } else {
+                    "(uintptr_t)"
+                };
                 format!(
-                    "*({} *)(uintptr_t)({})",
+                    "*({} *){integer}({})",
                     render_type(&Type::from_width(*width)),
                     render_expr(address, 0)
                 )

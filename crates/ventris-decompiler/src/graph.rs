@@ -17,6 +17,7 @@
 //! `funcdata_op.cc` at commit `8b4c91d4d5bd1549622bfbade0df199585b98365`.
 
 pub mod action;
+pub mod casts;
 pub mod deadcode;
 pub mod emit;
 pub mod guard;

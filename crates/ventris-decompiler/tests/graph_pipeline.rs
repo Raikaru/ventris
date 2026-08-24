@@ -208,3 +208,18 @@ fn a_merged_variable_needs_no_self_assignment() {
         }
     }
 }
+
+#[test]
+fn a_pointer_valued_address_carries_no_integer_conversion() {
+    // Every memory access used to render as `*(T *)(uintptr_t)(x)` even when
+    // `x` was already recovered as a pointer.
+    let source = render_via_graph(GET_BUILT_IN_TEXTURE, 0x124fa8);
+    assert!(
+        source.contains(" *)("),
+        "no memory access was emitted\n{source}"
+    );
+    assert!(
+        !source.contains("*)(uintptr_t)("),
+        "a pointer-valued address still carries an integer conversion\n{source}"
+    );
+}

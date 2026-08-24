@@ -39,6 +39,12 @@ pub struct Types {
 }
 
 impl Types {
+    /// A shared empty set, for callers with no recovered types.
+    pub fn empty_ref() -> &'static Self {
+        static EMPTY: std::sync::LazyLock<Types> = std::sync::LazyLock::new(Types::default);
+        &EMPTY
+    }
+
     pub fn get(&self, value: VarnodeId) -> Option<&Type> {
         self.types.get(&value)
     }

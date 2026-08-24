@@ -22,7 +22,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use ventris_pcode::op;
 
+use super::casts::needs_cast;
 use super::merge::{HighId, HighVariables, merge_required};
+use super::types::Types;
 use super::{Funcdata, OpId, VarnodeId};
 use crate::native::{BinaryOp, Expr, NativeStatement, Type};
 
@@ -119,6 +121,7 @@ pub struct Resolver<'a> {
     data: &'a Funcdata,
     naming: &'a Naming,
     register_name: &'a dyn Fn(u32, u64, u32) -> Option<String>,
+    types: &'a Types,
 }
 
 impl<'a> Resolver<'a> {
@@ -127,11 +130,30 @@ impl<'a> Resolver<'a> {
         naming: &'a Naming,
         register_name: &'a dyn Fn(u32, u64, u32) -> Option<String>,
     ) -> Self {
+        Self::with_types(data, naming, register_name, Types::empty_ref())
+    }
+
+    /// A resolver that consults recovered types when placing casts.
+    pub fn with_types(
+        data: &'a Funcdata,
+        naming: &'a Naming,
+        register_name: &'a dyn Fn(u32, u64, u32) -> Option<String>,
+        types: &'a Types,
+    ) -> Self {
         Self {
             data,
             naming,
             register_name,
+            types,
         }
+    }
+
+    /// The recovered type of a value, or what its storage width implies.
+    fn type_of(&self, value: VarnodeId) -> Type {
+        self.types
+            .get(value)
+            .cloned()
+            .unwrap_or_else(|| Type::Unsigned(self.data.varnode(value).size.saturating_mul(8)))
     }
 
     /// The expression for a value at a use site.
@@ -197,6 +219,21 @@ impl<'a> Resolver<'a> {
         }
     }
 
+    /// Marks an address expression with its recovered pointer type.
+    ///
+    /// The printer converts an integer to a pointer when it dereferences one.
+    /// Carrying the recovered type here lets it skip that conversion for a
+    /// value that is already a pointer.
+    pub fn as_address(&self, value: VarnodeId, expression: Expr) -> Expr {
+        match self.type_of(value) {
+            ty @ Type::Pointer(_) => Expr::Typed {
+                ty,
+                value: Box::new(expression),
+            },
+            _ => expression,
+        }
+    }
+
     fn translate(&self, def: OpId, active: &mut BTreeSet<VarnodeId>) -> Option<Expr> {
         let op = self.data.op(def);
         let mut input = |slot: usize| -> Option<Expr> {
@@ -239,21 +276,32 @@ impl<'a> Resolver<'a> {
             op::BOOL_AND => Some(binary(BinaryOp::LogicalAnd, input(0)?, input(1)?)),
             op::BOOL_OR => Some(binary(BinaryOp::LogicalOr, input(0)?, input(1)?)),
             op::INT_ZEXT | op::INT_SEXT => {
-                let width = self.data.varnode(op.output?).size;
+                let output = op.output?;
+                let width = self.data.varnode(output).size;
                 let ty = if op.opcode == op::INT_SEXT {
                     Type::Signed(width.saturating_mul(8))
                 } else {
                     Type::Unsigned(width.saturating_mul(8))
                 };
+                let operand = op.inputs.first().copied()?;
+                let value = input(0)?;
+                // An extension between integers is what C does on assignment.
+                // Spelling it repeats the destination's declared type.
+                if !needs_cast(&self.type_of(operand), &ty) {
+                    return Some(value);
+                }
                 Some(Expr::Cast {
                     ty,
-                    value: Box::new(input(0)?),
+                    value: Box::new(value),
                 })
             }
-            op::LOAD => Some(Expr::Load {
-                address: Box::new(input(1)?),
-                width: self.data.varnode(op.output?).size,
-            }),
+            op::LOAD => {
+                let operand = op.inputs.get(1).copied()?;
+                Some(Expr::Load {
+                    address: Box::new(self.as_address(operand, input(1)?)),
+                    width: self.data.varnode(op.output?).size,
+                })
+            }
             _ => None,
         }
     }
