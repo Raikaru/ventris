@@ -19,6 +19,7 @@
 pub mod guard;
 pub mod heritage;
 pub mod refine;
+pub mod value;
 
 use std::collections::{BTreeMap, BTreeSet};
 

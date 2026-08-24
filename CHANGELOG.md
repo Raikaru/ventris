@@ -29,6 +29,12 @@ All notable Ventris changes are documented here.
   `MULTIEQUAL` operations at joins, and renaming that rewrites every read to the
   definition dominating it. An undefined read becomes a function input rather
   than a bare register name.
+- Added graph value resolution, ported from `ActionMarkExplicit` and
+  `PrintC::pushVn`: a read resolves by following its definition edge, a value
+  with several readers or an unduplicatable definition is named and declared,
+  and a merged value is named with one assignment per incoming path instead of
+  being dropped. Resolution is order-independent, so a definition below its use
+  is found.
 
 - Added `LiftedInstruction::skips_delay_slot`, which reports the MIPS
   likely-branch shape so consumers stop treating its sequential successor as
