@@ -193,6 +193,18 @@ pub struct LiftedInstruction {
     pub embedded_delay_slot_bytes: u32,
 }
 
+impl LiftedInstruction {
+    /// Whether the instruction conditionally skips its own delay slot.
+    ///
+    /// MIPS likely-branches execute the delay slot only when the branch is
+    /// taken. Consumers that treat a sequential fallthrough as implicit must
+    /// ask, because here the sequential successor is an explicit branch target.
+    pub fn skips_delay_slot(&self) -> bool {
+        let sequential = self.address.wrapping_add(u64::from(self.pcode.len));
+        skips_to_fallthrough(&self.pcode.ops, sequential)
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct NativeFunction {
     pub entry: u64,
@@ -492,6 +504,21 @@ impl Lifter for Ppc64 {
 #[derive(Copy, Clone, Debug, Default)]
 pub struct GameCube;
 
+/// Whether the instruction conditionally skips straight to its own successor.
+///
+/// MIPS likely-branches (`beql`, `bnel`, `bgtzl`, …) execute their delay slot
+/// only when the branch is taken, which SLEIGH expresses as a `CBRANCH` to the
+/// following instruction followed by an unconditional `BRANCH`.
+fn skips_to_fallthrough(operations: &[PcodeOp], fallthrough: u64) -> bool {
+    operations.iter().any(|operation| {
+        operation.opcode == op::CBRANCH
+            && operation
+                .inputs
+                .first()
+                .is_some_and(|target| target.space != CONST_SPACE && target.offset == fallthrough)
+    })
+}
+
 fn sleigh_flow(address: u64, length: u32, operations: &[PcodeOp]) -> Flow {
     let fallthrough = address.wrapping_add(u64::from(length));
     for operation in operations.iter().rev() {
@@ -511,6 +538,16 @@ fn sleigh_flow(address: u64, length: u32, operations: &[PcodeOp]) -> Flow {
                 if let Some(target) = target
                     .filter(|target| target.space != CONST_SPACE && target.offset != fallthrough)
                 {
+                    // A likely-branch guards its own delay slot: the language
+                    // emits `if (!cond) goto next` before the unconditional
+                    // branch. Reporting only the branch would delete the
+                    // not-taken successor from the control-flow graph.
+                    if skips_to_fallthrough(operations, fallthrough) {
+                        return Flow::Conditional {
+                            target: target.offset,
+                            fallthrough,
+                        };
+                    }
                     return Flow::Jump(target.offset);
                 }
             }

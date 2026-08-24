@@ -526,12 +526,14 @@ def _source_declarations(source: str, function_name: str) -> list[str]:
     return declarations
 
 def _source_declaration_order(source: str, function_name: str) -> list[str]:
-    # Materialized call results preserve single evaluation but are renderer
-    # implementation details, not recovered source declaration evidence.
+    # Materialized call results and memory snapshots preserve evaluation order
+    # but are renderer implementation details, not recovered source declaration
+    # evidence. A snapshot exists because a store would otherwise change what a
+    # later read observes; the original source names no such variable.
     return [
         name
         for name in _source_declarations(source, function_name)
-        if re.fullmatch(r"call_[0-9a-f]+", name) is None
+        if re.fullmatch(r"(?:call|mem)_[0-9a-f]+(?:_\d+)?", name) is None
     ]
 
 

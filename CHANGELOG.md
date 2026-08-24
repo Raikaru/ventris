@@ -6,6 +6,13 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- Added `LiftedInstruction::skips_delay_slot`, which reports the MIPS
+  likely-branch shape so consumers stop treating its sequential successor as
+  implicit.
+- Added a `declaration-narrowing` action rule: a temporary that every use
+  narrows is declared at the narrow type instead.
+- Added PS2 retail regressions pinned to real Dungeon Game bytes covering
+  memory ordering, likely-branch flow, and merge points.
 - Added the Apache-2.0 R5900 language and routed the PS2 target to it. The
   generic MIPS64 language cannot decode the R5900's multimedia or COP2/VU
   macro-mode instructions.
@@ -18,6 +25,25 @@ All notable Ventris changes are documented here.
 
 ### Fixed
 
+- A value read before a store is now read once, before it. A definition holding
+  a load that a following store may overwrite is captured in a named temporary,
+  so `p->count++` no longer returns the incremented value where the program
+  returns the original.
+- MIPS likely-branches (`beql`, `bnel`, `bgtzl`, …) keep both successors. They
+  were lifted as unconditional jumps, which deleted the not-taken path and
+  truncated any function whose last branch was likely: `getBuiltInTexture` was
+  discovered 12 bytes short and jumped to a label that was never emitted.
+- A label reached from several blocks now keeps only the values every
+  predecessor agrees on. Carrying one path's value made four of five
+  comparisons in `getBuiltInTexture` test the wrong string and made the
+  function claim one path's return value unconditionally.
+- Casts that restate a value's own type are dropped, halving the cast count of
+  an ordinary field read.
+- Constant offsets fold through a truncating cast, since truncation commutes
+  with addition; `(uint32_t)(sp - 0x40) + 0x40` is `sp`.
+- A return register the function never writes is no longer reported as the
+  return value: an untouched register holds the incoming argument, not a
+  result.
 - Derived PS2 register offsets, register names, and O32 argument slots from the
   R5900 language. The previous MIPS64 stride misidentified every argument and
   return register, which silently disabled PS2 type recovery.

@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+
 use super::*;
 
 const DEFAULT_ITERATION_CAP: usize = 16;
@@ -17,6 +19,7 @@ pub(super) enum ActionRuleKind {
     DeadTemporaryAssignmentElimination,
     BranchConditionSimplification,
     ConsecutiveLabelGotoCleanup,
+    DeclarationNarrowing,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -61,6 +64,10 @@ impl ActionRule {
         Self::new(ActionRuleKind::ConsecutiveLabelGotoCleanup)
     }
 
+    pub(super) const fn declaration_narrowing() -> Self {
+        Self::new(ActionRuleKind::DeclarationNarrowing)
+    }
+
     pub(super) const fn name(self) -> &'static str {
         match self.kind {
             ActionRuleKind::ConstantFolding => "constant-folding",
@@ -73,6 +80,7 @@ impl ActionRule {
             }
             ActionRuleKind::BranchConditionSimplification => "branch-condition-simplification",
             ActionRuleKind::ConsecutiveLabelGotoCleanup => "consecutive-label-goto-cleanup",
+            ActionRuleKind::DeclarationNarrowing => "declaration-narrowing",
         }
     }
 
@@ -94,6 +102,7 @@ impl ActionRule {
             }
             ActionRuleKind::BranchConditionSimplification => simplify_branch_conditions(statements),
             ActionRuleKind::ConsecutiveLabelGotoCleanup => cleanup_labels_and_gotos(statements),
+            ActionRuleKind::DeclarationNarrowing => narrow_declarations_to_used_width(statements),
         }
     }
 }
@@ -194,7 +203,10 @@ impl ActionDatabase {
         ));
         database.add_group(ActionGroup::fixed_point(
             "temporary-cleanup",
-            vec![ActionRule::dead_temporary_assignment_elimination()],
+            vec![
+                ActionRule::dead_temporary_assignment_elimination(),
+                ActionRule::declaration_narrowing(),
+            ],
             DEFAULT_ITERATION_CAP,
         ));
         database.add_group(ActionGroup::fixed_point(
@@ -273,14 +285,171 @@ impl Default for ActionDatabase {
     }
 }
 
+/// Narrows a declared temporary to the width every use asks for.
+///
+/// A 32-bit result computed in a 64-bit register is declared wide and narrowed
+/// again at each use, which reads as two casts stating one fact. When every use
+/// applies the same narrowing cast, the declaration can carry that type and all
+/// the casts disappear. A bare use, or two uses that disagree, blocks the
+/// rewrite because the wide value is then observable.
+fn narrow_declarations_to_used_width(statements: &mut Vec<NativeStatement>) -> bool {
+    let mut candidates = BTreeMap::new();
+    collect_wide_declarations(statements, &mut candidates);
+    if candidates.is_empty() {
+        return false;
+    }
+    // The traversal is bottom-up, so a temporary is visited both on its own and
+    // again inside its parent cast. Counting instead of flagging keeps the
+    // decision independent of visit order: every use must be a narrowing cast.
+    let uses = RefCell::new(BTreeMap::<String, (usize, usize, Option<Type>)>::new());
+    rewrite_statement_expressions(statements, |value: Expr| {
+        walk_expr(value, &mut |value| {
+            if let Expr::Cast { ty, value: inner } = &value
+                && let Expr::Temporary { name, .. } = inner.as_ref()
+                && candidates.contains_key(name)
+                && matches!(ty, Type::Signed(bits) | Type::Unsigned(bits) if *bits < 64)
+            {
+                let mut uses = uses.borrow_mut();
+                let entry = uses.entry(name.clone()).or_insert((0, 0, None));
+                if entry.1 == 0 {
+                    entry.2 = Some(ty.clone());
+                } else if entry.2.as_ref() != Some(ty) {
+                    entry.2 = None;
+                }
+                entry.1 += 1;
+                return value;
+            }
+            if let Expr::Temporary { name, .. } = &value
+                && candidates.contains_key(name)
+            {
+                let mut uses = uses.borrow_mut();
+                uses.entry(name.clone()).or_insert((0, 0, None)).0 += 1;
+            }
+            value
+        })
+    });
+    let chosen = uses
+        .into_inner()
+        .into_iter()
+        .filter_map(|(name, (total, narrowed, ty))| {
+            (total > 0 && total == narrowed)
+                .then_some(ty)
+                .flatten()
+                .map(|ty| (name, ty))
+        })
+        .collect::<BTreeMap<_, _>>();
+    if chosen.is_empty() {
+        return false;
+    }
+    let mut changed = rewrite_statement_expressions(statements, |value: Expr| {
+        walk_expr(value, &mut |value| match value {
+            Expr::Cast { ty, value: inner }
+                if matches!(inner.as_ref(), Expr::Temporary { name, .. }
+                    if chosen.get(name) == Some(&ty)) =>
+            {
+                match *inner {
+                    Expr::Temporary { name, .. } => Expr::Temporary {
+                        name,
+                        width: type_width(&ty),
+                    },
+                    inner => inner,
+                }
+            }
+            value => value,
+        })
+    });
+    changed |= retype_narrowed_declarations(statements, &chosen);
+    changed
+}
+
+fn collect_wide_declarations(
+    statements: &[NativeStatement],
+    candidates: &mut BTreeMap<String, Type>,
+) {
+    for statement in statements {
+        match statement {
+            NativeStatement::Declare { name, ty, value } => {
+                if matches!(ty, Type::Signed(64) | Type::Unsigned(64))
+                    && matches!(value, Expr::Cast { ty: cast_ty, .. } if cast_ty == ty)
+                {
+                    candidates.insert(name.clone(), ty.clone());
+                }
+            }
+            NativeStatement::IfElse {
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_wide_declarations(then_body, candidates);
+                collect_wide_declarations(else_body, candidates);
+            }
+            NativeStatement::While { body, .. }
+            | NativeStatement::DoWhile { body, .. }
+            | NativeStatement::For { body, .. } => {
+                collect_wide_declarations(body, candidates);
+            }
+            NativeStatement::Switch { cases, default, .. } => {
+                for (_, body) in cases {
+                    collect_wide_declarations(body, candidates);
+                }
+                collect_wide_declarations(default, candidates);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn retype_narrowed_declarations(
+    statements: &mut [NativeStatement],
+    chosen: &BTreeMap<String, Type>,
+) -> bool {
+    let mut changed = false;
+    for statement in statements {
+        match statement {
+            NativeStatement::Declare { name, ty, value } => {
+                if let Some(narrow) = chosen.get(name)
+                    && ty != narrow
+                {
+                    *ty = narrow.clone();
+                    if let Expr::Cast { value: inner, .. } = value {
+                        *value = (**inner).clone();
+                    }
+                    changed = true;
+                }
+            }
+            NativeStatement::IfElse {
+                then_body,
+                else_body,
+                ..
+            } => {
+                changed |= retype_narrowed_declarations(then_body, chosen);
+                changed |= retype_narrowed_declarations(else_body, chosen);
+            }
+            NativeStatement::While { body, .. }
+            | NativeStatement::DoWhile { body, .. }
+            | NativeStatement::For { body, .. } => {
+                changed |= retype_narrowed_declarations(body, chosen);
+            }
+            NativeStatement::Switch { cases, default, .. } => {
+                for (_, body) in cases {
+                    changed |= retype_narrowed_declarations(body, chosen);
+                }
+                changed |= retype_narrowed_declarations(default, chosen);
+            }
+            _ => {}
+        }
+    }
+    changed
+}
+
 /// Run the default action database over a native statement stream.
 pub(super) fn run_action_database(statements: Vec<NativeStatement>) -> Vec<NativeStatement> {
     ActionDatabase::default().run(statements).statements
 }
 
-fn rewrite_statement_expressions(
+fn rewrite_statement_expressions<R: FnMut(Expr) -> Expr + Copy>(
     statements: &mut Vec<NativeStatement>,
-    rewrite: fn(Expr) -> Expr,
+    rewrite: R,
 ) -> bool {
     let mut changed = false;
     for statement in statements {
@@ -289,9 +458,9 @@ fn rewrite_statement_expressions(
     changed
 }
 
-fn rewrite_statement_expressions_in_place(
+fn rewrite_statement_expressions_in_place<R: FnMut(Expr) -> Expr + Copy>(
     statement: &mut NativeStatement,
-    rewrite: fn(Expr) -> Expr,
+    mut rewrite: R,
 ) -> bool {
     let before = statement.clone();
     match statement {
@@ -667,6 +836,37 @@ fn simplify_algebraic_expr_local(value: Expr) -> Expr {
         };
     }
 
+    // Truncation commutes with addition: `(uint32_t)x + c` and
+    // `(uint32_t)(x + c)` are the same value modulo 2^32. Sinking the constant
+    // lets the offset chain below fold, which is what turns
+    // `(uint32_t)(sp - 0x40) + 0x40` back into `sp`.
+    if matches!(op, BinaryOp::Add | BinaryOp::Sub)
+        && let Some((_, outer_width)) = constant_parts(right.as_ref())
+        && let Expr::Cast {
+            ty: cast_ty,
+            value: inner,
+        } = left.as_ref()
+        && matches!(cast_ty, Type::Unsigned(_))
+        && type_width(cast_ty) == outer_width
+        && type_width(cast_ty) <= expression_width(inner)
+        && matches!(
+            inner.as_ref(),
+            Expr::Binary {
+                op: BinaryOp::Add | BinaryOp::Sub,
+                ..
+            }
+        )
+    {
+        return Expr::Cast {
+            ty: cast_ty.clone(),
+            value: Box::new(Expr::Binary {
+                op,
+                left: inner.clone(),
+                right,
+            }),
+        };
+    }
+
     // `x + c1 + c2` is one addition. PowerPC address arithmetic produces long
     // chains of these, and leaving them unfolded hides that an offset is zero.
     if matches!(op, BinaryOp::Add | BinaryOp::Sub)
@@ -1013,6 +1213,20 @@ pub(super) fn expression_width(value: &Expr) -> u32 {
     }
 }
 
+/// The type a value already carries, when it is unambiguous.
+fn natural_type(value: &Expr) -> Option<Type> {
+    match value {
+        Expr::Load { width, .. }
+        | Expr::Global { width, .. }
+        | Expr::Register { width, .. }
+        | Expr::Temporary { width, .. } => Some(Type::Unsigned(width.saturating_mul(8))),
+        Expr::Parameter { ty, .. } | Expr::Typed { ty, .. } | Expr::Cast { ty, .. } => {
+            Some(ty.clone())
+        }
+        _ => None,
+    }
+}
+
 fn is_pure_expr(value: &Expr) -> bool {
     match value {
         Expr::Constant { .. }
@@ -1061,6 +1275,11 @@ fn copy_cast_cleanup_expr(value: Expr) -> Expr {
 
 fn copy_cast_cleanup_expr_local(value: Expr) -> Expr {
     match value {
+        // A cast to the type a value already carries says nothing. Keeping it
+        // triples the cast count of an ordinary field read.
+        Expr::Cast { ref ty, ref value } if natural_type(value).as_ref() == Some(ty) => {
+            (**value).clone()
+        }
         Expr::Cast { ty, value } => match *value {
             Expr::Cast {
                 ty: inner_ty,
@@ -1613,7 +1832,7 @@ fn direct_temporary_definition(statement: &NativeStatement) -> Option<String> {
     }
 }
 
-fn statement_temporary_uses(statement: &NativeStatement) -> BTreeSet<String> {
+pub(super) fn statement_temporary_uses(statement: &NativeStatement) -> BTreeSet<String> {
     let mut uses = BTreeSet::new();
     match statement {
         NativeStatement::Store { address, value, .. } => {
@@ -2068,6 +2287,80 @@ mod tests {
             width,
             volatile: false,
         }
+    }
+
+    #[test]
+    fn a_cast_restating_a_value_s_own_type_is_dropped() {
+        let load = Expr::Load {
+            address: Box::new(temporary("u_1", 4)),
+            width: 4,
+        };
+        let restated = Expr::Cast {
+            ty: Type::Unsigned(32),
+            value: Box::new(load.clone()),
+        };
+        assert_eq!(copy_cast_cleanup_expr(restated), load);
+    }
+
+    #[test]
+    fn a_narrowing_cast_of_a_value_is_kept() {
+        let load = Expr::Load {
+            address: Box::new(temporary("u_1", 4)),
+            width: 4,
+        };
+        let narrowed = Expr::Cast {
+            ty: Type::Unsigned(8),
+            value: Box::new(load),
+        };
+        assert_eq!(copy_cast_cleanup_expr(narrowed.clone()), narrowed);
+    }
+
+    #[test]
+    fn a_wide_temporary_narrowed_at_every_use_is_declared_narrow() {
+        let mut statements = vec![
+            NativeStatement::Declare {
+                name: "mem_1000_0".into(),
+                ty: Type::Signed(64),
+                value: Expr::Cast {
+                    ty: Type::Signed(64),
+                    value: Box::new(temporary("u_1", 4)),
+                },
+            },
+            NativeStatement::Return(Some(Expr::Cast {
+                ty: Type::Unsigned(32),
+                value: Box::new(temporary("mem_1000_0", 8)),
+            })),
+        ];
+        assert!(narrow_declarations_to_used_width(&mut statements));
+        assert_eq!(
+            statements,
+            vec![
+                NativeStatement::Declare {
+                    name: "mem_1000_0".into(),
+                    ty: Type::Unsigned(32),
+                    value: temporary("u_1", 4),
+                },
+                NativeStatement::Return(Some(temporary("mem_1000_0", 4))),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_wide_temporary_used_bare_keeps_its_width() {
+        let declaration = NativeStatement::Declare {
+            name: "mem_1000_0".into(),
+            ty: Type::Signed(64),
+            value: Expr::Cast {
+                ty: Type::Signed(64),
+                value: Box::new(temporary("u_1", 4)),
+            },
+        };
+        let mut statements = vec![
+            declaration.clone(),
+            NativeStatement::Return(Some(temporary("mem_1000_0", 8))),
+        ];
+        assert_eq!(narrow_declarations_to_used_width(&mut statements), false);
+        assert_eq!(statements[0], declaration);
     }
 
     /// Builds PowerPC's condition-register field for `left` versus `right`.

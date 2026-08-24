@@ -45,15 +45,20 @@ silently regressing behind a global average.
 
 `tools/quality_census.py` measures the remaining distance to Ghidra's
 decompiler across every hash-verified corpus function and ranks the differences
-by how many functions each affects. On the 37 currently verified functions, 9
-show no classified difference. No function still renders a comparison as a
-condition-register bit-field chain.
+by how many functions each affects. It drives the same public `decompile`
+command a user runs, and supplies no metadata, so both sides rely on their own
+inference.
 
-The dominant remaining defect is loop recovery: 22 functions lose a loop or
-switch that Ghidra recovers. The loop reducer itself is not at fault — it
-reduces the same loops in isolation — but it requires a single-entry,
-single-exit region, so one forward branch past a loop keeps a whole function in
-label-and-goto form.
+On the 37 currently verified functions, 17 show no classified difference,
+including 8 of the 10 PS2 functions. The dominant remaining defect is loop
+recovery: 22 functions lose a loop or switch that Ghidra recovers. The loop
+reducer itself is not at fault — it reduces the same loops in isolation — but it
+requires a single-entry, single-exit region, so one forward branch past a loop
+keeps a whole function in label-and-goto form.
+
+The next measured gap after that is frame-local recovery: stack slots are still
+rendered as `sp`-relative memory rather than named locals, which accounts for
+the remaining cast differences.
 
 ## CLI
 

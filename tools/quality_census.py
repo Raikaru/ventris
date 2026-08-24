@@ -145,10 +145,13 @@ def read_manifest(ventris: str) -> list[dict]:
 
 
 def render_ventris(ventris: str, target: Target, limit: int) -> tuple[str | None, str | None]:
+    # The public `decompile` command is what a user runs: load, lift, analyze,
+    # and render. Measuring the internal raw-render stage instead would report
+    # missing type recovery that the product already performs. No metadata is
+    # supplied, so both sides rely on their own inference.
     args = [
         ventris,
-        "__internal",
-        "decompile-native",
+        "decompile",
         os.fspath(target.image),
         target.qualified_address,
         "--target",
@@ -158,7 +161,7 @@ def render_ventris(ventris: str, target: Target, limit: int) -> tuple[str | None
         "--json",
     ]
     if target.base is not None:
-        args[5:5] = ["--base", f"0x{target.base:x}"]
+        args[4:4] = ["--base", f"0x{target.base:x}"]
     completed = subprocess.run(args, capture_output=True, text=True, check=False)
     try:
         payload = json.loads(completed.stdout)
@@ -252,6 +255,34 @@ def call_names(source: str) -> Counter:
     )
 
 
+def function_signature(source: str) -> str | None:
+    """Finds the rendered function signature, ignoring types and comments.
+
+    Both renderers emit type declarations and comments before the function, and
+    Ghidra writes calling conventions and qualified names into the signature. A
+    depth-aware scan for the last top-level declaration line is the only form
+    that reads both.
+    """
+    depth = 0
+    candidate = None
+    for line in source.splitlines():
+        stripped = line.strip()
+        if (
+            depth == 0
+            and "(" in stripped
+            and not stripped.startswith(("/*", "*", "//", "#"))
+            and not stripped.endswith(";")
+        ):
+            candidate = stripped
+        depth += line.count("{") - line.count("}")
+    return candidate
+
+
+def returns_void(source: str) -> bool:
+    signature = function_signature(source)
+    return signature is not None and re.match(r"void\b", signature) is not None
+
+
 def cast_count(source: str) -> int:
     return len(
         re.findall(
@@ -333,8 +364,8 @@ def classify(row: Row) -> None:
     if ours_calls != theirs_calls:
         row.findings.append(Finding("call-census", f"{ours_calls} vs {theirs_calls}"))
 
-    ours_void = bool(re.search(r"^\s*void\s+\w+\s*\(", ours, re.MULTILINE))
-    theirs_void = bool(re.search(r"^\s*void\s+\w+\s*\(", theirs, re.MULTILINE))
+    ours_void = returns_void(ours)
+    theirs_void = returns_void(theirs)
     if ours_void != theirs_void:
         row.findings.append(
             Finding(

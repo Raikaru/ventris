@@ -1478,21 +1478,37 @@ impl NativeDecompiler {
             solver.constrain(constraint.value, constraint.ty.clone());
         }
         let types = solver.solve();
+        // A likely-branch reports a non-sequential fallthrough: the block it
+        // skips to needs a label because the emitted `if` jumps there, even
+        // though it is the next address.
         let labels: BTreeSet<u64> = function
             .instructions
-            .values()
-            .filter_map(|instruction| match instruction.flow {
-                ventris_lifter::Flow::Jump(target)
-                | ventris_lifter::Flow::Conditional { target, .. } => Some(target),
-                ventris_lifter::Flow::FallThrough(_)
-                | ventris_lifter::Flow::Return
-                | ventris_lifter::Flow::Call { .. } => None,
+            .iter()
+            .flat_map(|(address, instruction)| {
+                let sequential = address.wrapping_add(u64::from(instruction.pcode.len));
+                match instruction.flow {
+                    ventris_lifter::Flow::Jump(target) => vec![target],
+                    ventris_lifter::Flow::Conditional {
+                        target,
+                        fallthrough,
+                    } => {
+                        if fallthrough == sequential && !instruction.skips_delay_slot() {
+                            vec![target]
+                        } else {
+                            vec![target, fallthrough]
+                        }
+                    }
+                    ventris_lifter::Flow::FallThrough(_)
+                    | ventris_lifter::Flow::Return
+                    | ventris_lifter::Flow::Call { .. } => Vec::new(),
+                }
             })
             .collect();
         let mut definitions: BTreeMap<ValueKey, Expr> = BTreeMap::new();
         if let Some(abi) = abi {
             seed_abi_parameters(&mut definitions, architecture, abi);
         }
+        let live_reads = LiveReads::of(function);
         let mut statements = Vec::new();
         let mut warnings = Vec::new();
         let mut prologue_state = PrologueState::default();
@@ -1501,11 +1517,39 @@ impl NativeDecompiler {
         let mut returned = false;
         let mut value_returned = false;
         let mut inferred_return_type = None;
+        // A label reached from several blocks may see a different value in the
+        // same register on each path. Intersecting the incoming states keeps
+        // only the definitions every predecessor agrees on; anything else must
+        // fall back to the register, because inlining one path's value silently
+        // rewrites what the other paths compute.
+        let mut predecessors: BTreeMap<u64, usize> = BTreeMap::new();
+        for (_, target) in &function.edges {
+            *predecessors.entry(*target).or_default() += 1;
+        }
+        // Each contribution records where the predecessor's block ended, so a
+        // value that differs per path can be assigned there and merged into one
+        // named variable at the label.
+        let mut join_states: BTreeMap<u64, Vec<(usize, BTreeMap<ValueKey, Expr>)>> =
+            BTreeMap::new();
+        // Registers whose value cannot depend on which path reached a label:
+        // the frame registers, which every path must agree on, and any register
+        // the function never writes.
+        let mut stable_registers: BTreeSet<String> =
+            live_reads.unwritten_register_names(architecture);
+        if let Some(abi) = abi {
+            for name in [Some(abi.stack_pointer), abi.frame_pointer]
+                .into_iter()
+                .flatten()
+            {
+                stable_registers.insert(name.strip_prefix('$').unwrap_or(name).to_owned());
+            }
+        }
         for (address, instruction) in &function.instructions {
             if consumed_delay_slots.contains(address) {
                 continue;
             }
             if labels.contains(address) {
+                let mut handled_by_branch_join = false;
                 if let Some(index) = pending_definition_joins
                     .iter()
                     .rposition(|pending| pending.join == Some(*address))
@@ -1518,7 +1562,16 @@ impl NativeDecompiler {
                             &definitions,
                             &fallthrough,
                         );
+                        handled_by_branch_join = true;
                     }
+                }
+                if !handled_by_branch_join && predecessors.get(address).copied().unwrap_or(0) > 1 {
+                    definitions = merge_join_contributions(
+                        predecessors[address],
+                        join_states.get(address).map(Vec::as_slice).unwrap_or(&[]),
+                        &definitions,
+                        &stable_registers,
+                    );
                 }
                 if let Some(pending) = pending_definition_joins.iter_mut().rfind(|pending| {
                     pending.branch_target == *address && pending.fallthrough.is_none()
@@ -1555,6 +1608,7 @@ impl NativeDecompiler {
                                             abi,
                                             call_prototypes,
                                             &mut prologue_state,
+                                            &live_reads,
                                             delay_address,
                                             operation,
                                             &mut definitions,
@@ -1580,6 +1634,7 @@ impl NativeDecompiler {
                     abi,
                     call_prototypes,
                     &mut prologue_state,
+                    &live_reads,
                     *address,
                     operation,
                     &mut definitions,
@@ -1603,6 +1658,7 @@ impl NativeDecompiler {
                         abi,
                         &definitions,
                         operation.inputs.first().copied(),
+                        &live_reads,
                     );
                     if let Some(returned_value) = value.as_ref() {
                         let repeats_store = statements
@@ -1627,6 +1683,15 @@ impl NativeDecompiler {
                     statements.push(NativeStatement::Return(value));
                     returned = true;
                 }
+            }
+            for (source, target) in &function.edges {
+                if source != address || predecessors.get(target).copied().unwrap_or(0) <= 1 {
+                    continue;
+                }
+                join_states
+                    .entry(*target)
+                    .or_default()
+                    .push((statements.len(), definitions.clone()));
             }
         }
         if let Some(abi) = abi {
@@ -1654,6 +1719,7 @@ impl NativeDecompiler {
             };
             statements.push(NativeStatement::Return(Some(Expr::constant(0, width))));
         }
+        drop_unread_memory_snapshots(&mut statements);
         statements = structure::structure_graph(statements);
         statements = actions::run_action_database(statements);
         let parameters = recover_parameters(abi, &statements);
@@ -1688,6 +1754,7 @@ impl NativeDecompiler {
         abi: Option<&Abi>,
         call_prototypes: Option<&BTreeMap<u64, NativeCallPrototype>>,
         prologue_state: &mut PrologueState,
+        live_reads: &LiveReads,
         address: u64,
         operation: &PcodeOp,
         definitions: &mut BTreeMap<ValueKey, Expr>,
@@ -2073,6 +2140,7 @@ impl NativeDecompiler {
                 }
             }
             op::STORE => {
+                let instruction_address = address;
                 if let (Some(address), Some(value)) = (input(1), input(2)) {
                     let stack_backchain = abi.is_some_and(|abi| {
                         is_abi_stack_backchain_save(architecture, abi, &address, &value)
@@ -2101,6 +2169,20 @@ impl NativeDecompiler {
                         ) => (memory.is_volatile)(*address_value, width),
                         _ => false,
                     };
+                    // A pending definition that still reads memory must be
+                    // read before this store overwrites it. Re-materializing
+                    // the load after the store would silently return the new
+                    // value: the whole point of `iVar1 = *p; *p = iVar1 + 1;`
+                    // is that the two uses differ.
+                    materialize_loads_before_store(
+                        &address,
+                        width,
+                        architecture,
+                        instruction_address,
+                        live_reads,
+                        definitions,
+                        statements,
+                    );
                     let address = named_global(symbols, &address, width).unwrap_or(address);
                     let value = simplify(value);
                     if width > 8 {
@@ -2389,6 +2471,317 @@ fn invalidate_mips_o32_call_arguments(
     }
 }
 
+/// Whether a value is the same no matter which path reached it.
+///
+/// Constants, parameters, and globals do not depend on the path. A register
+/// does only if the function never writes it, or if it is a frame register,
+/// whose value every path must agree on for the function to return. Memory is
+/// excluded: any path may have stored to it.
+fn is_path_invariant(value: &Expr, stable_registers: &BTreeSet<String>) -> bool {
+    match value {
+        Expr::Constant { .. } | Expr::Parameter { .. } | Expr::Global { .. } => true,
+        Expr::Register { name, .. } => stable_registers.contains(name),
+        Expr::Temporary { .. } => false,
+        Expr::Binary { left, right, .. } => {
+            is_path_invariant(left, stable_registers) && is_path_invariant(right, stable_registers)
+        }
+        Expr::Not(inner) | Expr::Neg(inner) | Expr::BitNot(inner) => {
+            is_path_invariant(inner, stable_registers)
+        }
+        Expr::Cast { value, .. } | Expr::Typed { value, .. } => {
+            is_path_invariant(value, stable_registers)
+        }
+        Expr::Select {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            is_path_invariant(condition, stable_registers)
+                && is_path_invariant(when_true, stable_registers)
+                && is_path_invariant(when_false, stable_registers)
+        }
+        Expr::Load { .. } | Expr::Call { .. } | Expr::Builtin { .. } => false,
+    }
+}
+
+/// Merges the states flowing into one label, naming values that disagree.
+///
+/// Only a key every predecessor agrees on keeps its inlined value. A key whose
+/// value depends on the path is dropped, so a later use reads the register
+/// rather than one path's value.
+fn merge_join_contributions(
+    predecessor_count: usize,
+    contributions: &[(usize, BTreeMap<ValueKey, Expr>)],
+    incoming: &BTreeMap<ValueKey, Expr>,
+    stable_registers: &BTreeSet<String>,
+) -> BTreeMap<ValueKey, Expr> {
+    if contributions.len() != predecessor_count || contributions.is_empty() {
+        // Not every path has been translated yet, so a value that any path can
+        // change cannot be carried across. A value built only from the entry
+        // state survives: no path can alter it.
+        return incoming
+            .iter()
+            .filter(|(_, value)| is_path_invariant(value, stable_registers))
+            .map(|(key, value)| (*key, value.clone()))
+            .collect();
+    }
+    let (_, first) = &contributions[0];
+    first
+        .iter()
+        .filter(|(key, value)| {
+            contributions
+                .iter()
+                .all(|(_, state)| state.get(key) == Some(*value))
+        })
+        .map(|(key, value)| (*key, value.clone()))
+        .collect()
+}
+/// Prefix of the temporaries introduced to hold a value read before a store.
+const MEMORY_SNAPSHOT_PREFIX: &str = "mem_";
+
+/// Removes memory snapshots that nothing ended up reading.
+///
+/// A snapshot is only created because a store might overwrite the value. When
+/// the value turns out to be unread, the snapshot is pure bookkeeping: the load
+/// it holds is a plain read of the same address the neighbouring store already
+/// names, so dropping it removes a line without removing an observable effect.
+fn drop_unread_memory_snapshots(statements: &mut Vec<NativeStatement>) {
+    let mut referenced = BTreeSet::new();
+    for statement in statements.iter() {
+        let declared = match statement {
+            NativeStatement::Declare { name, .. } => Some(name.clone()),
+            _ => None,
+        };
+        let mut used = actions::statement_temporary_uses(statement);
+        if let Some(declared) = declared {
+            used.remove(&declared);
+        }
+        referenced.extend(used);
+    }
+    statements.retain(|statement| match statement {
+        NativeStatement::Declare { name, .. } => {
+            !name.starts_with(MEMORY_SNAPSHOT_PREFIX) || referenced.contains(name)
+        }
+        _ => true,
+    });
+}
+
+/// Where each varnode is still read, so a value is only named when it is used.
+///
+/// Materializing every memory-valued definition before a store would be
+/// correct but unreadable: most definitions are intermediates that nothing
+/// reads again. This records the highest address that reads each varnode, and
+/// whether the function can branch backwards, which makes any read reachable
+/// again.
+struct LiveReads {
+    last_read: BTreeMap<(u32, u64), u64>,
+    written: BTreeSet<(u32, u64)>,
+    has_back_edge: bool,
+}
+
+impl LiveReads {
+    fn of(function: &NativeFunction) -> Self {
+        let mut last_read = BTreeMap::new();
+        let mut written = BTreeSet::new();
+        for (address, instruction) in &function.instructions {
+            for operation in &instruction.pcode.ops {
+                for input in &operation.inputs {
+                    if input.space != REGISTER_SPACE {
+                        continue;
+                    }
+                    last_read
+                        .entry((input.space, input.offset))
+                        .and_modify(|previous: &mut u64| *previous = (*previous).max(*address))
+                        .or_insert(*address);
+                }
+                if let Some(output) = operation.output.filter(|o| o.space == REGISTER_SPACE) {
+                    written.insert((output.space, output.offset));
+                }
+            }
+        }
+        Self {
+            last_read,
+            written,
+            has_back_edge: function
+                .edges
+                .iter()
+                .any(|(source, target)| target <= source),
+        }
+    }
+
+    fn read_after(&self, key: &ValueKey, address: u64) -> bool {
+        self.last_read
+            .get(&(key.space, key.offset))
+            .is_some_and(|last| self.has_back_edge || *last > address)
+    }
+
+    /// Whether the function writes this varnode at all.
+    fn is_written(&self, value: &Varnode) -> bool {
+        self.written.contains(&(value.space, value.offset))
+    }
+
+    /// Names of registers the function never writes. Their value at any point
+    /// is the value on entry, so no path can disagree about them.
+    fn unwritten_register_names(&self, architecture: Architecture) -> BTreeSet<String> {
+        self.last_read
+            .keys()
+            .filter(|key| !self.written.contains(key))
+            .map(|(_, offset)| register_name(architecture, *offset))
+            .collect()
+    }
+}
+/// Splits `base + constant` so two addresses can be compared symbolically.
+fn address_base_and_offset(value: &Expr) -> (&Expr, u64) {
+    match value {
+        Expr::Binary {
+            op: BinaryOp::Add,
+            left,
+            right,
+        } => match right.as_ref() {
+            Expr::Constant { value, .. } => (left.as_ref(), *value),
+            _ => (value, 0),
+        },
+        value => (value, 0),
+    }
+}
+
+/// Whether a load at `load` could read bytes a store at `store` overwrites.
+///
+/// Only provable disjointness returns false. Two accesses off the same base at
+/// non-overlapping constant offsets are distinct fields; two different
+/// constant addresses are distinct globals. Everything else may alias.
+fn accesses_may_alias(load: &Expr, load_width: u32, store: &Expr, store_width: u32) -> bool {
+    let disjoint = |left: u64, left_width: u32, right: u64, right_width: u32| {
+        left.saturating_add(u64::from(left_width)) <= right
+            || right.saturating_add(u64::from(right_width)) <= left
+    };
+    if let (Expr::Constant { value: load, .. }, Expr::Constant { value: store, .. }) = (load, store)
+    {
+        return !disjoint(*load, load_width, *store, store_width);
+    }
+    let (load_base, load_offset) = address_base_and_offset(load);
+    let (store_base, store_offset) = address_base_and_offset(store);
+    if load_base == store_base {
+        return !disjoint(load_offset, load_width, store_offset, store_width);
+    }
+    true
+}
+
+fn expression_reads_memory(value: &Expr) -> bool {
+    match value {
+        Expr::Load { .. } => true,
+        Expr::Binary { left, right, .. } => {
+            expression_reads_memory(left) || expression_reads_memory(right)
+        }
+        Expr::Not(inner) | Expr::Neg(inner) | Expr::BitNot(inner) => expression_reads_memory(inner),
+        Expr::Cast { value, .. } | Expr::Typed { value, .. } => expression_reads_memory(value),
+        Expr::Select {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            expression_reads_memory(condition)
+                || expression_reads_memory(when_true)
+                || expression_reads_memory(when_false)
+        }
+        Expr::Call { args, .. } | Expr::Builtin { args, .. } => {
+            args.iter().any(expression_reads_memory)
+        }
+        _ => false,
+    }
+}
+
+/// Collects the loads inside `value` that `store` may overwrite.
+fn aliasing_loads(value: &Expr, store: &Expr, store_width: u32, found: &mut bool) {
+    match value {
+        Expr::Load { address, width } => {
+            if accesses_may_alias(address, *width, store, store_width) {
+                *found = true;
+            }
+            aliasing_loads(address, store, store_width, found);
+        }
+        Expr::Binary { left, right, .. } => {
+            aliasing_loads(left, store, store_width, found);
+            aliasing_loads(right, store, store_width, found);
+        }
+        Expr::Not(inner) | Expr::Neg(inner) | Expr::BitNot(inner) => {
+            aliasing_loads(inner, store, store_width, found);
+        }
+        Expr::Cast { value, .. } | Expr::Typed { value, .. } => {
+            aliasing_loads(value, store, store_width, found);
+        }
+        Expr::Select {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            aliasing_loads(condition, store, store_width, found);
+            aliasing_loads(when_true, store, store_width, found);
+            aliasing_loads(when_false, store, store_width, found);
+        }
+        Expr::Call { args, .. } | Expr::Builtin { args, .. } => {
+            for arg in args {
+                aliasing_loads(arg, store, store_width, found);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Reads pending memory-valued definitions into temporaries before a store.
+///
+/// A definition holding `*p` is inlined at its use sites. If a store to `p`
+/// intervenes, the inlined load reads the stored value instead of the value the
+/// program computed, which changes what the function returns.
+fn materialize_loads_before_store(
+    store_address: &Expr,
+    store_width: u32,
+    architecture: Architecture,
+    instruction_address: u64,
+    live_reads: &LiveReads,
+    definitions: &mut BTreeMap<ValueKey, Expr>,
+    statements: &mut Vec<NativeStatement>,
+) {
+    let mut pending = Vec::new();
+    let mut stale = Vec::new();
+    for (key, value) in definitions.iter() {
+        if !expression_reads_memory(value) {
+            continue;
+        }
+        let mut aliases = false;
+        aliasing_loads(value, store_address, store_width, &mut aliases);
+        if !aliases {
+            continue;
+        }
+        if live_reads.read_after(key, instruction_address) {
+            pending.push((*key, value.clone()));
+        } else {
+            stale.push(*key);
+        }
+    }
+    // A definition nothing reads again would only add an unused name, but it
+    // must not survive: a later re-materialization would read the stored value.
+    for key in stale {
+        definitions.remove(&key);
+    }
+    for (index, (key, value)) in pending.into_iter().enumerate() {
+        let name = format!("mem_{instruction_address:x}_{index}");
+        let ty = expression_type(&value, architecture);
+        statements.push(NativeStatement::Declare {
+            name: name.clone(),
+            ty,
+            value,
+        });
+        definitions.insert(
+            key,
+            Expr::Temporary {
+                name,
+                width: key.width,
+            },
+        );
+    }
+}
+
 fn named_global(
     symbols: Option<&dyn Fn(u64) -> Option<String>>,
     address: &Expr,
@@ -2600,9 +2993,25 @@ fn return_value(
     abi: Option<&Abi>,
     definitions: &BTreeMap<ValueKey, Expr>,
     explicit: Option<Varnode>,
+    live_reads: &LiveReads,
 ) -> Option<Expr> {
+    // A return register the function never writes still holds the incoming
+    // argument. Treating that as the return value invents a result out of an
+    // untouched register, which is how a `void` function grows a return type.
     let all_candidates = abi
         .map(|abi| abi_return_vnodes(architecture, abi))
+        .map(|candidates| {
+            let written = candidates
+                .iter()
+                .copied()
+                .filter(|candidate| live_reads.is_written(candidate))
+                .collect::<Vec<_>>();
+            if written.is_empty() {
+                candidates
+            } else {
+                written
+            }
+        })
         .filter(|candidates| !candidates.is_empty())
         .unwrap_or_else(|| vec![return_vnode(architecture)]);
     let explicit_candidate = explicit.and_then(|explicit| {
@@ -2614,6 +3023,18 @@ fn return_value(
     let candidates = explicit_candidate.map_or_else(
         || {
             abi.map(|abi| abi_primary_return_vnodes(architecture, abi))
+                .map(|candidates| {
+                    let written = candidates
+                        .iter()
+                        .copied()
+                        .filter(|candidate| live_reads.is_written(candidate))
+                        .collect::<Vec<_>>();
+                    if written.is_empty() {
+                        candidates
+                    } else {
+                        written
+                    }
+                })
                 .filter(|candidates| !candidates.is_empty())
                 .unwrap_or_else(|| vec![return_vnode(architecture)])
         },
