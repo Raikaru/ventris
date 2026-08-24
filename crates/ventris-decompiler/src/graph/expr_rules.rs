@@ -200,9 +200,24 @@ fn is_constant(data: &Funcdata, value: VarnodeId) -> bool {
 
 /// A newly allocated, unmarked varnode has no heritage proof; constants,
 /// inputs, and defined values are the graph's conservative approximation.
+/// `Varnode::isHeritageKnown`: the value is in the SSA form, either because
+/// something defines it, because it enters the function, or because it is a
+/// constant and so needs no definition.
 fn heritage_known(data: &Funcdata, value: VarnodeId) -> bool {
     let varnode = data.varnode(value);
     varnode.flags.constant || varnode.flags.input || varnode.def.is_some()
+}
+
+/// `Varnode::isFree`: neither written nor an input.
+///
+/// This is not the negation of [`heritage_known`], and confusing the two makes a
+/// rule fire where Ghidra refuses. A constant is heritage-known yet free, so a
+/// rule that declines on a free operand — because it is about to hoist that
+/// operand somewhere the definition may not reach — must test this predicate
+/// and not the other one.
+fn is_free(data: &Funcdata, value: VarnodeId) -> bool {
+    let varnode = data.varnode(value);
+    !(varnode.flags.written || varnode.flags.input)
 }
 
 fn def_opcode(data: &Funcdata, value: VarnodeId) -> Option<i32> {
@@ -254,7 +269,7 @@ impl Rule for RuleAddMultCollapse {
         let Some((inner_base, inner_const)) = inputs2(data, subop) else {
             return 0;
         };
-        if !heritage_known(data, inner_base) {
+        if is_free(data, inner_base) {
             return 0;
         }
         if !is_constant(data, inner_const) {
@@ -390,8 +405,11 @@ impl Rule for RuleShiftBitops {
         let Some(slot) = masked_out else {
             return 0;
         };
+        let Some(other) = data.op(bitop).inputs.get(1 - slot).copied() else {
+            return 0;
+        };
         if matches!(bitop_code, op::INT_ADD | op::INT_XOR | op::INT_OR)
-            && !heritage_known(data, data.op(bitop).inputs[1 - slot])
+            && !heritage_known(data, other)
         {
             return 0;
         }
@@ -910,7 +928,7 @@ impl Rule for RuleAndCompare {
             }
             _ => return 0,
         };
-        if !heritage_known(data, base) {
+        if is_free(data, base) {
             return 0;
         }
         if data.varnode(and_const).offset == calc_mask(data.varnode(compared).size) {
@@ -1006,7 +1024,7 @@ impl Rule for RuleShiftSub {
         let Some((input, shift_amount)) = inputs2(data, shift_id) else {
             return 0;
         };
-        if !heritage_known(data, input) {
+        if is_free(data, input) {
             return 0;
         }
         if !is_constant(data, shift_amount) || !is_constant(data, offset) {
@@ -1088,7 +1106,7 @@ impl Rule for RuleConcatShift {
         let Some((high, low)) = inputs2(data, concat_id) else {
             return 0;
         };
-        if !heritage_known(data, high) {
+        if is_free(data, high) {
             return 0;
         }
         let low_bits = u64::from(data.varnode(low).size) * 8;
@@ -1156,8 +1174,14 @@ impl Rule for RuleXorCollapse {
         let Some((left, right)) = inputs2(data, xor_id) else {
             return 0;
         };
+        if is_free(data, left) {
+            return 0;
+        }
         let coeff1 = data.varnode(compare_const).offset;
         if !is_constant(data, right) {
+            if is_free(data, right) {
+                return 0;
+            }
             if coeff1 != 0 {
                 return 0;
             }
@@ -1321,6 +1345,9 @@ impl Rule for RuleSLess2Zero {
                     let Some((base, offset)) = inputs2(data, feed) else {
                         return 0;
                     };
+                    if is_free(data, base) {
+                        return 0;
+                    }
                     if !is_constant(data, offset)
                         || data.varnode(base).size > 8
                         || u64::from(data.varnode(right).size)
@@ -1338,6 +1365,9 @@ impl Rule for RuleSLess2Zero {
                     let Some(value) = data.op(feed).inputs.first().copied() else {
                         return 0;
                     };
+                    if is_free(data, value) {
+                        return 0;
+                    }
                     let zero = data.new_constant(0, data.varnode(value).size);
                     data.op_set_inputs(id, vec![value, zero]);
                     return 1;
@@ -1346,6 +1376,9 @@ impl Rule for RuleSLess2Zero {
                     let Some((value, mask)) = inputs2(data, feed) else {
                         return 0;
                     };
+                    if is_free(data, value) {
+                        return 0;
+                    }
                     let sign = data
                         .varnode(value)
                         .size
@@ -1364,6 +1397,9 @@ impl Rule for RuleSLess2Zero {
                     let Some((high, _)) = inputs2(data, feed) else {
                         return 0;
                     };
+                    if is_free(data, high) {
+                        return 0;
+                    }
                     let full = data
                         .new_constant(calc_mask(data.varnode(high).size), data.varnode(high).size);
                     data.op_set_inputs(id, vec![full, high]);
@@ -1408,6 +1444,9 @@ impl Rule for RuleSLess2Zero {
                     let Some((base, offset)) = inputs2(data, feed) else {
                         return 0;
                     };
+                    if is_free(data, base) {
+                        return 0;
+                    }
                     if !is_constant(data, offset)
                         || data.varnode(base).size > 8
                         || u64::from(data.varnode(left).size)
@@ -1424,6 +1463,9 @@ impl Rule for RuleSLess2Zero {
                     let Some(value) = data.op(feed).inputs.first().copied() else {
                         return 0;
                     };
+                    if is_free(data, value) {
+                        return 0;
+                    }
                     let full = data.new_constant(
                         calc_mask(data.varnode(value).size),
                         data.varnode(value).size,
@@ -1435,6 +1477,9 @@ impl Rule for RuleSLess2Zero {
                     let Some((value, mask)) = inputs2(data, feed) else {
                         return 0;
                     };
+                    if is_free(data, value) {
+                        return 0;
+                    }
                     let sign = data
                         .varnode(value)
                         .size
@@ -1453,6 +1498,9 @@ impl Rule for RuleSLess2Zero {
                     let Some((high, _)) = inputs2(data, feed) else {
                         return 0;
                     };
+                    if is_free(data, high) {
+                        return 0;
+                    }
                     let zero = data.new_constant(0, data.varnode(high).size);
                     data.op_set_inputs(id, vec![high, zero]);
                     return 1;
@@ -1828,9 +1876,7 @@ impl Rule for RuleZextCommute {
         let Some(source) = data.op(zext_id).inputs.first().copied() else {
             return 0;
         };
-        if !heritage_known(data, source)
-            || (!is_constant(data, amount) && !heritage_known(data, amount))
-        {
+        if is_free(data, source) || (!is_constant(data, amount) && is_free(data, amount)) {
             return 0;
         }
         let size = data.varnode(source).size;
@@ -1869,7 +1915,7 @@ impl Rule for RuleSubZext {
             let Some((base, offset)) = inputs2(data, sub_id) else {
                 return 0;
             };
-            if !heritage_known(data, base) {
+            if is_free(data, base) {
                 return 0;
             }
             let Some(output) = data.op(id).output else {
@@ -1919,7 +1965,7 @@ impl Rule for RuleSubZext {
         let Some((base, offset)) = inputs2(data, sub_id) else {
             return 0;
         };
-        if !heritage_known(data, base) {
+        if is_free(data, base) {
             return 0;
         }
         if !is_constant(data, offset) {
@@ -1995,7 +2041,7 @@ impl Rule for RuleSubCancel {
             let Some((through, mask)) = inputs2(data, ext_id) else {
                 return 0;
             };
-            if !heritage_known(data, through) {
+            if is_free(data, through) {
                 return 0;
             }
             if offset == 0
@@ -2012,7 +2058,7 @@ impl Rule for RuleSubCancel {
         };
         let input_size = data.varnode(through).size;
         let mut new_opcode = ext_code;
-        if !heritage_known(data, through) {
+        if is_free(data, through) {
             return 0;
         }
         let mut new_input = through;
@@ -2529,5 +2575,42 @@ mod tests {
         let (_, masked) = binary(&mut data, block, op::INT_AND, wide, mask, 4);
         let (bad, _) = binary(&mut data, block, op::SUBPIECE, masked, offset, 1);
         assert_eq!(RuleSubCancel.apply_op(bad, &mut data), 0);
+    }
+    #[test]
+    fn a_free_operand_is_not_the_same_as_an_unheritaged_one() {
+        // `Varnode::isFree` is "neither written nor input"; `isHeritageKnown`
+        // is "constant, input, or defined". A constant satisfies both, so
+        // treating one predicate as the negation of the other lets a rule that
+        // Ghidra declines fire on a constant operand.
+        let mut data = Funcdata::default();
+        let constant = data.new_constant(7, 4);
+        assert!(
+            is_free(&data, constant),
+            "a constant is free: nothing writes it and it does not enter the function"
+        );
+        assert!(
+            heritage_known(&data, constant),
+            "a constant needs no definition to be in SSA form"
+        );
+
+        let block = data.new_block(0x1000);
+        let written = data.new_unique(4);
+        let copy = data.new_op(op::COPY, seq(0x1000), vec![constant]);
+        data.op_set_output(copy, Some(written));
+        data.op_insert_end(copy, block);
+        assert!(!is_free(&data, written));
+        assert!(heritage_known(&data, written));
+
+        let dangling = data.new_varnode(ventris_lifter::REGISTER_SPACE, 8, 4);
+        assert!(
+            is_free(&data, dangling),
+            "nothing defines it and it is not an input"
+        );
+        assert!(!heritage_known(&data, dangling));
+
+        let argument = data.new_varnode(ventris_lifter::REGISTER_SPACE, 16, 4);
+        data.mark_input(argument);
+        assert!(!is_free(&data, argument));
+        assert!(heritage_known(&data, argument));
     }
 }

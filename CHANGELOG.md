@@ -197,6 +197,23 @@ All notable Ventris changes are documented here.
 - Fixed a named `INDIRECT` result being read but never declared, and a merged
   variable being redeclared at each of its definition sites; both emitted C that
   does not compile.
+- Fixed nine expression rules testing `Varnode::isHeritageKnown` where Ghidra
+  tests `Varnode::isFree`. The two are not complements: a constant is
+  heritage-known *and* free, so those rules fired on constant operands that
+  Ghidra declines, hoisting a value past the point its definition reaches.
+  Both predicates are now spelled exactly as `varnode.hh` defines them, with a
+  test pinning the four-way distinction between a constant, a written value, an
+  undefined read, and a function input.
+- Fixed a `const` space `BRANCH` operand being read as a code address. It is a
+  p-code-relative offset within one instruction's expansion, and treating it as
+  an address emitted jumps to addresses like `loc_2`; because a jump ends a
+  block, the rest of the function was then discarded as unreachable.
+- Fixed structuring discarding reachable statements after a surrendered edge. A
+  block reached only by falling through carries no label, so it looked
+  unreachable; pruning now applies only inside a construct's body, where the
+  construct is the only way in. `finish` additionally guarantees every live block
+  appears in the tree, so a rule that mishandles an edge can no longer silently
+  drop part of a function.
 
 - Added `LiftedInstruction::skips_delay_slot`, which reports the MIPS
   likely-branch shape so consumers stop treating its sequential successor as
