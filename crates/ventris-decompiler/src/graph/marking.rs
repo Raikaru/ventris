@@ -2,8 +2,8 @@
 //!
 //! Source authority (commit `8b4c91d4d5bd1549622bfbade0df199585b98365`):
 //! `ActionMarkExplicit::apply`, `ActionMarkExplicit::baseExplicit`,
-//! `ActionMarkExplicit::multipleInteraction` (the requested
-//! `ActionMarkExplicit::multiExplicit` helper in older descriptions),
+//! `ActionMarkExplicit::multipleInteraction` (the pinned source's name for
+//! the requested `ActionMarkExplicit::multiExplicit` pass),
 //! `ActionMarkImplied::apply`, and
 //! `ActionMarkImplied::checkImpliedCover` in `coreaction.cc`; the pinned
 //! source has no literal `ActionMarkImplied::checkCycle` symbol, so this port's
@@ -21,14 +21,18 @@
 //! `ActionSetCasts::tryResolutionAdjustment` in `coreaction.cc`.
 //!
 //! The graph intentionally does not carry Ghidra's HighVariable marks,
-//! datatypes, union resolutions, shadow flags, or prototype trash-register
-//! list.  This module therefore computes explicitness as an immutable side
-//! result and leaves the action wrappers as analysis actions; it never abuses
-//! `volatile` or another unrelated graph bit as a hidden mark.  The trash pass
-//! takes its register list explicitly for the same reason.  Struct/array
-//! offset-zero resolution and union resolution are also unavailable: the cast
-//! routines below conservatively retain the C cast whenever the reduced
-//! `Type` cannot prove compatibility (stronger than Ghidra, never weaker).
+//! datatypes, union resolutions, shadow flags, non-printing op flags, or
+//! unsigned/long constant-token flags, and Funcdata has no prototype
+//! trash-register list.  This module therefore computes explicitness as an
+//! immutable side result and leaves the metadata-only action wrappers as
+//! analysis actions; it never abuses `volatile` or another unrelated graph
+//! bit as a hidden mark.  The trash pass takes its register list explicitly;
+//! the graph also lacks Ghidra's indirect-store/persistent distinction, so
+//! this port treats every reachable `INDIRECT` as a terminal (stronger than
+//! Ghidra on that boundary).  Struct/array offset-zero resolution and union
+//! resolution are unavailable: retaining a cast where Ghidra can prove a
+//! field-compatible pointer is stronger, while an unknown type's no-claim
+//! result can decline a cast Ghidra would prove from a concrete size (weaker).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -202,6 +206,12 @@ pub fn check_cycle(data: &Funcdata, value: VarnodeId) -> bool {
     }
     false
 }
+/// Camel-case compatibility spelling used when referring directly to the
+/// source helper name.
+#[allow(non_snake_case)]
+pub fn checkCycle(data: &Funcdata, value: VarnodeId) -> bool {
+    check_cycle(data, value)
+}
 
 impl ActionMarkImplied {
     /// Compatibility spelling for callers referring to the C++ helper name.
@@ -225,7 +235,8 @@ impl Action for ActionMarkExplicit {
     }
 
     fn apply(&self, data: &mut Funcdata) -> usize {
-        Explicit::of(data).len()
+        let _ = Explicit::of(data);
+        0
     }
 }
 
@@ -239,13 +250,14 @@ impl Action for ActionMarkImplied {
 
     fn apply(&self, data: &mut Funcdata) -> usize {
         let explicit = Explicit::of(data);
-        (0..data.varnode_count())
+        let _ = (0..data.varnode_count())
             .map(|index| VarnodeId(index as u32))
             .filter(|value| {
                 let varnode = data.varnode(*value);
                 varnode.def.is_some() && !explicit.is_explicit(*value) && !check_cycle(data, *value)
             })
-            .count()
+            .count();
+        0
     }
 }
 
@@ -259,18 +271,19 @@ impl Action for ActionHideShadow {
 
     fn apply(&self, data: &mut Funcdata) -> usize {
         // `Merge::hideShadows` needs HighVariable covers and rewrites COPY
-        // inputs.  The side partition is still useful evidence, but this
-        // graph cannot safely perform the rewrite without inventing cover
-        // membership, so report candidates without mutating semantics.
+        // inputs.  GraphOp has no shadow/non-printing bit, so the candidate
+        // count is intentionally not returned as a graph change.
         let variables = merge_all(data);
-        data.live_ops()
+        let _ = data
+            .live_ops()
             .filter(|(_, operation)| operation.opcode == op::COPY)
             .filter_map(|(_, operation)| {
                 let output = operation.output?;
                 let input = operation.inputs.first().copied()?;
                 variables.same(output, input).then_some(())
             })
-            .count()
+            .count();
+        0
     }
 }
 
@@ -284,17 +297,19 @@ impl Action for ActionCopyMarker {
 
     fn apply(&self, data: &mut Funcdata) -> usize {
         // `Merge::markInternalCopies` marks the operation itself.  GraphOp has
-        // no non-printing bit, so count the exact COPY candidates and leave
-        // the graph unchanged rather than conflating that state with `dead`.
+        // no non-printing bit, so count candidates for analysis but report no
+        // mutation rather than conflating that state with `dead`.
         let variables = merge_all(data);
-        data.live_ops()
+        let _ = data
+            .live_ops()
             .filter(|(_, operation)| operation.opcode == op::COPY)
             .filter_map(|(_, operation)| {
                 let output = operation.output?;
                 let input = operation.inputs.first().copied()?;
                 variables.same(output, input).then_some(())
             })
-            .count()
+            .count();
+        0
     }
 }
 
@@ -327,6 +342,11 @@ impl ActionLikelyTrash {
     pub fn trace_trash(&self, data: &Funcdata, value: VarnodeId) -> Option<BTreeSet<OpId>> {
         trace_trash(data, value)
     }
+    /// Source-oriented spelling of [`Self::trace_trash`].
+    #[allow(non_snake_case)]
+    pub fn traceTrash(&self, data: &Funcdata, value: VarnodeId) -> Option<BTreeSet<OpId>> {
+        self.trace_trash(data, value)
+    }
 }
 
 impl Action for ActionLikelyTrash {
@@ -357,7 +377,11 @@ impl Action for ActionLikelyTrash {
                     let Some(input) = data.op(id).inputs.first().copied() else {
                         continue;
                     };
-                    let size = data.varnode(input).size;
+                    let size = data
+                        .op(id)
+                        .output
+                        .map(|output| data.varnode(output).size)
+                        .unwrap_or_else(|| data.varnode(input).size);
                     if !data.varnode(input).flags.constant || data.varnode(input).offset != 0 {
                         let zero = data.new_constant(0, size);
                         data.op_set_input(id, zero, 0);
@@ -606,25 +630,24 @@ fn promotion_extension(data: &Funcdata, value: VarnodeId, ty: &Type) -> u8 {
     };
     let opcode = data.op(def).opcode;
     match opcode {
-        op::BOOL_NEGATE | op::BOOL_XOR | op::BOOL_AND | op::BOOL_OR => EXT_EITHER,
+        // A BOOL operation is already a source-level boolean result; the
+        // C++ intPromotionType switch therefore reports NO_PROMOTION here.
+        op::BOOL_NEGATE | op::BOOL_XOR | op::BOOL_AND | op::BOOL_OR => EXT_NONE,
         // These operations introduce a value whose source-level integer
         // promotion is not represented by this p-code edge.
         op::COPY | op::MULTIEQUAL | op::INDIRECT | op::CAST | op::LOAD | op::CALL
         | op::CALLIND | op::CALLOTHER => EXT_NONE,
         op::INT_AND => {
             let operation = data.op(def);
-            let other = if operation.inputs.first() == Some(&value) {
-                operation.inputs.get(1).copied()
-            } else {
-                operation.inputs.first().copied()
-            };
-            other.map_or(EXT_UNKNOWN, |other| {
-                if data.varnode(other).flags.constant {
-                    local_extension(data, other, ty)
-                } else {
-                    EXT_UNKNOWN
+            let mut result = EXT_UNKNOWN;
+            for input in operation.inputs.iter().rev().copied() {
+                let ext = local_extension_context(data, input);
+                if ext & EXT_UNSIGNED != 0 {
+                    result = EXT_UNSIGNED;
+                    break;
                 }
-            })
+            }
+            result
         }
         op::INT_RIGHT => data
             .op(def)
@@ -632,8 +655,12 @@ fn promotion_extension(data: &Funcdata, value: VarnodeId, ty: &Type) -> u8 {
             .first()
             .copied()
             .map_or(EXT_UNKNOWN, |input| {
-                let input_ty = inferred_type(data, input);
-                local_extension(data, input, &input_ty)
+                let ext = local_extension_context(data, input);
+                if ext & EXT_UNSIGNED != 0 {
+                    ext
+                } else {
+                    EXT_UNKNOWN
+                }
             }),
         op::INT_SRIGHT => data
             .op(def)
@@ -641,28 +668,90 @@ fn promotion_extension(data: &Funcdata, value: VarnodeId, ty: &Type) -> u8 {
             .first()
             .copied()
             .map_or(EXT_UNKNOWN, |input| {
-                let input_ty = inferred_type(data, input);
-                let ext = local_extension(data, input, &input_ty);
+                let ext = local_extension_context(data, input);
+                if ext & EXT_SIGNED != 0 {
+                    ext
+                } else {
+                    EXT_UNKNOWN
+                }
+            }),
+        op::INT_XOR | op::INT_OR | op::INT_DIV | op::INT_REM => {
+            let inputs = data.op(def).inputs.iter().copied();
+            if inputs.clone().count() >= 2
+                && inputs
+                    .map(|input| local_extension_context(data, input))
+                    .all(|ext| ext & EXT_UNSIGNED != 0)
+            {
+                EXT_UNSIGNED
+            } else {
+                EXT_UNKNOWN
+            }
+        }
+        op::INT_SDIV | op::INT_SREM => {
+            let inputs = data.op(def).inputs.iter().copied();
+            if inputs.clone().count() >= 2
+                && inputs
+                    .map(|input| local_extension_context(data, input))
+                    .all(|ext| ext & EXT_SIGNED != 0)
+            {
+                EXT_SIGNED
+            } else {
+                EXT_UNKNOWN
+            }
+        }
+        op::INT_NEGATE | op::INT_2COMP => data
+            .op(def)
+            .inputs
+            .first()
+            .copied()
+            .map_or(EXT_UNKNOWN, |input| {
+                let ext = local_extension_context(data, input);
                 if ext & EXT_SIGNED != 0 {
                     EXT_SIGNED
                 } else {
                     EXT_UNKNOWN
                 }
             }),
-        // Arithmetic either has no promotion or needs more context than this
-        // reduced API can carry.  Unknown is deliberately cast-conservative.
+        // Addition, subtraction, multiplication, and left shift do not let
+        // CastStrategyC prove an extension direction from one edge.
         op::INT_ADD
         | op::INT_SUB
         | op::INT_MULT
-        | op::INT_DIV
-        | op::INT_REM
-        | op::INT_SDIV
-        | op::INT_SREM
-        | op::INT_NEGATE
-        | op::INT_2COMP
         | op::INT_LEFT
         | op::PTRADD
         | op::PTRSUB => EXT_UNKNOWN,
+        _ => EXT_NONE,
+    }
+}
+
+fn local_extension_context(data: &Funcdata, value: VarnodeId) -> u8 {
+    let ty = inferred_type(data, value);
+    let varnode = data.varnode(value);
+    if varnode.flags.constant {
+        return local_extension(data, value, &ty);
+    }
+    if Explicit::of(data).is_explicit(value) {
+        return extension_for_type(&ty);
+    }
+    let Some(def) = varnode.def else {
+        return EXT_UNKNOWN;
+    };
+    match data.op(def).opcode {
+        op::BOOL_NEGATE | op::BOOL_XOR | op::BOOL_AND | op::BOOL_OR => EXT_EITHER,
+        op::CAST | op::LOAD | op::CALL | op::CALLIND | op::CALLOTHER => extension_for_type(&ty),
+        op::INT_AND => data
+            .op(def)
+            .inputs
+            .iter()
+            .rev()
+            .copied()
+            .find_map(|input| {
+                data.varnode(input)
+                    .flags
+                    .constant
+                    .then(|| local_extension(data, input, &inferred_type(data, input)))
+            })
+            .unwrap_or(EXT_UNKNOWN),
         _ => EXT_UNKNOWN,
     }
 }

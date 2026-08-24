@@ -11,6 +11,11 @@
 //! and `ActionInferTypes::propagateTypeEdge` plus `ActionPrototypeTypes::apply`
 //! in `coreaction.cc`, all at commit
 //! `8b4c91d4d5bd1549622bfbade0df199585b98365`.
+//!
+//! The graph contract has no `ProtoModel`, type-lock, annotation, or
+//! architecture-space metadata.  `seed` is therefore the explicit equivalent
+//! of Ghidra's locked prototype types; `ActionPrototypeTypes::apply` cannot
+//! synthesize missing ABI varnodes here without inventing graph state.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -117,6 +122,10 @@ impl TypeFactory {
     /// Recover one component, preserving the offset relative to that
     /// component.  This is `TypeStruct::getSubType` and the one-level element
     /// part of `TypeArray::getSubEntry`; gaps intentionally return `None`.
+    ///
+    /// For an array, including an open-ended one, an interior byte offset is
+    /// valid too: `TypeArray::getSubEntry` returns the element and its `newoff`
+    /// remainder rather than requiring alignment to the first byte.
     pub fn sub_type(&self, ty: &DataType, offset: u32) -> Option<(DataType, u32)> {
         match ty {
             DataType::Struct { fields, .. } => fields
@@ -691,9 +700,16 @@ fn propagate_op(
             if let Some(output) = operation.output {
                 set_here!(output, DataType::Bool);
             }
-            // Comparisons are the type-equality edge in Ghidra: the result is
-            // bool, while the operands may share a richer type.
-            if operation.inputs.len() >= 2 {
+            if matches!(
+                operation.opcode,
+                op::BOOL_NEGATE | op::BOOL_AND | op::BOOL_OR | op::BOOL_XOR
+            ) {
+                for input in operation.inputs.iter().copied() {
+                    set_here!(input, DataType::Bool);
+                }
+            } else if operation.inputs.len() >= 2 {
+                // Comparisons are the type-equality edge in Ghidra: the
+                // result is bool, while operands may share a richer type.
                 let left = operation.inputs[0];
                 let right = operation.inputs[1];
                 if let (Some(left_ty), Some(right_ty)) =
@@ -703,11 +719,6 @@ fn propagate_op(
                     set_here!(left, best.clone());
                     set_here!(right, best);
                 }
-            }
-        }
-        op::BOOL_NEGATE | op::BOOL_AND | op::BOOL_OR | op::BOOL_XOR => {
-            for input in operation.inputs {
-                set_here!(input, DataType::Bool);
             }
         }
         op::INT_SDIV
@@ -721,14 +732,14 @@ fn propagate_op(
                 DataType::Int {
                     bits: data.varnode(output).size.saturating_mul(8),
                     signed: true,
-                },);
+                });
             }
             if let Some(input) = operation.inputs.first().copied() {
                 set_here!(input,
                 DataType::Int {
                     bits: data.varnode(input).size.saturating_mul(8),
                     signed: true,
-                },);
+                });
             }
         }
         op::FLOAT_ADD

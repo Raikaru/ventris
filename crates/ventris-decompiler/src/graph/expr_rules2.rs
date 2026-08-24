@@ -207,7 +207,8 @@ impl Rule for RuleCollectTerms {
             .wrapping_add(data.varnode(coef_right).offset)
             & mask(size);
         data.op_set_opcode(id, op::INT_MULT);
-        data.op_set_inputs(id, vec![base_left, data.new_constant(coefficient, size)]);
+        let coefficient_vn = data.new_constant(coefficient, size);
+        data.op_set_inputs(id, vec![base_left, coefficient_vn]);
         data.op_destroy(left_def);
         data.op_destroy(right_def);
         1
@@ -504,14 +505,14 @@ impl Rule for RuleOrPredicate {
             (None, Some(shape)) => (shape, left),
             _ => return 0,
         };
-        if shape.zero_path_true || data.lone_descend(output(data, shape.multi)?) != Some(id) {
+        let Some(multi_out) = output(data, shape.multi) else { return 0 };
+        if shape.zero_path_true || data.lone_descend(multi_out) != Some(id) {
             return 0;
         }
         if is_free(data, value) {
             return 0;
         }
         data.op_set_input(shape.multi, value, shape.zero_slot);
-        let multi_out = output(data, shape.multi)?;
         data.op_set_opcode(id, op::COPY);
         data.op_set_inputs(id, vec![multi_out]);
         1
@@ -570,7 +571,8 @@ impl Rule for RuleDoubleSub {
             .varnode(outer_offset)
             .offset
             .wrapping_add(data.varnode(inner_offset).offset);
-        data.op_set_inputs(id, vec![root, data.new_constant(total, 4)]);
+        let total_vn = data.new_constant(total, 4);
+        data.op_set_inputs(id, vec![root, total_vn]);
         1
     }
 }
@@ -613,7 +615,8 @@ impl Rule for RuleHumptyDumpty {
             data.op_set_inputs(id, vec![root1]);
         } else {
             data.op_set_opcode(id, op::SUBPIECE);
-            data.op_set_inputs(id, vec![root1, data.new_constant(pos2, 4)]);
+            let offset_vn = data.new_constant(pos2, 4);
+            data.op_set_inputs(id, vec![root1, offset_vn]);
         }
         1
     }
@@ -636,7 +639,9 @@ impl Rule for RuleDumptyHump {
         }
         let mut offset = data.varnode(offset_vn).offset;
         let out_size = data.varnode(out).size;
-        let (high, low) = (input(data, piece, 0)?, input(data, piece, 1)?);
+        let (Some(high), Some(low)) = (input(data, piece, 0), input(data, piece, 1)) else {
+            return 0;
+        };
         let selected = if offset < u64::from(data.varnode(low).size) {
             if offset.saturating_add(u64::from(out_size)) > u64::from(data.varnode(low).size) {
                 return 0;
@@ -653,7 +658,8 @@ impl Rule for RuleDumptyHump {
             data.op_set_opcode(id, op::COPY);
             data.op_set_inputs(id, vec![selected]);
         } else {
-            data.op_set_inputs(id, vec![selected, data.new_constant(offset, 4)]);
+            let offset_vn = data.new_constant(offset, 4);
+            data.op_set_inputs(id, vec![selected, offset_vn]);
         }
         1
     }
@@ -699,7 +705,8 @@ impl Rule for RuleHumptyOr {
                 data.op_set_inputs(id, vec![a]);
             } else {
                 data.op_set_opcode(id, op::INT_AND);
-                data.op_set_inputs(id, vec![a, data.new_constant(total, common_size)]);
+                let total_vn = data.new_constant(total, common_size);
+                data.op_set_inputs(id, vec![a, total_vn]);
             }
             return 1;
         }
@@ -743,7 +750,8 @@ impl Rule for RuleNegateIdentity {
             }
             let result = if logic_code == op::INT_AND { 0 } else { mask(data.varnode(value).size) };
             data.op_set_opcode(logic, op::COPY);
-            data.op_set_inputs(logic, vec![data.new_constant(result, data.varnode(value).size)]);
+            let result_vn = data.new_constant(result, data.varnode(value).size);
+            data.op_set_inputs(logic, vec![result_vn]);
             return 1;
         }
         0
@@ -761,7 +769,9 @@ impl Rule for RuleSubNormal {
     fn op_list(&self) -> Vec<i32> { vec![op::SUBPIECE] }
 
     fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
-        let (Some(shift_out), Some(c_vn), Some(out)) = (input(data, id, 0), input(data, id, 1), output(data, id)) else {
+        let (Some(shift_out), Some(c_vn), Some(out)) =
+            (input(data, id, 0), input(data, id, 1), output(data, id))
+        else {
             return 0;
         };
         let Some(shift_op) = def(data, shift_out) else { return 0 };
@@ -777,28 +787,30 @@ impl Rule for RuleSubNormal {
         }
         let mut n = data.varnode(n_vn).offset;
         let mut c = data.varnode(c_vn).offset;
-        let k = n / 8;
-        let in_size = data.varnode(shift_vn).size as u64;
-        let out_size = data.varnode(out).size as u64;
-        if n.saturating_add(8 * c).saturating_add(8 * out_size) < 8 * in_size && n != k * 8 {
+        let k0 = n / 8;
+        let in_size = u64::from(data.varnode(shift_vn).size);
+        let out_size = u64::from(data.varnode(out).size);
+        if n.saturating_add(8 * c).saturating_add(8 * out_size) < 8 * in_size && n != k0 * 8 {
             return 0;
         }
-        let mut k = k;
+        let mut k = k0;
         if k.saturating_add(c).saturating_add(out_size) > in_size {
             if c.saturating_add(k) > in_size {
                 return 0;
             }
             let trunc_size = in_size - c - k;
             if n == k * 8 && trunc_size > 0 && trunc_size.is_power_of_two() {
-                let (new_sub, new_out) = new_op_before(
-                    data,
+                let cut = data.new_constant(c + k, 4);
+                let (_, new_out) =
+                    new_op_before(data, id, op::SUBPIECE, vec![shift_vn, cut], trunc_size as u32);
+                data.op_set_opcode(
                     id,
-                    op::SUBPIECE,
-                    vec![shift_vn, data.new_constant(c + k, 4)],
-                    trunc_size as u32,
+                    if shift_code == Some(op::INT_SRIGHT) {
+                        op::INT_SEXT
+                    } else {
+                        op::INT_ZEXT
+                    },
                 );
-                let _ = new_sub;
-                data.op_set_opcode(id, if shift_code == Some(op::INT_SRIGHT) { op::INT_SEXT } else { op::INT_ZEXT });
                 data.op_set_inputs(id, vec![new_out]);
                 return 1;
             }
@@ -807,7 +819,8 @@ impl Rule for RuleSubNormal {
         c = c.saturating_add(k);
         n = n.saturating_sub(k * 8);
         if n == 0 {
-            data.op_set_inputs(id, vec![shift_vn, data.new_constant(c, 4)]);
+            let cut = data.new_constant(c, 4);
+            data.op_set_inputs(id, vec![shift_vn, cut]);
             return 1;
         }
         if n >= out_size * 8 {
@@ -816,15 +829,12 @@ impl Rule for RuleSubNormal {
                 n = n.saturating_sub(1);
             }
         }
-        let (_, new_out) = new_op_before(
-            data,
-            id,
-            op::SUBPIECE,
-            vec![shift_vn, data.new_constant(c, 4)],
-            out_size as u32,
-        );
+        let cut = data.new_constant(c, 4);
+        let (_, new_out) =
+            new_op_before(data, id, op::SUBPIECE, vec![shift_vn, cut], out_size as u32);
+        let amount = data.new_constant(n, 4);
         data.op_set_opcode(id, shift_code.unwrap());
-        data.op_set_inputs(id, vec![new_out, data.new_constant(n, 4)]);
+        data.op_set_inputs(id, vec![new_out, amount]);
         1
     }
 }
@@ -899,7 +909,7 @@ impl Rule for RuleDivTermAdd {
             return 0;
         }
         let Some(ext) = def(data, ext_vn) else { return 0 };
-        let ext_code = data.opcode_of(ext)?;
+        let Some(ext_code) = data.opcode_of(ext) else { return 0 };
         if ext_code != op::INT_ZEXT && ext_code != op::INT_SEXT {
             return 0;
         }
@@ -910,7 +920,7 @@ impl Rule for RuleDivTermAdd {
         }
         let power = 1u64 << n;
         let new_constant = data.varnode(mult_const).offset.wrapping_add(power) & mask(data.varnode(ext_vn).size);
-        let out = output(data, id)?;
+        let Some(out) = output(data, id) else { return 0 };
         let descendants: Vec<OpId> = data.varnode(out).descendants.iter().copied().collect();
         for add in descendants {
             if data.opcode_of(add) != Some(op::INT_ADD) {
@@ -921,26 +931,19 @@ impl Rule for RuleDivTermAdd {
             if left != ext_vn && right != ext_vn {
                 continue;
             }
-            let (new_mult, mult_out) = new_op_before(
-                data,
-                id,
-                op::INT_MULT,
-                vec![ext_vn, data.new_constant(new_constant, data.varnode(ext_vn).size)],
-                data.varnode(ext_vn).size,
-            );
+            let mult_factor = data.new_constant(new_constant, data.varnode(ext_vn).size);
+            let (new_mult, mult_out) =
+                new_op_before(data, id, op::INT_MULT, vec![ext_vn, mult_factor], data.varnode(ext_vn).size);
             let _ = new_mult;
             if shift_code == op::MAX {
                 shift_code = op::INT_RIGHT;
             }
-            let (_, shift_out) = new_op_before(
-                data,
-                id,
-                shift_code,
-                vec![mult_out, data.new_constant(n, 4)],
-                data.varnode(ext_vn).size,
-            );
+            let shift_amount = data.new_constant(n, 4);
+            let (_, shift_out) =
+                new_op_before(data, id, shift_code, vec![mult_out, shift_amount], data.varnode(ext_vn).size);
+            let zero = data.new_constant(0, 4);
             data.op_set_opcode(add, op::SUBPIECE);
-            data.op_set_inputs(add, vec![shift_out, data.new_constant(0, 4)]);
+            data.op_set_inputs(add, vec![shift_out, zero]);
             return 1;
         }
         0
@@ -958,19 +961,22 @@ impl Rule for RuleSignForm {
     fn op_list(&self) -> Vec<i32> { vec![op::SUBPIECE] }
 
     fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
-        let (Some(sext_out), Some(c_vn)) = (input(data, id, 0), input(data, id, 1)) else { return 0 };
+        let (Some(sext_out), Some(c_vn)) = (input(data, id, 0), input(data, id, 1)) else {
+            return 0;
+        };
         let Some(sext) = def(data, sext_out) else { return 0 };
         if data.opcode_of(sext) != Some(op::INT_SEXT) || !is_constant(data, c_vn) {
             return 0;
         }
-        let a = input(data, sext, 0)?;
+        let Some(a) = input(data, sext, 0) else { return 0 };
         let c = data.varnode(c_vn).offset;
         if c < u64::from(data.varnode(a).size) || is_free(data, a) {
             return 0;
         }
         let n = data.varnode(a).size * 8 - 1;
+        let amount = data.new_constant(u64::from(n), 4);
         data.op_set_opcode(id, op::INT_SRIGHT);
-        data.op_set_inputs(id, vec![a, data.new_constant(u64::from(n), 4)]);
+        data.op_set_inputs(id, vec![a, amount]);
         1
     }
 }
@@ -979,40 +985,44 @@ pub struct RuleSignDiv2;
 
 impl Rule for RuleSignDiv2 {
     fn name(&self) -> &'static str { "signdiv2" }
-
     fn op_list(&self) -> Vec<i32> { vec![op::INT_SRIGHT] }
-
     fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
         let Some(shift_amount) = input(data, id, 1) else { return 0 };
         if !is_constant(data, shift_amount) || data.varnode(shift_amount).offset != 1 {
             return 0;
         }
-        let add_out = input(data, id, 0)?;
-        let add = def(data, add_out)?;
+        let Some(add_out) = input(data, id, 0) else { return 0 };
+        let Some(add) = def(data, add_out) else { return 0 };
         if data.opcode_of(add) != Some(op::INT_ADD) {
             return 0;
         }
         for slot in 0..2 {
             let Some(mult_out) = input(data, add, slot) else { continue };
             let Some(mult) = def(data, mult_out) else { continue };
-            if data.opcode_of(mult) != Some(op::INT_MULT) || !is_constant(data, input(data, mult, 1)?) {
+            let Some(coefficient) = input(data, mult, 1) else { continue };
+            if data.opcode_of(mult) != Some(op::INT_MULT) || !is_constant(data, coefficient) {
                 continue;
             }
-            let coefficient = input(data, mult, 1)?;
             if data.varnode(coefficient).offset != mask(data.varnode(coefficient).size) {
                 continue;
             }
-            let shift_out = input(data, mult, 0)?;
-            let shift = def(data, shift_out)?;
-            if data.opcode_of(shift) != Some(op::INT_SRIGHT) || !is_constant(data, input(data, shift, 1)?) {
+            let Some(shift_out) = input(data, mult, 0) else { continue };
+            let Some(shift) = def(data, shift_out) else { continue };
+            let Some(shift_amount_vn) = input(data, shift, 1) else { continue };
+            let Some(value) = input(data, shift, 0) else { continue };
+            let Some(other_add) = input(data, add, 1 - slot) else { continue };
+            if data.opcode_of(shift) != Some(op::INT_SRIGHT)
+                || !is_constant(data, shift_amount_vn)
+                || value != other_add
+                || data.varnode(shift_amount_vn).offset
+                    != u64::from(data.varnode(value).size * 8 - 1)
+                || is_free(data, value)
+            {
                 continue;
             }
-            let value = input(data, shift, 0)?;
-            if value != input(data, add, 1 - slot)? || data.varnode(input(data, shift, 1)?).offset != u64::from(data.varnode(value).size * 8 - 1) || is_free(data, value) {
-                continue;
-            }
+            let divisor = data.new_constant(2, data.varnode(value).size);
             data.op_set_opcode(id, op::INT_SDIV);
-            data.op_set_inputs(id, vec![value, data.new_constant(2, data.varnode(value).size)]);
+            data.op_set_inputs(id, vec![value, divisor]);
             return 1;
         }
         0
@@ -1027,11 +1037,13 @@ impl Rule for RuleSignNearMult {
     fn op_list(&self) -> Vec<i32> { vec![op::INT_AND] }
 
     fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
-        let (Some(add_out), Some(and_mask)) = (input(data, id, 0), input(data, id, 1)) else { return 0 };
+        let (Some(add_out), Some(and_mask)) = (input(data, id, 0), input(data, id, 1)) else {
+            return 0;
+        };
         if !is_constant(data, and_mask) {
             return 0;
         }
-        let add = def(data, add_out)?;
+        let Some(add) = def(data, add_out) else { return 0 };
         if data.opcode_of(add) != Some(op::INT_ADD) {
             return 0;
         }
@@ -1040,42 +1052,54 @@ impl Rule for RuleSignNearMult {
         for slot in 0..2 {
             let Some(value) = input(data, add, slot) else { continue };
             let Some(defop) = def(data, value) else { continue };
-            if data.opcode_of(defop) == Some(op::INT_RIGHT) && is_constant(data, input(data, defop, 1)?) {
+            let Some(amount_vn) = input(data, defop, 1) else { continue };
+            if data.opcode_of(defop) == Some(op::INT_RIGHT) && is_constant(data, amount_vn) {
                 shift = Some(defop);
                 x = input(data, add, 1 - slot);
                 break;
             }
         }
-        let (shift, x) = (shift?, x?);
+        let (Some(shift), Some(x)) = (shift, x) else { return 0 };
         if is_free(data, x) {
             return 0;
         }
-        let amount = data.varnode(input(data, shift, 1)?).offset;
+        let Some(amount_vn) = input(data, shift, 1) else { return 0 };
+        let Some(shifted_vn) = input(data, shift, 0) else { return 0 };
+        let amount = data.varnode(amount_vn).offset;
         if amount == 0 {
             return 0;
         }
-        let n = u64::from(data.varnode(input(data, shift, 0)?).size * 8).saturating_sub(amount);
-        if n == 0 || ((mask(data.varnode(input(data, shift, 0)?).size) << n) & mask(data.varnode(input(data, shift, 0)?).size)) != data.varnode(and_mask).offset {
+        let size = data.varnode(shifted_vn).size;
+        let n = u64::from(size * 8).saturating_sub(amount);
+        if n == 0 || ((mask(size) << n) & mask(size)) != data.varnode(and_mask).offset {
             return 0;
         }
-        let sign_shift = input(data, shift, 0)?;
-        let sign_op = def(data, sign_shift)?;
-        if data.opcode_of(sign_op) != Some(op::INT_SRIGHT) || !is_constant(data, input(data, sign_op, 1)?) || input(data, sign_op, 0)? != x {
+        let Some(sign_shift) = input(data, shift, 0) else { return 0 };
+        let Some(sign_op) = def(data, sign_shift) else { return 0 };
+        let (Some(sign_amount), Some(sign_value)) =
+            (input(data, sign_op, 1), input(data, sign_op, 0))
+        else {
+            return 0;
+        };
+        if data.opcode_of(sign_op) != Some(op::INT_SRIGHT)
+            || !is_constant(data, sign_amount)
+            || sign_value != x
+            || data.varnode(sign_amount).offset != u64::from(data.varnode(x).size * 8 - 1)
+        {
             return 0;
         }
-        if data.varnode(input(data, sign_op, 1)?).offset != u64::from(data.varnode(x).size * 8 - 1) {
-            return 0;
-        }
-        let power = 1u64.checked_shl(n as u32)?;
+        let Some(power) = 1u64.checked_shl(n as u32) else { return 0 };
+        let divisor = data.new_constant(power, data.varnode(x).size);
         let (_, div_out) = new_op_before(
             data,
             id,
             op::INT_SDIV,
-            vec![x, data.new_constant(power, data.varnode(x).size)],
+            vec![x, divisor],
             data.varnode(x).size,
         );
+        let multiplier = data.new_constant(power, data.varnode(x).size);
         data.op_set_opcode(id, op::INT_MULT);
-        data.op_set_inputs(id, vec![div_out, data.new_constant(power, data.varnode(x).size)]);
+        data.op_set_inputs(id, vec![div_out, multiplier]);
         1
     }
 }
@@ -1088,19 +1112,28 @@ impl Rule for RuleModOpt {
     fn op_list(&self) -> Vec<i32> { vec![op::INT_DIV, op::INT_SDIV] }
 
     fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
-        let (Some(x), Some(divisor), Some(out)) = (input(data, id, 0), input(data, id, 1), output(data, id)) else { return 0 };
+        let (Some(x), Some(divisor), Some(out)) =
+            (input(data, id, 0), input(data, id, 1), output(data, id))
+        else {
+            return 0;
+        };
         let mults: Vec<OpId> = data.varnode(out).descendants.iter().copied().collect();
         for mult in mults {
             if data.opcode_of(mult) != Some(op::INT_MULT) {
                 continue;
             }
-            let (Some(mut div2), Some(other)) = (input(data, mult, 0), input(data, mult, 1)) else { continue };
+            let (Some(mut div2), Some(other)) = (input(data, mult, 0), input(data, mult, 1)) else {
+                continue;
+            };
             if div2 == out {
                 div2 = other;
             }
             let divisor_matches = if is_constant(data, div2) {
                 is_constant(data, divisor)
-                    && (((data.varnode(div2).offset ^ mask(data.varnode(div2).size)).wrapping_add(1) & mask(data.varnode(div2).size)) == data.varnode(divisor).offset)
+                    && (((data.varnode(div2).offset ^ mask(data.varnode(div2).size))
+                        .wrapping_add(1)
+                        & mask(data.varnode(div2).size))
+                        == data.varnode(divisor).offset)
             } else {
                 def(data, div2)
                     .filter(|neg| data.opcode_of(*neg) == Some(op::INT_2COMP))
@@ -1110,19 +1143,31 @@ impl Rule for RuleModOpt {
             if !divisor_matches {
                 continue;
             }
-            let mult_out = output(data, mult)?;
+            let Some(mult_out) = output(data, mult) else { continue };
             let adds: Vec<OpId> = data.varnode(mult_out).descendants.iter().copied().collect();
             for add in adds {
                 if data.opcode_of(add) != Some(op::INT_ADD) {
                     continue;
                 }
-                let left = input(data, add, 0)?;
-                let right = input(data, add, 1)?;
-                let other_input = if left == mult_out { right } else if right == mult_out { left } else { continue };
+                let (Some(left), Some(right)) = (input(data, add, 0), input(data, add, 1)) else {
+                    continue;
+                };
+                let other_input = if left == mult_out {
+                    right
+                } else if right == mult_out {
+                    left
+                } else {
+                    continue;
+                };
                 if other_input != x {
                     continue;
                 }
-                data.op_set_opcode(add, if data.opcode_of(id) == Some(op::INT_DIV) { op::INT_REM } else { op::INT_SREM });
+                let remainder = if data.opcode_of(id) == Some(op::INT_DIV) {
+                    op::INT_REM
+                } else {
+                    op::INT_SREM
+                };
+                data.op_set_opcode(add, remainder);
                 data.op_set_inputs(add, vec![x, divisor]);
                 return 1;
             }
@@ -1142,20 +1187,21 @@ impl Rule for RuleFloatCast {
     fn op_list(&self) -> Vec<i32> { vec![op::FLOAT_FLOAT2FLOAT, op::FLOAT_TRUNC] }
 
     fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
-        let opcode1 = data.opcode_of(id)?;
-        let vn1 = input(data, id, 0)?;
-        let cast = def(data, vn1)?;
-        let opcode2 = data.opcode_of(cast)?;
+        let Some(opcode1) = data.opcode_of(id) else { return 0 };
+        let Some(vn1) = input(data, id, 0) else { return 0 };
+        let Some(cast) = def(data, vn1) else { return 0 };
+        let Some(opcode2) = data.opcode_of(cast) else { return 0 };
         if opcode2 != op::FLOAT_FLOAT2FLOAT && opcode2 != op::FLOAT_INT2FLOAT {
             return 0;
         }
-        let vn2 = input(data, cast, 0)?;
+        let Some(vn2) = input(data, cast, 0) else { return 0 };
         if is_free(data, vn2) {
             return 0;
         }
         let in_size1 = data.varnode(vn1).size;
         let in_size2 = data.varnode(vn2).size;
-        let out_size = data.varnode(output(data, id)?).size;
+        let Some(out_vn) = output(data, id) else { return 0 };
+        let out_size = data.varnode(out_vn).size;
         if opcode2 == op::FLOAT_FLOAT2FLOAT && opcode1 == op::FLOAT_FLOAT2FLOAT {
             if in_size1 > out_size {
                 data.op_set_inputs(id, vec![vn2]);
@@ -1268,7 +1314,7 @@ mod tests {
         assert_eq!(data.op(add).opcode, op::INT_MULT);
         let y = input_value(&mut data, 4);
         let (_, m3) = op_with_output(&mut data, b, op::INT_MULT, vec![y, c4], 4);
-        let (_, bad) = op_with_output(&mut data, b, op::INT_ADD, vec![m1, m3], 4);
+        let (bad, _) = op_with_output(&mut data, b, op::INT_ADD, vec![m1, m3], 4);
         assert_eq!(RuleCollectTerms.apply_op(bad, &mut data), 0);
     }
 
@@ -1285,7 +1331,8 @@ mod tests {
         let offset = data.new_constant(1, 4);
         let (sub, _) = op_with_output(&mut data, b, op::SUBPIECE, vec![p, offset], 2);
         assert_eq!(RulePullsubMulti.apply_op(sub, &mut data), 1);
-        let (_, full) = op_with_output(&mut data, b, op::SUBPIECE, vec![p, data.new_constant(0, 4)], 4);
+        let zero_full = data.new_constant(0, 4);
+        let (full, _) = op_with_output(&mut data, b, op::SUBPIECE, vec![p, zero_full], 4);
         assert_eq!(RulePullsubMulti.apply_op(full, &mut data), 0);
     }
 
@@ -1309,10 +1356,12 @@ mod tests {
         let zero = data.new_constant(0, 4);
         let (_, first_out) = op_with_output(&mut data, b, op::SUBPIECE, vec![x, zero], 2);
         let (second, second_out) = op_with_output(&mut data, b, op::SUBPIECE, vec![x, zero], 2);
-        let (use_op, _) = op_with_output(&mut data, b, op::INT_ADD, vec![second_out, data.new_constant(1, 2)], 2);
+        let one_add = data.new_constant(1, 2);
+        let (use_op, _) = op_with_output(&mut data, b, op::INT_ADD, vec![second_out, one_add], 2);
         assert_eq!(RuleSelectCse.apply_op(second, &mut data), 1);
         assert_eq!(data.op(use_op).inputs[0], first_out);
-        let (_, different) = op_with_output(&mut data, b, op::SUBPIECE, vec![x, data.new_constant(1, 4)], 2);
+        let one_diff = data.new_constant(1, 4);
+        let (different, _) = op_with_output(&mut data, b, op::SUBPIECE, vec![x, one_diff], 2);
         assert_eq!(RuleSelectCse.apply_op(different, &mut data), 0);
     }
 
@@ -1327,7 +1376,7 @@ mod tests {
         assert_eq!(RuleXorSwap.apply_op(outer, &mut data), 1);
         assert_eq!(data.op(outer).inputs, vec![c]);
         let d = input_value(&mut data, 4);
-        let (_, bad) = op_with_output(&mut data, b, op::INT_XOR, vec![inner, d], 4);
+        let (bad, _) = op_with_output(&mut data, b, op::INT_XOR, vec![inner, d], 4);
         assert_eq!(RuleXorSwap.apply_op(bad, &mut data), 0);
     }
 
@@ -1338,10 +1387,12 @@ mod tests {
         let a = input_value(&mut data, 4);
         let c = input_value(&mut data, 4);
         let (_, cmp) = op_with_output(&mut data, b, op::INT_EQUAL, vec![a, c], 1);
-        let (eq, _) = op_with_output(&mut data, b, op::INT_EQUAL, vec![cmp, data.new_constant(0, 1)], 1);
+        let zero_bool = data.new_constant(0, 1);
+        let (eq, _) = op_with_output(&mut data, b, op::INT_EQUAL, vec![cmp, zero_bool], 1);
         assert_eq!(RuleBooleanNegate.apply_op(eq, &mut data), 1);
         assert_eq!(data.op(eq).opcode, op::BOOL_NEGATE);
-        let (_, wide) = op_with_output(&mut data, b, op::INT_EQUAL, vec![a, data.new_constant(0, 4)], 1);
+        let zero_wide = data.new_constant(0, 4);
+        let (wide, _) = op_with_output(&mut data, b, op::INT_EQUAL, vec![a, zero_wide], 1);
         assert_eq!(RuleBooleanNegate.apply_op(wide, &mut data), 0);
     }
 
@@ -1350,12 +1401,15 @@ mod tests {
         let mut data = Funcdata::default();
         let b = block(&mut data);
         let x = input_value(&mut data, 8);
-        let (_, mid) = op_with_output(&mut data, b, op::SUBPIECE, vec![x, data.new_constant(1, 4)], 4);
-        let (outer, _) = op_with_output(&mut data, b, op::SUBPIECE, vec![mid, data.new_constant(2, 4)], 2);
+        let one_mid = data.new_constant(1, 4);
+        let (_, mid) = op_with_output(&mut data, b, op::SUBPIECE, vec![x, one_mid], 4);
+        let two_outer = data.new_constant(2, 4);
+        let (outer, _) = op_with_output(&mut data, b, op::SUBPIECE, vec![mid, two_outer], 2);
         assert_eq!(RuleDoubleSub.apply_op(outer, &mut data), 1);
         assert_eq!(data.varnode(data.op(outer).inputs[1]).offset, 3);
         let y = data.new_varnode(REGISTER_SPACE, 0x400, 8);
-        let (_, bad) = op_with_output(&mut data, b, op::SUBPIECE, vec![y, data.new_constant(1, 4)], 2);
+        let one_bad = data.new_constant(1, 4);
+        let (bad, _) = op_with_output(&mut data, b, op::SUBPIECE, vec![y, one_bad], 2);
         assert_eq!(RuleDoubleSub.apply_op(bad, &mut data), 0);
     }
 
@@ -1364,13 +1418,16 @@ mod tests {
         let mut data = Funcdata::default();
         let b = block(&mut data);
         let root = input_value(&mut data, 4);
-        let (_, hi) = op_with_output(&mut data, b, op::SUBPIECE, vec![root, data.new_constant(2, 4)], 2);
-        let (_, lo) = op_with_output(&mut data, b, op::SUBPIECE, vec![root, data.new_constant(0, 4)], 2);
+        let two_hi = data.new_constant(2, 4);
+        let (_, hi) = op_with_output(&mut data, b, op::SUBPIECE, vec![root, two_hi], 2);
+        let zero_lo = data.new_constant(0, 4);
+        let (_, lo) = op_with_output(&mut data, b, op::SUBPIECE, vec![root, zero_lo], 2);
         let (piece, _) = op_with_output(&mut data, b, op::PIECE, vec![hi, lo], 4);
         assert_eq!(RuleHumptyDumpty.apply_op(piece, &mut data), 1);
         assert_eq!(data.op(piece).opcode, op::COPY);
-        let (_, bad_hi) = op_with_output(&mut data, b, op::SUBPIECE, vec![root, data.new_constant(1, 4)], 1);
-        let (_, bad) = op_with_output(&mut data, b, op::PIECE, vec![bad_hi, lo], 3);
+        let one_bad_hi = data.new_constant(1, 4);
+        let (_, bad_hi) = op_with_output(&mut data, b, op::SUBPIECE, vec![root, one_bad_hi], 1);
+        let (bad, _) = op_with_output(&mut data, b, op::PIECE, vec![bad_hi, lo], 3);
         assert_eq!(RuleHumptyDumpty.apply_op(bad, &mut data), 0);
     }
 
@@ -1381,10 +1438,12 @@ mod tests {
         let hi = input_value(&mut data, 2);
         let lo = input_value(&mut data, 2);
         let (_, piece) = op_with_output(&mut data, b, op::PIECE, vec![hi, lo], 4);
-        let (sub, _) = op_with_output(&mut data, b, op::SUBPIECE, vec![piece, data.new_constant(0, 4)], 2);
+        let zero_sub = data.new_constant(0, 4);
+        let (sub, _) = op_with_output(&mut data, b, op::SUBPIECE, vec![piece, zero_sub], 2);
         assert_eq!(RuleDumptyHump.apply_op(sub, &mut data), 1);
         assert_eq!(data.op(sub).inputs, vec![lo]);
-        let (_, bad) = op_with_output(&mut data, b, op::SUBPIECE, vec![piece, data.new_constant(1, 4)], 4);
+        let one_bad_sub = data.new_constant(1, 4);
+        let (bad, _) = op_with_output(&mut data, b, op::SUBPIECE, vec![piece, one_bad_sub], 4);
         assert_eq!(RuleDumptyHump.apply_op(bad, &mut data), 0);
     }
 
@@ -1402,7 +1461,7 @@ mod tests {
         assert_eq!(data.op(or).opcode, op::COPY);
         let y = input_value(&mut data, 1);
         let (_, bad_l) = op_with_output(&mut data, b, op::INT_AND, vec![x, a], 1);
-        let (_, bad) = op_with_output(&mut data, b, op::INT_OR, vec![bad_l, y], 1);
+        let (bad, _) = op_with_output(&mut data, b, op::INT_OR, vec![bad_l, y], 1);
         assert_eq!(RuleHumptyOr.apply_op(bad, &mut data), 0);
     }
 
@@ -1417,7 +1476,7 @@ mod tests {
         assert_eq!(data.op(logic).opcode, op::COPY);
         let (_, neg2) = op_with_output(&mut data, b, op::INT_NEGATE, vec![x], 4);
         let y = input_value(&mut data, 4);
-        let (_, bad) = op_with_output(&mut data, b, op::INT_ADD, vec![neg2, y], 4);
+        let (bad, _) = op_with_output(&mut data, b, op::INT_ADD, vec![neg2, y], 4);
         assert_eq!(RuleNegateIdentity.apply_op(data.varnode(neg2).def.unwrap(), &mut data), 0);
         assert_eq!(data.op(bad).opcode, op::INT_ADD);
     }
@@ -1427,12 +1486,16 @@ mod tests {
         let mut data = Funcdata::default();
         let b = block(&mut data);
         let x = input_value(&mut data, 8);
-        let (_, shifted) = op_with_output(&mut data, b, op::INT_RIGHT, vec![x, data.new_constant(8, 4)], 8);
-        let (sub, _) = op_with_output(&mut data, b, op::SUBPIECE, vec![shifted, data.new_constant(0, 4)], 4);
+        let eight_shift = data.new_constant(8, 4);
+        let (_, shifted) = op_with_output(&mut data, b, op::INT_RIGHT, vec![x, eight_shift], 8);
+        let zero_sub = data.new_constant(0, 4);
+        let (sub, _) = op_with_output(&mut data, b, op::SUBPIECE, vec![shifted, zero_sub], 4);
         assert_eq!(RuleSubNormal.apply_op(sub, &mut data), 1);
         let free = data.new_varnode(REGISTER_SPACE, 0x800, 8);
-        let (_, bad_shift) = op_with_output(&mut data, b, op::INT_RIGHT, vec![free, data.new_constant(8, 4)], 8);
-        let (bad, _) = op_with_output(&mut data, b, op::SUBPIECE, vec![bad_shift, data.new_constant(0, 4)], 4);
+        let eight_bad_shift = data.new_constant(8, 4);
+        let (_, bad_shift) = op_with_output(&mut data, b, op::INT_RIGHT, vec![free, eight_bad_shift], 8);
+        let zero_bad_sub = data.new_constant(0, 4);
+        let (bad, _) = op_with_output(&mut data, b, op::SUBPIECE, vec![bad_shift, zero_bad_sub], 4);
         assert_eq!(RuleSubNormal.apply_op(bad, &mut data), 0);
     }
 
@@ -1456,12 +1519,15 @@ mod tests {
         let b = block(&mut data);
         let x = input_value(&mut data, 1);
         let (_, ext) = op_with_output(&mut data, b, op::INT_ZEXT, vec![x], 4);
-        let (_, mult) = op_with_output(&mut data, b, op::INT_MULT, vec![ext, data.new_constant(3, 4)], 4);
-        let (_, sub) = op_with_output(&mut data, b, op::SUBPIECE, vec![mult, data.new_constant(3, 4)], 1);
-        let (add, _) = op_with_output(&mut data, b, op::INT_ADD, vec![sub, x], 1);
+        let three_mult = data.new_constant(3, 4);
+        let (_, mult) = op_with_output(&mut data, b, op::INT_MULT, vec![ext, three_mult], 4);
+        let three_sub = data.new_constant(3, 4);
+        let (sub, sub_out) = op_with_output(&mut data, b, op::SUBPIECE, vec![mult, three_sub], 1);
+        let (add, _) = op_with_output(&mut data, b, op::INT_ADD, vec![sub_out, x], 1);
         assert_eq!(RuleDivTermAdd.apply_op(sub, &mut data), 1);
         assert_eq!(data.op(add).opcode, op::SUBPIECE);
-        let (_, bad) = op_with_output(&mut data, b, op::SUBPIECE, vec![mult, data.new_constant(2, 4)], 1);
+        let two_bad_div = data.new_constant(2, 4);
+        let (bad, _) = op_with_output(&mut data, b, op::SUBPIECE, vec![mult, two_bad_div], 1);
         assert_eq!(RuleDivTermAdd.apply_op(bad, &mut data), 0);
     }
 
@@ -1471,10 +1537,12 @@ mod tests {
         let b = block(&mut data);
         let x = input_value(&mut data, 1);
         let (_, sext) = op_with_output(&mut data, b, op::INT_SEXT, vec![x], 4);
-        let (sub, _) = op_with_output(&mut data, b, op::SUBPIECE, vec![sext, data.new_constant(1, 4)], 1);
+        let one_sign_form = data.new_constant(1, 4);
+        let (sub, _) = op_with_output(&mut data, b, op::SUBPIECE, vec![sext, one_sign_form], 1);
         assert_eq!(RuleSignForm.apply_op(sub, &mut data), 1);
         assert_eq!(data.op(sub).opcode, op::INT_SRIGHT);
-        let (_, bad) = op_with_output(&mut data, b, op::SUBPIECE, vec![sext, data.new_constant(0, 4)], 1);
+        let zero_bad_form = data.new_constant(0, 4);
+        let (bad, _) = op_with_output(&mut data, b, op::SUBPIECE, vec![sext, zero_bad_form], 1);
         assert_eq!(RuleSignForm.apply_op(bad, &mut data), 0);
     }
 
@@ -1483,14 +1551,18 @@ mod tests {
         let mut data = Funcdata::default();
         let b = block(&mut data);
         let x = input_value(&mut data, 4);
-        let (_, sign) = op_with_output(&mut data, b, op::INT_SRIGHT, vec![x, data.new_constant(31, 4)], 4);
-        let (_, neg) = op_with_output(&mut data, b, op::INT_MULT, vec![sign, data.new_constant(u32::MAX as u64, 4)], 4);
+        let thirty_one = data.new_constant(31, 4);
+        let (_, sign) = op_with_output(&mut data, b, op::INT_SRIGHT, vec![x, thirty_one], 4);
+        let minus_one = data.new_constant(u32::MAX as u64, 4);
+        let (_, neg) = op_with_output(&mut data, b, op::INT_MULT, vec![sign, minus_one], 4);
         let (_, add) = op_with_output(&mut data, b, op::INT_ADD, vec![x, neg], 4);
-        let (div, _) = op_with_output(&mut data, b, op::INT_SRIGHT, vec![add, data.new_constant(1, 4)], 4);
+        let one_div = data.new_constant(1, 4);
+        let (div, _) = op_with_output(&mut data, b, op::INT_SRIGHT, vec![add, one_div], 4);
         assert_eq!(RuleSignDiv2.apply_op(div, &mut data), 1);
         assert_eq!(data.op(div).opcode, op::INT_SDIV);
         let y = input_value(&mut data, 4);
-        let (_, bad) = op_with_output(&mut data, b, op::INT_SRIGHT, vec![y, data.new_constant(2, 4)], 4);
+        let two_bad = data.new_constant(2, 4);
+        let (bad, _) = op_with_output(&mut data, b, op::INT_SRIGHT, vec![y, two_bad], 4);
         assert_eq!(RuleSignDiv2.apply_op(bad, &mut data), 0);
     }
 
@@ -1499,13 +1571,17 @@ mod tests {
         let mut data = Funcdata::default();
         let b = block(&mut data);
         let x = input_value(&mut data, 4);
-        let (_, sign) = op_with_output(&mut data, b, op::INT_SRIGHT, vec![x, data.new_constant(31, 4)], 4);
-        let (_, unsigned) = op_with_output(&mut data, b, op::INT_RIGHT, vec![sign, data.new_constant(29, 4)], 4);
+        let thirty_one_near = data.new_constant(31, 4);
+        let (_, sign) = op_with_output(&mut data, b, op::INT_SRIGHT, vec![x, thirty_one_near], 4);
+        let twenty_nine = data.new_constant(29, 4);
+        let (_, unsigned) = op_with_output(&mut data, b, op::INT_RIGHT, vec![sign, twenty_nine], 4);
         let (_, add) = op_with_output(&mut data, b, op::INT_ADD, vec![x, unsigned], 4);
-        let (and, _) = op_with_output(&mut data, b, op::INT_AND, vec![add, data.new_constant(0xfffffff8, 4)], 4);
+        let mask_near = data.new_constant(0xfffffff8, 4);
+        let (and, _) = op_with_output(&mut data, b, op::INT_AND, vec![add, mask_near], 4);
         assert_eq!(RuleSignNearMult.apply_op(and, &mut data), 1);
         assert_eq!(data.op(and).opcode, op::INT_MULT);
-        let (_, bad) = op_with_output(&mut data, b, op::INT_AND, vec![add, data.new_constant(0xfffffff0, 4)], 4);
+        let mask_bad_near = data.new_constant(0xfffffff0, 4);
+        let (bad, _) = op_with_output(&mut data, b, op::INT_AND, vec![add, mask_bad_near], 4);
         assert_eq!(RuleSignNearMult.apply_op(bad, &mut data), 0);
     }
 
@@ -1522,7 +1598,8 @@ mod tests {
         let divop = data.varnode(div).def.unwrap();
         assert_eq!(RuleModOpt.apply_op(divop, &mut data), 1);
         assert_eq!(data.op(add).opcode, op::INT_REM);
-        let (_, bad) = op_with_output(&mut data, b, op::INT_DIV, vec![x, data.new_constant(4, 4)], 4);
+        let four_bad = data.new_constant(4, 4);
+        let (bad, _) = op_with_output(&mut data, b, op::INT_DIV, vec![x, four_bad], 4);
         assert_eq!(RuleModOpt.apply_op(bad, &mut data), 0);
     }
 
@@ -1547,13 +1624,14 @@ mod tests {
         let b = block(&mut data);
         let x = input_value(&mut data, 1);
         let y = input_value(&mut data, 1);
-        let (_, zero_copy) = op_with_output(&mut data, b, op::COPY, vec![data.new_constant(0, 1)], 1);
+        let zero_for_copy = data.new_constant(0, 1);
+        let (_, zero_copy) = op_with_output(&mut data, b, op::COPY, vec![zero_for_copy], 1);
         let (_, other_copy) = op_with_output(&mut data, b, op::COPY, vec![x], 1);
         let phi = data.new_op(op::MULTIEQUAL, SeqNum { address: 0x1100, order: 0 }, vec![zero_copy, other_copy]);
         let phi_out = data.new_unique(1);
         data.op_set_output(phi, Some(phi_out));
         data.op_insert_end(phi, b);
-        let (_, or) = op_with_output(&mut data, b, op::INT_OR, vec![phi_out, y], 1);
+        let (or, _) = op_with_output(&mut data, b, op::INT_OR, vec![phi_out, y], 1);
         assert_eq!(RuleOrPredicate.apply_op(data.varnode(phi_out).def.unwrap(), &mut data), 0);
         assert_eq!(RuleOrPredicate.apply_op(or, &mut data), 0);
     }

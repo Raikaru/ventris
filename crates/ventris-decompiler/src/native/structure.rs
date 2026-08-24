@@ -1386,6 +1386,8 @@ fn is_pure_expression(expression: &Expr) -> bool {
         | Expr::Register { .. }
         | Expr::Temporary { .. }
         | Expr::Global { .. } => true,
+        // A field read touches memory, so it is not pure.
+        Expr::Field { .. } => false,
         Expr::Binary { left, right, .. } => is_pure_expression(left) && is_pure_expression(right),
         Expr::Not(value)
         | Expr::Neg(value)
@@ -1481,7 +1483,8 @@ fn expression_contains(expression: &Expr, needle: &Expr) -> bool {
         | Expr::BitNot(value)
         | Expr::Cast { value, .. }
         | Expr::Typed { value, .. }
-        | Expr::Load { address: value, .. } => expression_contains(value, needle),
+        | Expr::Load { address: value, .. }
+        | Expr::Field { base: value, .. } => expression_contains(value, needle),
         Expr::Select {
             condition,
             when_true,

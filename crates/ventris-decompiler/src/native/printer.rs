@@ -483,6 +483,11 @@ fn render_expr(value: &Expr, parent_precedence: u8) -> String {
         }
         Expr::Typed { value, .. } => return render_expr(value, parent_precedence),
         Expr::Global { name, address, .. } => render_global_name(name, *address),
+        Expr::Field { base, name, .. } => {
+            // A field read through a pointer needs no cast: the pointer's type
+            // already says what lives at that offset.
+            format!("{}->{}", render_expr(base, PREC_POSTFIX), name)
+        }
         Expr::Load { address, width } => {
             if let Expr::Constant { value, .. } = address.as_ref() {
                 render_global_name("", *value)
@@ -542,6 +547,7 @@ fn expr_precedence(value: &Expr) -> u8 {
         Expr::Not(_) | Expr::Neg(_) | Expr::BitNot(_) | Expr::Cast { .. } | Expr::Load { .. } => {
             PREC_UNARY
         }
+        Expr::Field { .. } => PREC_POSTFIX,
         Expr::Call { .. } | Expr::Builtin { .. } => PREC_POSTFIX,
         Expr::Constant { .. }
         | Expr::Parameter { .. }
@@ -773,5 +779,52 @@ mod tests {
         assert!(source.contains("switch (i) {"), "{source}");
         assert!(source.contains("case 1:"), "{source}");
         assert!(source.contains("default:"), "{source}");
+    }
+
+    #[test]
+    fn a_field_read_renders_without_a_cast() {
+        // A cast says the program's type is not what the context requires.
+        // Reading a field of a recovered structure makes no such claim, so
+        // `p->field_40` is the honest rendering and `*(uint32_t *)(p + 0x40)`
+        // is not. Ghidra's cast counts are lower than ours for exactly this
+        // reason.
+        let field = Expr::Field {
+            base: Box::new(Expr::Register {
+                name: "pVar1".into(),
+                width: 4,
+            }),
+            name: "field_40".into(),
+            width: 4,
+        };
+        let rendered = render_expr(&field, 0);
+        assert_eq!(rendered, "pVar1->field_40");
+        assert!(
+            !rendered.contains('('),
+            "a field read needs no cast: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_field_base_that_binds_looser_keeps_its_parentheses() {
+        // `->` binds tighter than arithmetic, so a computed base has to keep
+        // its parentheses or the rendering means something else.
+        let field = Expr::Field {
+            base: Box::new(Expr::Binary {
+                op: BinaryOp::Add,
+                left: Box::new(Expr::Register {
+                    name: "pVar1".into(),
+                    width: 4,
+                }),
+                right: Box::new(Expr::Constant { value: 8, width: 4 }),
+            }),
+            name: "field_0".into(),
+            width: 4,
+        };
+        assert!(
+            render_expr(&field, 0).ends_with("->field_0"),
+            "{}",
+            render_expr(&field, 0)
+        );
+        assert!(render_expr(&field, 0).starts_with('('));
     }
 }

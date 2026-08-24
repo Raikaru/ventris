@@ -197,6 +197,11 @@ fn combine_ancestry(results: impl IntoIterator<Item = AncestorVerdict>) -> Ances
 /// the only representable untouched-entry state; an `INDIRECT` is followed
 /// through its value operand, as Ghidra does for a non-creation indirect. A
 /// `CALL`-defined value is kept distinct as a value left behind by a callee.
+/// Following an `INDIRECT` whose input is not itself a CALL result is WEAKER
+/// than Ghidra for a call-created indirect output, because the missing
+/// creation bit could make this walk fire where Ghidra declines. Call-site
+/// recovery therefore reads operand zero of the guard (the pre-call value),
+/// never the guard output.
 fn ancestor_walk(
     data: &Funcdata,
     value: VarnodeId,
@@ -315,21 +320,116 @@ fn incoming_value(data: &Funcdata, call: OpId, location: Location) -> Option<Var
             return operation.inputs.first().copied();
         }
     }
-
     // A caller that has already been linked may carry the trial directly in
     // CALL input slots. This is also the faithful fallback for a locked
     // prototype, where `ActionFuncLink` inserts the Varnode instead of a guard.
-    data.op(call)
-        .inputs
+    for value in data.op(call).inputs.iter().copied().skip(1) {
+        let varnode = data.varnode(value);
+        if varnode.space == location.space
+            && varnode.offset == location.offset
+            && varnode.size == location.size
+        {
+            return Some(value);
+        }
+        let Some(def) = varnode.def else {
+            continue;
+        };
+        let operation = data.op(def);
+        if operation.opcode != op::PIECE {
+            continue;
+        }
+        if let Some(piece) = operation.inputs.iter().copied().find(|piece| {
+            let piece = data.varnode(*piece);
+            piece.space == location.space
+                && piece.offset == location.offset
+                && piece.size == location.size
+        }) {
+            return Some(piece);
+        }
+    }
+    None
+}
+fn guard_is_for_call(data: &Funcdata, guard: OpId, call: OpId) -> bool {
+    let Some(block) = data.op(call).parent else {
+        return false;
+    };
+    if data.op(guard).parent != Some(block) {
+        return false;
+    }
+    let Some(guard_pos) = data
+        .block(block)
+        .ops
         .iter()
-        .copied()
-        .skip(1)
-        .find(|value| {
-            let varnode = data.varnode(*value);
-            varnode.space == location.space
-                && varnode.offset == location.offset
-                && varnode.size == location.size
-        })
+        .position(|candidate| *candidate == guard)
+    else {
+        return false;
+    };
+    let Some(call_pos) = data
+        .block(block)
+        .ops
+        .iter()
+        .position(|candidate| *candidate == call)
+    else {
+        return false;
+    };
+    guard_pos < call_pos
+        && data.block(block).ops[guard_pos + 1..call_pos]
+            .iter()
+            .all(|candidate| data.op(*candidate).opcode == op::INDIRECT)
+}
+
+/// Approximate `Funcdata::ancestorOpUse` for the guard-shaped graph. Ghidra
+/// follows copies and merges until every leaf is used only by the CALL or its
+/// immediately preceding `INDIRECT`; any other reader makes a realistic value
+/// inactive (`fspec.cc` 5626-5643). The graph has no call-spec edge on a guard,
+/// so adjacency in the containing block is the available equivalent.
+fn only_call_use(
+    data: &Funcdata,
+    value: VarnodeId,
+    call: OpId,
+    seen: &mut BTreeSet<VarnodeId>,
+) -> bool {
+    if !seen.insert(value) {
+        return true;
+    }
+    let descendants: Vec<OpId> = data.varnode(value).descendants.iter().copied().collect();
+    if descendants.is_empty() {
+        return false;
+    }
+    for descendant in descendants {
+        let Some(opcode) = data.opcode_of(descendant) else {
+            continue;
+        };
+        if descendant == call {
+            continue;
+        }
+        if opcode == op::INDIRECT && guard_is_for_call(data, descendant, call) {
+            continue;
+        }
+        if matches!(opcode, op::COPY | op::MULTIEQUAL | op::PIECE | op::SUBPIECE)
+            && let Some(output) = data.op(descendant).output
+            && only_call_use(data, output, call, seen)
+        {
+            continue;
+        }
+        return false;
+    }
+    true
+}
+fn transparent_origin(data: &Funcdata, value: VarnodeId, depth: usize) -> VarnodeId {
+    if depth >= ANCESTOR_RECURSION_LIMIT {
+        return value;
+    }
+    let Some(def) = data.varnode(value).def else {
+        return value;
+    };
+    let operation = data.op(def);
+    if matches!(operation.opcode, op::COPY | op::INDIRECT)
+        && let Some(input) = operation.inputs.first().copied()
+    {
+        return transparent_origin(data, input, depth + 1);
+    }
+    value
 }
 
 fn call_like(opcode: i32) -> bool {
@@ -347,6 +447,8 @@ fn collapse_piece(data: &Funcdata, first: VarnodeId, second: VarnodeId) -> Optio
     // If both halves are SUBPIECEs of the same whole, the whole is the one
     // logical parameter. This mirrors `ActionParamDouble`'s `SplitVarnode`
     // join branch without requiring a target endianness object.
+    let first = transparent_origin(data, first, 0);
+    let second = transparent_origin(data, second, 0);
     let first_def = data.varnode(first).def;
     let second_def = data.varnode(second).def;
     if let (Some(first_def), Some(second_def)) = (first_def, second_def) {
@@ -449,7 +551,16 @@ fn trial_values(
         let trial = active.trials_mut().last_mut().expect("registered trial");
         trial.value = Some(value);
         match ancestor_verdict(data, value) {
-            AncestorVerdict::Realistic => trial.mark_active(),
+            AncestorVerdict::Realistic
+                if only_call_use(data, value, call, &mut BTreeSet::new()) =>
+            {
+                trial.mark_active();
+            }
+            AncestorVerdict::Realistic => {
+                trial.mark_inactive();
+                values.push(value);
+                stop_after_inactive = true;
+            }
             AncestorVerdict::UntouchedInput => {
                 // A supplied location with an untouched input is retained as
                 // one pass-through parameter. The next location is not
@@ -643,9 +754,6 @@ impl Action for ActionParamDouble {
         let mut changed = 0;
         for call in calls(data) {
             let old_inputs = data.op(call).inputs.clone();
-            if old_inputs.len() < 3 {
-                continue;
-            }
             let locations: Vec<Location> = old_inputs
                 .iter()
                 .skip(1)
@@ -756,8 +864,9 @@ mod tests {
         data.mark_input(entry);
         assert!(!ancestor_realistic(&data, entry));
         // Ghidra chooses `inactive` for this third case in
-        // `FuncCallSpecs::checkInputTrialUse`, rather than `defnouse`, so a
-        // known callee arity can still retain the pass-through value.
+        // `FuncCallSpecs::checkInputTrialUse`, rather than `defnouse`
+        // (`fspec.cc` 5644-5646), so a known callee arity can still retain
+        // the pass-through value.
     }
 
     #[test]
@@ -769,6 +878,10 @@ mod tests {
         assert_eq!(data.varnode(argument).space, REGISTER_SPACE);
         assert_eq!(data.varnode(argument).offset, loc.offset);
         assert!(data.varnode(argument).flags.input);
+        let mut linked = data.clone();
+        assert_eq!(ActionActiveParam.apply(&mut linked), 1);
+        assert_eq!(linked.op(call).inputs.len(), 2);
+        assert_eq!(ActionActiveParam.apply(&mut linked), 0);
     }
 
     #[test]
@@ -818,6 +931,9 @@ mod tests {
         linked.op_set_inputs(call, vec![target, sub_lo, sub_hi]);
         assert_eq!(ActionParamDouble.apply(&mut linked), 1);
         assert_eq!(linked.op(call).inputs, vec![target, whole]);
+        let mut declined = data.clone();
+        declined.op_set_inputs(call, vec![target, sub_lo, hi]);
+        assert_eq!(ActionParamDouble.apply(&mut declined), 0);
     }
 
     #[test]

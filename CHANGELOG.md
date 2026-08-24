@@ -226,6 +226,12 @@ All notable Ventris changes are documented here.
   following statements look unreachable in the first place.
 - Added `VENTRIS_SKIP_PASS`, a comma-separated list of pass names to disable, so
   a defect can be attributed to one pass without a rebuild per guess.
+- Added a field-read expression, rendered `p->field_40`. `*(uint32_t *)(p + 0x40)`
+  says the same thing but carries a cast, and a cast is a claim that the value's
+  type is not what the context wants. When type recovery knows the structure, no
+  such claim is needed. This is the whole of the measured `excess-casts` gap
+  against Ghidra: on `changeGroupID__7JKRHeapFUc` every one of our two casts is a
+  memory-access spelling where Ghidra names a field.
 
 - Added `LiftedInstruction::skips_delay_slot`, which reports the MIPS
   likely-branch shape so consumers stop treating its sequential successor as

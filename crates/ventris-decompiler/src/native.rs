@@ -189,6 +189,17 @@ pub enum Expr {
         address: Box<Expr>,
         width: u32,
     },
+    /// A field read through a recovered structure pointer.
+    ///
+    /// `*(uint32_t *)(p + 0x40)` and `p->field_40` describe the same access, but
+    /// only the second says the offset is a field of a known type. Ghidra emits
+    /// the second whenever type recovery gives it a structure, which is why its
+    /// output carries no cast where ours carries two.
+    Field {
+        base: Box<Expr>,
+        name: String,
+        width: u32,
+    },
     Call {
         target: Option<u64>,
         callee: Option<Box<Expr>>,
@@ -467,6 +478,11 @@ fn materialize_result_casts_expr(expression: Expr) -> Expr {
             when_true: Box::new(materialize_result_casts_expr(*when_true)),
             when_false: Box::new(materialize_result_casts_expr(*when_false)),
         },
+        Expr::Field { base, name, width } => Expr::Field {
+            base: Box::new(materialize_result_casts_expr(*base)),
+            name,
+            width,
+        },
         Expr::Load { address, width } => Expr::Load {
             address: Box::new(materialize_result_casts_expr(*address)),
             width,
@@ -655,7 +671,9 @@ fn expression_type(value: &Expr, architecture: Architecture) -> Type {
         Expr::Parameter { ty, .. } => ty.clone(),
         Expr::Constant { width, .. } => Type::from_width(*width),
         Expr::Call { .. } => default_return_type(architecture),
-        Expr::Global { width, .. } | Expr::Load { width, .. } => Type::from_width(*width),
+        Expr::Global { width, .. }
+        | Expr::Load { width, .. }
+        | Expr::Field { width, .. } => Type::from_width(*width),
         Expr::Builtin { .. } => Type::Unsigned(32),
         Expr::Typed { ty, .. } => ty.clone(),
         Expr::Register { width, .. } | Expr::Temporary { width, .. } => Type::from_width(*width),
@@ -1260,6 +1278,7 @@ fn collect_expr_parameters_with_type(
             collect_expr_parameters(when_false, used);
         }
         Expr::Load { address, .. } => collect_expr_parameters(address, used),
+        Expr::Field { base, .. } => collect_expr_parameters(base, used),
         Expr::Call { callee, args, .. } => {
             if let Some(callee) = callee {
                 collect_expr_parameters(callee, used);
@@ -2825,7 +2844,9 @@ fn is_path_invariant(value: &Expr, stable_registers: &BTreeSet<String>) -> bool 
                 && is_path_invariant(when_true, stable_registers)
                 && is_path_invariant(when_false, stable_registers)
         }
-        Expr::Load { .. } | Expr::Call { .. } | Expr::Builtin { .. } => false,
+        Expr::Load { .. } | Expr::Field { .. } | Expr::Call { .. } | Expr::Builtin { .. } => {
+            false
+        }
     }
 }
 
@@ -3018,7 +3039,7 @@ fn accesses_may_alias(load: &Expr, load_width: u32, store: &Expr, store_width: u
 
 fn expression_reads_memory(value: &Expr) -> bool {
     match value {
-        Expr::Load { .. } => true,
+        Expr::Load { .. } | Expr::Field { .. } => true,
         Expr::Binary { left, right, .. } => {
             expression_reads_memory(left) || expression_reads_memory(right)
         }

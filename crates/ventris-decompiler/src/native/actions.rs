@@ -1186,7 +1186,8 @@ pub(super) fn expression_width(value: &Expr) -> u32 {
         | Expr::Register { width, .. }
         | Expr::Temporary { width, .. }
         | Expr::Global { width, .. }
-        | Expr::Load { width, .. } => *width,
+        | Expr::Load { width, .. }
+        | Expr::Field { width, .. } => *width,
         Expr::Parameter { ty, .. } | Expr::Cast { ty, .. } | Expr::Typed { ty, .. } => {
             type_width(ty)
         }
@@ -1239,6 +1240,8 @@ fn is_pure_expr(value: &Expr) -> bool {
         | Expr::Register { .. }
         | Expr::Temporary { .. }
         | Expr::Global { .. } => true,
+        // A field read is a memory read, so it is no purer than a load.
+        Expr::Field { .. } => false,
         Expr::Binary { left, right, .. } => is_pure_expr(left) && is_pure_expr(right),
         Expr::Not(inner)
         | Expr::Neg(inner)
@@ -1952,7 +1955,8 @@ fn collect_temporary_uses(value: &Expr, uses: &mut BTreeSet<String>) {
         | Expr::Neg(inner)
         | Expr::BitNot(inner)
         | Expr::Cast { value: inner, .. }
-        | Expr::Typed { value: inner, .. } => collect_temporary_uses(inner, uses),
+        | Expr::Typed { value: inner, .. }
+        | Expr::Field { base: inner, .. } => collect_temporary_uses(inner, uses),
         Expr::Select {
             condition,
             when_true,
