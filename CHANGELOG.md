@@ -6,6 +6,13 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- Added `ventris_decompiler::graph`, a mutable p-code data-flow graph ported
+  from Ghidra 12.1.3's `Funcdata`/`Varnode`/`PcodeOp` object model: one varnode
+  per definition, descendant lists, operand replacement, operation insertion and
+  destruction, and construction from lifter output. Ghidra's Actions and Rules
+  rewrite a live graph rather than build expressions, so this object model is
+  the prerequisite for porting them instead of reinventing them.
+
 - Added `LiftedInstruction::skips_delay_slot`, which reports the MIPS
   likely-branch shape so consumers stop treating its sequential successor as
   implicit.
