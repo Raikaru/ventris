@@ -20,8 +20,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use ventris_lifter::RAM_SPACE;
 use ventris_pcode::op;
 
+use super::merge::merge_required;
 use super::types::Types;
-use super::value::{Naming, Resolver, mark_explicit};
+use super::value::{Naming, Resolver, mark_explicit_with};
 use super::{Funcdata, GraphBlockId, OpId};
 use crate::native::{Expr, NativeStatement, Type};
 
@@ -39,7 +40,7 @@ pub fn emit_with_types(
     register_name: &dyn Fn(u32, u64, u32) -> Option<String>,
     types: &Types,
 ) -> Vec<NativeStatement> {
-    let naming = mark_explicit(data);
+    let naming = mark_explicit_with(data, merge_required(data));
     let resolver = Resolver::new(data, &naming, register_name);
     Emitter {
         data,
@@ -69,6 +70,7 @@ impl Emitter<'_> {
 
 impl Emitter<'_> {
     fn run(&self) -> Vec<NativeStatement> {
+        let scoped = self.scoped_names();
         let mut phi_copies: BTreeMap<GraphBlockId, Vec<NativeStatement>> = BTreeMap::new();
         for (block, copy) in self.resolver.phi_copies() {
             let copies = phi_copies.entry(block).or_default();
@@ -91,7 +93,7 @@ impl Emitter<'_> {
         let mut emitted: Vec<(u64, Vec<NativeStatement>)> = Vec::new();
         for (index, (block, start)) in blocks.iter().copied().enumerate() {
             let mut body = Vec::new();
-            let terminator = self.emit_body(block, &mut body);
+            let terminator = self.emit_body(block, &scoped, &mut body);
             if let Some(copies) = phi_copies.get(&block) {
                 body.extend(copies.iter().cloned());
             }
@@ -133,6 +135,9 @@ impl Emitter<'_> {
     /// declaration dominating every assignment.
     fn phi_declarations(&self) -> Vec<NativeStatement> {
         let mut declarations = Vec::new();
+        // Merging can put several merges in one variable, and a variable is
+        // declared once however many merges it spans.
+        let mut declared: BTreeSet<String> = BTreeSet::new();
         for (_, operation) in self.data.live_ops() {
             if operation.opcode != op::MULTIEQUAL {
                 continue;
@@ -145,6 +150,9 @@ impl Emitter<'_> {
             };
             let width = self.data.varnode(output).size;
             let _ = width;
+            if !declared.insert(name.to_string()) {
+                continue;
+            }
             declarations.push(NativeStatement::DeclareLocal {
                 name: name.to_string(),
                 ty: self.type_of(output),
@@ -155,14 +163,27 @@ impl Emitter<'_> {
 
     /// Emits the block's non-terminator statements, returning the terminator so
     /// the caller can place phi assignments before it.
+    /// The names declared once at function scope, which later writes assign to
+    /// rather than redeclare.
+    fn scoped_names(&self) -> BTreeSet<String> {
+        self.phi_declarations()
+            .into_iter()
+            .filter_map(|statement| match statement {
+                NativeStatement::DeclareLocal { name, .. } => Some(name),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn emit_body(
         &self,
         block: GraphBlockId,
+        scoped: &BTreeSet<String>,
         statements: &mut Vec<NativeStatement>,
     ) -> Vec<NativeStatement> {
         let mut terminator = Vec::new();
         for op in self.data.block(block).ops.iter().copied() {
-            match self.classify(op) {
+            match self.classify(op, scoped) {
                 Emission::Skip => {}
                 Emission::Body(statement) => statements.push(statement),
                 Emission::Terminator(statement) => terminator.push(statement),
@@ -171,7 +192,7 @@ impl Emitter<'_> {
         terminator
     }
 
-    fn classify(&self, op: OpId) -> Emission {
+    fn classify(&self, op: OpId, scoped: &BTreeSet<String>) -> Emission {
         let operation = self.data.op(op);
         match operation.opcode {
             // A named result is declared where it is defined; an unnamed one
@@ -198,11 +219,7 @@ impl Emitter<'_> {
                         .name_of(output)
                         .map(|name| (name.to_string(), output))
                 }) {
-                    Some((name, output)) => Emission::Body(NativeStatement::Declare {
-                        name,
-                        ty: self.type_of(output),
-                        value: call,
-                    }),
+                    Some((name, output)) => Emission::Body(self.bind(name, output, call, scoped)),
                     None => Emission::Body(NativeStatement::Call(call)),
                 }
             }
@@ -237,7 +254,7 @@ impl Emitter<'_> {
             },
             _ => match operation.output {
                 Some(output) => match self.naming.name_of(output) {
-                    Some(_) => Emission::Body(self.declaration_of(op, output)),
+                    Some(_) => Emission::Body(self.declaration_of(output, scoped)),
                     None => Emission::Skip,
                 },
                 None => Emission::Skip,
@@ -245,16 +262,45 @@ impl Emitter<'_> {
         }
     }
 
-    fn declaration_of(&self, _op: OpId, output: super::VarnodeId) -> NativeStatement {
+    fn declaration_of(
+        &self,
+        output: super::VarnodeId,
+        scoped: &BTreeSet<String>,
+    ) -> NativeStatement {
         let name = self
             .naming
             .name_of(output)
             .expect("caller checked the value is named")
             .to_string();
+        let value = self.resolver.resolve_definition(output);
+        self.bind(name, output, value, scoped)
+    }
+
+    /// Gives a name a value: an assignment when the name is already declared at
+    /// function scope, a declaration at its single definition otherwise.
+    ///
+    /// A merged variable is written on several paths, so redeclaring it at each
+    /// write would not compile.
+    fn bind(
+        &self,
+        name: String,
+        output: super::VarnodeId,
+        value: Expr,
+        scoped: &BTreeSet<String>,
+    ) -> NativeStatement {
+        if scoped.contains(&name) {
+            return NativeStatement::Assign {
+                destination: Expr::Temporary {
+                    name,
+                    width: self.data.varnode(output).size,
+                },
+                source: value,
+            };
+        }
         NativeStatement::Declare {
             name,
             ty: self.type_of(output),
-            value: self.resolver.resolve_definition(output),
+            value,
         }
     }
 

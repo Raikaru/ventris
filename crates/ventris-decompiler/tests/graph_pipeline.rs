@@ -65,28 +65,60 @@ fn render_via_graph(bytes: &[u8], entry: u64) -> String {
         .render()
 }
 
-#[test]
-fn a_merged_value_is_declared_and_assigned_on_each_path() {
-    // The address-ordered pass dropped a register whose value differed per
-    // path, because it had no way to name the merge. The graph pipeline
-    // declares it once and assigns it where each path ends.
-    let source = render_via_graph(GET_BUILT_IN_TEXTURE, 0x124fa8);
-    let declarations: Vec<&str> = source
+/// The locals a rendered function declares, by name.
+///
+/// A declaration is a line naming a C type and an identifier. Matching on "ends
+/// with a semicolon" also catches `goto`, which is why the type prefix matters.
+fn declared_locals(source: &str) -> Vec<String> {
+    const TYPES: &[&str] = &[
+        "uint8_t",
+        "uint16_t",
+        "uint32_t",
+        "uint64_t",
+        "int8_t",
+        "int16_t",
+        "int32_t",
+        "int64_t",
+        "uintptr_t",
+        "bool",
+        "float",
+        "double",
+    ];
+    source
         .lines()
         .map(str::trim)
-        .filter(|line| line.starts_with("uint") && line.contains("phi_") && line.ends_with(';'))
-        .filter(|line| !line.contains('='))
+        .filter(|line| line.ends_with(';'))
+        .filter_map(|line| {
+            let (ty, rest) = line.split_once(' ')?;
+            TYPES.contains(&ty).then_some(rest)
+        })
+        .map(|rest| {
+            rest.split(['=', ';'])
+                .next()
+                .unwrap_or(rest)
+                .trim()
+                .to_string()
+        })
+        .filter(|name| !name.is_empty() && !name.contains('*'))
+        .collect()
+}
+
+#[test]
+fn a_merged_variable_is_declared_once_and_written_on_several_paths() {
+    // The address-ordered pass dropped a register whose value differed per
+    // path. Merging gives every version one name, declared at function scope
+    // and assigned wherever a path computes it.
+    let source = render_via_graph(GET_BUILT_IN_TEXTURE, 0x124fa8);
+    let scoped: Vec<String> = source
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.ends_with(';') && !line.contains('='))
+        .filter_map(|line| line.split_once(' '))
+        .map(|(_, name)| name.trim_end_matches(';').to_string())
+        .filter(|name| name.starts_with("v_") || name.starts_with("phi_"))
         .collect();
-    assert!(
-        !declarations.is_empty(),
-        "no merged value was declared\n{source}"
-    );
-    let merged = declarations.iter().any(|declaration| {
-        let name = declaration
-            .split_whitespace()
-            .nth(1)
-            .expect("a declaration names a variable")
-            .trim_end_matches(';');
+    assert!(!scoped.is_empty(), "no merged variable declared\n{source}");
+    let written_twice = scoped.iter().any(|name| {
         source
             .lines()
             .filter(|line| line.trim().starts_with(&format!("{name} =")))
@@ -94,8 +126,8 @@ fn a_merged_value_is_declared_and_assigned_on_each_path() {
             > 1
     });
     assert!(
-        merged,
-        "a declared merge must be assigned on more than one path\n{source}"
+        written_twice,
+        "no merged variable is written on more than one path\n{source}"
     );
 }
 
@@ -142,4 +174,37 @@ fn recovered_calls_carry_their_arguments() {
         calls.iter().all(|line| !line.contains("sub_1253f8()")),
         "a call was emitted with no arguments\n{source}"
     );
+}
+
+#[test]
+fn each_local_is_declared_exactly_once() {
+    // Merging puts every version of a variable under one name, and several
+    // merges can land in one variable. A name declared twice does not compile.
+    let source = render_via_graph(GET_BUILT_IN_TEXTURE, 0x124fa8);
+    let mut declared = declared_locals(&source);
+    let before = declared.len();
+    assert!(before > 0, "nothing was declared\n{source}");
+    declared.sort();
+    declared.dedup();
+    assert_eq!(
+        declared.len(),
+        before,
+        "a local was declared more than once\n{source}"
+    );
+}
+
+#[test]
+fn a_merged_variable_needs_no_self_assignment() {
+    // Before merging, every join emitted one assignment per incoming path even
+    // when both sides named the same value.
+    let source = render_via_graph(GET_BUILT_IN_TEXTURE, 0x124fa8);
+    for line in source.lines().map(str::trim) {
+        if let Some((left, right)) = line.split_once(" = ") {
+            assert_ne!(
+                left.trim(),
+                right.trim_end_matches(';').trim(),
+                "a variable was assigned to itself\n{source}"
+            );
+        }
+    }
 }

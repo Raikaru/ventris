@@ -22,18 +22,32 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use ventris_pcode::op;
 
+use super::merge::{HighId, HighVariables, merge_required};
 use super::{Funcdata, OpId, VarnodeId};
 use crate::native::{BinaryOp, Expr, NativeStatement, Type};
 
-/// Names assigned to values that must be spelled once and referred to by name.
+/// Names assigned to variables that must be spelled once and referred to by
+/// name.
+///
+/// A name belongs to a `HighVariable`, not to an SSA value: every version of a
+/// merged variable answers to one identifier, which is what makes the merge
+/// itself disappear from the output.
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
 pub struct Naming {
-    names: BTreeMap<VarnodeId, String>,
+    names: BTreeMap<HighId, String>,
+    highs: HighVariables,
 }
 
 impl Naming {
     pub fn name_of(&self, value: VarnodeId) -> Option<&str> {
-        self.names.get(&value).map(String::as_str)
+        self.names
+            .get(&self.highs.high_of(value))
+            .map(String::as_str)
+    }
+
+    /// Whether an assignment between these values would say nothing.
+    pub fn same_variable(&self, left: VarnodeId, right: VarnodeId) -> bool {
+        self.highs.same(left, right)
     }
 
     pub fn len(&self) -> usize {
@@ -52,7 +66,12 @@ impl Naming {
 /// phi result. Duplicating a call or a load would duplicate an observable
 /// effect, and a phi has no expression spelling at all, so both must be named.
 pub fn mark_explicit(data: &Funcdata) -> Naming {
-    let mut names = BTreeMap::new();
+    mark_explicit_with(data, merge_required(data))
+}
+
+/// As [`mark_explicit`], with a variable partition supplied by the caller.
+pub fn mark_explicit_with(data: &Funcdata, highs: HighVariables) -> Naming {
+    let mut names: BTreeMap<HighId, String> = BTreeMap::new();
     for (id, op) in data.live_ops() {
         let Some(output) = op.output else { continue };
         let varnode = data.varnode(output);
@@ -67,9 +86,13 @@ pub fn mark_explicit(data: &Funcdata) -> Naming {
         if !effectful && !shared {
             continue;
         }
-        names.insert(output, value_name(data, id, output));
+        // The first definition encountered names the variable. Later versions
+        // of the same variable answer to that name rather than minting one.
+        names
+            .entry(highs.high_of(output))
+            .or_insert_with(|| value_name(data, id, output));
     }
-    Naming { names }
+    Naming { names, highs }
 }
 
 /// A name unique to one value.
@@ -288,6 +311,11 @@ impl<'a> Resolver<'a> {
                 else {
                     continue;
                 };
+                // Merging made the operand and the result one variable, so the
+                // assignment would read and write the same name.
+                if self.naming.same_variable(output, operand) {
+                    continue;
+                }
                 copies.push((
                     predecessor,
                     NativeStatement::Assign {
@@ -392,7 +420,7 @@ mod tests {
     }
 
     #[test]
-    fn a_merged_value_is_named_and_assigned_on_each_path() {
+    fn a_merged_value_becomes_one_variable_written_on_each_path() {
         let mut data = Funcdata::default();
         let entry = data.new_block(0x1000);
         let left = data.new_block(0x1010);
@@ -418,37 +446,30 @@ mod tests {
         let naming = mark_explicit(&data);
         let resolver = Resolver::new(&data, &naming, &names);
 
+        // The value read after the join is named, not dropped.
         let returned = resolver.resolve(data.op(ret).inputs[0]);
         let Expr::Temporary { name, .. } = &returned else {
             panic!("a merged value must be named, not dropped: {returned:?}");
         };
 
-        let copies = resolver.phi_copies();
-        assert_eq!(copies.len(), 2, "one assignment per incoming path");
-        let mut sources: Vec<u64> = Vec::new();
-        for (block, statement) in &copies {
-            assert!(*block == left || *block == right);
-            let NativeStatement::Assign {
-                destination,
-                source,
-            } = statement
-            else {
-                panic!("expected an assignment");
-            };
+        // Merging made each arm's definition the same variable as the result,
+        // so the arms write that variable directly and the merge needs no
+        // assignments of its own.
+        assert!(
+            resolver.phi_copies().is_empty(),
+            "a merged variable needs no copy from itself"
+        );
+        for (_, operation) in data
+            .live_ops()
+            .filter(|(_, operation)| operation.opcode == op::COPY)
+        {
+            let out = operation.output.expect("each arm defines a value");
             assert_eq!(
-                destination,
-                &Expr::Temporary {
-                    name: name.clone(),
-                    width: 4
-                }
+                naming.name_of(out),
+                Some(name.as_str()),
+                "each arm writes the merged variable"
             );
-            let Expr::Constant { value, .. } = source else {
-                panic!("expected the path's constant");
-            };
-            sources.push(*value);
         }
-        sources.sort_unstable();
-        assert_eq!(sources, vec![7, 9]);
     }
 
     #[test]

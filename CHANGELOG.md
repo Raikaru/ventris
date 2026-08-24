@@ -83,6 +83,12 @@ All notable Ventris changes are documented here.
 - Fixed graph value names colliding when one location holds values of different
   widths at one address, which emitted two C declarations of the same identifier
   with different types.
+- Added variable merging, ported from `Merge::mergeOpcode` and `HighVariable`:
+  the values a `MULTIEQUAL` or `INDIRECT` relates become one C variable, so a
+  merge carries no content of its own and its per-path assignments disappear.
+  Names belong to variables rather than SSA values, a merged variable is
+  declared once at function scope, and writes to it are assignments rather than
+  redeclarations.
 
 - Added `LiftedInstruction::skips_delay_slot`, which reports the MIPS
   likely-branch shape so consumers stop treating its sequential successor as
