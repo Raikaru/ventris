@@ -194,7 +194,12 @@ fn inputs2(data: &Funcdata, id: OpId) -> Option<(VarnodeId, VarnodeId)> {
     let operation = data.op(id);
     Some((*operation.inputs.first()?, *operation.inputs.get(1)?))
 }
+fn is_constant(data: &Funcdata, value: VarnodeId) -> bool {
+    data.varnode(value).flags.constant
+}
 
+/// A newly allocated, unmarked varnode has no heritage proof; constants,
+/// inputs, and defined values are the graph's conservative approximation.
 fn heritage_known(data: &Funcdata, value: VarnodeId) -> bool {
     let varnode = data.varnode(value);
     varnode.flags.constant || varnode.flags.input || varnode.def.is_some()
@@ -382,8 +387,6 @@ impl Rule for RuleShiftBitops {
         let Some(slot) = masked_out else {
             return 0;
         };
-        match bitop_code {
-            op::INT_MULT | op::INT_AND => {
         if matches!(bitop_code, op::INT_ADD | op::INT_XOR | op::INT_OR)
             && !heritage_known(data, data.op(bitop).inputs[1 - slot])
         {
@@ -736,6 +739,9 @@ impl Rule for RuleAndCommute {
         for slot in 0..2 {
             let shiftvn = if slot == 0 { left } else { right };
             let other = if slot == 0 { right } else { left };
+            if !heritage_known(data, other) {
+                continue;
+            }
             let Some(shift_id) = data.varnode(shiftvn).def else {
                 continue;
             };

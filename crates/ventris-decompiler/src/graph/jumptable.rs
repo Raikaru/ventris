@@ -1,0 +1,647 @@
+//! Jump-table recovery for indirect branches.
+//!
+//! This is the loader-independent part of Ghidra 12.1.3's jump-table pass at
+//! commit `8b4c91d4d5bd1549622bfbade0df199585b98365`. The implementation is
+//! based on `JumpTable::recoverAddresses`, `JumpTable::recoverModel`, and
+//! `JumpTable::foldInNormalization` in `jumptable.cc`, with the primary model
+//! from `JumpBasic::recoverModel`, `JumpBasic::findDeterminingVarnodes`, and
+//! `JumpBasic::analyzeGuards`. `JumpValuesRange::initializeForReading` and
+//! `JumpValuesRange::next` are represented by the bounded label loop.
+//! `JumpBasic2::recoverModel` is deliberately not reproduced: this graph has
+//! no `PathMeld::set`/`PathMeld::meld` or emulation state for a split-path
+//! `MULTIEQUAL` model. The address walk corresponds to
+//! `EmulateFunction::emulatePath` and its `executeLoad` hook, while the
+//! one-edge fallback is `JumpModelTrivial::recoverModel`/`buildAddresses`.
+//! `ActionSwitchNorm::apply` is represented by the local branch-input fold
+//! below; the reduced graph has no `Funcdata` jump-table registry or loader
+//! through which to perform Ghidra's later label and guard folding.
+
+use std::collections::BTreeSet;
+
+use super::action::Action;
+use super::{Funcdata, GraphBlockId, OpId, VarnodeId};
+use ventris_pcode::op;
+
+const MAX_TABLE_ENTRIES: u64 = 0x1_0000;
+
+/// One recovered switch: the value tested, and each case label with its target address.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JumpTable {
+    pub branch: OpId,
+    pub switch_value: VarnodeId,
+    pub cases: Vec<(u64, u64)>,
+    pub default_target: Option<u64>,
+}
+
+#[derive(Copy, Clone)]
+struct Scale {
+    value: VarnodeId,
+    stride: u64,
+}
+
+#[derive(Copy, Clone)]
+struct AddressModel {
+    base: u64,
+    index: VarnodeId,
+    stride: u64,
+}
+
+#[derive(Copy, Clone)]
+struct DestinationModel {
+    address: AddressModel,
+    entry_size: u32,
+    target_bias: u64,
+}
+
+#[derive(Copy, Clone)]
+struct GuardModel {
+    bound: u64,
+    default_target: Option<u64>,
+}
+
+/// Strip operations which preserve the low-order value bits used by a switch.
+///
+/// Ghidra calls this a quasi-COPY while pulling a guard back through the data
+/// flow (`GuardRecord::quasiCopy` in `jumptable.cc`).  `BOOL_NEGATE` is included
+/// only for matching a condition value; it is never used while walking an
+/// address calculation.
+fn strip_alias(data: &Funcdata, start: VarnodeId) -> VarnodeId {
+    let mut current = start;
+    let mut seen = BTreeSet::new();
+    loop {
+        if !seen.insert(current) {
+            return current;
+        }
+        let Some(def) = data.varnode(current).def else {
+            return current;
+        };
+        let operation = data.op(def);
+        let source = match operation.opcode {
+            op::COPY | op::INT_ZEXT | op::BOOL_NEGATE => operation.inputs.first().copied(),
+            op::SUBPIECE => {
+                let offset = operation.inputs.get(1).copied();
+                offset
+                    .filter(|value| {
+                        data.varnode(*value).flags.constant && data.varnode(*value).offset == 0
+                    })
+                    .and_then(|_| operation.inputs.first().copied())
+            }
+            _ => None,
+        };
+        let Some(source) = source else {
+            return current;
+        };
+        current = source;
+    }
+}
+
+fn constant_value(data: &Funcdata, value: VarnodeId) -> Option<u64> {
+    let value = strip_alias(data, value);
+    data.varnode(value)
+        .flags
+        .constant
+        .then_some(data.varnode(value).offset)
+}
+
+fn same_value(data: &Funcdata, left: VarnodeId, right: VarnodeId) -> bool {
+    strip_alias(data, left) == strip_alias(data, right)
+}
+
+/// Recover an index and its scale from the address calculation.
+///
+/// The accepted forms are the reversible operations used by Ghidra's basic
+/// model: `INT_MULT(index, constant)`, `INT_LEFT(index, constant)`, and the
+/// quasi-copy operations handled by `strip_alias`.  A value defined by any
+/// other operation is not treated as an index; accepting it would turn an
+/// arbitrary pointer expression into a switch.
+fn parse_scaled(data: &Funcdata, value: VarnodeId) -> Option<Scale> {
+    let value = strip_alias(data, value);
+    if data.varnode(value).flags.constant {
+        return None;
+    }
+    let Some(def) = data.varnode(value).def else {
+        return Some(Scale { value, stride: 1 });
+    };
+    let operation = data.op(def);
+    match operation.opcode {
+        op::INT_MULT if operation.inputs.len() >= 2 => {
+            let (index, scale) = if let Some(scale) = constant_value(data, operation.inputs[1]) {
+                (operation.inputs[0], scale)
+            } else if let Some(scale) = constant_value(data, operation.inputs[0]) {
+                (operation.inputs[1], scale)
+            } else {
+                return None;
+            };
+            if scale == 0 {
+                return None;
+            }
+            let nested = parse_scaled(data, index)?;
+            Some(Scale {
+                value: nested.value,
+                stride: nested.stride.checked_mul(scale)?,
+            })
+        }
+        op::INT_LEFT if operation.inputs.len() >= 2 => {
+            let shift = constant_value(data, operation.inputs[1])?;
+            if shift >= u64::from(u64::BITS) {
+                return None;
+            }
+            let nested = parse_scaled(data, operation.inputs[0])?;
+            Some(Scale {
+                value: nested.value,
+                stride: nested.stride.checked_shl(shift as u32)?,
+            })
+        }
+        // A free, non-constant varnode is the determining value.  Defined
+        // values reach this point only when their producer was unsupported.
+        _ => None,
+    }
+}
+
+/// Recover `constant base + scaled index` from a LOAD address.
+fn parse_address(data: &Funcdata, value: VarnodeId) -> Option<AddressModel> {
+    let value = strip_alias(data, value);
+    let def = data.varnode(value).def?;
+    let operation = data.op(def);
+    if operation.opcode != op::INT_ADD || operation.inputs.len() < 2 {
+        return None;
+    }
+
+    if let Some(base) = constant_value(data, operation.inputs[0]) {
+        if let Some(scale) = parse_scaled(data, operation.inputs[1]) {
+            return Some(AddressModel {
+                base,
+                index: scale.value,
+                stride: scale.stride,
+            });
+        }
+        // Permit a second constant add around an already recognized table
+        // address.  Both constants still collapse to one fixed table base.
+        if let Some(mut nested) = parse_address(data, operation.inputs[1]) {
+            nested.base = nested.base.wrapping_add(base);
+            return Some(nested);
+        }
+    }
+    if let Some(base) = constant_value(data, operation.inputs[1]) {
+        if let Some(scale) = parse_scaled(data, operation.inputs[0]) {
+            return Some(AddressModel {
+                base,
+                index: scale.value,
+                stride: scale.stride,
+            });
+        }
+        if let Some(mut nested) = parse_address(data, operation.inputs[0]) {
+            nested.base = nested.base.wrapping_add(base);
+            return Some(nested);
+        }
+    }
+    // In particular, an input/global base plus an index is rejected here.
+    // A table address must be anchored by a literal constant.
+    None
+}
+
+/// Trace a BRANCHIND destination back to a loaded table entry.
+fn parse_destination(data: &Funcdata, value: VarnodeId) -> Option<DestinationModel> {
+    let value = strip_alias(data, value);
+    let def = data.varnode(value).def?;
+    let operation = data.op(def);
+    match operation.opcode {
+        op::LOAD => {
+            let address = parse_address(data, *operation.inputs.get(1)?)?;
+            let output = operation.output?;
+            let entry_size = data.varnode(output).size;
+            (entry_size != 0).then_some(DestinationModel {
+                address,
+                entry_size,
+                target_bias: 0,
+            })
+        }
+        op::INT_ADD if operation.inputs.len() >= 2 => {
+            if let Some(bias) = constant_value(data, operation.inputs[0]) {
+                let mut nested = parse_destination(data, operation.inputs[1])?;
+                nested.target_bias = nested.target_bias.wrapping_add(bias);
+                return Some(nested);
+            }
+            if let Some(bias) = constant_value(data, operation.inputs[1]) {
+                let mut nested = parse_destination(data, operation.inputs[0])?;
+                nested.target_bias = nested.target_bias.wrapping_add(bias);
+                return Some(nested);
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Keep a table-shaped destination from falling through to the trivial model
+/// when its address failed validation (for example, because the base is
+/// dynamic). This is only a shape check, not a recovery.
+fn contains_load(data: &Funcdata, value: VarnodeId) -> bool {
+    let value = strip_alias(data, value);
+    let Some(def) = data.varnode(value).def else {
+        return false;
+    };
+    let operation = data.op(def);
+    match operation.opcode {
+        op::LOAD => true,
+        op::INT_ADD if operation.inputs.len() >= 2 => {
+            contains_load(data, operation.inputs[0]) || contains_load(data, operation.inputs[1])
+        }
+        _ => false,
+    }
+}
+
+fn block_reaches(data: &Funcdata, start: GraphBlockId, target: GraphBlockId) -> bool {
+    let mut pending = vec![start];
+    let mut seen = BTreeSet::new();
+    while let Some(block) = pending.pop() {
+        if !seen.insert(block) {
+            continue;
+        }
+        if block == target {
+            return true;
+        }
+        pending.extend(data.block(block).successors.iter().copied());
+    }
+    false
+}
+
+fn guard_relation(
+    data: &Funcdata,
+    guard_block: GraphBlockId,
+    branch_block: GraphBlockId,
+    guard: OpId,
+    branch: OpId,
+) -> Option<Option<u64>> {
+    if guard_block == branch_block {
+        // A CBRANCH normally terminates its block, but hand-built graphs and
+        // partially lifted code can place both ops together. Sequence order
+        // is enough to preserve the "preceding guard" invariant there.
+        return (data.op(guard).seq < data.op(branch).seq).then_some(None);
+    }
+    let successors = &data.block(guard_block).successors;
+    if successors.len() == 2 {
+        let first = block_reaches(data, successors[0], branch_block);
+        let second = block_reaches(data, successors[1], branch_block);
+        if first == second {
+            return None;
+        }
+        let default = if first {
+            data.block(successors[1]).start
+        } else {
+            data.block(successors[0]).start
+        };
+        return Some(Some(default));
+    }
+    block_reaches(data, guard_block, branch_block).then_some(None)
+}
+
+fn guard_bound(data: &Funcdata, compare: OpId, switch_value: VarnodeId) -> Option<u64> {
+    let operation = data.op(compare);
+    let left = *operation.inputs.first()?;
+    let right = *operation.inputs.get(1)?;
+    if !same_value(data, left, switch_value) {
+        return None;
+    }
+    let limit = constant_value(data, right)?;
+    match operation.opcode {
+        op::INT_LESS => Some(limit),
+        op::INT_LESSEQUAL => limit.checked_add(1),
+        _ => None,
+    }
+}
+
+/// Find the smallest range reaching the indirect branch, like
+/// `JumpBasic::findSmallestNormal` after `analyzeGuards` has populated its
+/// `GuardRecord`s.
+fn find_guard(data: &Funcdata, branch: OpId, switch_value: VarnodeId) -> Option<GuardModel> {
+    let branch_block = data.op(branch).parent?;
+    let condition = |candidate: OpId| {
+        let operation = data.op(candidate);
+        (operation.opcode == op::CBRANCH)
+            .then(|| operation.inputs.get(1).copied())
+            .flatten()
+    };
+    let mut best: Option<GuardModel> = None;
+
+    for (cbranch, operation) in data.live_ops() {
+        let Some(condition_value) = condition(cbranch) else {
+            continue;
+        };
+        let compare = strip_alias(data, condition_value);
+        let Some(compare_def) = data.varnode(compare).def else {
+            continue;
+        };
+        if compare_def != cbranch
+            && data.op(compare_def).opcode != op::INT_LESS
+            && data.op(compare_def).opcode != op::INT_LESSEQUAL
+        {
+            continue;
+        }
+        let Some(bound) = guard_bound(data, compare_def, switch_value) else {
+            continue;
+        };
+        if bound == 0 || bound > MAX_TABLE_ENTRIES {
+            continue;
+        }
+        let Some(guard_block) = operation.parent else {
+            continue;
+        };
+        let Some(default_target) = guard_relation(data, guard_block, branch_block, cbranch, branch)
+        else {
+            continue;
+        };
+        let candidate = GuardModel {
+            bound,
+            default_target,
+        };
+        if best.is_none_or(|current| candidate.bound < current.bound) {
+            best = Some(candidate);
+        }
+    }
+    best
+}
+
+fn recover_basic(
+    data: &Funcdata,
+    branch: OpId,
+    read_memory: &dyn Fn(u64, u32) -> Option<u64>,
+) -> Option<JumpTable> {
+    let destination = *data.op(branch).inputs.first()?;
+    let model = parse_destination(data, destination)?;
+    let guard = find_guard(data, branch, model.address.index)?;
+    let mut cases = Vec::with_capacity(guard.bound as usize);
+    for label in 0..guard.bound {
+        let offset = label.checked_mul(model.address.stride)?;
+        let address = model.address.base.checked_add(offset)?;
+        let target = read_memory(address, model.entry_size)?;
+        cases.push((label, target.wrapping_add(model.target_bias)));
+    }
+    Some(JumpTable {
+        branch,
+        switch_value: model.address.index,
+        cases,
+        default_target: guard.default_target,
+    })
+}
+
+/// `JumpModelTrivial` uses the outgoing edges themselves as the address table.
+/// A literal BRANCHIND target is also unambiguous in a graph with no edges.
+fn recover_trivial(data: &Funcdata, branch: OpId) -> Option<JumpTable> {
+    let operation = data.op(branch);
+    let destination = *operation.inputs.first()?;
+    let parent = operation.parent?;
+    let target = if let Some(target) = constant_value(data, destination) {
+        target
+    } else {
+        let successors = &data.block(parent).successors;
+        (successors.len() == 1).then(|| data.block(successors[0]).start)?
+    };
+    Some(JumpTable {
+        branch,
+        switch_value: destination,
+        cases: vec![(target, target)],
+        default_target: None,
+    })
+}
+
+/// Recovers every jump table in the function.
+///
+/// `read_memory` reads the image, because a table's targets live in data, not code.
+/// A failed read rejects the whole model: a partial table would invent a
+/// different control-flow graph from the one represented by the image.
+pub fn recover_jump_tables(
+    data: &Funcdata,
+    read_memory: &dyn Fn(u64, u32) -> Option<u64>,
+) -> Vec<JumpTable> {
+    data.live_ops()
+        .filter(|(_, operation)| operation.opcode == op::BRANCHIND)
+        .filter_map(|(branch, _)| {
+            let destination = data.op(branch).inputs.first().copied()?;
+            // Once the destination has the shape of a table load, a missing or
+            // unbounded guard must not fall through to the one-edge model.
+            if parse_destination(data, destination).is_some() || contains_load(data, destination) {
+                recover_basic(data, branch, read_memory)
+            } else {
+                recover_trivial(data, branch)
+            }
+        })
+        .collect()
+}
+
+/// Normalizes a recovered switch before structure recovery.
+///
+/// Ghidra's `ActionSwitchNorm::apply` calls `JumpTable::foldInNormalization`,
+/// which makes BRANCHIND consume the unnormalized switch variable and leaves
+/// the address-calculation ops for dead-code cleanup.  This reduced graph has
+/// no jump-table registry, so the action performs that local fold for every
+/// guarded basic-model branch; label recovery remains the explicit
+/// `recover_jump_tables` API above.
+pub struct ActionSwitchNorm;
+
+impl Action for ActionSwitchNorm {
+    fn name(&self) -> &'static str {
+        "switchnorm"
+    }
+
+    fn apply(&self, data: &mut Funcdata) -> usize {
+        let candidates: Vec<(OpId, VarnodeId)> = data
+            .live_ops()
+            .filter(|(_, operation)| operation.opcode == op::BRANCHIND)
+            .filter_map(|(branch, operation)| {
+                let destination = operation.inputs.first().copied()?;
+                let model = parse_destination(data, destination)?;
+                find_guard(data, branch, model.address.index).map(|_| (branch, model.address.index))
+            })
+            .collect();
+        let mut changed = 0;
+        for (branch, switch_value) in candidates {
+            if data.op(branch).inputs.first().copied() != Some(switch_value) {
+                data.op_set_input(branch, switch_value, 0);
+                changed += 1;
+            }
+        }
+        changed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ventris_lifter::{CONST_SPACE, RAM_SPACE, REGISTER_SPACE};
+
+    fn seq(order: u32) -> super::super::SeqNum {
+        super::super::SeqNum {
+            address: 0x1000 + u64::from(order),
+            order,
+        }
+    }
+
+    struct Fixture {
+        data: Funcdata,
+        branch: OpId,
+        index: VarnodeId,
+        table_base: u64,
+        entries: Vec<u64>,
+    }
+
+    fn bounded_fixture() -> Fixture {
+        let mut data = Funcdata {
+            entry: 0x1000,
+            ..Funcdata::default()
+        };
+        let entry = data.new_block(0x1000);
+        let guarded = data.new_block(0x1010);
+        let default = data.new_block(0x2000);
+        let switch = data.new_block(0x1020);
+        data.add_edge(entry, guarded);
+        data.add_edge(guarded, default);
+        data.add_edge(guarded, switch);
+
+        let index = data.new_varnode(REGISTER_SPACE, 0, 4);
+        data.mark_input(index);
+        let bound = data.new_constant(3, 4);
+        let compare = data.new_op(op::INT_LESS, seq(0), vec![index, bound]);
+        let comparison = data.new_unique(1);
+        data.op_set_output(compare, Some(comparison));
+        data.op_insert_end(compare, guarded);
+        let guard_target = data.new_constant(data.block(switch).start, 8);
+        let cbranch = data.new_op(op::CBRANCH, seq(1), vec![guard_target, comparison]);
+        data.op_insert_end(cbranch, guarded);
+
+        let shift_amount = data.new_constant(2, 4);
+        let scaled = data.new_unique(4);
+        let shift = data.new_op(op::INT_LEFT, seq(2), vec![index, shift_amount]);
+        data.op_set_output(shift, Some(scaled));
+        data.op_insert_end(shift, switch);
+        let base = 0x8000;
+        let base_value = data.new_constant(base, 8);
+        let address = data.new_unique(8);
+        let add = data.new_op(op::INT_ADD, seq(3), vec![base_value, scaled]);
+        data.op_set_output(add, Some(address));
+        data.op_insert_end(add, switch);
+        let space = data.new_constant(RAM_SPACE as u64, 4);
+        let loaded = data.new_unique(8);
+        let load = data.new_op(op::LOAD, seq(4), vec![space, address]);
+        data.op_set_output(load, Some(loaded));
+        data.op_insert_end(load, switch);
+        let branch = data.new_op(op::BRANCHIND, seq(5), vec![loaded]);
+        data.op_insert_end(branch, switch);
+
+        Fixture {
+            data,
+            branch,
+            index,
+            table_base: base,
+            entries: vec![0x3000, 0x3010, 0x3020],
+        }
+    }
+
+    #[test]
+    fn bounded_scaled_table_recovers_all_entries_and_default() {
+        let fixture = bounded_fixture();
+        let entries = fixture.entries.clone();
+        let base = fixture.table_base;
+        let recovered = recover_jump_tables(&fixture.data, &move |address, width| {
+            assert_eq!(width, 8);
+            let index = usize::try_from((address - base) / 4).ok()?;
+            entries.get(index).copied()
+        });
+        assert_eq!(recovered.len(), 1);
+        let table = &recovered[0];
+        assert_eq!(table.branch, fixture.branch);
+        assert_eq!(table.switch_value, fixture.index);
+        assert_eq!(table.cases, vec![(0, 0x3000), (1, 0x3010), (2, 0x3020)]);
+        assert_eq!(table.default_target, Some(0x2000));
+    }
+
+    #[test]
+    fn unbounded_index_is_rejected() {
+        let mut fixture = bounded_fixture();
+        let compare = fixture
+            .data
+            .live_ops()
+            .find(|(_, operation)| operation.opcode == op::INT_LESS)
+            .map(|(id, _)| id)
+            .expect("guard compare");
+        fixture.data.op_destroy(compare);
+        assert!(recover_jump_tables(&fixture.data, &|_, _| Some(0x3000)).is_empty());
+    }
+
+    #[test]
+    fn nonconstant_table_base_is_rejected() {
+        let mut fixture = bounded_fixture();
+        let add = fixture
+            .data
+            .live_ops()
+            .find(|(_, operation)| operation.opcode == op::INT_ADD)
+            .map(|(id, _)| id)
+            .expect("address add");
+        let dynamic_base = fixture.data.new_varnode(REGISTER_SPACE, 0x40, 8);
+        fixture.data.mark_input(dynamic_base);
+        fixture.data.op_set_input(add, dynamic_base, 0);
+        let branch_block = fixture
+            .data
+            .op(fixture.branch)
+            .parent
+            .expect("switch block");
+        let trivial_target = fixture.data.new_block(0x4000);
+        fixture.data.add_edge(branch_block, trivial_target);
+        assert!(recover_jump_tables(&fixture.data, &|_, _| Some(0x3000)).is_empty());
+    }
+
+    #[test]
+    fn trivial_single_target_uses_the_edge_target() {
+        let mut data = Funcdata {
+            entry: 0x1000,
+            ..Funcdata::default()
+        };
+        let source = data.new_block(0x1000);
+        let target = data.new_block(0x1234);
+        data.add_edge(source, target);
+        let destination = data.new_unique(8);
+        data.mark_input(destination);
+        let branch = data.new_op(op::BRANCHIND, seq(0), vec![destination]);
+        data.op_insert_end(branch, source);
+
+        let recovered = recover_jump_tables(&data, &|_, _| None);
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].branch, branch);
+        assert_eq!(recovered[0].switch_value, destination);
+        assert_eq!(recovered[0].cases, vec![(0x1234, 0x1234)]);
+        assert_eq!(recovered[0].default_target, None);
+    }
+
+    #[test]
+    fn action_switch_norm_folds_the_branch_destination() {
+        let mut fixture = bounded_fixture();
+        // Make the branch consume the loaded result through an explicit COPY.
+        let loaded = fixture.data.op(fixture.branch).inputs[0];
+        let copy_out = fixture.data.new_unique(8);
+        let copy = fixture.data.new_op(op::COPY, seq(5), vec![loaded]);
+        fixture.data.op_set_output(copy, Some(copy_out));
+        fixture.data.op_insert_before(copy, fixture.branch);
+        fixture.data.op_set_input(fixture.branch, copy_out, 0);
+        assert_eq!(ActionSwitchNorm.apply(&mut fixture.data), 1);
+        assert_eq!(fixture.data.op(fixture.branch).inputs[0], fixture.index);
+    }
+    #[test]
+    fn action_switch_norm_declines_without_a_guard() {
+        let mut fixture = bounded_fixture();
+        let compare = fixture
+            .data
+            .live_ops()
+            .find(|(_, operation)| operation.opcode == op::INT_LESS)
+            .map(|(id, _)| id)
+            .expect("guard compare");
+        fixture.data.op_destroy(compare);
+        let destination = fixture.data.op(fixture.branch).inputs[0];
+        assert_eq!(ActionSwitchNorm.apply(&mut fixture.data), 0);
+        assert_eq!(fixture.data.op(fixture.branch).inputs[0], destination);
+    }
+
+    #[allow(dead_code)]
+    fn _spaces_are_canonical() {
+        let _ = (CONST_SPACE, RAM_SPACE);
+    }
+}

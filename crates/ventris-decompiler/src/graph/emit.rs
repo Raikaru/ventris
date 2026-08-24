@@ -23,7 +23,7 @@ use ventris_pcode::op;
 use super::mergeaction::merge_all;
 use super::structure::Condition;
 use super::types::Types;
-use super::value::{Naming, Resolver, mark_explicit_with};
+use super::value::{Naming, Resolver, mark_explicit_named, mark_explicit_with};
 use super::{Funcdata, GraphBlockId, OpId};
 use crate::native::{Expr, NativeStatement, Type};
 
@@ -62,8 +62,9 @@ pub fn emit_structured(
     register_name: &dyn Fn(u32, u64, u32) -> Option<String>,
     types: &Types,
     parameters: &BTreeMap<(u32, u64), (String, Type)>,
+    stack_pointer: Option<super::guard::Location>,
 ) -> Vec<NativeStatement> {
-    let naming = mark_explicit_with(data, merge_all(data));
+    let naming = mark_explicit_named(data, merge_all(data), types, stack_pointer);
     let resolver =
         Resolver::with_types(data, &naming, register_name, types).with_parameters(parameters);
     let emitter = Emitter {
@@ -85,8 +86,81 @@ pub fn emit_structured(
     let targets = goto_targets(&tree);
     statements.extend(emitter.emit_tree(&tree, &scoped, &phi_copies, &targets));
     drop_gotos_to_next_statement(&mut statements);
+    drop_trailing_gotos_to_following_label(&mut statements);
+    prefer_non_empty_then(&mut statements);
     drop_self_assignments(&mut statements);
     statements
+}
+
+/// Removes a jump at the end of a construct's body when the label it names is
+/// the statement right after that construct.
+///
+/// Control already arrives there by leaving the construct. Ghidra never emits
+/// the jump because its block tree ends the region at that point; the collapse
+/// here surrenders the edge before knowing where the target lands.
+fn drop_trailing_gotos_to_following_label(statements: &mut Vec<NativeStatement>) {
+    for index in 0..statements.len() {
+        let following = match statements.get(index + 1) {
+            Some(NativeStatement::Label(label)) => Some(*label),
+            _ => None,
+        };
+        match &mut statements[index] {
+            NativeStatement::IfElse {
+                then_body,
+                else_body,
+                ..
+            } => {
+                if let Some(label) = following {
+                    drop_trailing_goto(then_body, label);
+                    drop_trailing_goto(else_body, label);
+                }
+                drop_trailing_gotos_to_following_label(then_body);
+                drop_trailing_gotos_to_following_label(else_body);
+            }
+            NativeStatement::While { body, .. } | NativeStatement::DoWhile { body, .. } => {
+                drop_trailing_gotos_to_following_label(body);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn drop_trailing_goto(body: &mut Vec<NativeStatement>, label: u64) {
+    if matches!(body.last(), Some(NativeStatement::Goto(target)) if *target == label) {
+        body.pop();
+    }
+}
+
+/// Inverts a conditional whose taken branch is empty.
+///
+/// `if (c) {} else { work }` says the same thing as `if (!c) { work }` and reads
+/// as source rather than as a branch table. Ghidra normalises the same way
+/// through `negateCondition` when it chooses which clause to print.
+fn prefer_non_empty_then(statements: &mut Vec<NativeStatement>) {
+    for statement in statements.iter_mut() {
+        match statement {
+            NativeStatement::IfElse {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                if then_body.is_empty() && !else_body.is_empty() {
+                    std::mem::swap(then_body, else_body);
+                    let inverted = match condition.clone() {
+                        Expr::Not(inner) => *inner,
+                        other => Expr::Not(Box::new(other)),
+                    };
+                    *condition = inverted;
+                }
+                prefer_non_empty_then(then_body);
+                prefer_non_empty_then(else_body);
+            }
+            NativeStatement::While { body, .. } | NativeStatement::DoWhile { body, .. } => {
+                prefer_non_empty_then(body);
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Removes assignments whose two sides are the same variable.
@@ -480,12 +554,29 @@ impl Emitter<'_> {
     /// each assignment and to the join that reads it. C spells that as one
     /// declaration dominating every assignment.
     fn phi_declarations(&self) -> Vec<NativeStatement> {
+        // A variable written at more than one place cannot be declared at each
+        // of them, so it is declared once at function scope and assigned
+        // afterwards. Merging is what creates these: several definitions of one
+        // C variable. A merge is always such a case, because each incoming path
+        // writes it.
+        let mut sites: BTreeMap<String, usize> = BTreeMap::new();
+        for (_, operation) in self.data.live_ops() {
+            let Some(output) = operation.output else {
+                continue;
+            };
+            if let Some(name) = self.naming.name_of(output) {
+                *sites.entry(name.to_string()).or_default() += 1;
+            }
+        }
         let mut declarations = Vec::new();
-        // Merging can put several merges in one variable, and a variable is
-        // declared once however many merges it spans.
         let mut declared: BTreeSet<String> = BTreeSet::new();
         for (_, operation) in self.data.live_ops() {
-            if operation.opcode != op::MULTIEQUAL {
+            let multiply_defined = operation
+                .output
+                .and_then(|output| self.naming.name_of(output))
+                .and_then(|name| sites.get(name))
+                .is_some_and(|count| *count > 1);
+            if operation.opcode != op::MULTIEQUAL && !multiply_defined {
                 continue;
             }
             let Some(output) = operation.output else {

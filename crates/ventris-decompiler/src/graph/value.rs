@@ -78,6 +78,37 @@ pub fn mark_explicit(data: &Funcdata) -> Naming {
     mark_explicit_with(data, merge_all(data))
 }
 
+/// As [`mark_explicit`], but naming each variable through `ActionNameVars`
+/// instead of by its defining address.
+///
+/// `v_800a67f0_c_4` records where a value came from; `iVar3` and `local_10`
+/// record what it is. Ghidra's naming pass is the difference between output
+/// that documents the analysis and output that reads as source.
+pub fn mark_explicit_named(
+    data: &Funcdata,
+    highs: Variables,
+    types: &Types,
+    stack_pointer: Option<super::guard::Location>,
+) -> Naming {
+    let mut naming = mark_explicit_with(data, highs);
+    let group_of = |value: VarnodeId| naming.highs.high_of(value);
+    let recovered = super::namevars::Names::of(data, &group_of, types, stack_pointer);
+    let renamed: BTreeMap<u32, String> = naming
+        .names
+        .keys()
+        .copied()
+        .map(|group| {
+            let name = recovered
+                .name_of_group(group)
+                .map(str::to_string)
+                .unwrap_or_else(|| naming.names[&group].clone());
+            (group, name)
+        })
+        .collect();
+    naming.names = renamed;
+    naming
+}
+
 /// As [`mark_explicit`], with a variable partition supplied by the caller.
 pub fn mark_explicit_with(data: &Funcdata, highs: Variables) -> Naming {
     let mut names: BTreeMap<u32, String> = BTreeMap::new();
@@ -87,9 +118,13 @@ pub fn mark_explicit_with(data: &Funcdata, highs: Variables) -> Naming {
         if varnode.flags.constant {
             continue;
         }
+        // An INDIRECT is not named. C cannot spell "this operation may have
+        // changed the location", and required merging has already put the value
+        // before and after the operation in one variable, so naming the output
+        // separately would declare a name nothing ever assigns.
         let effectful = matches!(
             op.opcode,
-            op::MULTIEQUAL | op::INDIRECT | op::CALL | op::CALLIND | op::LOAD
+            op::MULTIEQUAL | op::CALL | op::CALLIND | op::LOAD
         );
         let shared = varnode.descendants.len() > 1;
         if !effectful && !shared {
@@ -281,7 +316,11 @@ impl<'a> Resolver<'a> {
             right: Box::new(right),
         };
         match op.opcode {
-            op::COPY | op::CAST => input(0),
+            // The value an INDIRECT relays is the value that was there before
+            // the operation it names. That is also what a call's own argument
+            // reads, which is why collapsing it here restores parameters at
+            // call sites.
+            op::COPY | op::CAST | op::INDIRECT => input(0),
             op::INT_ADD | op::PTRADD | op::PTRSUB => {
                 Some(binary(BinaryOp::Add, input(0)?, input(1)?))
             }

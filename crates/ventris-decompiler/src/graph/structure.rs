@@ -17,10 +17,11 @@
 //! `ruleBlockGoto` in `blockaction.cc` at commit
 //! `8b4c91d4d5bd1549622bfbade0df199585b98365`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use ventris_pcode::op;
 
+use super::heritage::compute_dominance;
 use super::{Funcdata, GraphBlockId};
 
 /// The test a construct evaluates.
@@ -123,11 +124,15 @@ pub fn structure(data: &Funcdata) -> Structured {
     graph.finish()
 }
 
+/// The collapsing graph: nodes that rules merge until one construct remains.
 struct Graph<'a> {
     data: &'a Funcdata,
     nodes: Vec<Node>,
     of_block: BTreeMap<GraphBlockId, NodeId>,
     entry: Option<NodeId>,
+    /// Count of edges given up as gotos, so a stalled collapse can tell whether
+    /// re-marking loop exits made progress.
+    surrendered: usize,
 }
 
 impl<'a> Graph<'a> {
@@ -175,6 +180,7 @@ impl<'a> Graph<'a> {
             nodes,
             of_block,
             entry,
+            surrendered: 0,
         }
     }
 
@@ -184,6 +190,13 @@ impl<'a> Graph<'a> {
         // operator spans two blocks that every other rule would otherwise
         // treat as separate regions.
         self.collapse_conditions();
+        // Then loops are identified and their exits surrendered. Every
+        // structuring rule demands that a clause have exactly one predecessor,
+        // and a loop with a `break` violates that at the block after the loop.
+        // Marking the exits first is how Ghidra makes the loop itself visible;
+        // a greedy rule set without this step recovers the loop only when the
+        // body happens to be a single-entry chain.
+        self.mark_loop_exits();
 
         let cap = self.nodes.len() * 4 + 16;
         let mut guard = 0;
@@ -239,6 +252,13 @@ impl<'a> Graph<'a> {
             if outer_changed {
                 continue;
             }
+            // Concatenation can expose a loop that was not visible as one
+            // before, so exits are re-marked whenever the rules stall.
+            let before = self.surrendered;
+            self.mark_loop_exits();
+            if self.surrendered != before {
+                continue;
+            }
             // Nothing matched at all: give up one edge as a goto and retry.
             // This is `ruleBlockGoto`, the last resort that guarantees the
             // collapse terminates.
@@ -246,6 +266,137 @@ impl<'a> Graph<'a> {
                 return;
             }
         }
+    }
+
+    /// Surrenders every edge that leaves a natural loop, except its one exit.
+    ///
+    /// Ported from `CollapseStructure::labelLoops`, `LoopBody::findBase`,
+    /// `LoopBody::findExit`, and `CollapseStructure::markExitsAsGotos`.
+    fn mark_loop_exits(&mut self) {
+        let dominance = compute_dominance(self.data);
+        for (head, tails) in self.natural_loops(&dominance) {
+            let body = self.loop_body(head, &tails);
+            let exit = self.loop_exit(&body, &tails);
+            // Every edge out of the body other than the chosen exit is
+            // unstructured. Surrendering it now leaves the loop with the single
+            // entry and single exit the loop rules require.
+            let leaving: Vec<(NodeId, NodeId)> = body
+                .iter()
+                .copied()
+                .flat_map(|node| {
+                    self.nodes[node]
+                        .successors
+                        .clone()
+                        .into_iter()
+                        .map(move |successor| (node, successor))
+                })
+                .filter(|(_, successor)| !body.contains(successor))
+                .filter(|(_, successor)| Some(*successor) != exit)
+                .collect();
+            for (node, successor) in leaving {
+                self.surrender_edge(node, successor);
+            }
+        }
+    }
+
+    /// Back edges, grouped by the loop head they return to.
+    ///
+    /// An edge is a back edge when its target dominates its source, which is
+    /// exactly Ghidra's `isBackEdgeIn` for a reducible graph.
+    fn natural_loops(&self, dominance: &super::heritage::Dominance) -> Vec<(NodeId, Vec<NodeId>)> {
+        let mut loops: BTreeMap<NodeId, Vec<NodeId>> = BTreeMap::new();
+        for node in 0..self.nodes.len() {
+            if self.nodes[node].collapsed {
+                continue;
+            }
+            for successor in self.nodes[node].successors.clone() {
+                if dominates(
+                    dominance,
+                    self.nodes[successor].entry,
+                    self.nodes[node].entry,
+                ) {
+                    loops.entry(successor).or_default().push(node);
+                }
+            }
+        }
+        loops.into_iter().collect()
+    }
+
+    /// The natural loop body: the head, its tails, and everything that reaches a
+    /// tail without leaving through the head.
+    ///
+    /// `LoopBody::findBase` walks predecessors rather than successors, because
+    /// the body is what can reach the back edge, not what the head can reach.
+    fn loop_body(&self, head: NodeId, tails: &[NodeId]) -> BTreeSet<NodeId> {
+        let mut body: BTreeSet<NodeId> = BTreeSet::from([head]);
+        let mut pending: Vec<NodeId> = Vec::new();
+        for tail in tails.iter().copied() {
+            if body.insert(tail) {
+                pending.push(tail);
+            }
+        }
+        while let Some(node) = pending.pop() {
+            for predecessor in self.nodes[node].predecessors.clone() {
+                if predecessor == head || self.nodes[predecessor].collapsed {
+                    continue;
+                }
+                if body.insert(predecessor) {
+                    pending.push(predecessor);
+                }
+            }
+        }
+        body
+    }
+
+    /// The one block a structured loop may exit to.
+    ///
+    /// `LoopBody::findExit` prefers an exit taken from a tail, because that is
+    /// the loop's own test; an exit from the middle is a `break`, which has to
+    /// become a goto.
+    fn loop_exit(&self, body: &BTreeSet<NodeId>, tails: &[NodeId]) -> Option<NodeId> {
+        for tail in tails.iter().copied() {
+            if let Some(exit) = self.nodes[tail]
+                .successors
+                .iter()
+                .copied()
+                .find(|successor| !body.contains(successor))
+            {
+                return Some(exit);
+            }
+        }
+        body.iter()
+            .copied()
+            .flat_map(|node| self.nodes[node].successors.clone())
+            .find(|successor| !body.contains(successor))
+    }
+
+    /// Turns one edge into a `goto`, leaving the rest of the node intact.
+    fn surrender_edge(&mut self, node: NodeId, successor: NodeId) {
+        let Some(index) = self.nodes[node]
+            .successors
+            .iter()
+            .position(|candidate| *candidate == successor)
+        else {
+            return;
+        };
+        let branching = self.nodes[node].successors.len() == 2;
+        self.nodes[node].successors.remove(index);
+        self.nodes[successor]
+            .predecessors
+            .retain(|predecessor| *predecessor != node);
+        let jump = if branching {
+            Structured::IfGoto {
+                test: self.condition_for(node),
+                taken: index == 0,
+                target: self.nodes[successor].entry,
+            }
+        } else {
+            Structured::Goto {
+                from: self.nodes[node].exit,
+                target: self.nodes[successor].entry,
+            }
+        };
+        self.nodes[node].body = Structured::List(vec![self.nodes[node].body.clone(), jump]);
     }
 
     /// Collapses short-circuit conditions to a fixed point.
@@ -569,12 +720,15 @@ impl<'a> Graph<'a> {
     /// The edge chosen is a back edge if there is one, because a loop that no
     /// loop rule matched is what blocks progress most often.
     fn rule_goto(&mut self, live: &[NodeId]) -> bool {
-        // Prefer the edge whose removal most unblocks the other rules. Every
-        // rule requires its clause to have exactly one predecessor, so an edge
-        // into a block several paths reach is what stalls the collapse; giving
-        // that one up lets concatenation and the loop rules see the shape
-        // underneath. Ghidra reaches the same state by marking such edges
-        // unstructured before the main loop rather than during it.
+        // Prefer the edge whose removal unblocks the other rules while
+        // destroying the least structure. Every rule requires its clause to
+        // have exactly one predecessor, so an edge into a block several paths
+        // reach is what stalls the collapse.
+        //
+        // A back edge is the last thing to give up. Ghidra never surrenders
+        // one: `markExitsAsGotos` marks the edges *leaving* a loop, because the
+        // back edge is the loop. Scoring it highest — as this did — hands the
+        // loop to a goto and no later rule can recover it.
         let mut choice: Option<(NodeId, usize, u32)> = None;
         for node in live.iter().copied() {
             for (index, successor) in self.nodes[node].successors.iter().copied().enumerate() {
@@ -583,7 +737,7 @@ impl<'a> Graph<'a> {
                 }
                 let joins = self.nodes[successor].predecessors.len() > 1;
                 let back = self.nodes[successor].entry <= self.nodes[node].entry;
-                let score = u32::from(joins) * 2 + u32::from(back);
+                let score = u32::from(!back) * 4 + u32::from(joins) * 2;
                 if choice.is_none_or(|(_, _, best)| score > best) {
                     choice = Some((node, index, score));
                 }
@@ -616,16 +770,17 @@ impl<'a> Graph<'a> {
 
     /// Replaces `node` and `absorbed` with one node carrying `body`.
     fn absorb(&mut self, node: NodeId, absorbed: &[NodeId], body: Structured) {
-        // The composite's successors are whatever the absorbed nodes left to.
+        // An absorbed member's edge back to the composite is the loop's back
+        // edge. `newBlockList` keeps it, and it must be kept here: dropping it
+        // turns the loop into straight-line code that no loop rule can
+        // recognise afterwards.
         let mut successors: Vec<NodeId> = Vec::new();
         for member in absorbed.iter().copied() {
             for successor in self.nodes[member].successors.clone() {
-                if successor != node
-                    && !absorbed.contains(&successor)
-                    && !successors.contains(&successor)
-                {
-                    successors.push(successor);
+                if absorbed.contains(&successor) || successors.contains(&successor) {
+                    continue;
                 }
+                successors.push(successor);
             }
         }
         for member in absorbed.iter().copied() {
@@ -635,6 +790,23 @@ impl<'a> Graph<'a> {
             let entry = &mut self.nodes[successor].predecessors;
             entry.retain(|predecessor| *predecessor != node && !absorbed.contains(predecessor));
             entry.push(node);
+        }
+        // A predecessor of an absorbed member now reaches the composite, so its
+        // outgoing edge has to name the composite instead of the collapsed node.
+        for member in absorbed.iter().copied() {
+            for predecessor in self.nodes[member].predecessors.clone() {
+                if predecessor == node || absorbed.contains(&predecessor) {
+                    continue;
+                }
+                for entry in self.nodes[predecessor].successors.iter_mut() {
+                    if *entry == member {
+                        *entry = node;
+                    }
+                }
+                if !self.nodes[node].predecessors.contains(&predecessor) {
+                    self.nodes[node].predecessors.push(predecessor);
+                }
+            }
         }
         self.nodes[node].successors = successors;
         self.nodes[node].body = body;
@@ -664,6 +836,23 @@ impl<'a> Graph<'a> {
         remaining.sort_by_key(|(entry, _)| self.data.block(*entry).start);
         let _ = &self.of_block;
         Structured::List(remaining.into_iter().map(|(_, body)| body).collect())
+    }
+}
+
+/// Whether one block dominates another, by walking the dominator tree upward.
+fn dominates(
+    dominance: &super::heritage::Dominance,
+    ancestor: GraphBlockId,
+    mut candidate: GraphBlockId,
+) -> bool {
+    loop {
+        if candidate == ancestor {
+            return true;
+        }
+        match dominance.immediate.get(&candidate).copied().flatten() {
+            Some(parent) if parent != candidate => candidate = parent,
+            _ => return false,
+        }
     }
 }
 
@@ -847,9 +1036,14 @@ mod tests {
         data.add_edge(right, left);
 
         let structured = structure(&data);
+        // The surrendered edge may be conditional or unconditional depending on
+        // which one the collapse gives up; either is an unstructured transfer.
         assert!(
-            contains(&structured, &|node| matches!(node, Structured::Goto { .. })),
-            "expected a goto for the irreducible edge: {structured:?}"
+            contains(&structured, &|node| matches!(
+                node,
+                Structured::Goto { .. } | Structured::IfGoto { .. }
+            )),
+            "expected an unstructured transfer for the irreducible edge: {structured:?}"
         );
     }
 

@@ -109,14 +109,9 @@ fn a_merged_variable_is_declared_once_and_written_on_several_paths() {
     // path. Merging gives every version one name, declared at function scope
     // and assigned wherever a path computes it.
     let source = render_via_graph(GET_BUILT_IN_TEXTURE, 0x124fa8);
-    let scoped: Vec<String> = source
-        .lines()
-        .map(str::trim)
-        .filter(|line| line.ends_with(';') && !line.contains('='))
-        .filter_map(|line| line.split_once(' '))
-        .map(|(_, name)| name.trim_end_matches(';').to_string())
-        .filter(|name| name.starts_with("v_") || name.starts_with("phi_"))
-        .collect();
+    // Names come from the naming pass now, so match on the declaration shape
+    // rather than on a generated prefix.
+    let scoped: Vec<String> = declared_locals(&source);
     assert!(!scoped.is_empty(), "no merged variable declared\n{source}");
     let written_twice = scoped.iter().any(|name| {
         source

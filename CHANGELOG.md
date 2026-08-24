@@ -167,6 +167,36 @@ All notable Ventris changes are documented here.
 - Commutative identities are recognised with the constant on either operand,
   since nothing yet canonicalises constants onto the second slot the way Ghidra
   does before those rules run.
+- Ported a second batch of Ghidra passes and wired them into the pipeline:
+  - `ActionNameVars` with the `ScopeLocal`/`ScopeInternal` naming rules
+    (`graph/namevars.rs`). Variables are now named `uVar2`, `pVar4`, `local_10`
+    by type class and frame offset rather than by the address that defined them.
+  - `JumpBasic`/`JumpModelTrivial` jump-table recovery and `ActionSwitchNorm`
+    (`graph/jumptable.rs`).
+  - `ActionStackPtrFlow` with `AliasChecker` escape reasoning and frame slot
+    widths (`graph/stackframe.rs`).
+  - `ActionConditionalConst`, `ActionConditionalExe`, `ActionDeindirect`,
+    `ActionConstantPtr` (`graph/condprop.rs`).
+- Ported Ghidra's natural-loop analysis into structuring: `labelLoops`,
+  `LoopBody::findBase`, `LoopBody::findExit`, and `markExitsAsGotos` run before
+  the collapse, so a loop's exits are surrendered while its back edge is kept.
+- Fixed three structuring defects that between them prevented every loop from
+  being recovered:
+  - `absorb` dropped an absorbed member's edge back to the composite, which is
+    the loop's back edge. `newBlockList` keeps it.
+  - `absorb` did not rewire a predecessor of an absorbed member onto the
+    composite, leaving stale edges.
+  - the last-resort goto scored back edges *highest*, so it surrendered loop
+    edges first. Ghidra never surrenders a back edge; `markExitsAsGotos` marks
+    the edges leaving a loop.
+  Measured effect on the corpus: `missing-loop-or-switch` fell from 11 functions
+  to 5 and `unstructured-control-flow` from 16 to 13.
+- Fixed `ActionReturnRecovery` looking through a call's `INDIRECT`, which
+  credited this function with whatever register a callee left behind.
+  `return-presence` fell from 13 functions to 1.
+- Fixed a named `INDIRECT` result being read but never declared, and a merged
+  variable being redeclared at each of its definition sites; both emitted C that
+  does not compile.
 
 - Added `LiftedInstruction::skips_delay_slot`, which reports the MIPS
   likely-branch shape so consumers stop treating its sequential successor as

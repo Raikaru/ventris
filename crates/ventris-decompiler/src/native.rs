@@ -1924,13 +1924,19 @@ impl NativeDecompiler {
         graph::action::Action::apply(&graph::protoaction::ActionReturnRecovery, &mut data);
         graph::action::Action::apply(&graph::protoaction::ActionActiveReturn, &mut data);
         let pipeline = graph::action::default_pipeline();
-        let control_flow: [&dyn graph::action::Action; 6] = [
+        let control_flow: [&dyn graph::action::Action; 10] = [
             &graph::branchaction::ActionDeterminedBranch,
             &graph::branchaction::ActionRedundBranch,
             &graph::branchaction::ActionDoNothing,
             &graph::branchaction::ActionUnreachable,
             &graph::branchaction::ActionCse,
             &graph::branchaction::ActionMultiCse,
+            // Resolving a loaded function pointer to a constant turns an
+            // indirect call into a named callee, which then gets a prototype.
+            &graph::condprop::ActionDeindirect,
+            &graph::condprop::ActionConditionalConst,
+            &graph::condprop::ActionConditionalExe,
+            &graph::stackframe::ActionStackPtrFlow,
         ];
         for _ in 0..GRAPH_PIPELINE_ROUNDS {
             let mut changed = graph::action::Action::apply(pipeline.as_ref(), &mut data);
@@ -2001,7 +2007,17 @@ impl NativeDecompiler {
         // Structuring happens on the graph, where the edge conditions each
         // construct requires are visible. The statement-level structurer
         // inferred them back from labels.
-        let statements = graph::emit::emit_structured(&data, &naming, &recovered, &parameter_names);
+        let stack_slot = abi.and_then(|abi| {
+            abi_register_vnode(architecture, abi.stack_pointer, abi.pointer_bits).map(|vnode| {
+                graph::guard::Location {
+                    space: vnode.space,
+                    offset: vnode.offset,
+                    size: vnode.size,
+                }
+            })
+        });
+        let statements =
+            graph::emit::emit_structured(&data, &naming, &recovered, &parameter_names, stack_slot);
         // A matched save and restore of a callee-saved register says nothing
         // about what the function computes, and naming provably private stack
         // slots turns spills into locals. Both stages read statements, so they

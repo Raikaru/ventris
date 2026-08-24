@@ -90,21 +90,19 @@ fn function_produced(data: &Funcdata, value: VarnodeId, seen: &mut BTreeSet<Varn
     let operation = data.op(def);
     match operation.opcode {
         op::CALL | op::CALLIND | op::CALLOTHER => false,
-        op::INDIRECT | op::MULTIEQUAL | op::COPY => {
-            let inputs =
-                operation
-                    .inputs
-                    .iter()
-                    .copied()
-                    .take(if operation.opcode == op::INDIRECT {
-                        1
-                    } else {
-                        operation.inputs.len()
-                    });
-            inputs
-                .filter(|input| *input != value)
-                .any(|input| function_produced(data, input, seen))
-        }
+        // An INDIRECT states that the named operation may have changed this
+        // location. When that operation is a call, the value afterwards is
+        // whatever the callee left, which is not a result this function
+        // produced — following the operand through would credit the caller with
+        // the callee's leftover register. Ghidra reports `void` for exactly
+        // these functions.
+        op::INDIRECT => false,
+        op::MULTIEQUAL | op::COPY => operation
+            .inputs
+            .iter()
+            .copied()
+            .filter(|input| *input != value)
+            .any(|input| function_produced(data, input, seen)),
         _ => true,
     }
 }
