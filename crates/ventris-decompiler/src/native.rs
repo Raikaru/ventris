@@ -314,6 +314,12 @@ impl NativeDocument {
 ///
 /// These are semantic-preserving spellings, not arbitrary optimization knobs.
 /// Keep this list small: every added form multiplies external compiler work.
+/// How many times simplification, unreachable-block removal, and dead code
+/// may feed each other before the pipeline stops. Each pass is monotone, so a
+/// small bound suffices; the cap exists so a rule pair that oscillates cannot
+/// spin.
+const GRAPH_PIPELINE_ROUNDS: usize = 8;
+
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum CompilerNormalForm {
     Canonical,
@@ -1765,13 +1771,18 @@ impl NativeDecompiler {
             warnings,
         }
     }
-    /// Decompiles through the SSA graph rather than the address-ordered pass.
+
     ///
     /// This is the ported pipeline: build the graph, refine overlapping
     /// locations, guard indirect effects, construct SSA with real `MULTIEQUAL`
     /// ops, then resolve and emit. Structuring and the action database are
     /// shared with the address-ordered path so the comparison isolates value
     /// resolution.
+    /// Decompiles through the SSA graph rather than the address-ordered pass.
+    ///
+    /// This is the ported pipeline: build the graph, guard indirect effects,
+    /// construct SSA with real `MULTIEQUAL` ops, simplify to a fixed point,
+    /// then resolve and emit.
     pub fn decompile_via_graph(
         &mut self,
         architecture: Architecture,
@@ -1804,14 +1815,29 @@ impl NativeDecompiler {
         }
         graph::guard::guard_calls(&mut data, &locations, &effects);
         graph::heritage::heritage(&mut data);
-        graph::deadcode::eliminate_dead_code(&mut data);
+        // Simplification, unreachable-block removal, and dead code each expose
+        // work for the others: folding a condition orphans a block, removing a
+        // block leaves a merge with one operand, and collapsing that merge
+        // leaves a copy nothing reads. Ghidra runs them in one fixed point.
+        let pipeline = graph::action::default_pipeline();
+        for _ in 0..GRAPH_PIPELINE_ROUNDS {
+            let mut changed = graph::action::Action::apply(pipeline.as_ref(), &mut data);
+            changed += data.remove_unreachable_blocks();
+            changed += graph::deadcode::eliminate_dead_code(&mut data);
+            if changed == 0 {
+                break;
+            }
+        }
 
         let naming = |space: u32, offset: u64, _size: u32| -> Option<String> {
             (space == REGISTER_SPACE).then(|| register_name(architecture, offset))
         };
+        // The statement-level action database exists to repair the
+        // address-ordered emitter's output. Its rules assume that shape, and
+        // running them over graph-emitted statements loses conditionals. The
+        // graph's own rules already ran, on the graph.
         let mut statements = graph::emit::emit(&data, &naming);
         statements = structure::structure_graph(statements);
-        statements = actions::run_action_database(statements);
         let parameters = recover_parameters(abi, &statements);
         NativeDocument {
             name: format!("sub_{:x}", function.entry),

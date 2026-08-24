@@ -16,6 +16,7 @@
 //! Source authority: `varnode.hh`, `op.hh`, `funcdata.hh`, `funcdata_varnode.cc`,
 //! `funcdata_op.cc` at commit `8b4c91d4d5bd1549622bfbade0df199585b98365`.
 
+pub mod action;
 pub mod deadcode;
 pub mod emit;
 pub mod guard;
@@ -114,6 +115,9 @@ pub struct GraphBlock {
     pub ops: Vec<OpId>,
     pub predecessors: Vec<GraphBlockId>,
     pub successors: Vec<GraphBlockId>,
+    /// Set when the block is unreachable from the entry. Its slot is retained
+    /// so existing identifiers stay valid.
+    pub dead: bool,
 }
 
 /// A function's mutable p-code graph.
@@ -145,6 +149,7 @@ impl Funcdata {
         self.blocks
             .iter()
             .enumerate()
+            .filter(|(_, block)| !block.dead)
             .map(|(index, block)| (GraphBlockId(index as u32), block))
     }
 
@@ -259,6 +264,36 @@ impl Funcdata {
     }
 
     /// Sets one operand, maintaining the descendant list on both sides.
+    /// The opcode of a live operation, or `None` once it has been destroyed.
+    ///
+    /// A rule may destroy or retype the operation it is applied to, so callers
+    /// re-read rather than caching what they were handed.
+    pub fn opcode_of(&self, op: OpId) -> Option<i32> {
+        let candidate = &self.ops[op.0 as usize];
+        (!candidate.dead).then_some(candidate.opcode)
+    }
+
+    /// Whether any live operation begins at the given address.
+    pub fn has_op_at(&self, address: u64) -> bool {
+        self.live_ops().any(|(_, op)| op.seq.address == address)
+    }
+
+    /// Retypes an operation, keeping its operands and output.
+    pub fn op_set_opcode(&mut self, op: OpId, opcode: i32) {
+        self.ops[op.0 as usize].opcode = opcode;
+    }
+
+    /// Replaces every operand, releasing the readers of the old ones.
+    pub fn op_set_inputs(&mut self, op: OpId, inputs: Vec<VarnodeId>) {
+        for existing in self.ops[op.0 as usize].inputs.clone() {
+            self.varnodes[existing.0 as usize].descendants.remove(&op);
+        }
+        for input in &inputs {
+            self.varnodes[input.0 as usize].descendants.insert(op);
+        }
+        self.ops[op.0 as usize].inputs = inputs;
+    }
+
     pub fn op_set_input(&mut self, op: OpId, value: VarnodeId, slot: usize) {
         let previous = self.ops[op.0 as usize].inputs.get(slot).copied();
         if let Some(previous) = previous
@@ -372,12 +407,91 @@ impl Funcdata {
         }
     }
 
+    /// Removes blocks the entry cannot reach.
+    ///
+    /// Ported from `Funcdata::removeUnreachableBlocks`. Branch folding and
+    /// constant conditions leave whole blocks with no path from the entry;
+    /// emitting them produces statements after an unconditional transfer.
+    /// Removing a predecessor also removes the operand it contributed to each
+    /// merge at its successors, which keeps operand slots aligned with the
+    /// predecessor list renaming relies on.
+    pub fn remove_unreachable_blocks(&mut self) -> usize {
+        let entry = self
+            .blocks()
+            .find(|(_, block)| block.start == self.entry)
+            .map(|(id, _)| id)
+            .or_else(|| self.blocks().next().map(|(id, _)| id));
+        let Some(entry) = entry else { return 0 };
+
+        let mut reachable = BTreeSet::from([entry]);
+        let mut pending = vec![entry];
+        while let Some(id) = pending.pop() {
+            for successor in self.blocks[id.0 as usize].successors.clone() {
+                if reachable.insert(successor) {
+                    pending.push(successor);
+                }
+            }
+        }
+
+        let unreachable: Vec<GraphBlockId> = self
+            .blocks()
+            .map(|(id, _)| id)
+            .filter(|id| !reachable.contains(id))
+            .collect();
+        for id in unreachable.iter().copied() {
+            for successor in self.blocks[id.0 as usize].successors.clone() {
+                self.detach_predecessor(successor, id);
+            }
+            for predecessor in self.blocks[id.0 as usize].predecessors.clone() {
+                self.blocks[predecessor.0 as usize]
+                    .successors
+                    .retain(|candidate| *candidate != id);
+            }
+            for op in self.blocks[id.0 as usize].ops.clone() {
+                self.op_destroy(op);
+            }
+            let block = &mut self.blocks[id.0 as usize];
+            block.ops.clear();
+            block.predecessors.clear();
+            block.successors.clear();
+            block.dead = true;
+        }
+        unreachable.len()
+    }
+
+    /// Drops one incoming edge, along with the merge operand it fed.
+    fn detach_predecessor(&mut self, block: GraphBlockId, predecessor: GraphBlockId) {
+        let Some(slot) = self.blocks[block.0 as usize]
+            .predecessors
+            .iter()
+            .position(|candidate| *candidate == predecessor)
+        else {
+            return;
+        };
+        self.blocks[block.0 as usize].predecessors.remove(slot);
+        let phis: Vec<OpId> = self.blocks[block.0 as usize]
+            .ops
+            .iter()
+            .copied()
+            .take_while(|op| self.ops[op.0 as usize].opcode == ventris_pcode::op::MULTIEQUAL)
+            .collect();
+        for phi in phis {
+            let mut inputs = self.ops[phi.0 as usize].inputs.clone();
+            if slot < inputs.len() {
+                inputs.remove(slot);
+                self.op_set_inputs(phi, inputs);
+            }
+        }
+    }
+
     /// Builds the graph from immutable lifter output.
     ///
-    /// Locations become one varnode per definition, so the result is already in
-    /// the shape Heritage expects to renumber: reads point at whichever
-    /// definition the linear order makes current, and Heritage replaces those
-    /// links with dominance-correct ones.
+    /// Every read becomes its own *free* varnode: unwritten, unlinked, and
+    /// carrying only a location. Nothing here decides which definition a read
+    /// sees. That is renaming's job, and pre-linking reads in address order
+    /// defeats it — a read already bound to a lower definition is skipped by
+    /// renaming, so a value written on a path that dominates the read is lost.
+    /// A call whose result is read afterwards showed the pre-call value.
     pub fn from_lifted(function: &NativeFunction) -> Self {
         let mut data = Self {
             entry: function.entry,
@@ -389,7 +503,6 @@ impl Funcdata {
             let id = data.new_block(*leader);
             block_of_address.insert(*leader, id);
         }
-        let mut current: BTreeMap<(u32, u64, u32), VarnodeId> = BTreeMap::new();
         let mut block = None;
         for (address, instruction) in &function.instructions {
             if let Some(id) = block_of_address.get(address) {
@@ -400,7 +513,7 @@ impl Funcdata {
                 let inputs = operation
                     .inputs
                     .iter()
-                    .map(|input| data.value_for_read(*input, &mut current))
+                    .map(|input| data.value_for_read(*input))
                     .collect();
                 let seq = SeqNum {
                     address: *address,
@@ -411,7 +524,6 @@ impl Funcdata {
                 if let Some(output) = operation.output {
                     let value = data.new_varnode(output.space, output.offset, output.size);
                     data.op_set_output(op, Some(value));
-                    current.insert((output.space, output.offset, output.size), value);
                 }
             }
         }
@@ -426,22 +538,12 @@ impl Funcdata {
         data
     }
 
-    fn value_for_read(
-        &mut self,
-        input: Varnode,
-        current: &mut BTreeMap<(u32, u64, u32), VarnodeId>,
-    ) -> VarnodeId {
+    /// A fresh varnode for one read, with no definition attached.
+    fn value_for_read(&mut self, input: Varnode) -> VarnodeId {
         if input.space == CONST_SPACE {
             return self.new_constant(input.offset, input.size);
         }
-        let key = (input.space, input.offset, input.size);
-        if let Some(existing) = current.get(&key) {
-            return *existing;
-        }
-        let value = self.new_varnode(input.space, input.offset, input.size);
-        self.mark_input(value);
-        current.insert(key, value);
-        value
+        self.new_varnode(input.space, input.offset, input.size)
     }
 }
 
@@ -524,14 +626,22 @@ mod tests {
     fn each_definition_of_a_location_gets_its_own_value() {
         let data = Funcdata::from_lifted(&lifted());
         let versions = data.at_location(ventris_lifter::REGISTER_SPACE, 8, 4);
-        assert_eq!(versions.len(), 2, "one varnode per definition");
-        assert!(data.varnode(versions[0]).flags.written);
-        assert!(data.varnode(versions[1]).flags.written);
+        let written = versions
+            .iter()
+            .filter(|value| data.varnode(**value).flags.written)
+            .count();
+        assert_eq!(written, 2, "one varnode per definition");
+        assert_eq!(
+            versions.len() - written,
+            1,
+            "the read is its own free varnode, unlinked until renaming"
+        );
     }
 
     #[test]
-    fn a_read_links_to_the_definition_that_reaches_it() {
-        let data = Funcdata::from_lifted(&lifted());
+    fn renaming_links_a_read_to_the_definition_that_reaches_it() {
+        let mut data = Funcdata::from_lifted(&lifted());
+        heritage::heritage(&mut data);
         let add = data
             .live_ops()
             .find(|(_, op)| op.opcode == op::INT_ADD)
@@ -540,6 +650,36 @@ mod tests {
         let first = data.at_location(ventris_lifter::REGISTER_SPACE, 8, 4)[0];
         assert_eq!(data.op(add).inputs[0], first);
         assert!(data.varnode(first).descendants.contains(&add));
+    }
+
+    #[test]
+    fn an_unreachable_block_and_its_merge_operand_are_removed() {
+        let mut data = Funcdata::default();
+        data.entry = 0x1000;
+        let entry = data.new_block(0x1000);
+        let orphan = data.new_block(0x1010);
+        let join = data.new_block(0x1020);
+        data.add_edge(entry, join);
+        data.add_edge(orphan, join);
+        let seq = SeqNum {
+            address: 0x1020,
+            order: 0,
+        };
+        let left = data.new_varnode(ventris_lifter::REGISTER_SPACE, 8, 4);
+        let right = data.new_varnode(ventris_lifter::REGISTER_SPACE, 8, 4);
+        let phi = data.new_op(op::MULTIEQUAL, seq, vec![left, right]);
+        let out = data.new_varnode(ventris_lifter::REGISTER_SPACE, 8, 4);
+        data.op_set_output(phi, Some(out));
+        data.op_insert_front(phi, join);
+
+        assert_eq!(data.remove_unreachable_blocks(), 1);
+        assert!(data.blocks().all(|(id, _)| id != orphan));
+        assert_eq!(data.block(join).predecessors, vec![entry]);
+        assert_eq!(
+            data.op(phi).inputs,
+            vec![left],
+            "the operand the removed path contributed is gone"
+        );
     }
 
     #[test]

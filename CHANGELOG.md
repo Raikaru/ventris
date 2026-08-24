@@ -53,6 +53,22 @@ All notable Ventris changes are documented here.
 - Added `NativeDecompiler::decompile_via_graph`, the ported pipeline end to end.
   Branch and call targets are read as `ram` space addresses rather than `const`
   constants, which is what a direct call and a conditional branch actually are.
+- Added the graph Action and Rule framework, ported from `Action`, `Rule`,
+  `ActionPool`, and `ActionGroup`. Rules are registered by opcode and rewrite
+  the graph in place, so one rule's result is another's input. Ported rules:
+  `RuleMultiCollapse`, `RuleCollapseConstants`, `RuleTrivialArith`,
+  `RulePropagateCopy`, `RuleIndirectCollapse`.
+- Added unreachable-block removal, ported from
+  `Funcdata::removeUnreachableBlocks`, including dropping the merge operand a
+  removed predecessor contributed so operand slots stay aligned with the
+  predecessor list.
+- Fixed graph construction pre-linking reads in address order, which defeated
+  renaming: a read already bound to a lower definition was skipped, so a call's
+  result read afterwards showed the value from before the call. Reads are now
+  free varnodes and renaming alone decides what they see.
+- Fixed the graph pipeline running the statement-level action database. Those
+  rules repair the address-ordered emitter's output and assume its shape; on
+  graph-emitted statements they deleted conditional branches.
 
 - Added `LiftedInstruction::skips_delay_slot`, which reports the MIPS
   likely-branch shape so consumers stop treating its sequential successor as

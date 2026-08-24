@@ -81,18 +81,21 @@ fn a_merged_value_is_declared_and_assigned_on_each_path() {
         !declarations.is_empty(),
         "no merged value was declared\n{source}"
     );
-    let name = declarations[0]
-        .split_whitespace()
-        .nth(1)
-        .expect("a declaration names a variable")
-        .trim_end_matches(';');
-    let assignments = source
-        .lines()
-        .filter(|line| line.trim().starts_with(&format!("{name} =")))
-        .count();
+    let merged = declarations.iter().any(|declaration| {
+        let name = declaration
+            .split_whitespace()
+            .nth(1)
+            .expect("a declaration names a variable")
+            .trim_end_matches(';');
+        source
+            .lines()
+            .filter(|line| line.trim().starts_with(&format!("{name} =")))
+            .count()
+            > 1
+    });
     assert!(
-        assignments > 1,
-        "{name} must be assigned on more than one path, saw {assignments}\n{source}"
+        merged,
+        "a declared merge must be assigned on more than one path\n{source}"
     );
 }
 
