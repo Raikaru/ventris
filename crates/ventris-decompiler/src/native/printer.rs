@@ -367,6 +367,25 @@ fn write_indent(out: &mut String, depth: usize) {
     }
 }
 
+/// Magnitude of a constant that is more readable as a subtraction.
+///
+/// Only clearly-negative small offsets qualify: a value near the top of its
+/// width is an offset, while an arbitrary large constant is a mask or a bit
+/// pattern and must keep its written form.
+fn negative_offset(value: u64, width: u32) -> Option<u64> {
+    let bits = width.saturating_mul(8);
+    if bits == 0 || bits > 64 {
+        return None;
+    }
+    let span = if bits == 64 {
+        u64::MAX
+    } else {
+        (1_u64 << bits) - 1
+    };
+    let magnitude = span.wrapping_sub(value).wrapping_add(1);
+    (value > span / 2 && magnitude <= 0xffff).then_some(magnitude)
+}
+
 fn render_expr(value: &Expr, parent_precedence: u8) -> String {
     // Select is deliberately emitted with one pair of parentheses at every
     // occurrence. Besides matching the existing source style, this prevents
@@ -393,6 +412,18 @@ fn render_expr(value: &Expr, parent_precedence: u8) -> String {
         | Expr::Temporary { name, .. } => escape_identifier(name),
         Expr::Binary { op, left, right } => {
             let precedence = op.precedence();
+            // A folded negative offset reads as a subtraction. Printing
+            // `rsp + 0xfffffffffffffff0` for `rsp - 0x10` is technically the
+            // same value and useless to a reader.
+            if let (BinaryOp::Add, Expr::Constant { value, width }) = (op, right.as_ref())
+                && let Some(magnitude) = negative_offset(*value, *width)
+            {
+                return format!(
+                    "{} - {:#x}",
+                    render_expr(left, BinaryOp::Sub.precedence()),
+                    magnitude
+                );
+            }
             // C binary operators are left associative. The right child must
             // therefore bind more strongly than the operator to retain an
             // equal-precedence AST grouping (`a - (b - c)`).

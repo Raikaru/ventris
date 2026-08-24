@@ -29,6 +29,16 @@ All notable Ventris changes are documented here.
   every 32-bit arithmetic result.
 - A value left in the return register is still recognized as a store byproduct
   when the store and the register disagree only about declared width.
+- Recovered the comparison behind a packed condition-register field. A branch
+  that tested `(a < b) << 3 | (b < a) << 2 | (a == b) << 1 | so` now renders as
+  `a < b`, so no corpus function spells a comparison as a bit-field chain and
+  the widest rendered expression in `TRK_fill_mem` fell from 2836 to 247
+  characters.
+- Collapsed rotate-and-mask pairs whose mask erases one half, folded chained
+  constant offsets into one addition, dropped shifts at or beyond a value's own
+  width, and dropped `x - 0`.
+- Negative folded offsets render as subtraction: `rsp - 0x10` instead of
+  `rsp + 0xfffffffffffffff0`.
 
 ## [0.3.0] - 2026-08-24
 

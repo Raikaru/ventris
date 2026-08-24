@@ -647,9 +647,90 @@ fn simplify_algebraic_expr_local(value: Expr) -> Expr {
         };
     }
 
+    // Shift amounts are unrelated to the shifted value's width, so these two
+    // rules must not wait for matching operand widths. PowerPC rotate-and-mask
+    // instructions lift to `x << 0 | x >> 32`, which is just `x`.
+    if matches!(op, BinaryOp::Left | BinaryOp::Right | BinaryOp::SignedRight)
+        && is_zero_constant(right.as_ref())
+    {
+        return *left;
+    }
+    if matches!(op, BinaryOp::Left | BinaryOp::Right)
+        && is_pure_expr(left.as_ref())
+        && let Some((shift, _)) = constant_parts(right.as_ref())
+        && left_width > 0
+        && shift >= u64::from(left_width).saturating_mul(8)
+    {
+        return Expr::Constant {
+            value: 0,
+            width: left_width,
+        };
+    }
+
+    // `x + c1 + c2` is one addition. PowerPC address arithmetic produces long
+    // chains of these, and leaving them unfolded hides that an offset is zero.
+    if matches!(op, BinaryOp::Add | BinaryOp::Sub)
+        && let Some((outer, outer_width)) = constant_parts(right.as_ref())
+        && let Expr::Binary {
+            op: inner_op @ (BinaryOp::Add | BinaryOp::Sub),
+            left: base,
+            right: inner,
+        } = left.as_ref()
+        && let Some((inner_value, inner_width)) = constant_parts(inner.as_ref())
+        && inner_width == outer_width
+    {
+        let signed = |value: u64, subtract: bool| {
+            if subtract {
+                0_u64.wrapping_sub(value)
+            } else {
+                value
+            }
+        };
+        let total = masked(
+            signed(inner_value, *inner_op == BinaryOp::Sub)
+                .wrapping_add(signed(outer, op == BinaryOp::Sub)),
+            outer_width,
+        );
+        if total == 0 {
+            return base.as_ref().clone();
+        }
+        return Expr::Binary {
+            op: BinaryOp::Add,
+            left: base.clone(),
+            right: Box::new(Expr::Constant {
+                value: total,
+                width: outer_width,
+            }),
+        };
+    }
+
+    // A rotate-and-mask keeps only one of its two halves. Dropping the half the
+    // mask erases turns `x << 27 | x >> 5 & 0x7ffffff` back into a shift.
+    if op == BinaryOp::And
+        && let Some((mask, _)) = constant_parts(right.as_ref())
+        && let Expr::Binary {
+            op: BinaryOp::Or,
+            left: or_left,
+            right: or_right,
+        } = left.as_ref()
+    {
+        let keep = |value: &Expr| Expr::Binary {
+            op: BinaryOp::And,
+            left: Box::new(value.clone()),
+            right: right.clone(),
+        };
+        if mask_erases(or_left.as_ref(), mask) && is_pure_expr(or_left.as_ref()) {
+            return keep(or_right.as_ref());
+        }
+        if mask_erases(or_right.as_ref(), mask) && is_pure_expr(or_right.as_ref()) {
+            return keep(or_left.as_ref());
+        }
+    }
+
     if same_width && is_zero_constant(right.as_ref()) {
         return match op {
             BinaryOp::Add
+            | BinaryOp::Sub
             | BinaryOp::Or
             | BinaryOp::Xor
             | BinaryOp::Left
@@ -658,6 +739,12 @@ fn simplify_algebraic_expr_local(value: Expr) -> Expr {
             BinaryOp::Mul | BinaryOp::And if is_pure_expr(left.as_ref()) => zero(),
             _ => Expr::Binary { op, left, right },
         };
+    }
+    if op == BinaryOp::And
+        && is_one_constant(right.as_ref())
+        && let Some(bit) = extract_condition_bit(left.as_ref(), 0)
+    {
+        return bit;
     }
     if same_width && is_one_constant(right.as_ref()) {
         return match op {
@@ -691,6 +778,120 @@ fn simplify_algebraic_expr_local(value: Expr) -> Expr {
     }
 
     Expr::Binary { op, left, right }
+}
+
+/// True when every bit `value` could set falls outside `mask`.
+///
+/// Only shapes with a provable zero pattern qualify; anything else is treated
+/// as possibly-set so the mask is preserved.
+fn mask_erases(value: &Expr, mask: u64) -> bool {
+    if mask == 0 {
+        return true;
+    }
+    match value {
+        Expr::Constant { value, width } => masked(*value, *width) & mask == 0,
+        Expr::Binary {
+            op: BinaryOp::Left,
+            left: _,
+            right,
+        } => constant_parts(right)
+            .and_then(|(shift, _)| u32::try_from(shift).ok())
+            .is_some_and(|shift| shift >= 64 || mask >> shift == 0),
+        Expr::Binary {
+            op: BinaryOp::And,
+            left,
+            right,
+        } => {
+            constant_parts(right)
+                .is_some_and(|(inner, inner_width)| masked(inner, inner_width) & mask == 0)
+                || mask_erases(left, mask)
+        }
+        value if is_boolean_expr(value) => mask & 1 == 0,
+        _ => false,
+    }
+}
+
+/// Recovers the expression for one bit of a packed flag word.
+///
+/// PowerPC writes a comparison into a condition-register field as
+/// `(a < b) << 3 | (b < a) << 2 | (a == b) << 1 | summary_overflow`, and a
+/// conditional branch then extracts a single bit. Without this reduction the
+/// whole packed word survives into the branch condition, structuring cannot
+/// recognize the comparison, and every loop degenerates into `goto`.
+///
+/// Returns `None` unless the bit is derivable, so an unknown flag word is left
+/// alone rather than guessed.
+fn extract_condition_bit(value: &Expr, bit: u32) -> Option<Expr> {
+    if bit >= 64 {
+        return None;
+    }
+    let clear = || Expr::Constant { value: 0, width: 1 };
+    // Bits past a value's own width are zero, and a boolean occupies only bit
+    // zero of its byte. Both facts keep a packed field from blocking recovery.
+    if u64::from(bit) >= u64::from(expression_width(value)).saturating_mul(8)
+        || (bit > 0 && is_boolean_expr(value))
+    {
+        return Some(clear());
+    }
+    match value {
+        Expr::Constant { value, width } => Some(Expr::Constant {
+            value: (masked(*value, *width) >> bit) & 1,
+            width: 1,
+        }),
+        Expr::Binary {
+            op: BinaryOp::Left,
+            left,
+            right,
+        } => {
+            let shift = u32::try_from(constant_parts(right)?.0).ok()?;
+            if bit < shift {
+                Some(clear())
+            } else {
+                extract_condition_bit(left, bit - shift)
+            }
+        }
+        Expr::Binary {
+            op: BinaryOp::Right,
+            left,
+            right,
+        } => {
+            let shift = u32::try_from(constant_parts(right)?.0).ok()?;
+            extract_condition_bit(left, bit.checked_add(shift)?)
+        }
+        Expr::Binary {
+            op: op @ (BinaryOp::Or | BinaryOp::And | BinaryOp::Xor),
+            left,
+            right,
+        } => {
+            if *op == BinaryOp::And
+                && let Some((mask, mask_width)) = constant_parts(right)
+            {
+                return if (masked(mask, mask_width) >> bit) & 1 == 0 {
+                    Some(clear())
+                } else {
+                    extract_condition_bit(left, bit)
+                };
+            }
+            let left = extract_condition_bit(left, bit)?;
+            let right = extract_condition_bit(right, bit)?;
+            match op {
+                BinaryOp::Or if is_zero_constant(&left) => Some(right),
+                BinaryOp::Or if is_zero_constant(&right) => Some(left),
+                BinaryOp::And if is_zero_constant(&left) || is_zero_constant(&right) => {
+                    Some(clear())
+                }
+                BinaryOp::Xor if is_zero_constant(&left) => Some(right),
+                BinaryOp::Xor if is_zero_constant(&right) => Some(left),
+                op => Some(Expr::Binary {
+                    op: *op,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                }),
+            }
+        }
+        value if bit == 0 && is_boolean_expr(value) => Some(value.clone()),
+        _ => None,
+    }
 }
 
 fn is_zero_constant(value: &Expr) -> bool {
@@ -1867,6 +2068,163 @@ mod tests {
             width,
             volatile: false,
         }
+    }
+
+    /// Builds PowerPC's condition-register field for `left` versus `right`.
+    fn condition_field(left: Expr, right: Expr, summary_overflow: Expr) -> Expr {
+        let shifted = |value: Expr, bit: u64| Expr::Binary {
+            op: BinaryOp::Left,
+            left: Box::new(value),
+            right: Box::new(Expr::constant(bit, 4)),
+        };
+        let compare = |op: BinaryOp, left: Expr, right: Expr| Expr::Binary {
+            op,
+            left: Box::new(left),
+            right: Box::new(right),
+        };
+        let or = |left: Expr, right: Expr| Expr::Binary {
+            op: BinaryOp::Or,
+            left: Box::new(left),
+            right: Box::new(right),
+        };
+        or(
+            or(
+                or(
+                    shifted(compare(BinaryOp::Less, left.clone(), right.clone()), 3),
+                    shifted(compare(BinaryOp::Less, right.clone(), left.clone()), 2),
+                ),
+                shifted(compare(BinaryOp::Equal, left, right), 1),
+            ),
+            Expr::Binary {
+                op: BinaryOp::And,
+                left: Box::new(summary_overflow),
+                right: Box::new(Expr::constant(1, 1)),
+            },
+        )
+    }
+
+    fn extracted_bit(field: Expr, bit: u64) -> Expr {
+        Expr::Binary {
+            op: BinaryOp::And,
+            left: Box::new(Expr::Binary {
+                op: BinaryOp::Right,
+                left: Box::new(field),
+                right: Box::new(Expr::constant(bit, 4)),
+            }),
+            right: Box::new(Expr::constant(1, 1)),
+        }
+    }
+
+    #[test]
+    fn condition_register_field_reduces_to_the_selected_comparison() {
+        let counter = temporary("u_1", 4);
+        let limit = Expr::constant(0x20, 4);
+        let field = || {
+            condition_field(
+                counter.clone(),
+                limit.clone(),
+                Expr::Register {
+                    name: "xer_so".into(),
+                    width: 1,
+                },
+            )
+        };
+        let less = Expr::Binary {
+            op: BinaryOp::Less,
+            left: Box::new(counter.clone()),
+            right: Box::new(limit.clone()),
+        };
+        let greater = Expr::Binary {
+            op: BinaryOp::Less,
+            left: Box::new(limit.clone()),
+            right: Box::new(counter.clone()),
+        };
+        let equal = Expr::Binary {
+            op: BinaryOp::Equal,
+            left: Box::new(counter.clone()),
+            right: Box::new(limit.clone()),
+        };
+        assert_eq!(simplify_algebraic_expr(extracted_bit(field(), 3)), less);
+        assert_eq!(simplify_algebraic_expr(extracted_bit(field(), 2)), greater);
+        assert_eq!(simplify_algebraic_expr(extracted_bit(field(), 1)), equal);
+    }
+
+    #[test]
+    fn summary_overflow_bit_is_left_alone_rather_than_guessed() {
+        let field = condition_field(
+            temporary("u_1", 4),
+            Expr::constant(0x20, 4),
+            Expr::Register {
+                name: "xer_so".into(),
+                width: 1,
+            },
+        );
+        let reduced = simplify_algebraic_expr(extracted_bit(field, 0));
+        assert!(
+            matches!(
+                reduced,
+                Expr::Binary {
+                    op: BinaryOp::And,
+                    ..
+                }
+            ),
+            "{reduced:?}"
+        );
+    }
+
+    #[test]
+    fn rotate_and_mask_collapses_to_one_shift() {
+        let value = temporary("u_1", 4);
+        let rotated = Expr::Binary {
+            op: BinaryOp::And,
+            left: Box::new(Expr::Binary {
+                op: BinaryOp::Or,
+                left: Box::new(Expr::Binary {
+                    op: BinaryOp::Left,
+                    left: Box::new(value.clone()),
+                    right: Box::new(Expr::constant(0x1b, 4)),
+                }),
+                right: Box::new(Expr::Binary {
+                    op: BinaryOp::Right,
+                    left: Box::new(value.clone()),
+                    right: Box::new(Expr::constant(5, 4)),
+                }),
+            }),
+            right: Box::new(Expr::constant(0x7ffffff, 4)),
+        };
+        let reduced = simplify_algebraic_expr(rotated);
+        let rendered = format!("{reduced:?}");
+        assert!(!rendered.contains("Left"), "{rendered}");
+        assert!(rendered.contains("Right"), "{rendered}");
+    }
+
+    #[test]
+    fn shifting_a_value_past_its_width_yields_zero() {
+        let value = temporary("u_1", 4);
+        let shifted = Expr::Binary {
+            op: BinaryOp::Right,
+            left: Box::new(value),
+            right: Box::new(Expr::constant(0x20, 4)),
+        };
+        assert_eq!(
+            simplify_algebraic_expr(shifted),
+            Expr::Constant { value: 0, width: 4 }
+        );
+    }
+
+    #[test]
+    fn constant_offsets_fold_into_one_addition() {
+        let base = temporary("u_1", 4);
+        let chained = Expr::Binary {
+            op: BinaryOp::Add,
+            left: Box::new(Expr::Binary {
+                op: BinaryOp::Add,
+                left: Box::new(base.clone()),
+                right: Box::new(Expr::constant(0xffffffff, 4)),
+            }),
+            right: Box::new(Expr::constant(1, 4)),
+        };
+        assert_eq!(simplify_algebraic_expr(chained), base);
     }
 
     #[test]
