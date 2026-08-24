@@ -108,6 +108,20 @@ All notable Ventris changes are documented here.
   conditions the construct requires, which a flat statement list cannot express.
   Statements following an unconditional transfer are dropped, since a node that
   surrendered an edge has no fallthrough.
+- Added `VENTRIS_PIPELINE=graph`, which routes the public `decompile` command
+  through the ported graph pipeline so the quality census can measure both paths
+  on identical input. The address-ordered path remains the default: measured
+  against the Ghidra oracle across all 37 hash-verified corpus functions, it
+  agrees on 19 and the graph path on 6.
+- Fixed the graph pipeline reading a `RETURN`'s first operand as the returned
+  value. It is the return address, so every function claimed to return a value.
+- Fixed graph-pipeline calls losing arguments a function forwards without
+  touching. Parameter locations now get a trial from the convention rather than
+  only when they appear as a varnode, and a known callee's arity bounds the
+  argument list, matching `FuncCallSpecs`' use of the callee prototype.
+- Fixed a returned register holding whatever the last callee left being reported
+  as a return value. A result must be produced by this function, looking through
+  guards and merges, to count.
 
 - Added `LiftedInstruction::skips_delay_slot`, which reports the MIPS
   likely-branch shape so consumers stop treating its sequential successor as

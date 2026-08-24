@@ -60,9 +60,11 @@ pub fn emit_structured(
     data: &Funcdata,
     register_name: &dyn Fn(u32, u64, u32) -> Option<String>,
     types: &Types,
+    parameters: &BTreeMap<(u32, u64), (String, Type)>,
 ) -> Vec<NativeStatement> {
     let naming = mark_explicit_with(data, merge_required(data));
-    let resolver = Resolver::with_types(data, &naming, register_name, types);
+    let resolver =
+        Resolver::with_types(data, &naming, register_name, types).with_parameters(parameters);
     let emitter = Emitter {
         data,
         naming: &naming,
@@ -451,9 +453,12 @@ impl Emitter<'_> {
                 }
             }
             op::RETURN => {
+                // A `RETURN`'s first operand is the return address, not a
+                // result. Reading it as the result made every function claim to
+                // return a value.
                 let value = operation
                     .inputs
-                    .first()
+                    .get(1)
                     .copied()
                     .map(|value| self.resolver.resolve(value));
                 Emission::Terminator(NativeStatement::Return(value))
@@ -686,7 +691,8 @@ mod tests {
         let sum = data.new_unique(4);
         data.op_set_output(add, Some(sum));
         data.op_insert_end(add, block);
-        let ret = data.new_op(op::RETURN, seq(0x1004), vec![sum]);
+        let link = data.new_varnode(REGISTER_SPACE, 0x1f0, 8);
+        let ret = data.new_op(op::RETURN, seq(0x1004), vec![link, sum]);
         data.op_insert_end(ret, block);
 
         let statements = emit(&data, &names);
@@ -724,7 +730,8 @@ mod tests {
             data.op_insert_end(copy, block);
         }
         let read = data.new_varnode(REGISTER_SPACE, 8, 4);
-        let ret = data.new_op(op::RETURN, seq(0x1030), vec![read]);
+        let link = data.new_varnode(REGISTER_SPACE, 0x1f0, 8);
+        let ret = data.new_op(op::RETURN, seq(0x1030), vec![link, read]);
         data.op_insert_end(ret, join);
 
         heritage(&mut data);

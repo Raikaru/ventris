@@ -368,13 +368,23 @@ impl Rule for RuleTrivialArith {
         let right_zero = right_value.flags.constant && right_value.offset == 0;
         let right_one = right_value.flags.constant && right_value.offset == 1;
         let identity = match opcode {
-            op::INT_ADD | op::INT_SUB | op::INT_OR | op::INT_XOR | op::INT_LEFT | op::INT_RIGHT => {
-                right_zero
-            }
+            op::INT_ADD | op::INT_SUB | op::INT_LEFT | op::INT_RIGHT => right_zero,
             op::INT_MULT => right_one,
+            // A register move is spelled `or rX, rX, rX` on PowerPC and
+            // `or rX, rX, zero` on MIPS. Both are the value itself.
+            op::INT_OR => right_zero || left == right,
             op::INT_AND => left == right,
+            op::INT_XOR => right_zero,
             _ => false,
         };
+        if opcode == op::INT_XOR && left == right {
+            // A value exclusive-ored with itself is zero, whatever it was.
+            let width = data.varnode(left).size;
+            let zero = data.new_constant(0, width);
+            data.op_set_opcode(id, op::COPY);
+            data.op_set_inputs(id, vec![zero]);
+            return 1;
+        }
         if !identity {
             return 0;
         }

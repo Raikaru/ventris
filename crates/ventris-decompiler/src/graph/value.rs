@@ -61,6 +61,13 @@ impl Naming {
     }
 }
 
+/// A shared empty parameter map.
+fn empty_parameters() -> &'static BTreeMap<(u32, u64), (String, Type)> {
+    static EMPTY: std::sync::LazyLock<BTreeMap<(u32, u64), (String, Type)>> =
+        std::sync::LazyLock::new(BTreeMap::new);
+    &EMPTY
+}
+
 /// Decides which values are explicit, i.e. get a name and a declaration.
 ///
 /// Ghidra's `ActionMarkExplicit` marks a varnode explicit when it has more than
@@ -122,6 +129,7 @@ pub struct Resolver<'a> {
     naming: &'a Naming,
     register_name: &'a dyn Fn(u32, u64, u32) -> Option<String>,
     types: &'a Types,
+    parameters: &'a BTreeMap<(u32, u64), (String, Type)>,
 }
 
 impl<'a> Resolver<'a> {
@@ -145,7 +153,19 @@ impl<'a> Resolver<'a> {
             naming,
             register_name,
             types,
+            parameters: empty_parameters(),
         }
+    }
+
+    /// Names the locations the calling convention passes parameters in.
+    ///
+    /// A value the function never wrote, read from an argument location, is a
+    /// parameter. Without this the entry value renders as the raw register,
+    /// which reads as if the function used an uninitialised register and leaves
+    /// the recovered prototype empty.
+    pub fn with_parameters(mut self, parameters: &'a BTreeMap<(u32, u64), (String, Type)>) -> Self {
+        self.parameters = parameters;
+        self
     }
 
     /// The recovered type of a value, or what its storage width implies.
@@ -207,6 +227,19 @@ impl<'a> Resolver<'a> {
     /// function input, or a stack slot.
     fn storage(&self, value: VarnodeId) -> Expr {
         let varnode = self.data.varnode(value);
+        if varnode.def.is_none()
+            && let Some((name, declared)) = self.parameters.get(&(varnode.space, varnode.offset))
+        {
+            return Expr::Parameter {
+                name: name.clone(),
+                ty: self
+                    .types
+                    .get(value)
+                    .filter(|recovered| !matches!(recovered, Type::Unsigned(_)))
+                    .cloned()
+                    .unwrap_or_else(|| declared.clone()),
+            };
+        }
         match (self.register_name)(varnode.space, varnode.offset, varnode.size) {
             Some(name) => Expr::Register {
                 name,

@@ -37,20 +37,40 @@ struct Trial {
 ///
 /// `argument_locations` is the convention's parameter storage, in the order the
 /// convention assigns it. Returns the number of calls given arguments.
-pub fn recover_call_arguments(data: &mut Funcdata, argument_locations: &[Location]) -> usize {
-    let calls: Vec<OpId> = data
+pub fn recover_call_arguments(
+    data: &mut Funcdata,
+    argument_locations: &[Location],
+    arity_of: &dyn Fn(u64) -> Option<usize>,
+) -> usize {
+    let calls: Vec<(OpId, Option<u64>)> = data
         .live_ops()
         .filter(|(_, operation)| matches!(operation.opcode, op::CALL | op::CALLIND))
-        .map(|(id, _)| id)
+        .map(|(id, operation)| {
+            let target = operation
+                .inputs
+                .first()
+                .copied()
+                .map(|value| data.varnode(value))
+                .filter(|value| value.def.is_none())
+                .map(|value| value.offset);
+            (id, target)
+        })
         .collect();
     let mut recovered = 0;
-    for call in calls {
+    for (call, target) in calls {
         let trials = register_trials(data, call, argument_locations);
-        let arguments: Vec<VarnodeId> = trials
-            .iter()
-            .take_while(|trial| trial.used)
-            .map(|trial| trial.value)
-            .collect();
+        // A known callee states its own arity. Ghidra's `FuncCallSpecs` uses
+        // the callee prototype when it has one, which is the only way to see
+        // an argument this function forwards without touching.
+        let arity = target.and_then(arity_of);
+        let arguments: Vec<VarnodeId> = match arity {
+            Some(arity) => trials.iter().take(arity).map(|trial| trial.value).collect(),
+            None => trials
+                .iter()
+                .take_while(|trial| trial.used)
+                .map(|trial| trial.value)
+                .collect(),
+        };
         if arguments.is_empty() {
             continue;
         }
@@ -128,6 +148,10 @@ fn is_used(data: &Funcdata, value: VarnodeId) -> bool {
                 .any(|operand| is_used(data, operand)),
             _ => true,
         },
+        // A value with no definition was never computed here. It can still be
+        // an argument the function forwards, but only the callee's prototype
+        // can say how many, so that case is decided by the arity bound rather
+        // than by claiming every convention register.
         None => false,
     }
 }
@@ -177,7 +201,7 @@ mod tests {
     fn a_written_argument_register_becomes_a_call_argument() {
         let (mut data, call) = one_argument_call();
         let locations = [location(0x10), location(0x20), location(0x30)];
-        assert_eq!(recover_call_arguments(&mut data, &locations), 1);
+        assert_eq!(recover_call_arguments(&mut data, &locations, &|_| None), 1);
         assert_eq!(
             data.op(call).inputs.len(),
             2,
@@ -202,7 +226,7 @@ mod tests {
         // The convention's second and third registers were never written, so
         // they cannot be arguments and no later register can be either.
         let locations = [location(0x10), location(0x20), location(0x30)];
-        recover_call_arguments(&mut data, &locations);
+        recover_call_arguments(&mut data, &locations, &|_| None);
         for argument in data.op(call).inputs.iter().skip(1).copied() {
             assert!(
                 data.varnode(argument).flags.constant || data.varnode(argument).def.is_some(),
@@ -224,7 +248,7 @@ mod tests {
         heritage(&mut data);
 
         assert_eq!(
-            recover_call_arguments(&mut data, &[location(0x10)]),
+            recover_call_arguments(&mut data, &[location(0x10)], &|_| None),
             0,
             "nothing wrote the argument register"
         );
@@ -258,7 +282,10 @@ mod tests {
         let locations = BTreeSet::from([location(0x10)]);
         guard_calls(&mut data, &locations, &CallEffects::default());
         heritage(&mut data);
-        assert_eq!(recover_call_arguments(&mut data, &[location(0x10)]), 1);
+        assert_eq!(
+            recover_call_arguments(&mut data, &[location(0x10)], &|_| None),
+            1
+        );
         assert_eq!(data.op(call).inputs.len(), 2);
     }
 }

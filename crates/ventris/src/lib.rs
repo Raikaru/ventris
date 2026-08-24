@@ -168,6 +168,16 @@ impl fmt::Display for PipelineError {
 
 impl std::error::Error for PipelineError {}
 
+/// Whether the caller asked for the ported graph pipeline.
+///
+/// Selected with `VENTRIS_PIPELINE=graph`. An environment switch rather than a
+/// flag because the choice is a measurement tool, not part of the interface.
+fn graph_pipeline_requested() -> bool {
+    std::env::var("VENTRIS_PIPELINE")
+        .map(|value| value.eq_ignore_ascii_case("graph"))
+        .unwrap_or(false)
+}
+
 /// An immutable loaded binary plus its explicit target decision.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Pipeline {
@@ -313,15 +323,24 @@ impl Pipeline {
             Some(&resolve_symbol),
         );
         let mut decompiler = NativeDecompiler;
-        let document = decompiler.decompile_with_call_prototypes(
-            self.architecture
-                .ok_or(PipelineError::ArchitectureRequired)?,
-            &function,
-            abi,
-            Some(&memory),
-            Some(&resolve_symbol),
-            Some(&call_prototypes),
-        );
+        let architecture = self
+            .architecture
+            .ok_or(PipelineError::ArchitectureRequired)?;
+        // The ported graph pipeline is selectable so the quality census can
+        // measure both paths on identical input. It is not the default until it
+        // measures at least as well across every corpus image.
+        let document = if graph_pipeline_requested() {
+            decompiler.decompile_via_graph(architecture, &function, abi, Some(&call_prototypes))
+        } else {
+            decompiler.decompile_with_call_prototypes(
+                architecture,
+                &function,
+                abi,
+                Some(&memory),
+                Some(&resolve_symbol),
+                Some(&call_prototypes),
+            )
+        };
         let recovered = self.target.map(|target| {
             recover_function(
                 target,

@@ -61,7 +61,7 @@ fn discover(bytes: &[u8], entry: u64) -> NativeFunction {
 fn render_via_graph(bytes: &[u8], entry: u64) -> String {
     let abi = TargetProfile::Ps2.spec().abi;
     NativeDecompiler
-        .decompile_via_graph(Architecture::Ps2, &discover(bytes, entry), Some(&abi))
+        .decompile_via_graph(Architecture::Ps2, &discover(bytes, entry), Some(&abi), None)
         .render()
 }
 

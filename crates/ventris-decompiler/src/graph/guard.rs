@@ -139,6 +139,76 @@ pub fn guard_returns(data: &mut Funcdata, storage: &[Location]) -> usize {
     added
 }
 
+/// Removes a return's result operand when nothing here produced it.
+///
+/// [`guard_returns`] adds the operand unconditionally so the value has a reader
+/// and survives dead code. Whether the function actually returns something is a
+/// separate question, answered after renaming: a result the function never
+/// wrote is the caller's own register showing through, not a return value.
+pub fn drop_undefined_return_values(data: &mut Funcdata) -> usize {
+    let returns: Vec<OpId> = data
+        .live_ops()
+        .filter(|(_, operation)| operation.opcode == op::RETURN)
+        .filter(|(_, operation)| operation.inputs.len() > 1)
+        .map(|(id, _)| id)
+        .collect();
+    let mut dropped = 0;
+    for id in returns {
+        let inputs = data.op(id).inputs.clone();
+        let kept: Vec<VarnodeId> = inputs
+            .iter()
+            .copied()
+            .take(1)
+            .chain(
+                inputs
+                    .iter()
+                    .copied()
+                    .skip(1)
+                    .filter(|value| function_produced(data, *value, 0)),
+            )
+            .collect();
+        if kept.len() != inputs.len() {
+            data.op_set_inputs(id, kept);
+            dropped += 1;
+        }
+    }
+    dropped
+}
+
+/// Whether this function put the value where it is, rather than a call having
+/// left it there.
+///
+/// A guard and a merge only relay a value, so they are looked through. A result
+/// register holding whatever the last callee left is not this function's return
+/// value, which is the difference between `void` and a spurious result.
+fn function_produced(data: &Funcdata, value: VarnodeId, depth: u32) -> bool {
+    if depth > 8 {
+        return false;
+    }
+    let varnode = data.varnode(value);
+    if varnode.flags.constant {
+        return true;
+    }
+    let Some(def) = varnode.def else {
+        return false;
+    };
+    match data.op(def).opcode {
+        op::INDIRECT | op::MULTIEQUAL | op::COPY => data
+            .op(def)
+            .inputs
+            .iter()
+            .copied()
+            .take(if data.op(def).opcode == op::INDIRECT {
+                1
+            } else {
+                data.op(def).inputs.len()
+            })
+            .filter(|operand| *operand != value)
+            .any(|operand| function_produced(data, operand, depth + 1)),
+        _ => true,
+    }
+}
+
 /// Creates `out = INDIRECT(in, op)` immediately before `anchor`.
 ///
 /// The second operand names the operation responsible, matching Ghidra's

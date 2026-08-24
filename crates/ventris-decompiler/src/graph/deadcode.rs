@@ -116,7 +116,11 @@ pub fn propagate(data: &Funcdata) -> BTreeMap<VarnodeId, u64> {
         if !all {
             continue;
         }
-        for input in operation.inputs.iter().copied() {
+        // A `RETURN`'s first operand is the return address. It is consumed by
+        // the machine, not by the program, and marking it live keeps the
+        // epilogue's register restore alive with it.
+        let skip = usize::from(operation.opcode == op::RETURN);
+        for input in operation.inputs.iter().skip(skip).copied() {
             let mask = calc_mask(data.varnode(input).size);
             push(input, mask, &mut consumed, &mut worklist);
         }
@@ -258,6 +262,15 @@ mod tests {
         SeqNum { address, order: 0 }
     }
 
+    /// A `RETURN` in its real p-code shape: return address first, then any
+    /// returned value.
+    fn returning(data: &mut Funcdata, address: u64, value: Option<VarnodeId>) -> OpId {
+        let link = data.new_varnode(REGISTER_SPACE, 0x1f0, 8);
+        let mut inputs = vec![link];
+        inputs.extend(value);
+        data.new_op(op::RETURN, seq(address), inputs)
+    }
+
     #[test]
     fn an_unread_computation_is_removed() {
         let mut data = Funcdata::default();
@@ -268,7 +281,7 @@ mod tests {
         let sum = data.new_unique(4);
         data.op_set_output(add, Some(sum));
         data.op_insert_end(add, block);
-        let ret = data.new_op(op::RETURN, seq(0x1004), vec![]);
+        let ret = returning(&mut data, 0x1004, None);
         data.op_insert_end(ret, block);
 
         assert_eq!(eliminate_dead_code(&mut data), 1);
@@ -285,7 +298,7 @@ mod tests {
         let sum = data.new_unique(4);
         data.op_set_output(add, Some(sum));
         data.op_insert_end(add, block);
-        let ret = data.new_op(op::RETURN, seq(0x1004), vec![sum]);
+        let ret = returning(&mut data, 0x1004, Some(sum));
         data.op_insert_end(ret, block);
 
         assert_eq!(eliminate_dead_code(&mut data), 0);
@@ -328,7 +341,7 @@ mod tests {
             data.op_set_output(copy, Some(out));
             data.op_insert_end(copy, block);
         }
-        let ret = data.new_op(op::RETURN, seq(0x1030), vec![]);
+        let ret = returning(&mut data, 0x1030, None);
         data.op_insert_end(ret, join);
 
         assert_eq!(heritage(&mut data), 1);
@@ -359,7 +372,7 @@ mod tests {
             data.op_insert_end(copy, block);
         }
         let read = data.new_varnode(REGISTER_SPACE, 8, 4);
-        let ret = data.new_op(op::RETURN, seq(0x1030), vec![read]);
+        let ret = returning(&mut data, 0x1030, Some(read));
         data.op_insert_end(ret, join);
 
         heritage(&mut data);
@@ -389,7 +402,7 @@ mod tests {
         let byte = data.new_unique(4);
         data.op_set_output(masked, Some(byte));
         data.op_insert_end(masked, block);
-        let ret = data.new_op(op::RETURN, seq(0x1008), vec![byte]);
+        let ret = returning(&mut data, 0x1008, Some(byte));
         data.op_insert_end(ret, block);
 
         let consumed = propagate(&data);
@@ -425,7 +438,7 @@ mod tests {
         let bit = data.new_unique(4);
         data.op_set_output(masked, Some(bit));
         data.op_insert_end(masked, block);
-        let ret = data.new_op(op::RETURN, seq(0x1008), vec![bit]);
+        let ret = returning(&mut data, 0x1008, Some(bit));
         data.op_insert_end(ret, block);
 
         let consumed = propagate(&data);

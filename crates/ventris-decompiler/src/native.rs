@@ -310,6 +310,57 @@ impl NativeDocument {
     }
 }
 
+/// Stack offsets a callee-saved register is restored from.
+///
+/// A save whose value is read back before the function returns is bookkeeping,
+/// not computation.
+fn graph_restored_slots(
+    architecture: Architecture,
+    abi: &Abi,
+    statements: &[NativeStatement],
+) -> BTreeSet<(String, i64)> {
+    let mut restored = BTreeSet::new();
+    for statement in statements {
+        let value = match statement {
+            NativeStatement::Declare { value, .. }
+            | NativeStatement::Assign { source: value, .. } => value,
+            _ => continue,
+        };
+        if let Expr::Load { address, .. } = value
+            && let Some(slot) = prologue_stack_slot(architecture, abi, address)
+        {
+            restored.insert(slot);
+        }
+    }
+    restored
+}
+
+/// The return type a graph-pipeline function reports.
+///
+/// A function whose returns carry no value is `void`. Reporting a value type
+/// unconditionally claims a result the function never produces, which is what
+/// made every graph-pipeline function differ from the oracle on return
+/// presence.
+fn graph_return_type(
+    data: &graph::Funcdata,
+    types: &graph::types::Types,
+    architecture: Architecture,
+) -> Type {
+    let returned: Vec<graph::VarnodeId> = data
+        .live_ops()
+        .filter(|(_, operation)| operation.opcode == op::RETURN)
+        .filter_map(|(_, operation)| operation.inputs.get(1).copied())
+        .collect();
+    if returned.is_empty() {
+        return Type::Void;
+    }
+    returned
+        .iter()
+        .filter_map(|value| types.get(*value).cloned())
+        .find(|recovered| !matches!(recovered, Type::Unknown))
+        .unwrap_or_else(|| default_return_type(architecture))
+}
+
 /// Bounded source normal forms for compiler-sensitive candidate probing.
 ///
 /// These are semantic-preserving spellings, not arbitrary optimization knobs.
@@ -1788,6 +1839,7 @@ impl NativeDecompiler {
         architecture: Architecture,
         function: &NativeFunction,
         abi: Option<&Abi>,
+        call_prototypes: Option<&BTreeMap<u64, NativeCallPrototype>>,
     ) -> NativeDocument {
         let ssa = build_ssa(function);
         let mut solver = TypeSolver::default();
@@ -1802,6 +1854,18 @@ impl NativeDecompiler {
         // merge for every address the function mentions.
         let mut locations = graph::guard::heritaged_locations(&data);
         locations.retain(|location| location.space == REGISTER_SPACE);
+        // A convention's parameter locations get a trial whether or not this
+        // function mentions them. A forwarding function passes arguments it
+        // never touches, so waiting for one to appear as a varnode loses them.
+        if let Some(abi) = abi {
+            for vnode in abi_argument_vnodes(architecture, abi) {
+                locations.insert(graph::guard::Location {
+                    space: vnode.space,
+                    offset: vnode.offset,
+                    size: vnode.size,
+                });
+            }
+        }
         let mut effects = graph::guard::CallEffects::default();
         if let Some(abi) = abi {
             for name in [Some(abi.stack_pointer), abi.frame_pointer]
@@ -1814,6 +1878,20 @@ impl NativeDecompiler {
             }
         }
         graph::guard::guard_calls(&mut data, &locations, &effects);
+        // A return reads the convention's result storage. Without this the
+        // returned value has no reader, dead code removes the computation, and
+        // the function reports `void`.
+        if let Some(abi) = abi {
+            let result: Vec<graph::guard::Location> = abi_primary_return_vnodes(architecture, abi)
+                .into_iter()
+                .map(|vnode| graph::guard::Location {
+                    space: vnode.space,
+                    offset: vnode.offset,
+                    size: vnode.size,
+                })
+                .collect();
+            graph::guard::guard_returns(&mut data, &result);
+        }
         graph::heritage::heritage(&mut data);
         // Arguments must be recovered while the guards that name each
         // location's value at the call still exist: simplification collapses
@@ -1828,12 +1906,18 @@ impl NativeDecompiler {
                         size: vnode.size,
                     })
                     .collect();
-            graph::proto::recover_call_arguments(&mut data, &argument_locations);
+            let arity_of = |target: u64| {
+                call_prototypes
+                    .and_then(|prototypes| prototypes.get(&target))
+                    .map(|prototype| prototype.parameters.len())
+            };
+            graph::proto::recover_call_arguments(&mut data, &argument_locations, &arity_of);
         }
         // Simplification, unreachable-block removal, and dead code each expose
         // work for the others: folding a condition orphans a block, removing a
         // block leaves a merge with one operand, and collapsing that merge
         // leaves a copy nothing reads. Ghidra runs them in one fixed point.
+        graph::guard::drop_undefined_return_values(&mut data);
         let pipeline = graph::action::default_pipeline();
         for _ in 0..GRAPH_PIPELINE_ROUNDS {
             let mut changed = graph::action::Action::apply(pipeline.as_ref(), &mut data);
@@ -1852,14 +1936,68 @@ impl NativeDecompiler {
         // running them over graph-emitted statements loses conditionals. The
         // graph's own rules already ran, on the graph.
         let recovered = graph::types::infer_types(&data, &BTreeMap::new());
+        // Argument locations name themselves as parameters, which is how the
+        // recovered prototype gets its arguments.
+        let mut parameter_names: BTreeMap<(u32, u64), (String, Type)> = BTreeMap::new();
+        if let Some(abi) = abi {
+            // Names follow the convention the prototype recovery reads back:
+            // integer arguments are `arg`, floating `farg`, vector `varg`, each
+            // numbered within its class.
+            let classes = [
+                (
+                    AbiRegisterClass::Integer,
+                    "arg",
+                    Type::Unsigned(u32::from(abi.pointer_bits)),
+                ),
+                (AbiRegisterClass::Floating, "farg", Type::Float(32)),
+                (
+                    AbiRegisterClass::Vector,
+                    "varg",
+                    Type::Unsigned(u32::from(abi.pointer_bits)),
+                ),
+            ];
+            let independent = abi.argument_mode == ArgumentRegisterMode::Independent;
+            for (class, prefix, declared) in classes {
+                if prefix != "arg" && !independent {
+                    continue;
+                }
+                let group = abi.arguments.group(class);
+                let vnodes = abi_register_group_vnodes(architecture, abi, group);
+                for (index, vnode) in vnodes.into_iter().enumerate() {
+                    parameter_names
+                        .entry((vnode.space, vnode.offset))
+                        .or_insert_with(|| (format!("{prefix}{index}"), declared.clone()));
+                }
+            }
+        }
         // Structuring happens on the graph, where the edge conditions each
         // construct requires are visible. The statement-level structurer
         // inferred them back from labels.
-        let statements = graph::emit::emit_structured(&data, &naming, &recovered);
+        let statements = graph::emit::emit_structured(&data, &naming, &recovered, &parameter_names);
+        // A matched save and restore of a callee-saved register says nothing
+        // about what the function computes, and naming provably private stack
+        // slots turns spills into locals. Both stages read statements, so they
+        // are shared with the address-ordered path rather than reimplemented.
+        let mut statements = statements;
+        let mut stable_registers = LiveReads::of(function).unwritten_register_names(architecture);
+        if let Some(abi) = abi {
+            for name in [Some(abi.stack_pointer), abi.frame_pointer]
+                .into_iter()
+                .flatten()
+            {
+                stable_registers.insert(name.strip_prefix('$').unwrap_or(name).to_owned());
+            }
+            let restored = graph_restored_slots(architecture, abi, &statements);
+            statements.retain(|statement| {
+                !is_matched_abi_stack_save(architecture, abi, &restored, statement)
+            });
+        }
+        promote_frame_slots(&mut statements, &stable_registers);
         let parameters = recover_parameters(abi, &statements);
+        let return_type = graph_return_type(&data, &recovered, architecture);
         NativeDocument {
             name: format!("sub_{:x}", function.entry),
-            return_type: default_return_type(architecture),
+            return_type,
             parameters,
             statements,
             ssa,
