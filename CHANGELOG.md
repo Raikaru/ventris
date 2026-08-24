@@ -278,6 +278,20 @@ All notable Ventris changes are documented here.
   the corpus census 496. Both are now 2.2 seconds and 12 seconds. The module's
   real analysis — `Explicit`, `cast_standard`, the promotion helpers and
   `ActionLikelyTrash` — is kept for the renderer to consult.
+- The graph path now emits `CALLOTHER` userops, naming them from the SLEIGH
+  userop table exactly as the address-ordered path does, and suppressing the ones
+  the MIPS and Arm lifters use for branch-state bookkeeping. They were dropped
+  because they have no result, and the resultless case fell through to a `Skip`:
+  every coprocessor and TLB write disappeared from the output.
+- `call-census` now counts call sites rather than only calls to unnamed targets.
+  It was measuring symbol availability: on `getBuiltInTexture` Ghidra resolves
+  `memcmp` where we print `sub_1201144`, and that scored as five lost calls on a
+  function where both emit exactly five. With the measurement corrected, three
+  real losses appear that the old form hid, all of them upstream of both
+  pipelines in instruction discovery.
+- A recovered structure field below its base no longer collapses to `field_0`.
+  Clamping the offset to zero declared the same member twice, so the rendered C
+  did not compile.
 
 - Added `LiftedInstruction::skips_delay_slot`, which reports the MIPS
   likely-branch shape so consumers stop treating its sequential successor as

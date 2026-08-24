@@ -31,8 +31,9 @@ use crate::native::{Expr, NativeStatement, Type};
 pub fn emit(
     data: &Funcdata,
     register_name: &dyn Fn(u32, u64, u32) -> Option<String>,
+    architecture: ventris_lifter::Architecture,
 ) -> Vec<NativeStatement> {
-    emit_with_types(data, register_name, &Types::default())
+    emit_with_types(data, register_name, &Types::default(), architecture)
 }
 
 /// Emits statements, declaring each named value at its recovered type.
@@ -40,6 +41,7 @@ pub fn emit_with_types(
     data: &Funcdata,
     register_name: &dyn Fn(u32, u64, u32) -> Option<String>,
     types: &Types,
+    architecture: ventris_lifter::Architecture,
 ) -> Vec<NativeStatement> {
     let naming = mark_explicit_with(data, merge_all(data));
     let resolver = Resolver::with_types(data, &naming, register_name, types);
@@ -48,6 +50,7 @@ pub fn emit_with_types(
         naming: &naming,
         resolver,
         types,
+        architecture,
     }
     .run()
 }
@@ -63,6 +66,7 @@ pub fn emit_structured(
     types: &Types,
     parameters: &BTreeMap<(u32, u64), (String, Type)>,
     stack_pointer: Option<super::guard::Location>,
+    architecture: ventris_lifter::Architecture,
 ) -> Vec<NativeStatement> {
     let naming = mark_explicit_named(data, merge_all(data), types, stack_pointer);
     let resolver =
@@ -72,6 +76,7 @@ pub fn emit_structured(
         naming: &naming,
         resolver,
         types,
+        architecture,
     };
     let tree = super::structure::structure(data);
     let scoped = emitter.scoped_names();
@@ -408,6 +413,9 @@ struct Emitter<'a> {
     naming: &'a Naming,
     resolver: Resolver<'a>,
     types: &'a Types,
+    /// Needed to name SLEIGH userops: a `CALLOTHER` index means nothing without
+    /// the architecture whose table defines it.
+    architecture: ventris_lifter::Architecture,
 }
 
 impl Emitter<'_> {
@@ -805,6 +813,27 @@ impl Emitter<'_> {
                 )),
                 None => Emission::Skip,
             },
+            // A userop is real machine behaviour. Skipping it because it has
+            // no output silently deleted every coprocessor write: the N64
+            // `preamble` lost six TLB and COP0 operations and rendered as a
+            // loop with nothing after it.
+            op::CALLOTHER => match self.userop_call(op) {
+                Some(call) => match operation
+                    .output
+                    .and_then(|output| self.naming.name_of(output).map(|_| output))
+                {
+                    Some(output) => {
+                        let name = self
+                            .naming
+                            .name_of(output)
+                            .expect("checked above")
+                            .to_string();
+                        Emission::Body(self.bind(name, output, call, scoped))
+                    }
+                    None => Emission::Body(NativeStatement::Call(call)),
+                },
+                None => Emission::Skip,
+            },
             _ => match operation.output {
                 Some(output) => match self.naming.name_of(output) {
                     Some(_) => Emission::Body(self.declaration_of(output, scoped)),
@@ -813,6 +842,45 @@ impl Emitter<'_> {
                 None => Emission::Skip,
             },
         }
+    }
+
+    /// A userop rendered as the pseudo-call Ghidra prints for it.
+    ///
+    /// Returns `None` for the userops the MIPS and Arm lifters use to record
+    /// branch state, which have no source-level effect.
+    fn userop_call(&self, op: OpId) -> Option<Expr> {
+        let operation = self.data.op(op);
+        let index = operation
+            .inputs
+            .first()
+            .copied()
+            .filter(|value| self.data.varnode(*value).flags.constant)
+            .map(|value| self.data.varnode(value).offset);
+        let name =
+            index.and_then(|index| ventris_lifter::sleigh_userop_name(self.architecture, index));
+        if operation.output.is_none()
+            && (name == Some("setISAMode")
+                || matches!(
+                    self.architecture,
+                    ventris_lifter::Architecture::Mips32
+                        | ventris_lifter::Architecture::Mips32Be
+                        | ventris_lifter::Architecture::Ps1
+                        | ventris_lifter::Architecture::Ps2
+                        | ventris_lifter::Architecture::N64
+                ) && index == Some(0))
+        {
+            return None;
+        }
+        Some(Expr::Builtin {
+            name: name.unwrap_or("__ventris_callother"),
+            args: operation
+                .inputs
+                .iter()
+                .skip(usize::from(name.is_some()))
+                .copied()
+                .map(|value| self.resolver.resolve(value))
+                .collect(),
+        })
     }
 
     fn declaration_of(
@@ -972,7 +1040,7 @@ mod tests {
         let store = data.new_op(op::STORE, seq(0x1000), vec![space, address, value]);
         data.op_insert_end(store, block);
 
-        let statements = emit(&data, &names);
+        let statements = emit(&data, &names, ventris_lifter::Architecture::Mips32);
         assert_eq!(
             statements,
             vec![NativeStatement::Store {
@@ -997,7 +1065,7 @@ mod tests {
         let call = data.new_op(op::CALL, seq(0x1000), vec![target, argument]);
         data.op_insert_end(call, block);
 
-        let statements = emit(&data, &names);
+        let statements = emit(&data, &names, ventris_lifter::Architecture::Mips32);
         assert_eq!(
             statements,
             vec![NativeStatement::Call(Expr::Call {
@@ -1022,7 +1090,7 @@ mod tests {
         let ret = data.new_op(op::RETURN, seq(0x1004), vec![link, sum]);
         data.op_insert_end(ret, block);
 
-        let statements = emit(&data, &names);
+        let statements = emit(&data, &names, ventris_lifter::Architecture::Mips32);
         assert_eq!(
             statements,
             vec![NativeStatement::Return(Some(Expr::Binary {
@@ -1062,7 +1130,7 @@ mod tests {
         data.op_insert_end(ret, join);
 
         heritage(&mut data);
-        let statements = emit(&data, &names);
+        let statements = emit(&data, &names, ventris_lifter::Architecture::Mips32);
 
         assert!(
             statements
@@ -1113,7 +1181,7 @@ mod tests {
         let ret = data.new_op(op::RETURN, seq(0x1020), vec![]);
         data.op_insert_end(ret, join);
 
-        let statements = emit(&data, &names);
+        let statements = emit(&data, &names, ventris_lifter::Architecture::Mips32);
         assert!(statements.contains(&NativeStatement::Label(0x1020)));
         assert!(statements.contains(&NativeStatement::IfGoto {
             condition: Expr::Constant { value: 1, width: 1 },
@@ -1137,7 +1205,7 @@ mod tests {
             data.op_insert_end(store, block);
         }
 
-        let statements = emit(&data, &names);
+        let statements = emit(&data, &names, ventris_lifter::Architecture::Mips32);
         let declarations = statements
             .iter()
             .filter(|statement| matches!(statement, NativeStatement::Declare { .. }))
@@ -1149,5 +1217,48 @@ mod tests {
                 assert!(matches!(value, Expr::Temporary { .. }));
             }
         }
+    }
+
+    #[test]
+    fn a_userop_without_a_result_is_still_emitted() {
+        // A coprocessor write has no result, and skipping every resultless
+        // operation deleted it. That is real machine behaviour disappearing
+        // from the output, not a cosmetic difference.
+        let mut data = Funcdata::default();
+        let block = data.new_block(0x1000);
+        let index = data.new_constant(9, 4);
+        let value = data.new_varnode(REGISTER_SPACE, 8, 4);
+        data.mark_input(value);
+        let userop = data.new_op(op::CALLOTHER, seq(0x1000), vec![index, value]);
+        data.op_insert_end(userop, block);
+
+        let names = |_: u32, _: u64, _: u32| Some("reg".to_owned());
+        let statements = emit(&data, &names, ventris_lifter::Architecture::Mips32);
+        assert!(
+            statements
+                .iter()
+                .any(|statement| matches!(statement, NativeStatement::Call(Expr::Builtin { .. }))),
+            "the userop was dropped: {statements:?}"
+        );
+    }
+
+    #[test]
+    fn the_branch_state_userop_is_not_emitted() {
+        // MIPS lifters use userop zero to record branch state. It has no
+        // source-level effect, so printing it would be noise.
+        let mut data = Funcdata::default();
+        let block = data.new_block(0x1000);
+        let index = data.new_constant(0, 4);
+        let userop = data.new_op(op::CALLOTHER, seq(0x1000), vec![index]);
+        data.op_insert_end(userop, block);
+
+        let names = |_: u32, _: u64, _: u32| Some("reg".to_owned());
+        let statements = emit(&data, &names, ventris_lifter::Architecture::Mips32);
+        assert!(
+            !statements
+                .iter()
+                .any(|statement| matches!(statement, NativeStatement::Call(Expr::Builtin { .. }))),
+            "branch-state bookkeeping was printed: {statements:?}"
+        );
     }
 }

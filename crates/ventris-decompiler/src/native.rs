@@ -2043,8 +2043,14 @@ impl NativeDecompiler {
                 }
             })
         });
-        let statements =
-            graph::emit::emit_structured(&data, &naming, &recovered, &parameter_names, stack_slot);
+        let statements = graph::emit::emit_structured(
+            &data,
+            &naming,
+            &recovered,
+            &parameter_names,
+            stack_slot,
+            architecture,
+        );
         // A matched save and restore of a callee-saved register says nothing
         // about what the function computes, and naming provably private stack
         // slots turns spills into locals. Both stages read statements, so they

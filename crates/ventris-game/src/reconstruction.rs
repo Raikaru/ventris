@@ -336,6 +336,19 @@ fn replace_identifier(source: &str, old: &str, new: &str) -> String {
     output
 }
 
+/// A unique C identifier for a field at a byte offset.
+///
+/// Clamping the offset to zero named every field below the base `field_0`, so a
+/// structure recovered from negative offsets declared the same member twice and
+/// the rendered C did not compile.
+fn field_name_for_offset(offset: i64) -> String {
+    if offset < 0 {
+        format!("field_neg_{:x}", offset.unsigned_abs())
+    } else {
+        format!("field_{offset:x}")
+    }
+}
+
 fn rewrite_recovered_field_accesses(
     signature: &mut SourceSignature,
     structs: &[SourceStruct],
@@ -462,7 +475,7 @@ fn source_struct(
                 .as_deref()
                 .map(c_identifier)
                 .filter(|name| !name.is_empty())
-                .unwrap_or_else(|| format!("field_{:x}", field.offset.max(0)));
+                .unwrap_or_else(|| field_name_for_offset(field.offset));
             let (c_type, declarator_suffix) = c_declarator(&field.ty, &mut unresolved);
             SourceField {
                 offset: field.offset,
@@ -787,5 +800,17 @@ mod tests {
             SourceReconstruction::from_report(&report(), "   "),
             Err(ReconstructionError::EmptyBody)
         );
+    }
+
+    #[test]
+    fn fields_below_the_base_get_distinct_names() {
+        // Clamping negative offsets to zero declared two members called
+        // `field_0` in one struct, which does not compile.
+        assert_ne!(
+            field_name_for_offset(-0x51e0),
+            field_name_for_offset(-0x51dc)
+        );
+        assert_ne!(field_name_for_offset(-4), field_name_for_offset(0));
+        assert_eq!(field_name_for_offset(0x10), "field_10");
     }
 }

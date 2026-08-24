@@ -255,6 +255,40 @@ def call_names(source: str) -> Counter:
     )
 
 
+# Control-flow keywords are followed by a parenthesis but are not calls, and
+# neither is a cast or a sizeof.
+NOT_A_CALL = frozenset(
+    {
+        "if",
+        "while",
+        "for",
+        "switch",
+        "return",
+        "do",
+        "sizeof",
+        "else",
+        "goto",
+        "case",
+        "default",
+    }
+)
+
+
+def call_site_count(source: str) -> int:
+    """Counts call sites regardless of what the callee is called.
+
+    Counting only `sub_`/`FUN_` names measured symbol availability, not call
+    recovery: Ghidra resolving `memcmp` while we render `sub_1201144` scored as
+    five lost calls on a function where both emit exactly five.
+    """
+    body = function_body(source)
+    return sum(
+        1
+        for name in re.findall(r"\b([A-Za-z_][A-Za-z0-9_:]*)\s*\(", body)
+        if name not in NOT_A_CALL
+    )
+
+
 def function_signature(source: str) -> str | None:
     """Finds the rendered function signature, ignoring types and comments.
 
@@ -351,16 +385,8 @@ def classify(row: Row) -> None:
             )
         )
 
-    ours_calls = sum(
-        count
-        for name, count in call_names(ours).items()
-        if name.startswith(("sub_", "func_0x", "FUN_"))
-    )
-    theirs_calls = sum(
-        count
-        for name, count in call_names(theirs).items()
-        if name.startswith(("sub_", "func_0x", "FUN_"))
-    )
+    ours_calls = call_site_count(ours)
+    theirs_calls = call_site_count(theirs)
     if ours_calls != theirs_calls:
         row.findings.append(Finding("call-census", f"{ours_calls} vs {theirs_calls}"))
 
