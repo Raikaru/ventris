@@ -12,6 +12,12 @@ All notable Ventris changes are documented here.
   destruction, and construction from lifter output. Ghidra's Actions and Rules
   rewrite a live graph rather than build expressions, so this object model is
   the prerequisite for porting them instead of reinventing them.
+- Added location refinement ported from `Heritage::buildRefinement`,
+  `splitByRefinement`, `refineRead`, `refineWrite`, `concatPieces`, and
+  `splitPieces`: overlapping accesses are cut at every access boundary, a read
+  spanning several cells becomes a `PIECE` chain, and a write becomes one
+  `SUBPIECE` per cell. Ventris previously keyed SSA on exact locations and
+  handled sub-register views with an ad-hoc widening cast at read time.
 
 - Added `LiftedInstruction::skips_delay_slot`, which reports the MIPS
   likely-branch shape so consumers stop treating its sequential successor as
