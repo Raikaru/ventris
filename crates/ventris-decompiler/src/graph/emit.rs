@@ -21,6 +21,7 @@ use ventris_lifter::RAM_SPACE;
 use ventris_pcode::op;
 
 use super::merge::merge_required;
+use super::structure::Condition;
 use super::types::Types;
 use super::value::{Naming, Resolver, mark_explicit_with};
 use super::{Funcdata, GraphBlockId, OpId};
@@ -83,7 +84,60 @@ pub fn emit_structured(
     let mut statements = emitter.phi_declarations();
     let targets = goto_targets(&tree);
     statements.extend(emitter.emit_tree(&tree, &scoped, &phi_copies, &targets));
+    drop_gotos_to_next_statement(&mut statements);
     statements
+}
+
+/// Removes a jump to the label that immediately follows it.
+///
+/// The collapse surrenders an edge as a `goto` without knowing where the target
+/// will be emitted. When it lands next, the jump says nothing, and it is the
+/// difference between output that reads as a `goto` ladder and output that
+/// reads as straight-line code.
+fn drop_gotos_to_next_statement(statements: &mut Vec<NativeStatement>) {
+    let mut index = 0;
+    while index + 1 < statements.len() {
+        let redundant = matches!(
+            (&statements[index], &statements[index + 1]),
+            (NativeStatement::Goto(target), NativeStatement::Label(label)) if target == label
+        );
+        if redundant {
+            statements.remove(index);
+            continue;
+        }
+        // Recurse into nested bodies, where the same shape occurs.
+        match &mut statements[index] {
+            NativeStatement::IfElse {
+                then_body,
+                else_body,
+                ..
+            } => {
+                drop_gotos_to_next_statement(then_body);
+                drop_gotos_to_next_statement(else_body);
+            }
+            NativeStatement::While { body, .. } | NativeStatement::DoWhile { body, .. } => {
+                drop_gotos_to_next_statement(body);
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    if let Some(last) = statements.last_mut() {
+        match last {
+            NativeStatement::IfElse {
+                then_body,
+                else_body,
+                ..
+            } => {
+                drop_gotos_to_next_statement(then_body);
+                drop_gotos_to_next_statement(else_body);
+            }
+            NativeStatement::While { body, .. } | NativeStatement::DoWhile { body, .. } => {
+                drop_gotos_to_next_statement(body);
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Drops statements that follow an unconditional transfer.
@@ -145,7 +199,7 @@ fn goto_targets(tree: &super::structure::Structured) -> BTreeSet<GraphBlockId> {
                 pending.push(header);
                 pending.push(body);
             }
-            Structured::DoWhile { body, .. } => pending.push(body),
+            Structured::DoWhile { body, .. } | Structured::InfLoop { body } => pending.push(body),
             Structured::Basic(_) => {}
         }
     }
@@ -222,7 +276,7 @@ impl Emitter<'_> {
             } => {
                 let mut statements = self.emit_tree(header, scoped, phi_copies, targets);
                 statements.push(NativeStatement::IfElse {
-                    condition: self.condition_of(*test, *taken_first),
+                    condition: self.condition_of(test, *taken_first),
                     then_body: self.emit_tree(then_body, scoped, phi_copies, targets),
                     else_body: else_body
                         .as_ref()
@@ -244,7 +298,7 @@ impl Emitter<'_> {
                 let mut inner = self.emit_tree(body, scoped, phi_copies, targets);
                 inner.extend(self.emit_tree(header, scoped, phi_copies, targets));
                 statements.push(NativeStatement::While {
-                    condition: self.condition_of(*test, *body_taken),
+                    condition: self.condition_of(test, *body_taken),
                     body: inner,
                 });
                 statements
@@ -256,7 +310,13 @@ impl Emitter<'_> {
             } => {
                 vec![NativeStatement::DoWhile {
                     body: self.emit_tree(body, scoped, phi_copies, targets),
-                    condition: self.condition_of(*test, *body_taken),
+                    condition: self.condition_of(test, *body_taken),
+                }]
+            }
+            Structured::InfLoop { body } => {
+                vec![NativeStatement::While {
+                    condition: Expr::Constant { value: 1, width: 1 },
+                    body: self.emit_tree(body, scoped, phi_copies, targets),
                 }]
             }
             Structured::Goto { target, .. } => {
@@ -268,31 +328,58 @@ impl Emitter<'_> {
                 target,
             } => {
                 vec![NativeStatement::IfGoto {
-                    condition: self.condition_of(*test, *taken),
+                    condition: self.condition_of(test, *taken),
                     target: self.data.block(*target).start,
                 }]
             }
         }
     }
 
-    /// The condition the branch in `test` evaluates, negated when the construct
-    /// runs on the branch's untaken side.
-    fn condition_of(&self, test: GraphBlockId, taken: bool) -> Expr {
-        let condition = self
-            .data
-            .block(test)
-            .ops
-            .iter()
-            .copied()
-            .map(|op| self.data.op(op))
-            .find(|operation| operation.opcode == op::CBRANCH)
-            .and_then(|operation| operation.inputs.get(1).copied())
-            .map(|value| self.resolver.resolve(value))
-            .unwrap_or(Expr::Constant { value: 1, width: 1 });
+    /// The condition a construct evaluates, negated when the construct runs on
+    /// the test's untaken side.
+    fn condition_of(&self, test: &Condition, taken: bool) -> Expr {
+        let condition = self.condition_expr(test);
         if taken {
             condition
         } else {
             Expr::Not(Box::new(condition))
+        }
+    }
+
+    /// The expression for a condition tree.
+    ///
+    /// A short-circuit operator keeps its operand order, because the second
+    /// test only runs when the first did not decide the branch.
+    fn condition_expr(&self, test: &Condition) -> Expr {
+        match test {
+            Condition::Branch { block, taken } => {
+                let condition = self
+                    .data
+                    .block(*block)
+                    .ops
+                    .iter()
+                    .copied()
+                    .map(|op| self.data.op(op))
+                    .find(|operation| operation.opcode == op::CBRANCH)
+                    .and_then(|operation| operation.inputs.get(1).copied())
+                    .map(|value| self.resolver.resolve(value))
+                    .unwrap_or(Expr::Constant { value: 1, width: 1 });
+                if *taken {
+                    condition
+                } else {
+                    Expr::Not(Box::new(condition))
+                }
+            }
+            Condition::Or(left, right) => Expr::Binary {
+                op: crate::native::BinaryOp::LogicalOr,
+                left: Box::new(self.condition_expr(left)),
+                right: Box::new(self.condition_expr(right)),
+            },
+            Condition::And(left, right) => Expr::Binary {
+                op: crate::native::BinaryOp::LogicalAnd,
+                left: Box::new(self.condition_expr(left)),
+                right: Box::new(self.condition_expr(right)),
+            },
         }
     }
 

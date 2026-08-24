@@ -17,13 +17,19 @@
 //! `funcdata_op.cc` at commit `8b4c91d4d5bd1549622bfbade0df199585b98365`.
 
 pub mod action;
+pub mod branchaction;
 pub mod casts;
+pub mod cover;
 pub mod deadcode;
 pub mod emit;
+pub mod expr_rules;
 pub mod guard;
 pub mod heritage;
 pub mod merge;
+pub mod mergeaction;
+pub mod nonzero;
 pub mod proto;
+pub mod protoaction;
 pub mod refine;
 pub mod rules;
 pub mod structure;
@@ -411,6 +417,86 @@ impl Funcdata {
                 self.op_set_input(reader, new, slot);
             }
         }
+    }
+
+    /// Removes one control-flow edge.
+    ///
+    /// The merge operand the predecessor contributed goes with it, because a
+    /// `MULTIEQUAL`'s operand slots are positional against the predecessor
+    /// list: leaving a stale operand would silently reassign every later path's
+    /// value to the wrong edge.
+    pub fn remove_edge(&mut self, from: GraphBlockId, to: GraphBlockId) -> bool {
+        if !self.blocks[from.0 as usize].successors.contains(&to) {
+            return false;
+        }
+        self.blocks[from.0 as usize]
+            .successors
+            .retain(|candidate| *candidate != to);
+        self.detach_predecessor(to, from);
+        true
+    }
+
+    /// Removes a block that only transfers control, connecting its predecessors
+    /// straight to its successor.
+    ///
+    /// Ported from `Funcdata::spliceBlockBasic`. A block holding nothing but a
+    /// jump is an artefact of instruction-level block splitting; keeping it
+    /// forces structuring to account for a region that computes nothing.
+    /// Refuses when the block merges values, has other than one successor, or
+    /// is the entry, since each of those makes the removal observable.
+    pub fn splice_block(&mut self, block: GraphBlockId) -> bool {
+        let candidate = &self.blocks[block.0 as usize];
+        if candidate.dead || candidate.successors.len() != 1 || candidate.start == self.entry {
+            return false;
+        }
+        let successor = candidate.successors[0];
+        if successor == block {
+            return false;
+        }
+        let carries_work = candidate
+            .ops
+            .iter()
+            .any(|op| !matches!(self.ops[op.0 as usize].opcode, ventris_pcode::op::BRANCH));
+        if carries_work {
+            return false;
+        }
+        // A merge at the successor reads one operand per predecessor. Splicing
+        // would change how many arrive, so leave it alone.
+        let merges = self.blocks[successor.0 as usize]
+            .ops
+            .iter()
+            .any(|op| self.ops[op.0 as usize].opcode == ventris_pcode::op::MULTIEQUAL);
+        if merges {
+            return false;
+        }
+        for predecessor in self.blocks[block.0 as usize].predecessors.clone() {
+            let successors = &mut self.blocks[predecessor.0 as usize].successors;
+            for entry in successors.iter_mut() {
+                if *entry == block {
+                    *entry = successor;
+                }
+            }
+            if !self.blocks[successor.0 as usize]
+                .predecessors
+                .contains(&predecessor)
+            {
+                self.blocks[successor.0 as usize]
+                    .predecessors
+                    .push(predecessor);
+            }
+        }
+        self.blocks[successor.0 as usize]
+            .predecessors
+            .retain(|predecessor| *predecessor != block);
+        for op in self.blocks[block.0 as usize].ops.clone() {
+            self.op_destroy(op);
+        }
+        let removed = &mut self.blocks[block.0 as usize];
+        removed.ops.clear();
+        removed.predecessors.clear();
+        removed.successors.clear();
+        removed.dead = true;
+        true
     }
 
     /// Removes blocks the entry cannot reach.

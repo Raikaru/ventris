@@ -17,10 +17,11 @@
 //! `pushConsumed` in `coreaction.cc` at commit
 //! `8b4c91d4d5bd1549622bfbade0df199585b98365`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use ventris_pcode::op;
 
+use super::guard::Location;
 use super::{Funcdata, OpId, VarnodeId};
 
 /// All bits of a value of the given byte size.
@@ -79,6 +80,160 @@ pub fn eliminate_dead_code(data: &mut Funcdata) -> usize {
         removed += 1;
     }
     removed
+}
+
+/// Removes stores to frame slots that nothing reads.
+///
+/// A store is normally a sink: its effect is visible outside the function. A
+/// store into this function's own stack frame is different, because the frame
+/// dies with the call. Ghidra reaches this by heritaging the stack space and
+/// letting ordinary dead code remove the result, which is why a prologue that
+/// saves registers and never reloads them does not appear in its output. Keeping
+/// those stores puts the whole prologue in front of every function body.
+///
+/// The conditions are deliberately narrow, because getting this wrong deletes a
+/// real memory write:
+///   * the address is the stack pointer plus a constant, so the slot is known;
+///   * no load in the function reads that slot;
+///   * no frame address reaches a call or a store, so no callee can read it.
+///
+/// Source authority: `ActionHeritage` over `IPTR_SPACEBASE` plus
+/// `ActionDeadCode` in `coreaction.cc`, and `Heritage::guardStores` in
+/// `heritage.cc`.
+pub fn eliminate_dead_frame_stores(data: &mut Funcdata, stack_pointer: Location) -> usize {
+    if frame_address_escapes(data, stack_pointer) {
+        return 0;
+    }
+    let read: BTreeSet<i64> = data
+        .live_ops()
+        .filter(|(_, operation)| operation.opcode == op::LOAD)
+        .filter_map(|(_, operation)| operation.inputs.get(1).copied())
+        .filter_map(|address| frame_offset(data, address, stack_pointer))
+        .collect();
+    let dead: Vec<OpId> = data
+        .live_ops()
+        .filter(|(_, operation)| operation.opcode == op::STORE)
+        .filter(|(_, operation)| {
+            operation
+                .inputs
+                .get(1)
+                .copied()
+                .and_then(|address| frame_offset(data, address, stack_pointer))
+                .is_some_and(|offset| !read.contains(&offset))
+        })
+        .map(|(id, _)| id)
+        .collect();
+    let removed = dead.len();
+    for id in dead {
+        data.op_destroy(id);
+    }
+    removed
+}
+
+/// The frame offset an address denotes, or `None` when it is not frame relative.
+fn frame_offset(data: &Funcdata, address: VarnodeId, stack_pointer: Location) -> Option<i64> {
+    frame_offset_bounded(data, address, stack_pointer, 0)
+}
+
+fn frame_offset_bounded(
+    data: &Funcdata,
+    address: VarnodeId,
+    stack_pointer: Location,
+    depth: u32,
+) -> Option<i64> {
+    if depth > 8 {
+        return None;
+    }
+    let varnode = data.varnode(address);
+    if varnode.space == stack_pointer.space && varnode.offset == stack_pointer.offset {
+        // The incoming stack pointer is offset zero of the frame.
+        return match varnode.def {
+            None => Some(0),
+            Some(def) => frame_offset_from_op(data, def, stack_pointer, depth),
+        };
+    }
+    let def = varnode.def?;
+    frame_offset_from_op(data, def, stack_pointer, depth)
+}
+
+fn frame_offset_from_op(
+    data: &Funcdata,
+    def: OpId,
+    stack_pointer: Location,
+    depth: u32,
+) -> Option<i64> {
+    let operation = data.op(def);
+    match operation.opcode {
+        op::COPY | op::CAST | op::INDIRECT => frame_offset_bounded(
+            data,
+            operation.inputs.first().copied()?,
+            stack_pointer,
+            depth + 1,
+        ),
+        op::INT_ADD | op::PTRADD | op::PTRSUB | op::INT_SUB => {
+            let left = operation.inputs.first().copied()?;
+            let right = operation.inputs.get(1).copied()?;
+            let constant = data.varnode(right);
+            if !constant.flags.constant {
+                return None;
+            }
+            let base = frame_offset_bounded(data, left, stack_pointer, depth + 1)?;
+            let delta = sign_extend(constant.offset, constant.size);
+            Some(if operation.opcode == op::INT_SUB {
+                base - delta
+            } else {
+                base + delta
+            })
+        }
+        _ => None,
+    }
+}
+
+fn sign_extend(value: u64, size: u32) -> i64 {
+    match size {
+        0 | 8.. => value as i64,
+        size => {
+            let bits = size * 8;
+            let sign = 1u64 << (bits - 1);
+            if value & sign != 0 {
+                (value | !calc_mask(size)) as i64
+            } else {
+                value as i64
+            }
+        }
+    }
+}
+
+/// Whether any frame address reaches a call argument or is itself stored.
+///
+/// If a callee receives a pointer into the frame, it may read a slot this
+/// function never loads, so no store into the frame can be proven dead.
+fn frame_address_escapes(data: &Funcdata, stack_pointer: Location) -> bool {
+    data.live_ops()
+        .any(|(_, operation)| match operation.opcode {
+            op::CALL | op::CALLIND | op::CALLOTHER | op::RETURN => operation
+                .inputs
+                .iter()
+                .skip(1)
+                .copied()
+                .any(|value| frame_offset(data, value, stack_pointer).is_some()),
+            // A frame address written *outside* the frame outlives it. Written
+            // into the frame it stays private, which is what a saved frame pointer
+            // is: the prologue stores the old stack pointer into its own slot.
+            op::STORE => {
+                let escapes_value = operation
+                    .inputs
+                    .get(2)
+                    .copied()
+                    .is_some_and(|value| frame_offset(data, value, stack_pointer).is_some());
+                let into_frame =
+                    operation.inputs.get(1).copied().is_some_and(|address| {
+                        frame_offset(data, address, stack_pointer).is_some()
+                    });
+                escapes_value && !into_frame
+            }
+            _ => false,
+        })
 }
 
 /// The consumed-bit mask of every value, propagated backwards from the sinks.
@@ -383,6 +538,165 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    fn stack_pointer() -> Location {
+        Location {
+            space: REGISTER_SPACE,
+            offset: 0x1d0,
+            size: 4,
+        }
+    }
+
+    /// Builds `store [sp + offset] = value`, with the address computed the way
+    /// a prologue does.
+    fn frame_store(
+        data: &mut Funcdata,
+        block: crate::graph::GraphBlockId,
+        offset: u64,
+        value: VarnodeId,
+    ) -> OpId {
+        let sp = data.new_varnode(REGISTER_SPACE, 0x1d0, 4);
+        let delta = data.new_constant(offset, 4);
+        let add = data.new_op(op::INT_ADD, seq(0x1000), vec![sp, delta]);
+        let address = data.new_unique(4);
+        data.op_set_output(add, Some(address));
+        data.op_insert_end(add, block);
+        let space = data.new_constant(0, 4);
+        let store = data.new_op(op::STORE, seq(0x1004), vec![space, address, value]);
+        data.op_insert_end(store, block);
+        store
+    }
+
+    #[test]
+    fn a_frame_slot_nothing_reads_loses_its_store() {
+        let mut data = Funcdata::default();
+        data.entry = 0x1000;
+        let block = data.new_block(0x1000);
+        let saved = data.new_varnode(REGISTER_SPACE, 0x1f0, 8);
+        frame_store(&mut data, block, 0x10, saved);
+        let ret = returning(&mut data, 0x1008, None);
+        data.op_insert_end(ret, block);
+
+        assert_eq!(eliminate_dead_frame_stores(&mut data, stack_pointer()), 1);
+        assert!(data.live_ops().all(|(_, op)| op.opcode != op::STORE));
+    }
+
+    #[test]
+    fn a_frame_slot_that_is_reloaded_keeps_its_store() {
+        let mut data = Funcdata::default();
+        data.entry = 0x1000;
+        let block = data.new_block(0x1000);
+        let saved = data.new_varnode(REGISTER_SPACE, 0x1f0, 8);
+        frame_store(&mut data, block, 0x10, saved);
+        let sp = data.new_varnode(REGISTER_SPACE, 0x1d0, 4);
+        let delta = data.new_constant(0x10, 4);
+        let add = data.new_op(op::INT_ADD, seq(0x100c), vec![sp, delta]);
+        let address = data.new_unique(4);
+        data.op_set_output(add, Some(address));
+        data.op_insert_end(add, block);
+        let space = data.new_constant(0, 4);
+        let load = data.new_op(op::LOAD, seq(0x1010), vec![space, address]);
+        let loaded = data.new_unique(8);
+        data.op_set_output(load, Some(loaded));
+        data.op_insert_end(load, block);
+        let ret = returning(&mut data, 0x1014, Some(loaded));
+        data.op_insert_end(ret, block);
+
+        assert_eq!(eliminate_dead_frame_stores(&mut data, stack_pointer()), 0);
+    }
+
+    #[test]
+    fn a_frame_address_passed_to_a_call_protects_every_slot() {
+        let mut data = Funcdata::default();
+        data.entry = 0x1000;
+        let block = data.new_block(0x1000);
+        let saved = data.new_varnode(REGISTER_SPACE, 0x1f0, 8);
+        frame_store(&mut data, block, 0x10, saved);
+        // The callee receives a pointer into the frame, so it may read the slot.
+        let sp = data.new_varnode(REGISTER_SPACE, 0x1d0, 4);
+        let delta = data.new_constant(0x20, 4);
+        let add = data.new_op(op::INT_ADD, seq(0x100c), vec![sp, delta]);
+        let argument = data.new_unique(4);
+        data.op_set_output(add, Some(argument));
+        data.op_insert_end(add, block);
+        let target = data.new_varnode(ventris_lifter::RAM_SPACE, 0x3000, 4);
+        let call = data.new_op(op::CALL, seq(0x1010), vec![target, argument]);
+        data.op_insert_end(call, block);
+
+        assert_eq!(
+            eliminate_dead_frame_stores(&mut data, stack_pointer()),
+            0,
+            "a slot the callee can reach is not provably dead"
+        );
+    }
+
+    #[test]
+    fn saving_the_stack_pointer_into_the_frame_does_not_escape_it() {
+        // A prologue stores the old stack pointer into its own slot. That keeps
+        // the address inside the frame, so other slots stay provably private.
+        let mut data = Funcdata::default();
+        data.entry = 0x1000;
+        let block = data.new_block(0x1000);
+        let sp_value = data.new_varnode(REGISTER_SPACE, 0x1d0, 4);
+        frame_store(&mut data, block, 0, sp_value);
+        let saved = data.new_varnode(REGISTER_SPACE, 0x1f0, 8);
+        frame_store(&mut data, block, 0x10, saved);
+        let ret = returning(&mut data, 0x1020, None);
+        data.op_insert_end(ret, block);
+
+        assert_eq!(
+            eliminate_dead_frame_stores(&mut data, stack_pointer()),
+            2,
+            "both prologue saves are private to the frame"
+        );
+    }
+
+    #[test]
+    fn a_frame_address_stored_outside_the_frame_does_escape() {
+        let mut data = Funcdata::default();
+        data.entry = 0x1000;
+        let block = data.new_block(0x1000);
+        let saved = data.new_varnode(REGISTER_SPACE, 0x1f0, 8);
+        frame_store(&mut data, block, 0x10, saved);
+        // The frame address is published through an unrelated pointer.
+        let sp_value = data.new_varnode(REGISTER_SPACE, 0x1d0, 4);
+        let space = data.new_constant(0, 4);
+        let elsewhere = data.new_varnode(REGISTER_SPACE, 0x20, 4);
+        let store = data.new_op(op::STORE, seq(0x1030), vec![space, elsewhere, sp_value]);
+        data.op_insert_end(store, block);
+
+        assert_eq!(eliminate_dead_frame_stores(&mut data, stack_pointer()), 0);
+    }
+
+    #[test]
+    fn a_store_through_an_unrelated_pointer_is_untouched() {
+        let mut data = Funcdata::default();
+        data.entry = 0x1000;
+        let block = data.new_block(0x1000);
+        let space = data.new_constant(0, 4);
+        let address = data.new_varnode(REGISTER_SPACE, 0x20, 4);
+        let value = data.new_constant(7, 4);
+        let store = data.new_op(op::STORE, seq(0x1000), vec![space, address, value]);
+        data.op_insert_end(store, block);
+
+        assert_eq!(eliminate_dead_frame_stores(&mut data, stack_pointer()), 0);
+        assert!(data.live_ops().any(|(id, _)| id == store));
+    }
+
+    #[test]
+    fn a_negative_frame_offset_is_recognised() {
+        let mut data = Funcdata::default();
+        data.entry = 0x1000;
+        let block = data.new_block(0x1000);
+        let sp = data.new_varnode(REGISTER_SPACE, 0x1d0, 4);
+        // Prologues subtract, so the offset arrives as a negative constant.
+        let delta = data.new_constant(0xffff_fff0, 4);
+        let add = data.new_op(op::INT_ADD, seq(0x1000), vec![sp, delta]);
+        let address = data.new_unique(4);
+        data.op_set_output(add, Some(address));
+        data.op_insert_end(add, block);
+        assert_eq!(frame_offset(&data, address, stack_pointer()), Some(-0x10));
     }
 
     #[test]

@@ -23,6 +23,25 @@ use ventris_pcode::op;
 
 use super::{Funcdata, GraphBlockId};
 
+/// The test a construct evaluates.
+///
+/// A single branch is one block's condition. Short-circuit operators combine
+/// two, which is what `CollapseStructure::ruleBlockOr` recovers: machine code
+/// spells `a || b` as two consecutive conditional branches to the same target,
+/// and without recognising that shape the second branch stays a separate block
+/// and the whole region falls back to `goto`.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Condition {
+    /// The condition under which `block`'s branch transfers to its taken
+    /// target, negated when `taken` is false.
+    Branch {
+        block: GraphBlockId,
+        taken: bool,
+    },
+    Or(Box<Condition>, Box<Condition>),
+    And(Box<Condition>, Box<Condition>),
+}
+
 /// A recovered source construct.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Structured {
@@ -37,7 +56,7 @@ pub enum Structured {
     /// holding the branch itself, so the condition can be read from it.
     IfElse {
         header: Box<Structured>,
-        test: GraphBlockId,
+        test: Condition,
         /// True when the recovered clauses are in the branch's taken order.
         taken_first: bool,
         then_body: Box<Structured>,
@@ -46,7 +65,7 @@ pub enum Structured {
     /// A loop testing before its body.
     WhileDo {
         header: Box<Structured>,
-        test: GraphBlockId,
+        test: Condition,
         /// True when the body is the taken side of the test.
         body_taken: bool,
         body: Box<Structured>,
@@ -54,9 +73,11 @@ pub enum Structured {
     /// A loop testing after its body.
     DoWhile {
         body: Box<Structured>,
-        test: GraphBlockId,
+        test: Condition,
         body_taken: bool,
     },
+    /// A loop with no exit.
+    InfLoop { body: Box<Structured> },
     /// An edge no construct claimed.
     Goto {
         from: GraphBlockId,
@@ -66,7 +87,7 @@ pub enum Structured {
     /// remains the fallthrough, so the branch keeps its condition instead of
     /// becoming an unconditional jump that orphans it.
     IfGoto {
-        test: GraphBlockId,
+        test: Condition,
         taken: bool,
         target: GraphBlockId,
     },
@@ -81,6 +102,10 @@ struct Node {
     /// Block holding this node's outgoing branch, which is where a construct
     /// reads its condition from.
     exit: GraphBlockId,
+    /// The condition under which `successors[0]` is taken, once a rule has
+    /// combined several branches into one test. `None` means the condition is
+    /// still just this node's own exit branch.
+    test: Option<Condition>,
     successors: Vec<NodeId>,
     predecessors: Vec<NodeId>,
     collapsed: bool,
@@ -115,6 +140,7 @@ impl<'a> Graph<'a> {
                 body: Structured::Basic(id),
                 entry: id,
                 exit: id,
+                test: None,
                 successors: Vec::new(),
                 predecessors: Vec::new(),
                 collapsed: false,
@@ -153,44 +179,112 @@ impl<'a> Graph<'a> {
     }
 
     fn collapse(&mut self) {
-        let mut guard = 0;
+        // Conditions collapse in their own pass first. Ghidra runs
+        // `collapseConditions` ahead of the main loop because a short-circuit
+        // operator spans two blocks that every other rule would otherwise
+        // treat as separate regions.
+        self.collapse_conditions();
+
         let cap = self.nodes.len() * 4 + 16;
+        let mut guard = 0;
         loop {
-            guard += 1;
-            if guard > cap {
-                break;
+            let mut inner_changed = true;
+            while inner_changed {
+                guard += 1;
+                if guard > cap {
+                    return;
+                }
+                inner_changed = false;
+                let live: Vec<NodeId> = (0..self.nodes.len())
+                    .filter(|node| !self.nodes[*node].collapsed)
+                    .collect();
+                if live.len() <= 1 {
+                    return;
+                }
+                for node in live.iter().copied() {
+                    if self.nodes[node].collapsed {
+                        continue;
+                    }
+                    if self.rule_cat(node)
+                        || self.rule_if_else(node)
+                        || self.rule_while_do(node)
+                        || self.rule_do_while(node)
+                        || self.rule_inf_loop(node)
+                    {
+                        inner_changed = true;
+                        break;
+                    }
+                }
             }
+
+            // Only when nothing preferable applies. An `if` with no join
+            // matches shapes that a loop or an if/else would have claimed, so
+            // running it early loses those constructs.
             let live: Vec<NodeId> = (0..self.nodes.len())
                 .filter(|node| !self.nodes[*node].collapsed)
                 .collect();
             if live.len() <= 1 {
-                break;
+                return;
             }
-            let mut progressed = false;
+            let mut outer_changed = false;
             for node in live.iter().copied() {
                 if self.nodes[node].collapsed {
                     continue;
                 }
-                if self.rule_cat(node)
-                    || self.rule_if_else(node)
-                    || self.rule_if_no_exit(node)
-                    || self.rule_while_do(node)
-                    || self.rule_do_while(node)
-                {
-                    progressed = true;
+                if self.rule_if_no_exit(node) || self.rule_block_if_return(node) {
+                    outer_changed = true;
                     break;
                 }
             }
-            if progressed {
+            if outer_changed {
                 continue;
             }
-            // Nothing matched: give up one edge as a goto and try again. This
-            // is Ghidra's `ruleBlockGoto`, the last resort that guarantees
-            // termination.
+            // Nothing matched at all: give up one edge as a goto and retry.
+            // This is `ruleBlockGoto`, the last resort that guarantees the
+            // collapse terminates.
             if !self.rule_goto(&live) {
-                break;
+                return;
             }
         }
+    }
+
+    /// Collapses short-circuit conditions to a fixed point.
+    fn collapse_conditions(&mut self) {
+        let cap = self.nodes.len() * 2 + 8;
+        for _ in 0..cap {
+            let live: Vec<NodeId> = (0..self.nodes.len())
+                .filter(|node| !self.nodes[*node].collapsed)
+                .collect();
+            let mut changed = false;
+            for node in live {
+                if !self.nodes[node].collapsed && self.rule_block_or(node) {
+                    changed = true;
+                    break;
+                }
+            }
+            if !changed {
+                return;
+            }
+        }
+    }
+
+    /// A block whose only successor is itself never leaves.
+    ///
+    /// Ghidra's `ruleBlockInfLoop`. Without this the block keeps a self edge
+    /// that no other rule can claim, and the collapse surrenders it as a goto.
+    fn rule_inf_loop(&mut self, node: NodeId) -> bool {
+        if self.nodes[node].successors.len() != 1 || self.nodes[node].successors[0] != node {
+            return false;
+        }
+        let body = Structured::InfLoop {
+            body: Box::new(self.nodes[node].body.clone()),
+        };
+        self.nodes[node].successors.clear();
+        self.nodes[node]
+            .predecessors
+            .retain(|predecessor| *predecessor != node);
+        self.nodes[node].body = body;
+        true
     }
 
     /// Two blocks in a chain become one.
@@ -248,7 +342,7 @@ impl<'a> Graph<'a> {
         }
         let body = Structured::IfElse {
             header: Box::new(self.nodes[node].body.clone()),
-            test: self.nodes[node].exit,
+            test: self.condition_for(node),
             taken_first: true,
             then_body: Box::new(self.nodes[taken].body.clone()),
             else_body: Some(Box::new(self.nodes[fallthrough].body.clone())),
@@ -283,7 +377,7 @@ impl<'a> Graph<'a> {
             }
             let body = Structured::IfElse {
                 header: Box::new(self.nodes[node].body.clone()),
-                test: self.nodes[node].exit,
+                test: self.condition_for(node),
                 taken_first,
                 then_body: Box::new(self.nodes[clause].body.clone()),
                 else_body: None,
@@ -317,7 +411,7 @@ impl<'a> Graph<'a> {
             }
             let structured = Structured::WhileDo {
                 header: Box::new(self.nodes[node].body.clone()),
-                test: self.nodes[node].exit,
+                test: self.condition_for(node),
                 body_taken: index == 0,
                 body: Box::new(self.nodes[body].body.clone()),
             };
@@ -337,7 +431,7 @@ impl<'a> Graph<'a> {
         };
         let body = Structured::DoWhile {
             body: Box::new(self.nodes[node].body.clone()),
-            test: self.nodes[node].exit,
+            test: self.condition_for(node),
             body_taken: self_index == 0,
         };
         // The self edge is consumed; the other edge leaves the loop.
@@ -351,27 +445,151 @@ impl<'a> Graph<'a> {
         true
     }
 
+    /// The condition under which this node transfers to its first successor.
+    ///
+    /// A node that has not been combined with another still tests its own exit
+    /// branch; one that has carries the combined tree instead.
+    fn condition_for(&self, node: NodeId) -> Condition {
+        self.nodes[node].test.clone().unwrap_or(Condition::Branch {
+            block: self.nodes[node].exit,
+            taken: true,
+        })
+    }
+
+    /// The condition under which this node transfers to the given successor.
+    fn condition_toward(&self, node: NodeId, successor: NodeId) -> Option<Condition> {
+        let index = self.nodes[node]
+            .successors
+            .iter()
+            .position(|candidate| *candidate == successor)?;
+        let base = self.condition_for(node);
+        Some(if index == 0 { base } else { negate(base) })
+    }
+
+    /// Two consecutive tests reaching one target are a short-circuit operator.
+    ///
+    /// Ghidra's `ruleBlockOr`. Control reaches the shared clause when the first
+    /// test takes its edge there, or else when the second does; because the
+    /// second is only evaluated when the first did not, the disjunction is
+    /// exactly C's `||` including its evaluation order.
+    fn rule_block_or(&mut self, node: NodeId) -> bool {
+        if self.nodes[node].successors.len() != 2 {
+            return false;
+        }
+        let successors = self.nodes[node].successors.clone();
+        for index in 0..2 {
+            let second = successors[index];
+            let clause = successors[1 - index];
+            if second == node || clause == node || clause == second {
+                continue;
+            }
+            // Nothing else may reach the second test, or it is a join rather
+            // than the tail of one condition.
+            if self.nodes[second].predecessors.len() != 1 {
+                continue;
+            }
+            if self.nodes[second].successors.len() != 2 {
+                continue;
+            }
+            if !self.nodes[second].successors.contains(&clause) {
+                continue;
+            }
+            let other = self.nodes[second]
+                .successors
+                .iter()
+                .copied()
+                .find(|candidate| *candidate != clause);
+            let Some(other) = other else { continue };
+            if other == node {
+                continue;
+            }
+            let Some(first_to_clause) = self.condition_toward(node, clause) else {
+                continue;
+            };
+            let Some(second_to_clause) = self.condition_toward(second, clause) else {
+                continue;
+            };
+            let combined = Condition::Or(Box::new(first_to_clause), Box::new(second_to_clause));
+            self.nodes[second].collapsed = true;
+            let body = Structured::List(vec![
+                self.nodes[node].body.clone(),
+                self.nodes[second].body.clone(),
+            ]);
+            // The composite tests both blocks, and reaches the clause first.
+            self.nodes[node].body = body;
+            self.nodes[node].test = Some(combined);
+            self.nodes[node].exit = self.nodes[second].exit;
+            self.nodes[node].successors = vec![clause, other];
+            for successor in [clause, other] {
+                let predecessors = &mut self.nodes[successor].predecessors;
+                predecessors.retain(|predecessor| *predecessor != node && *predecessor != second);
+                predecessors.push(node);
+            }
+            return true;
+        }
+        false
+    }
+
+    /// A clause that leaves the function needs no join to be an `if`.
+    ///
+    /// Ghidra's `ruleBlockIfNoExit`. A guard clause that returns has no
+    /// successor at all, so the rule that requires both arms to rejoin cannot
+    /// see it, and the region stays a `goto`.
+    fn rule_block_if_return(&mut self, node: NodeId) -> bool {
+        if self.nodes[node].successors.len() != 2 {
+            return false;
+        }
+        let successors = self.nodes[node].successors.clone();
+        for index in 0..2 {
+            let clause = successors[index];
+            if clause == node {
+                continue;
+            }
+            if self.nodes[clause].predecessors.len() != 1 {
+                continue;
+            }
+            if !self.nodes[clause].successors.is_empty() {
+                continue;
+            }
+            let body = Structured::IfElse {
+                header: Box::new(self.nodes[node].body.clone()),
+                test: self.condition_for(node),
+                taken_first: index == 0,
+                then_body: Box::new(self.nodes[clause].body.clone()),
+                else_body: None,
+            };
+            self.absorb(node, &[clause], body);
+            return true;
+        }
+        false
+    }
+
     /// Surrenders one edge as a `goto` so collapsing can continue.
     ///
     /// The edge chosen is a back edge if there is one, because a loop that no
     /// loop rule matched is what blocks progress most often.
     fn rule_goto(&mut self, live: &[NodeId]) -> bool {
-        let mut choice = None;
+        // Prefer the edge whose removal most unblocks the other rules. Every
+        // rule requires its clause to have exactly one predecessor, so an edge
+        // into a block several paths reach is what stalls the collapse; giving
+        // that one up lets concatenation and the loop rules see the shape
+        // underneath. Ghidra reaches the same state by marking such edges
+        // unstructured before the main loop rather than during it.
+        let mut choice: Option<(NodeId, usize, u32)> = None;
         for node in live.iter().copied() {
             for (index, successor) in self.nodes[node].successors.iter().copied().enumerate() {
+                if self.nodes[node].successors.len() == 1 && successor == node {
+                    continue;
+                }
+                let joins = self.nodes[successor].predecessors.len() > 1;
                 let back = self.nodes[successor].entry <= self.nodes[node].entry;
-                if back {
-                    choice = Some((node, index));
-                    break;
+                let score = u32::from(joins) * 2 + u32::from(back);
+                if choice.is_none_or(|(_, _, best)| score > best) {
+                    choice = Some((node, index, score));
                 }
-                if choice.is_none() {
-                    choice = Some((node, index));
-                }
-            }
-            if matches!(choice, Some((chosen, _)) if chosen == node) {
-                break;
             }
         }
+        let choice = choice.map(|(node, index, _)| (node, index));
         let Some((node, index)) = choice else {
             return false;
         };
@@ -382,7 +600,7 @@ impl<'a> Graph<'a> {
             .retain(|predecessor| *predecessor != node);
         let jump = if branching {
             Structured::IfGoto {
-                test: self.nodes[node].exit,
+                test: self.condition_for(node),
                 taken: index == 0,
                 target: self.nodes[successor].entry,
             }
@@ -446,6 +664,26 @@ impl<'a> Graph<'a> {
         remaining.sort_by_key(|(entry, _)| self.data.block(*entry).start);
         let _ = &self.of_block;
         Structured::List(remaining.into_iter().map(|(_, body)| body).collect())
+    }
+}
+
+/// The condition that holds exactly when the given one does not.
+///
+/// Negation is pushed into the leaf so a combined test stays a tree of `&&` and
+/// `||` over branch conditions, which is what De Morgan's laws give and what C
+/// can spell without a temporary.
+fn negate(condition: Condition) -> Condition {
+    match condition {
+        Condition::Branch { block, taken } => Condition::Branch {
+            block,
+            taken: !taken,
+        },
+        Condition::Or(left, right) => {
+            Condition::And(Box::new(negate(*left)), Box::new(negate(*right)))
+        }
+        Condition::And(left, right) => {
+            Condition::Or(Box::new(negate(*left)), Box::new(negate(*right)))
+        }
     }
 }
 
@@ -615,6 +853,138 @@ mod tests {
         );
     }
 
+    #[test]
+    fn two_tests_reaching_one_clause_become_a_short_circuit_condition() {
+        // `if (a || b) clause;` compiles to two conditional branches to the
+        // same target. Without recognising that, the second test stays its own
+        // region and the whole thing degenerates to goto.
+        let mut data = Funcdata::default();
+        data.entry = 0x1000;
+        let first = data.new_block(0x1000);
+        let second = data.new_block(0x1010);
+        let clause = data.new_block(0x1020);
+        let after = data.new_block(0x1030);
+        conditional(&mut data, first, 0x1020);
+        data.add_edge(first, clause);
+        data.add_edge(first, second);
+        conditional(&mut data, second, 0x1020);
+        data.add_edge(second, clause);
+        data.add_edge(second, after);
+        data.add_edge(clause, after);
+
+        let structured = structure(&data);
+        assert!(
+            contains(&structured, &|node| matches!(
+                node,
+                Structured::IfElse {
+                    test: Condition::Or(..),
+                    ..
+                }
+            )),
+            "expected a short-circuit condition: {structured:?}"
+        );
+    }
+
+    #[test]
+    fn a_single_test_keeps_a_plain_condition() {
+        let mut data = Funcdata::default();
+        data.entry = 0x1000;
+        let head = data.new_block(0x1000);
+        let clause = data.new_block(0x1010);
+        let after = data.new_block(0x1020);
+        conditional(&mut data, head, 0x1010);
+        data.add_edge(head, clause);
+        data.add_edge(head, after);
+        data.add_edge(clause, after);
+
+        let structured = structure(&data);
+        assert!(
+            !contains(&structured, &|node| matches!(
+                node,
+                Structured::IfElse {
+                    test: Condition::Or(..) | Condition::And(..),
+                    ..
+                }
+            )),
+            "one test is not a short circuit: {structured:?}"
+        );
+    }
+
+    #[test]
+    fn a_block_looping_only_to_itself_is_an_infinite_loop() {
+        let mut data = Funcdata::default();
+        data.entry = 0x1000;
+        let entry = data.new_block(0x1000);
+        let spin = data.new_block(0x1010);
+        data.add_edge(entry, spin);
+        data.add_edge(spin, spin);
+
+        let structured = structure(&data);
+        assert!(
+            contains(&structured, &|node| matches!(
+                node,
+                Structured::InfLoop { .. }
+            )),
+            "expected an infinite loop: {structured:?}"
+        );
+    }
+
+    #[test]
+    fn a_guard_clause_that_returns_becomes_an_if_without_else() {
+        // The clause has no successor at all, so the rule requiring both arms
+        // to rejoin cannot see it.
+        let mut data = Funcdata::default();
+        data.entry = 0x1000;
+        let head = data.new_block(0x1000);
+        let bail = data.new_block(0x1010);
+        let rest = data.new_block(0x1020);
+        conditional(&mut data, head, 0x1010);
+        data.add_edge(head, bail);
+        data.add_edge(head, rest);
+        let link = data.new_varnode(ventris_lifter::REGISTER_SPACE, 0x1f0, 8);
+        let ret = data.new_op(op::RETURN, seq(0x1010), vec![link]);
+        data.op_insert_end(ret, bail);
+
+        let structured = structure(&data);
+        assert!(
+            contains(&structured, &|node| matches!(
+                node,
+                Structured::IfElse {
+                    else_body: None,
+                    ..
+                }
+            )),
+            "expected an if with no else: {structured:?}"
+        );
+    }
+
+    #[test]
+    fn negating_a_short_circuit_applies_de_morgan() {
+        let base = Condition::Or(
+            Box::new(Condition::Branch {
+                block: GraphBlockId(0),
+                taken: true,
+            }),
+            Box::new(Condition::Branch {
+                block: GraphBlockId(1),
+                taken: false,
+            }),
+        );
+        assert_eq!(
+            negate(base),
+            Condition::And(
+                Box::new(Condition::Branch {
+                    block: GraphBlockId(0),
+                    taken: false
+                }),
+                Box::new(Condition::Branch {
+                    block: GraphBlockId(1),
+                    taken: true
+                }),
+            )
+        );
+    }
+
     fn contains(node: &Structured, predicate: &dyn Fn(&Structured) -> bool) -> bool {
         if predicate(node) {
             return true;
@@ -636,7 +1006,9 @@ mod tests {
             Structured::WhileDo { header, body, .. } => {
                 contains(header, predicate) || contains(body, predicate)
             }
-            Structured::DoWhile { body, .. } => contains(body, predicate),
+            Structured::DoWhile { body, .. } | Structured::InfLoop { body } => {
+                contains(body, predicate)
+            }
             Structured::Basic(_) | Structured::Goto { .. } | Structured::IfGoto { .. } => false,
         }
     }

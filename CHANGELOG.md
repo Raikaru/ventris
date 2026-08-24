@@ -122,6 +122,24 @@ All notable Ventris changes are documented here.
 - Fixed a returned register holding whatever the last callee left being reported
   as a return value. A result must be produced by this function, looking through
   guards and merges, to count.
+- Added `ruleBlockOr`, `ruleBlockInfLoop`, and the returning-clause case of
+  `ruleBlockIfNoExit` to graph structuring, and corrected the rule ordering to
+  match `CollapseStructure::collapseInternal`: conditions collapse in their own
+  pass first, and the no-join `if` rule runs only when nothing preferable
+  applies, because running it early costs loops and if/else regions. Conditions
+  are now expression trees, so a short-circuit operator keeps its operand order.
+- Added `Funcdata::remove_edge` and `Funcdata::splice_block`, the latter ported
+  from `Funcdata::spliceBlockBasic`, refusing whenever the removal would be
+  observable.
+- Added dead-store elimination for private frame slots. A store into this
+  function's own frame is not a sink, because the frame dies with the call; a
+  slot no load reads, in a frame whose address never reaches a call or leaves
+  through memory, is dead. This is what removes the prologue that previously
+  preceded every graph-pipeline function body.
+- Fixed the graph structurer emitting a jump to the label immediately following
+  it, and made the last-resort edge surrender prefer edges into multi-predecessor
+  joins, which is the state Ghidra reaches by marking edges unstructured before
+  its main loop.
 
 - Added `LiftedInstruction::skips_delay_slot`, which reports the MIPS
   likely-branch shape so consumers stop treating its sequential successor as

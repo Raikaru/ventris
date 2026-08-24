@@ -1923,6 +1923,19 @@ impl NativeDecompiler {
             let mut changed = graph::action::Action::apply(pipeline.as_ref(), &mut data);
             changed += data.remove_unreachable_blocks();
             changed += graph::deadcode::eliminate_dead_code(&mut data);
+            if let Some(abi) = abi
+                && let Some(vnode) =
+                    abi_register_vnode(architecture, abi.stack_pointer, abi.pointer_bits)
+            {
+                changed += graph::deadcode::eliminate_dead_frame_stores(
+                    &mut data,
+                    graph::guard::Location {
+                        space: vnode.space,
+                        offset: vnode.offset,
+                        size: vnode.size,
+                    },
+                );
+            }
             if changed == 0 {
                 break;
             }
