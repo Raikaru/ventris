@@ -229,9 +229,26 @@ def control_profile(source: str) -> Counter:
     return counts
 
 
+def function_body(source: str) -> str:
+    """Drops the signature so a definition is never counted as a call site.
+
+    Ventris names an unsymbolized function `sub_<address>` and Ghidra names it
+    `FUN_<address>`, both of which match a call pattern. Counting the signature
+    reported a phantom call in every function whose oracle had a real symbol.
+    """
+    lines = source.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip().startswith("{"):
+            return "\n".join(lines[index + 1 :])
+    return source
+
+
 def call_names(source: str) -> Counter:
     return Counter(
-        re.findall(r"\b((?:FUN_|func_0x|sub_)[0-9A-Fa-f]+|[A-Za-z_][A-Za-z0-9_]*)\s*\(", source)
+        re.findall(
+            r"\b((?:FUN_|func_0x|sub_)[0-9A-Fa-f]+|[A-Za-z_][A-Za-z0-9_]*)\s*\(",
+            function_body(source),
+        )
     )
 
 
