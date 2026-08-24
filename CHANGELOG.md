@@ -23,6 +23,12 @@ All notable Ventris changes are documented here.
   each location it may change, and a return reads its result storage. The effect
   model is supplied by the target ABI rather than guessed, so a preserved
   register is not needlessly invalidated.
+- Added SSA construction on the graph, ported from `Heritage::calcMultiequals`
+  and `renameRecurse`: reverse postorder, Cooper-Harvey-Kennedy immediate
+  dominators, Cytron dominance frontiers and iterated phi placement, real
+  `MULTIEQUAL` operations at joins, and renaming that rewrites every read to the
+  definition dominating it. An undefined read becomes a function input rather
+  than a bare register name.
 
 - Added `LiftedInstruction::skips_delay_slot`, which reports the MIPS
   likely-branch shape so consumers stop treating its sequential successor as

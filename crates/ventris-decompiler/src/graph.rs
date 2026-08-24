@@ -17,6 +17,7 @@
 //! `funcdata_op.cc` at commit `8b4c91d4d5bd1549622bfbade0df199585b98365`.
 
 pub mod guard;
+pub mod heritage;
 pub mod refine;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -316,6 +317,15 @@ impl Funcdata {
             .map_or(self.blocks[parent.0 as usize].ops.len(), |index| index + 1);
         self.ops[op.0 as usize].parent = Some(parent);
         self.blocks[parent.0 as usize].ops.insert(position, op);
+    }
+
+    /// Places an operation at the head of a block, before every existing op.
+    ///
+    /// Phi operations must precede all other operations in their block, which
+    /// is what lets a predecessor find them by scanning from the block start.
+    pub fn op_insert_front(&mut self, op: OpId, block: GraphBlockId) {
+        self.ops[op.0 as usize].parent = Some(block);
+        self.blocks[block.0 as usize].ops.insert(0, op);
     }
 
     /// Appends an operation to the end of a block.
