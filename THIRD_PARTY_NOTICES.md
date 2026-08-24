@@ -24,6 +24,12 @@ The bundled `spu.sla` was built with Ghidra 12.1.3 from Apache-2.0
 aerosoul94/GhidraSPU commit
 `b85076dcecf30cf9db6ada506d69dd64972a00d7`; its SHA-256 is
 `9c04f6f759962855c2f406a9f812cc886c621c634b3b5768ca350b6f67944d08`.
+The bundled `r5900.sla` was built with Ghidra 12.1.3 from Apache-2.0
+chaoticgd/ghidra-emotionengine-reloaded release `v2.1.36`, commit
+`44fdb01a08d15a562308e79651203879d454bd8e`; its SHA-256 is
+`703cc84a67b4a049e5a6e3d258975fb1e4ea27f024968bb6397cf57095418c6c`. Ghidra's
+own MIPS languages do not decode the R5900's multimedia or COP2/VU macro-mode
+instructions.
 
 `tools/diff_ghidra.py` optionally compares Ventris output against a separately
 installed Ghidra 12.1.3. The official release archive has SHA-256

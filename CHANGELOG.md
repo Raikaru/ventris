@@ -4,6 +4,32 @@ All notable Ventris changes are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Added the Apache-2.0 R5900 language and routed the PS2 target to it. The
+  generic MIPS64 language cannot decode the R5900's multimedia or COP2/VU
+  macro-mode instructions.
+- Added `SleighSpec::register_varnode` so ABI recovery reads register offsets
+  from the language instead of assuming a per-family stride, plus a bundled
+  register-layout audit over every shipped language.
+- Added `tools/quality_census.py` and `tools/CensusDecompile.java`, which
+  classify Ventris output against Ghidra's decompiler across every
+  hash-verified corpus function and rank defects by affected function count.
+
+### Fixed
+
+- Derived PS2 register offsets, register names, and O32 argument slots from the
+  R5900 language. The previous MIPS64 stride misidentified every argument and
+  return register, which silently disabled PS2 type recovery.
+- Narrowing casts of constants now truncate: a byte store of `0x1234` reports
+  `0x34`, matching Ghidra, instead of the untruncated value.
+- Widening casts of constants now adopt the declared width, so a 32-bit result
+  materialized from a 16-bit immediate no longer infers a 16-bit type.
+- Dropped redundant widen-then-narrow cast pairs, which the R5900 emits for
+  every 32-bit arithmetic result.
+- A value left in the return register is still recognized as a store byproduct
+  when the store and the register disagree only about declared width.
+
 ## [0.3.0] - 2026-08-24
 
 ### Added

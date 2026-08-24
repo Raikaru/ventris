@@ -14,7 +14,7 @@ use ventris_format::Image;
 pub use ventris_pcode::{CONST_SPACE, OTHER_SPACE, RAM_SPACE, REGISTER_SPACE, UNIQUE_SPACE};
 use ventris_pcode::{InstPcode, PcodeOp, op};
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Architecture {
     X86_64,
     /// Intel/AMD 32-bit x86.
@@ -567,7 +567,7 @@ fn bundled_sleigh_spec(
         Architecture::Thumb => cached!(ventris_sleigh::THUMB_SLA),
         Architecture::Mips32 | Architecture::Ps1 => cached!(ventris_sleigh::MIPS32_LE_SLA),
         Architecture::Mips32Be => cached!(ventris_sleigh::MIPS32_BE_SLA),
-        Architecture::Ps2 => cached!(ventris_sleigh::MIPS64_LE_SLA),
+        Architecture::Ps2 => cached!(ventris_sleigh::PS2_R5900_SLA),
         Architecture::N64 => cached!(ventris_sleigh::MIPS64_BE_SLA),
         Architecture::Rv64 => cached!(ventris_sleigh::RISCV64_SLA),
         Architecture::Rv32 => cached!(ventris_sleigh::RISCV32_SLA),
@@ -588,6 +588,20 @@ pub fn sleigh_userop_name(architecture: Architecture, index: u64) -> Option<&'st
     bundled_sleigh_spec(architecture)
         .ok()
         .and_then(|spec| spec.userop_name(index))
+}
+
+/// Resolves a named register to the varnode the bundled language compiles it to.
+///
+/// Returns the p-code space, offset, and declared width. Consumers that need
+/// ABI registers must use this instead of assuming a register stride: the same
+/// architecture family can space its registers differently per language.
+pub fn sleigh_register_varnode(
+    architecture: Architecture,
+    register: &str,
+) -> Option<(u32, u64, u32)> {
+    bundled_sleigh_spec(architecture)
+        .ok()
+        .and_then(|spec| spec.register_varnode(register))
 }
 
 fn bundled_sleigh_context(architecture: Architecture) -> Result<[u32; 4], String> {
@@ -630,10 +644,7 @@ fn bundled_sleigh_context(architecture: Architecture) -> Result<[u32; 4], String
             Architecture::Mips32Be,
             &[("PAIR_INSTRUCTION_FLAG", 0), ("RELP", 1)]
         ),
-        Architecture::Ps2 => cached!(
-            Architecture::Ps2,
-            &[("PAIR_INSTRUCTION_FLAG", 0), ("RELP", 1)]
-        ),
+        Architecture::Ps2 => cached!(Architecture::Ps2, &[("PAIR_INSTRUCTION_FLAG", 0)]),
         Architecture::N64 => cached!(
             Architecture::N64,
             &[("PAIR_INSTRUCTION_FLAG", 0), ("RELP", 1)]

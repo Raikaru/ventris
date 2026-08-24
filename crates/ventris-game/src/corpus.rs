@@ -225,12 +225,12 @@ pub const DUNGEON_GAME_METADATA_JSON: &str = r#"{
   }],
   "assertions": [{
     "space": 4,
-    "base": 32,
-    "size": 8,
+    "base": 64,
+    "size": 4,
     "offset": 0,
     "name": "this_",
     "type": {"kind": "nominal", "id": 1, "name": "GameWorld", "size": 22224},
-    "note": "GameWorld member-function receiver from pinned source metadata"
+    "note": "GameWorld receiver in the R5900 language's 32-bit $a0 address varnode"
   }]
 }"#;
 

@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::sync::LazyLock;
 use ventris_lifter::{Architecture, NativeFunction, REGISTER_SPACE};
 use ventris_pcode::{PcodeOp, Varnode, op};
 use ventris_target::{Abi, AbiRegisterClass, ArgumentRegisterMode};
@@ -20,6 +21,7 @@ mod printer;
 mod ssa;
 mod structure;
 
+use actions::{expression_width, type_width};
 pub use c_score::{CScore, score_c};
 use control_flow::simplify;
 #[cfg(test)]
@@ -645,7 +647,26 @@ fn abi_register_vnode(
                     .map(|index| Varnode::new(REGISTER_SPACE, 0x200 + index * 4, 4))
             })
         }
-        Architecture::Ps2 | Architecture::N64 => {
+        Architecture::Ps2 => {
+            // The R5900 uses O32 register names over a 128-bit register file,
+            // so neither the MIPS32 nor the MIPS64 stride applies. Ask the
+            // language for the offset instead of assuming one.
+            const GPR: &[&str] = &[
+                "zero", "at", "v0", "v1", "a0", "a1", "a2", "a3", "t0", "t1", "t2", "t3", "t4",
+                "t5", "t6", "t7", "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "t8", "t9", "k0",
+                "k1", "gp", "sp", "fp", "ra",
+            ];
+            let named = GPR.iter().any(|candidate| *candidate == register)
+                || register
+                    .strip_prefix('f')
+                    .is_some_and(|index| index.parse::<u64>().is_ok_and(|index| index < 32));
+            if !named {
+                return None;
+            }
+            ventris_lifter::sleigh_register_varnode(architecture, register)
+                .map(|(space, offset, size)| Varnode::new(space, offset, size))
+        }
+        Architecture::N64 => {
             const GPR: &[&str] = &[
                 "zero", "at", "v0", "v1", "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7", "t0",
                 "t1", "t2", "t3", "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "t8", "t9", "k0",
@@ -1584,13 +1605,14 @@ impl NativeDecompiler {
                         operation.inputs.first().copied(),
                     );
                     if let Some(returned_value) = value.as_ref() {
-                        let repeats_store = statements.iter().rev().find_map(|statement| {
-                            if let NativeStatement::Store { value, .. } = statement {
-                                Some(value)
-                            } else {
-                                None
-                            }
-                        }) == Some(returned_value);
+                        let repeats_store = statements
+                            .iter()
+                            .rev()
+                            .find_map(|statement| match statement {
+                                NativeStatement::Store { value, .. } => Some(value),
+                                _ => None,
+                            })
+                            .is_some_and(|stored| is_same_value(stored, returned_value));
                         if repeats_store {
                             value = None;
                         } else {
@@ -2304,20 +2326,37 @@ fn constant_value(v: &Varnode) -> Option<u64> {
     (v.space == ventris_lifter::CONST_SPACE).then_some(v.offset)
 }
 
+/// Offsets of the O32 argument registers in one architecture's own language.
+fn mips_o32_call_argument_offsets(architecture: Architecture) -> &'static BTreeSet<u64> {
+    static OFFSETS: LazyLock<BTreeMap<Architecture, BTreeSet<u64>>> = LazyLock::new(|| {
+        const ARGUMENTS: [&str; 6] = ["a0", "a1", "a2", "a3", "f12", "f14"];
+        [
+            Architecture::Mips32,
+            Architecture::Mips32Be,
+            Architecture::Ps1,
+            Architecture::Ps2,
+        ]
+        .into_iter()
+        .map(|architecture| {
+            let offsets = ARGUMENTS
+                .into_iter()
+                .filter_map(|name| {
+                    ventris_lifter::sleigh_register_varnode(architecture, name)
+                        .filter(|(space, _, _)| *space == REGISTER_SPACE)
+                        .map(|(_, offset, _)| offset)
+                })
+                .collect();
+            (architecture, offsets)
+        })
+        .collect()
+    });
+    static EMPTY: LazyLock<BTreeSet<u64>> = LazyLock::new(BTreeSet::new);
+    OFFSETS.get(&architecture).unwrap_or(&EMPTY)
+}
+
 fn is_mips_o32_call_argument(architecture: Architecture, value: Varnode) -> bool {
-    if value.space != ventris_lifter::REGISTER_SPACE {
-        return false;
-    }
-    match architecture {
-        Architecture::Ps2 => {
-            ((32..=56).contains(&value.offset) && value.offset % 8 == 0)
-                || matches!(value.offset, 0x260 | 0x270)
-        }
-        _ => {
-            ((16..=28).contains(&value.offset) && value.offset % 4 == 0)
-                || matches!(value.offset, 0x230 | 0x238)
-        }
-    }
+    value.space == ventris_lifter::REGISTER_SPACE
+        && mips_o32_call_argument_offsets(architecture).contains(&value.offset)
 }
 
 fn call_argument_available(
@@ -2511,7 +2550,8 @@ fn return_vnode(architecture: Architecture) -> Varnode {
         Architecture::Mips32 | Architecture::Mips32Be | Architecture::Ps1 => {
             Varnode::new(REGISTER_SPACE, 8, 4)
         }
-        Architecture::Ps2 | Architecture::N64 => Varnode::new(REGISTER_SPACE, 16, 8),
+        Architecture::Ps2 => Varnode::new(REGISTER_SPACE, 32, 8),
+        Architecture::N64 => Varnode::new(REGISTER_SPACE, 16, 8),
         Architecture::Rv64 => Varnode::new(REGISTER_SPACE, 0x2000 + 8 * 10, 8),
         Architecture::Rv32 => Varnode::new(REGISTER_SPACE, 0x2000 + 4 * 10, 4),
         Architecture::Ppc32 | Architecture::GameCube => Varnode::new(REGISTER_SPACE, 3 * 4, 4),
@@ -2521,6 +2561,37 @@ fn return_vnode(architecture: Architecture) -> Varnode {
         Architecture::Spu => Varnode::new(REGISTER_SPACE, 3 * 16, 16),
         Architecture::M6502 => Varnode::new(REGISTER_SPACE, 0, 1),
         Architecture::Z80 => Varnode::new(REGISTER_SPACE, 1, 1),
+    }
+}
+
+/// Presents a value at the width its own type declares.
+///
+/// A definition's expression can be narrower than the value it defines: the
+/// R5900 materializes a 32-bit result from a 16-bit immediate, so the recorded
+/// expression is two bytes wide while the defined value is four. Returning the
+/// raw expression would infer a 16-bit return type for a 32-bit result.
+fn narrow_to_declared_width(value: Expr, architecture: Architecture) -> Expr {
+    let ty = expression_type(&value, architecture);
+    let declared = type_width(&ty);
+    if declared == 0 || expression_width(&value) == declared {
+        return value;
+    }
+    simplify(Expr::Cast {
+        ty,
+        value: Box::new(value),
+    })
+}
+/// Compares two expressions as values, ignoring the declared width of an
+/// integer constant.
+///
+/// A stored constant carries the store's width while the same constant left in
+/// a register carries the register's width. They are the same value, and a
+/// width-sensitive comparison would treat a returned byproduct as a genuine
+/// return value.
+fn is_same_value(left: &Expr, right: &Expr) -> bool {
+    match (left, right) {
+        (Expr::Constant { value: left, .. }, Expr::Constant { value: right, .. }) => left == right,
+        (left, right) => left == right,
     }
 }
 
@@ -2574,7 +2645,9 @@ fn return_value(
                 ty: Type::Unsigned(64),
                 value,
             },
-        ) if expression_type(&value, architecture) == Type::Unsigned(32) => *value,
+        ) if expression_type(&value, architecture) == Type::Unsigned(32) => {
+            narrow_to_declared_width(*value, architecture)
+        }
         (
             Architecture::Ps2,
             Expr::Cast {
@@ -2586,7 +2659,7 @@ fn return_value(
             Type::Signed(32) | Type::Unsigned(32)
         ) =>
         {
-            *value
+            narrow_to_declared_width(*value, architecture)
         }
         (_, value) => value,
     };
@@ -2595,6 +2668,36 @@ fn return_value(
         Expr::Temporary { ref name, .. } if name.starts_with("call_") => None,
         value => Some(value),
     }
+}
+
+/// The R5900's register offsets are not derivable by arithmetic: general
+/// registers are quadword-spaced and COP1 registers are stored in swapped
+/// little-endian pairs. Invert the language's own forward mapping instead of
+/// guessing a stride.
+fn ps2_register_names() -> &'static BTreeMap<u64, &'static str> {
+    static NAMES: LazyLock<BTreeMap<u64, &'static str>> = LazyLock::new(|| {
+        const GPR: [&str; 32] = [
+            "zero", "at", "v0", "v1", "a0", "a1", "a2", "a3", "t0", "t1", "t2", "t3", "t4", "t5",
+            "t6", "t7", "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "t8", "t9", "k0", "k1",
+            "gp", "sp", "fp", "ra",
+        ];
+        const FPR: [&str; 32] = [
+            "f0", "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12", "f13",
+            "f14", "f15", "f16", "f17", "f18", "f19", "f20", "f21", "f22", "f23", "f24", "f25",
+            "f26", "f27", "f28", "f29", "f30", "f31",
+        ];
+        let mut names = BTreeMap::new();
+        for name in GPR.into_iter().chain(FPR) {
+            if let Some((space, offset, _)) =
+                ventris_lifter::sleigh_register_varnode(Architecture::Ps2, name)
+                && space == REGISTER_SPACE
+            {
+                names.insert(offset, name);
+            }
+        }
+        names
+    });
+    &NAMES
 }
 
 fn register_name(architecture: Architecture, offset: u64) -> String {
@@ -2645,7 +2748,12 @@ fn register_name(architecture: Architecture, offset: u64) -> String {
                 .to_string()
             }
         }
-        Architecture::Ps2 | Architecture::N64 => {
+        Architecture::Ps2 => ps2_register_names()
+            .get(&offset)
+            .copied()
+            .unwrap_or("reg")
+            .to_string(),
+        Architecture::N64 => {
             let fpu_offset = offset.saturating_sub(0x200);
             if offset >= 0x200 && fpu_offset < 32 * 8 && fpu_offset % 8 == 0 {
                 format!("f{}", fpu_offset / 8)
@@ -3801,8 +3909,13 @@ mod tests {
         for (architecture, lifter, hex) in little_endian_cases {
             let function = public_function_at(hex, lifter, 0x1000);
             let candidate = NativeDecompiler.decompile(architecture, &function).render();
+            // `sb` stores the low byte of 0x1234; Ghidra renders `= 0x34`.
             assert!(
-                candidate.contains("= 0x1234;"),
+                candidate.contains("= 0x34;"),
+                "{architecture:?}\n{candidate}"
+            );
+            assert!(
+                !candidate.contains("= 0x1234;"),
                 "{architecture:?}\n{candidate}"
             );
             assert!(

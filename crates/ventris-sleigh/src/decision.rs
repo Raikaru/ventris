@@ -9,6 +9,7 @@ use ventris_pcode::{CONST_SPACE, OTHER_SPACE, RAM_SPACE, REGISTER_SPACE, UNIQUE_
 
 const ATTR_VAL: u16 = 2;
 const ATTR_ID: u16 = 3;
+const ATTR_SPACE: u16 = 4;
 const ATTR_OFF: u16 = 6;
 const ATTR_INDEX: u16 = 9;
 const ATTR_MASK: u16 = 8;
@@ -53,6 +54,7 @@ const ELEM_USEROP_HEADER: u16 = 26;
 const ELEM_CONTEXT_OP: u16 = 32;
 const ELEM_SPACES: u16 = 34;
 const ELEM_SPACE_UNIQUE: u16 = 46;
+const ELEM_VARNODE_SYM: u16 = 23;
 const ELEM_SPACE: u16 = 37;
 const ELEM_SPACE_OTHER: u16 = 45;
 const ELEM_SYMBOL_TABLE: u16 = 38;
@@ -261,6 +263,30 @@ impl SleighSpec {
             }
             Some(header.name.as_str())
         })
+    }
+
+    /// Returns the address space, offset, and size compiled for a named
+    /// register.
+    ///
+    /// Register offsets are language facts, not architecture folklore: the
+    /// R5900 spaces its 128-bit general registers 16 bytes apart while generic
+    /// MIPS64 spaces its 64-bit registers 8 bytes apart. Callers that hardcode
+    /// one layout silently misidentify ABI registers under the other.
+    pub fn register_varnode(&self, name: &str) -> Option<(u32, u64, u32)> {
+        let header = self.symbols.iter().find(|symbol| symbol.name == name)?;
+        let body = self.symbol_bodies.get(&header.id)?;
+        if body.id != ELEM_VARNODE_SYM {
+            return None;
+        }
+        let space = match attribute(body, ATTR_SPACE).ok()? {
+            AttributeValue::AddressSpace(space) => u32::try_from(*space).ok()?,
+            _ => return None,
+        };
+        Some((
+            self.normalize_space(space),
+            unsigned(body, ATTR_OFF).ok()?,
+            u32::try_from(signed(body, ATTR_SIZE).ok()?).ok()?,
+        ))
     }
 
     /// Sets a named stored-context field using the bit range encoded in the

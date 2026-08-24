@@ -490,18 +490,7 @@ fn fold_expr_local(value: Expr) -> Expr {
         },
         Expr::Cast { ty, value } => match *value {
             Expr::Constant { value, width } if !matches!(&ty, Type::Float(_)) => {
-                let result_width = type_width(&ty);
-                let result = match &ty {
-                    Type::Bool => u64::from(masked(value, width) != 0),
-                    Type::Signed(_) => {
-                        (signed_value(value, width) as u64) & width_mask(result_width)
-                    }
-                    _ => masked(value, width) & width_mask(result_width),
-                };
-                Expr::Constant {
-                    value: result,
-                    width: result_width,
-                }
+                fold_constant_cast(&ty, value, width)
             }
             value => Expr::Cast {
                 ty,
@@ -756,7 +745,25 @@ fn signed_value(value: u64, width: u32) -> i64 {
     }
 }
 
-fn type_width(ty: &Type) -> u32 {
+/// Folds a cast of a constant, honouring the cast's declared width.
+///
+/// The result adopts the target type's width, sign-extending for signed targets
+/// and truncating for narrower ones. Keeping the operand's width instead would
+/// let a 16-bit immediate masquerade as a 16-bit value after a widening cast.
+pub(super) fn fold_constant_cast(ty: &Type, value: u64, width: u32) -> Expr {
+    let result_width = type_width(ty);
+    let result = match ty {
+        Type::Bool => u64::from(masked(value, width) != 0),
+        Type::Signed(_) => (signed_value(value, width) as u64) & width_mask(result_width),
+        _ => masked(value, width) & width_mask(result_width),
+    };
+    Expr::Constant {
+        value: result,
+        width: result_width,
+    }
+}
+
+pub(super) fn type_width(ty: &Type) -> u32 {
     match ty {
         Type::Bool => 1,
         Type::Unsigned(bits) | Type::Signed(bits) | Type::Float(bits) => {
@@ -767,7 +774,7 @@ fn type_width(ty: &Type) -> u32 {
     }
 }
 
-fn expression_width(value: &Expr) -> u32 {
+pub(super) fn expression_width(value: &Expr) -> u32 {
     match value {
         Expr::Constant { width, .. }
         | Expr::Register { width, .. }
@@ -830,6 +837,23 @@ fn is_pure_expr(value: &Expr) -> bool {
     }
 }
 
+fn is_integer_type(ty: &Type) -> bool {
+    matches!(ty, Type::Unsigned(_) | Type::Signed(_))
+}
+
+/// True when `Cast{outer, Cast{inner, value}}` can drop the inner cast.
+///
+/// Widening an integer and immediately narrowing it back to the value's own
+/// width preserves every live bit, so the inner cast carries no meaning. Float
+/// and boolean conversions are excluded because they change the value, not just
+/// its declared width.
+fn is_value_preserving_widening(outer: &Type, inner: &Type, value: &Expr) -> bool {
+    is_integer_type(outer)
+        && is_integer_type(inner)
+        && type_width(inner) > type_width(outer)
+        && type_width(outer) == expression_width(value)
+}
+
 fn copy_cast_cleanup_expr(value: Expr) -> Expr {
     walk_expr(value, &mut copy_cast_cleanup_expr_local)
 }
@@ -841,6 +865,17 @@ fn copy_cast_cleanup_expr_local(value: Expr) -> Expr {
                 ty: inner_ty,
                 value: inner_value,
             } if ty == inner_ty => Expr::Cast {
+                ty,
+                value: inner_value,
+            },
+            // A widen-then-narrow pair is the identity when the narrow type is
+            // already the value's own width: nothing is truncated. The R5900
+            // makes these pervasive because 32-bit arithmetic is defined to
+            // sign-extend through 64-bit registers.
+            Expr::Cast {
+                ty: inner_ty,
+                value: inner_value,
+            } if is_value_preserving_widening(&ty, &inner_ty, &inner_value) => Expr::Cast {
                 ty,
                 value: inner_value,
             },

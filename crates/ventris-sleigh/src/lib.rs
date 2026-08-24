@@ -54,6 +54,13 @@ pub const MIPS32_BE_SLA: &[u8] = include_bytes!("../specs/Ghidra_12.1.3/mips32be
 pub const MIPS64_BE_SLA: &[u8] = include_bytes!("../specs/Ghidra_12.1.3/mips64be.sla");
 /// Ghidra 12.1.3 little-endian MIPS64 compiled language specification.
 pub const MIPS64_LE_SLA: &[u8] = include_bytes!("../specs/Ghidra_12.1.3/mips64le.sla");
+/// Apache-2.0 Emotion Engine R5900 specification from
+/// chaoticgd/ghidra-emotionengine-reloaded, compiled by Ghidra 12.1.3.
+///
+/// The generic MIPS64 little-endian language cannot decode the R5900's
+/// multimedia (MMI) or COP2/VU macro-mode instructions, so retail PS2 code
+/// fails constructor resolution under it.
+pub const PS2_R5900_SLA: &[u8] = include_bytes!("../specs/Ghidra_12.1.3/r5900.sla");
 /// Ghidra 12.1.3 big-endian PowerPC64 compiled language specification.
 pub const POWERPC64_BE_SLA: &[u8] = include_bytes!("../specs/Ghidra_12.1.3/ppc_64_be.sla");
 /// Ghidra 12.1.3 RISC-V ILP32D compiled language specification.

@@ -46,7 +46,14 @@ pub(super) fn simplify(value: Expr) -> Expr {
         Expr::Cast { ty, value } => {
             let value = simplify(*value);
             if let Expr::Constant { value, width } = value {
-                Expr::Constant { value, width }
+                // Widening a constant cannot change it, so the cast is dropped.
+                // Narrowing must actually truncate: `sb` of 0x1234 stores 0x34,
+                // and reporting 0x1234 would misstate the program.
+                if matches!(&ty, super::Type::Float(_)) {
+                    Expr::Constant { value, width }
+                } else {
+                    super::actions::fold_constant_cast(&ty, value, width)
+                }
             } else {
                 Expr::Cast {
                     ty,

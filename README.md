@@ -43,6 +43,14 @@ three per-function compiler-comparison floors, while the GameCube corpus has
 one source-backed semantic baseline. These gates prevent a function from
 silently regressing behind a global average.
 
+`tools/quality_census.py` measures the remaining distance to Ghidra's
+decompiler across every hash-verified corpus function and ranks the differences
+by how many functions each affects. On the 37 currently verified functions, 8
+show no classified difference. The dominant defect is an unreduced
+condition-register expression: 13 functions render a comparison as an
+arithmetic bit-field chain, and all 13 also lose loop or branch structure,
+which accounts for 13 of the 17 functions with structural differences.
+
 ## CLI
 
 The public CLI has three analysis commands:
