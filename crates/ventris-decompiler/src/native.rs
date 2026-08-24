@@ -1852,8 +1852,10 @@ impl NativeDecompiler {
         // running them over graph-emitted statements loses conditionals. The
         // graph's own rules already ran, on the graph.
         let recovered = graph::types::infer_types(&data, &BTreeMap::new());
-        let mut statements = graph::emit::emit_with_types(&data, &naming, &recovered);
-        statements = structure::structure_graph(statements);
+        // Structuring happens on the graph, where the edge conditions each
+        // construct requires are visible. The statement-level structurer
+        // inferred them back from labels.
+        let statements = graph::emit::emit_structured(&data, &naming, &recovered);
         let parameters = recover_parameters(abi, &statements);
         NativeDocument {
             name: format!("sub_{:x}", function.entry),

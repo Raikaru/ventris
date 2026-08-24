@@ -223,3 +223,42 @@ fn a_pointer_valued_address_carries_no_integer_conversion() {
         "a pointer-valued address still carries an integer conversion\n{source}"
     );
 }
+
+#[test]
+fn nested_conditionals_are_recovered_as_if_statements() {
+    // This function is a chain of memcmp tests. Structuring on the graph
+    // recovers them as nested `if`/`else`; the statement-level structurer left
+    // them as a label-and-goto ladder.
+    let source = render_via_graph(GET_BUILT_IN_TEXTURE, 0x124fa8);
+    let braced = source
+        .lines()
+        .filter(|line| line.trim_start().starts_with("if (") && line.trim_end().ends_with('{'))
+        .count();
+    assert!(
+        braced >= 2,
+        "expected nested if statements, found {braced}\n{source}"
+    );
+    assert!(
+        source.contains("} else {"),
+        "expected an else clause\n{source}"
+    );
+}
+
+#[test]
+fn no_statement_follows_an_unconditional_transfer() {
+    // A node that surrendered an edge as a goto has no fallthrough. Emitting
+    // one claims control flow that does not exist.
+    let source = render_via_graph(GET_BUILT_IN_TEXTURE, 0x124fa8);
+    let lines: Vec<&str> = source.lines().map(str::trim).collect();
+    for (index, line) in lines.iter().enumerate() {
+        let transfers = line.starts_with("goto ") || line.starts_with("return");
+        if !transfers {
+            continue;
+        }
+        let next = lines.get(index + 1).copied().unwrap_or("}");
+        assert!(
+            next == "}" || next.ends_with(':') || next.starts_with('}'),
+            "unreachable statement after {line:?}: {next:?}\n{source}"
+        );
+    }
+}

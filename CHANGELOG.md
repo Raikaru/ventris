@@ -101,6 +101,13 @@ All notable Ventris changes are documented here.
   that two of them need. These recognise machine idioms — a comparison against
   zero of a difference, a mask that cannot clear a bit, a negated comparison —
   and rewrite them to what the source said.
+- Added control-flow structuring on the graph, ported from
+  `CollapseStructure`: concatenation, if/else, if without else, while/do, and
+  do/while rules collapse the block graph into a construct tree, with a
+  conditional `goto` for any edge no rule claimed. Each rule tests the edge
+  conditions the construct requires, which a flat statement list cannot express.
+  Statements following an unconditional transfer are dropped, since a node that
+  surrendered an edge has no fallthrough.
 
 - Added `LiftedInstruction::skips_delay_slot`, which reports the MIPS
   likely-branch shape so consumers stop treating its sequential successor as

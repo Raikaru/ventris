@@ -26,6 +26,7 @@ pub mod merge;
 pub mod proto;
 pub mod refine;
 pub mod rules;
+pub mod structure;
 pub mod types;
 pub mod value;
 

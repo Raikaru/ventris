@@ -51,6 +51,105 @@ pub fn emit_with_types(
     .run()
 }
 
+/// Emits statements following a recovered construct tree.
+///
+/// The label-and-goto form exists for flow no construct claimed. Everything the
+/// structuring pass recovered is emitted as the construct it recovered, so no
+/// later pass has to infer it back from labels.
+pub fn emit_structured(
+    data: &Funcdata,
+    register_name: &dyn Fn(u32, u64, u32) -> Option<String>,
+    types: &Types,
+) -> Vec<NativeStatement> {
+    let naming = mark_explicit_with(data, merge_required(data));
+    let resolver = Resolver::with_types(data, &naming, register_name, types);
+    let emitter = Emitter {
+        data,
+        naming: &naming,
+        resolver,
+        types,
+    };
+    let tree = super::structure::structure(data);
+    let scoped = emitter.scoped_names();
+    let mut phi_copies: BTreeMap<GraphBlockId, Vec<NativeStatement>> = BTreeMap::new();
+    for (block, copy) in emitter.resolver.phi_copies() {
+        let copies = phi_copies.entry(block).or_default();
+        if !copies.contains(&copy) {
+            copies.push(copy);
+        }
+    }
+    let mut statements = emitter.phi_declarations();
+    let targets = goto_targets(&tree);
+    statements.extend(emitter.emit_tree(&tree, &scoped, &phi_copies, &targets));
+    statements
+}
+
+/// Drops statements that follow an unconditional transfer.
+///
+/// A node that surrendered an edge as a `goto` has no fallthrough, but the
+/// collapsing graph can still attach a successor after it. Anything past the
+/// transfer cannot execute, and emitting it claims control flow that does not
+/// exist.
+fn after_transfer_is_unreachable(statements: Vec<NativeStatement>) -> Vec<NativeStatement> {
+    let mut kept = Vec::with_capacity(statements.len());
+    let mut reachable = true;
+    for statement in statements {
+        // A label is reached by a jump from elsewhere, so control resumes
+        // there regardless of what preceded it.
+        if matches!(statement, NativeStatement::Label(_)) {
+            reachable = true;
+        }
+        if !reachable {
+            continue;
+        }
+        let transfers = matches!(
+            statement,
+            NativeStatement::Goto(_)
+                | NativeStatement::Return(_)
+                | NativeStatement::IndirectGoto(_)
+        );
+        kept.push(statement);
+        if transfers {
+            reachable = false;
+        }
+    }
+    kept
+}
+
+/// Blocks a surviving `goto` still names, which therefore need labels.
+fn goto_targets(tree: &super::structure::Structured) -> BTreeSet<GraphBlockId> {
+    use super::structure::Structured;
+    let mut targets = BTreeSet::new();
+    let mut pending = vec![tree];
+    while let Some(node) = pending.pop() {
+        match node {
+            Structured::Goto { target, .. } | Structured::IfGoto { target, .. } => {
+                targets.insert(*target);
+            }
+            Structured::List(members) => pending.extend(members.iter()),
+            Structured::IfElse {
+                header,
+                then_body,
+                else_body,
+                ..
+            } => {
+                pending.push(header);
+                pending.push(then_body);
+                if let Some(body) = else_body {
+                    pending.push(body);
+                }
+            }
+            Structured::WhileDo { header, body, .. } => {
+                pending.push(header);
+                pending.push(body);
+            }
+            Structured::DoWhile { body, .. } => pending.push(body),
+            Structured::Basic(_) => {}
+        }
+    }
+    targets
+}
+
 struct Emitter<'a> {
     data: &'a Funcdata,
     naming: &'a Naming,
@@ -69,6 +168,132 @@ impl Emitter<'_> {
 }
 
 impl Emitter<'_> {
+    /// Statements for one construct, recursing into its parts.
+    fn emit_tree(
+        &self,
+        node: &super::structure::Structured,
+        scoped: &BTreeSet<String>,
+        phi_copies: &BTreeMap<GraphBlockId, Vec<NativeStatement>>,
+        targets: &BTreeSet<GraphBlockId>,
+    ) -> Vec<NativeStatement> {
+        after_transfer_is_unreachable(self.emit_construct(node, scoped, phi_copies, targets))
+    }
+
+    fn emit_construct(
+        &self,
+        node: &super::structure::Structured,
+        scoped: &BTreeSet<String>,
+        phi_copies: &BTreeMap<GraphBlockId, Vec<NativeStatement>>,
+        targets: &BTreeSet<GraphBlockId>,
+    ) -> Vec<NativeStatement> {
+        use super::structure::Structured;
+        match node {
+            Structured::Basic(block) => {
+                let mut statements = Vec::new();
+                if targets.contains(block) {
+                    statements.push(NativeStatement::Label(self.data.block(*block).start));
+                }
+                let terminator = self.emit_body(*block, scoped, &mut statements);
+                if let Some(copies) = phi_copies.get(block) {
+                    statements.extend(copies.iter().cloned());
+                }
+                // A conditional branch's own transfer is replaced by whichever
+                // construct claimed its edges; only a return or an unclaimed
+                // jump still belongs here.
+                statements.extend(
+                    terminator
+                        .into_iter()
+                        .filter(|statement| !matches!(statement, NativeStatement::IfGoto { .. })),
+                );
+                statements
+            }
+            Structured::List(members) => members
+                .iter()
+                .flat_map(|member| self.emit_tree(member, scoped, phi_copies, targets))
+                .collect(),
+            Structured::IfElse {
+                header,
+                test,
+                taken_first,
+                then_body,
+                else_body,
+            } => {
+                let mut statements = self.emit_tree(header, scoped, phi_copies, targets);
+                statements.push(NativeStatement::IfElse {
+                    condition: self.condition_of(*test, *taken_first),
+                    then_body: self.emit_tree(then_body, scoped, phi_copies, targets),
+                    else_body: else_body
+                        .as_ref()
+                        .map(|body| self.emit_tree(body, scoped, phi_copies, targets))
+                        .unwrap_or_default(),
+                });
+                statements
+            }
+            Structured::WhileDo {
+                header,
+                test,
+                body_taken,
+                body,
+            } => {
+                // The header runs before the first test and again after each
+                // iteration, so it appears twice: once ahead of the loop and
+                // once at the end of the body.
+                let mut statements = self.emit_tree(header, scoped, phi_copies, targets);
+                let mut inner = self.emit_tree(body, scoped, phi_copies, targets);
+                inner.extend(self.emit_tree(header, scoped, phi_copies, targets));
+                statements.push(NativeStatement::While {
+                    condition: self.condition_of(*test, *body_taken),
+                    body: inner,
+                });
+                statements
+            }
+            Structured::DoWhile {
+                body,
+                test,
+                body_taken,
+            } => {
+                vec![NativeStatement::DoWhile {
+                    body: self.emit_tree(body, scoped, phi_copies, targets),
+                    condition: self.condition_of(*test, *body_taken),
+                }]
+            }
+            Structured::Goto { target, .. } => {
+                vec![NativeStatement::Goto(self.data.block(*target).start)]
+            }
+            Structured::IfGoto {
+                test,
+                taken,
+                target,
+            } => {
+                vec![NativeStatement::IfGoto {
+                    condition: self.condition_of(*test, *taken),
+                    target: self.data.block(*target).start,
+                }]
+            }
+        }
+    }
+
+    /// The condition the branch in `test` evaluates, negated when the construct
+    /// runs on the branch's untaken side.
+    fn condition_of(&self, test: GraphBlockId, taken: bool) -> Expr {
+        let condition = self
+            .data
+            .block(test)
+            .ops
+            .iter()
+            .copied()
+            .map(|op| self.data.op(op))
+            .find(|operation| operation.opcode == op::CBRANCH)
+            .and_then(|operation| operation.inputs.get(1).copied())
+            .map(|value| self.resolver.resolve(value))
+            .unwrap_or(Expr::Constant { value: 1, width: 1 });
+        if taken {
+            condition
+        } else {
+            Expr::Not(Box::new(condition))
+        }
+    }
+
     fn run(&self) -> Vec<NativeStatement> {
         let scoped = self.scoped_names();
         let mut phi_copies: BTreeMap<GraphBlockId, Vec<NativeStatement>> = BTreeMap::new();
