@@ -16,6 +16,7 @@ use ventris_target::{Abi, AbiRegisterClass, ArgumentRegisterMode};
 mod actions;
 mod c_score;
 mod control_flow;
+mod frame;
 mod heritage;
 mod printer;
 mod ssa;
@@ -26,6 +27,7 @@ pub use c_score::{CScore, score_c};
 use control_flow::simplify;
 #[cfg(test)]
 use control_flow::structure_control_flow;
+use frame::promote_frame_slots;
 pub use ssa::{SsaFunction, SsaValue, TypeConstraint, TypeSolver, build_ssa};
 use ssa::{ValueKey, merge_types};
 
@@ -1722,6 +1724,7 @@ impl NativeDecompiler {
         drop_unread_memory_snapshots(&mut statements);
         statements = structure::structure_graph(statements);
         statements = actions::run_action_database(statements);
+        promote_frame_slots(&mut statements, &stable_registers);
         let parameters = recover_parameters(abi, &statements);
         NativeDocument {
             name: format!("sub_{:x}", function.entry),
@@ -2630,6 +2633,24 @@ impl LiveReads {
             .collect()
     }
 }
+/// Interprets a constant of the given byte width as signed.
+fn signed_constant_value(value: u64, width: u32) -> i64 {
+    let bits = width.saturating_mul(8).min(64);
+    if bits == 0 {
+        return 0;
+    }
+    if bits == 64 {
+        return value as i64;
+    }
+    let mask = (1_u64 << bits) - 1;
+    let masked = value & mask;
+    if masked & (1_u64 << (bits - 1)) == 0 {
+        masked as i64
+    } else {
+        (masked as i64) - (1_i64 << bits)
+    }
+}
+
 /// Splits `base + constant` so two addresses can be compared symbolically.
 fn address_base_and_offset(value: &Expr) -> (&Expr, u64) {
     match value {

@@ -49,16 +49,16 @@ by how many functions each affects. It drives the same public `decompile`
 command a user runs, and supplies no metadata, so both sides rely on their own
 inference.
 
-On the 37 currently verified functions, 17 show no classified difference,
-including 8 of the 10 PS2 functions. The dominant remaining defect is loop
+On the 37 currently verified functions, 18 show no classified difference,
+including 9 of the 10 PS2 functions. The dominant remaining defect is loop
 recovery: 22 functions lose a loop or switch that Ghidra recovers. The loop
 reducer itself is not at fault — it reduces the same loops in isolation — but it
 requires a single-entry, single-exit region, so one forward branch past a loop
 keeps a whole function in label-and-goto form.
 
-The next measured gap after that is frame-local recovery: stack slots are still
-rendered as `sp`-relative memory rather than named locals, which accounts for
-the remaining cast differences.
+Frame slots are named locals when they are provably private scalars. The
+remaining cast differences come from slots written a byte at a time and read as
+a word, which one name cannot describe.
 
 ## CLI
 
