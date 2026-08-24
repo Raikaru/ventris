@@ -18,6 +18,11 @@ All notable Ventris changes are documented here.
   spanning several cells becomes a `PIECE` chain, and a write becomes one
   `SUBPIECE` per cell. Ventris previously keyed SSA on exact locations and
   handled sub-register views with an ad-hoc widening cast at read time.
+- Added data-flow guards ported from `Heritage::guardCalls`, `guardStores`, and
+  `guardReturns`: a call or aliasing store gains an `INDIRECT` definition for
+  each location it may change, and a return reads its result storage. The effect
+  model is supplied by the target ABI rather than guessed, so a preserved
+  register is not needlessly invalidated.
 
 - Added `LiftedInstruction::skips_delay_slot`, which reports the MIPS
   likely-branch shape so consumers stop treating its sequential successor as
