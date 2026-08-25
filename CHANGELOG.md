@@ -282,6 +282,18 @@ All notable Ventris changes are documented here.
   table-backed switch the rule can claim, and `dl_G_MOVEWORD`'s `switch 0 vs 1`
   is a `BRANCHIND` whose table this pipeline does not recover. The rule is
   correct and tested; it has no corpus function to improve yet.
+- Ported `ActionPreferComplement`, via `Funcdata::opFlipInPlaceTest` and
+  `get_booleanflip`. A branch whose clause sits on the fall-through side used to
+  be printed as `if (!(arg1 < 1))`; Ghidra asks whether the comparison can absorb
+  the negation and rewrites the operator where it can, so the condition comes out
+  positive. `if (!(arg1 < 1))` is now `if (1 <= arg1)` and `if (!(arg1 < 9))` is
+  `if (9 <= arg1)`.
+  The ordered comparisons swap their operands as well as their operator, because
+  `!(a < b)` is `b <= a` and this expression tree has no `>=`. Equality flips
+  without reordering, a double negation collapses — Ghidra's flip of
+  `BOOL_NEGATE` is a `COPY` it then deletes — and a plain boolean cannot absorb
+  the negation, so `if (!bVar1)` keeps its `!` exactly as Ghidra's does. Four
+  cases pinned by test.
 - Ported the rest of `LoopBody`, which is what `labelExitEdges` needs to mean
   anything. An earlier attempt at the ordering alone regressed the census
   (`agrees` 22 -> 21, `unstructured-control-flow` 11 -> 14) and was reverted; with

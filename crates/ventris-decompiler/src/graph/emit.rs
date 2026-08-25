@@ -412,6 +412,43 @@ fn substitute_name(statement: &mut NativeStatement, name: &str, value: &Expr) ->
     }
 }
 
+/// The complement of a comparison, when the operator can absorb the negation.
+///
+/// Port of `get_booleanflip` together with the cases `opFlipInPlaceTest` accepts.
+/// The ordered comparisons flip by swapping their operands as well as their
+/// operator, because `!(a < b)` is `b <= a` and not `a >= b` in an expression
+/// tree that has no `>=`.
+fn flip_boolean(condition: &Expr) -> Option<Expr> {
+    use crate::native::BinaryOp;
+    match condition {
+        // `!!x` is `x`: Ghidra's flip of `BOOL_NEGATE` is a `COPY`, which it
+        // then removes entirely.
+        Expr::Not(inner) => Some((**inner).clone()),
+        Expr::Binary { op, left, right } => {
+            let (flipped, reorder) = match op {
+                BinaryOp::Equal => (BinaryOp::NotEqual, false),
+                BinaryOp::NotEqual => (BinaryOp::Equal, false),
+                BinaryOp::Less => (BinaryOp::LessEqual, true),
+                BinaryOp::LessEqual => (BinaryOp::Less, true),
+                BinaryOp::SignedLess => (BinaryOp::SignedLessEqual, true),
+                BinaryOp::SignedLessEqual => (BinaryOp::SignedLess, true),
+                _ => return None,
+            };
+            let (left, right) = if reorder {
+                (right.clone(), left.clone())
+            } else {
+                (left.clone(), right.clone())
+            };
+            Some(Expr::Binary {
+                op: flipped,
+                left,
+                right,
+            })
+        }
+        _ => None,
+    }
+}
+
 fn substitute_expr(target: &mut Expr, name: &str, value: &Expr) -> bool {
     if matches!(target, Expr::Temporary { name: other, .. } if other == name) {
         *target = value.clone();
@@ -1294,10 +1331,15 @@ impl Emitter<'_> {
     fn condition_of(&self, test: &Condition, taken: bool) -> Expr {
         let condition = self.condition_expr(test);
         if taken {
-            condition
-        } else {
-            Expr::Not(Box::new(condition))
+            return condition;
         }
+        // `ActionPreferComplement`. Ghidra does not wrap a negated branch in a
+        // `!`: `Funcdata::opFlipInPlaceTest` asks whether the comparison can
+        // absorb the negation, and where it can `get_booleanflip` rewrites the
+        // operator — swapping the operands for the ordered ones — so the printed
+        // condition is the positive form. The `!` remains only for a condition
+        // that cannot absorb it.
+        flip_boolean(&condition).unwrap_or_else(|| Expr::Not(Box::new(condition)))
     }
 
     /// The expression for a condition tree.
@@ -2362,6 +2404,74 @@ mod tests {
             statements.len(),
             1,
             "the carried constant should reach its reader and the name disappear"
+        );
+    }
+
+    #[test]
+    fn a_negated_comparison_flips_its_operator_instead_of_wearing_a_bang() {
+        use crate::native::BinaryOp;
+        let less = Expr::Binary {
+            op: BinaryOp::SignedLess,
+            left: Box::new(Expr::Temporary {
+                name: "x".into(),
+                width: 4,
+            }),
+            right: Box::new(Expr::Constant { value: 1, width: 4 }),
+        };
+        // `!(x < 1)` is `1 <= x`: the operator flips and the operands swap,
+        // because the expression tree has no `>=`.
+        assert_eq!(
+            flip_boolean(&less),
+            Some(Expr::Binary {
+                op: BinaryOp::SignedLessEqual,
+                left: Box::new(Expr::Constant { value: 1, width: 4 }),
+                right: Box::new(Expr::Temporary {
+                    name: "x".into(),
+                    width: 4
+                }),
+            })
+        );
+        // Equality absorbs the negation without reordering.
+        let equal = Expr::Binary {
+            op: BinaryOp::Equal,
+            left: Box::new(Expr::Temporary {
+                name: "x".into(),
+                width: 4,
+            }),
+            right: Box::new(Expr::Constant { value: 0, width: 4 }),
+        };
+        let Some(Expr::Binary { op, left, .. }) = flip_boolean(&equal) else {
+            panic!("equality should flip");
+        };
+        assert_eq!(op, BinaryOp::NotEqual);
+        assert_eq!(
+            left.as_ref(),
+            &Expr::Temporary {
+                name: "x".into(),
+                width: 4
+            },
+            "an unordered comparison keeps its operand order"
+        );
+        // A double negation collapses, matching Ghidra's flip of `BOOL_NEGATE`
+        // to a `COPY` that it then removes.
+        let negated = Expr::Not(Box::new(Expr::Temporary {
+            name: "flag".into(),
+            width: 1,
+        }));
+        assert_eq!(
+            flip_boolean(&negated),
+            Some(Expr::Temporary {
+                name: "flag".into(),
+                width: 1
+            })
+        );
+        // A plain boolean cannot absorb it, so the `!` has to stay.
+        assert_eq!(
+            flip_boolean(&Expr::Temporary {
+                name: "flag".into(),
+                width: 1
+            }),
+            None
         );
     }
 }
