@@ -249,6 +249,21 @@ All notable Ventris changes are documented here.
 - Measured against Ghidra on the corpus, the graph path improves to
   `unstructured-control-flow` 10 (from 13) and `missing-loop-or-switch` 4, against
   15 and 11 on the address-ordered default.
+- Tried and reverted `LoopBody::labelExitEdges`' candidate ordering. Ghidra
+  orders a loop's exit-edge candidates interior-body-nodes first, then the head,
+  then the tails in reverse ("exits from more preferred tails later"), with every
+  edge to the official exit block postponed to the end. Ported faithfully it
+  regressed the census: `agrees` 22 -> 21, `unstructured-control-flow` 11 -> 14,
+  `missing-loop-or-switch` 5 -> 11, and three of four sampled functions gained
+  `goto`s. Adding Ghidra's persistent candidate iterator as well
+  (`likelylistfull`/`likelyiter`, so successive stalls advance through the list
+  instead of re-offering its first entry) did not recover it either. Our
+  `loop_exit` was checked against `LoopBody::findExit` and already matches it, so
+  the exit choice is not the difference. Reverted to node order, which measures
+  22 agrees. Recorded rather than re-attempted: the ordering is only worth
+  anything alongside more of Ghidra's loop-body bookkeeping — `uniquecount`,
+  `orderTails`, `labelContainments` and `immed_container` — and a faithful port of
+  one piece that measures worse is not an improvement.
 - Ported `TraceDAG` from `blockaction.cc` into `graph/tracedag.rs`, with its
   `BranchPoint`, `BlockTrace` and `BadEdgeScore` helpers: `initialize`,
   `pushBranches`, `checkOpen`, `openBranch`, `checkRetirement`, `retireBranch`,
