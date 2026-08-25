@@ -15,6 +15,7 @@ came from.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import os
 import re
@@ -429,6 +430,29 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="skip Ghidra and reuse previously exported oracle files",
     )
+    # Almost none of a census run is analysis; it is 37 serial subprocess
+    # renders. Narrowing and parallelising them is what makes the census usable
+    # as an inner-loop measurement instead of a pre-commit one.
+    parser.add_argument(
+        "--id",
+        action="append",
+        default=None,
+        metavar="ENTRY",
+        help="restrict to corpus entries by id; repeatable",
+    )
+    parser.add_argument(
+        "--function",
+        action="append",
+        default=None,
+        metavar="SUBSTRING",
+        help="restrict to functions whose name contains this; repeatable",
+    )
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=0,
+        help="parallel renders; 0 picks one per available processor",
+    )
     return parser
 
 
@@ -439,7 +463,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         entries = selected_entries(manifest, args.image_dir)
         if not entries:
             raise CensusError("no hash-verified corpus image is available")
+        if args.id:
+            wanted = set(args.id)
+            unknown = wanted - {entry["id"] for entry in entries}
+            if unknown:
+                raise CensusError(
+                    "no such corpus entry: " + ", ".join(sorted(unknown))
+                )
+            entries = [entry for entry in entries if entry["id"] in wanted]
         targets = targets_for(entries, args.image_dir)
+        if args.function:
+            targets = [
+                target
+                for target in targets
+                if any(needle in target.name for needle in args.function)
+            ]
+            if not targets:
+                raise CensusError("no corpus function matched --function")
         oracle_dir = args.out / "oracle"
         oracle_dir.mkdir(parents=True, exist_ok=True)
         if not args.reuse_oracle:
@@ -449,12 +489,29 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.ghidra, args.out / "project", oracle_dir, entry, entry_targets
                 )
 
+        # Each render is an independent subprocess, so they overlap freely. The
+        # rows stay in target order regardless of completion order, because the
+        # printed report is compared between runs.
+        jobs = args.jobs if args.jobs > 0 else (os.cpu_count() or 1)
+        jobs = max(1, min(jobs, len(targets)))
+        rendered: list[tuple[str | None, str | None]]
+        if jobs == 1:
+            rendered = [
+                render_ventris(args.ventris, target, args.limit) for target in targets
+            ]
+        else:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+                rendered = list(
+                    pool.map(
+                        lambda target: render_ventris(args.ventris, target, args.limit),
+                        targets,
+                    )
+                )
+
         rows = []
-        for target in targets:
+        for target, (ventris, ventris_error) in zip(targets, rendered):
             row = Row(target=target)
-            row.ventris, row.ventris_error = render_ventris(
-                args.ventris, target, args.limit
-            )
+            row.ventris, row.ventris_error = ventris, ventris_error
             exported = oracle_dir / f"{target.census_id}.ghidra-decompile"
             failed = oracle_dir / f"{target.census_id}.error"
             if exported.is_file():

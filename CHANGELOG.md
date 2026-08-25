@@ -249,6 +249,31 @@ All notable Ventris changes are documented here.
 - Measured against Ghidra on the corpus, the graph path improves to
   `unstructured-control-flow` 10 (from 13) and `missing-loop-or-switch` 4, against
   15 and 11 on the address-ordered default.
+- Types are recovered once per pipeline round instead of after every rewrite.
+  `invalidate_masks` no longer drops the recovered-type snapshot; the pipeline
+  calls the new `Funcdata::invalidate_types` at each round boundary and once more
+  before emission, which is where Ghidra runs `ActionInferTypes`. One corpus
+  function ran 5000 seven-pass inferences over a 10,000-varnode graph; it now
+  runs under 200. `queryMapAddress_single` went from 50s to 22s and
+  `JUTReportConsole_f_va` from 7.9s to 0.6s.
+- Added `stackframe::is_frame_derived`. `frame_offset` answers "at which offset"
+  and gives nothing when there is no single answer, but a frame pointer carried
+  around a loop (`p = p + 0x20` each turn) has no single offset and is still a
+  frame pointer. `RuleStructOffset0` now asks this instead of reading a recovered
+  type: it is structural, so unlike a snapshot it cannot be stale, which is what
+  let the rule print a stack slot as `local_20->field_0` once types stopped being
+  re-derived per rewrite.
+- `quality_census.py` gained `--id`, `--function`, and `--jobs`; renders are
+  independent subprocesses and now overlap. The full census went from about 150s
+  to 25.7s, and a single-image run (`--id ps2-dungeon-game`) takes 1.0s, which
+  makes the census usable as an inner-loop measurement rather than only a
+  pre-commit one.
+- Added `tools/test_gate.py`. `cargo test` reports a compile failure in test-only
+  code with no test results at all, so a filter keyed on the word `FAILED`
+  reports green over zero tests; that has silently passed a broken suite twice
+  here. The gate asserts result lines, a minimum test count, and zero failures
+  instead, and was verified against both a healthy tree and a deliberately broken
+  one.
 - Ported `SplitDatatype` from `subflow.cc` with its three rules,
   `RuleSplitCopy`, `RuleSplitLoad`, and `RuleSplitStore`, in
   `graph/splitdatatype.rs`. One instruction can move a whole structure; split,

@@ -166,6 +166,60 @@ impl Action for ActionRestrictLocal {
         0
     }
 }
+/// Whether a value is derived from the frame base at all.
+///
+/// `frame_offset` answers "at which offset", and returns nothing when there is no
+/// single answer. A frame pointer carried around a loop has no single offset —
+/// `p = p + 0x20` each turn — yet it is still a frame pointer, and the question
+/// of whether the frame may be treated as an ordinary structure needs that
+/// weaker fact. This crosses phis for exactly that reason, and it is a
+/// structural property, so unlike a recovered type it cannot be stale.
+pub fn is_frame_derived(data: &Funcdata, address: VarnodeId, stack_pointer: Location) -> bool {
+    let mut active = BTreeSet::new();
+    frame_derived_inner(data, address, stack_pointer, &mut active)
+}
+
+fn frame_derived_inner(
+    data: &Funcdata,
+    address: VarnodeId,
+    stack_pointer: Location,
+    active: &mut BTreeSet<VarnodeId>,
+) -> bool {
+    if !active.insert(address) {
+        // A cycle contributes nothing: the loop-carried edge is the one this
+        // returns to, and the other operand decides.
+        return false;
+    }
+    let varnode = data.varnode(address);
+    let result = if varnode.space == stack_pointer.space && varnode.offset == stack_pointer.offset {
+        true
+    } else {
+        match varnode.def {
+            None => false,
+            Some(def) => {
+                let operation = data.op(def);
+                let opcode = operation.opcode;
+                let inputs = operation.inputs.clone();
+                match opcode {
+                    op::COPY | op::CAST | op::INDIRECT | op::MULTIEQUAL => inputs
+                        .iter()
+                        .any(|input| frame_derived_inner(data, *input, stack_pointer, active)),
+                    // Only the base of an address computation carries the frame;
+                    // the displacement is a number.
+                    op::INT_ADD | op::INT_SUB | op::PTRADD | op::PTRSUB => {
+                        inputs.first().is_some_and(|input| {
+                            frame_derived_inner(data, *input, stack_pointer, active)
+                        })
+                    }
+                    _ => false,
+                }
+            }
+        }
+    };
+    active.remove(&address);
+    result
+}
+
 fn frame_offset_inner(
     data: &Funcdata,
     address: VarnodeId,

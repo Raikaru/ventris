@@ -255,8 +255,23 @@ impl Funcdata {
     }
 
     /// Drops the mask cache. Called by every mutator.
+    ///
+    /// The recovered types are deliberately not dropped here. Ghidra recovers
+    /// types in `ActionInferTypes`, a pass in the pool, and rules read the types
+    /// left on the varnodes; it does not re-derive the whole function's types
+    /// after each rewrite. Dropping the snapshot per mutation made the pointer
+    /// rules re-run seven-pass inference once per rewrite: 5000 full inferences
+    /// on a 10,000-varnode function, and fifty seconds where the address-ordered
+    /// path took a quarter of one.
     fn invalidate_masks(&self) {
         self.masks.clear();
+    }
+
+    /// Drops the recovered types, for a caller at a pass boundary.
+    ///
+    /// This is `ActionInferTypes` running again: the point at which the graph has
+    /// settled enough for its types to be worth re-deriving.
+    pub fn invalidate_types(&self) {
         self.recovered_types.clear();
     }
 

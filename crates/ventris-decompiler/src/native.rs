@@ -2035,9 +2035,9 @@ impl NativeDecompiler {
         // an aggregate means, so the graph is told before any rule runs.
         data.big_endian = architecture_is_big_endian(architecture);
         // `ActionSpacebase`, and it must happen before anything reads a type:
-        // the recovered-type cache is cleared by graph edits, not by learning a
-        // new fact about the architecture, so naming the frame base after the
-        // first rule has run leaves that rule's view of the stack behind.
+        // types are re-derived at a round boundary, not per edit, so naming the
+        // frame base after the first round leaves that round's view of the stack
+        // behind.
         if let Some(abi) = abi
             && let Some(vnode) =
                 abi_register_vnode(architecture, abi.stack_pointer, abi.pointer_bits)
@@ -2049,6 +2049,11 @@ impl NativeDecompiler {
             });
         }
         for _ in 0..GRAPH_PIPELINE_ROUNDS {
+            // `ActionInferTypes` is a pass in Ghidra's pool, not a query the
+            // rules make: types are re-derived once per round, and the rules in
+            // that round read what it produced. Re-deriving after every rewrite
+            // instead cost fifty seconds on one corpus function.
+            data.invalidate_types();
             let mut changed = graph::action::Action::apply(pipeline.as_ref(), &mut data);
             for pass in control_flow {
                 if skipped_passes.iter().any(|name| name == pass.name()) {
@@ -2074,6 +2079,10 @@ impl NativeDecompiler {
                 break;
             }
         }
+        // The last round's rewrites are not in the types the round started with,
+        // and emission reads types to spell a field access. Ghidra recovers types
+        // once more before it prints for the same reason.
+        data.invalidate_types();
 
         let naming = |space: u32, offset: u64, _size: u32| -> Option<String> {
             (space == REGISTER_SPACE).then(|| register_name(architecture, offset))

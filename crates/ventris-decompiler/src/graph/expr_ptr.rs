@@ -581,6 +581,18 @@ impl Rule for RuleStructOffset0 {
         let Some(ptr) = operation.inputs.get(1).copied() else {
             return 0;
         };
+        // The frame is not a structure, and that question has a structural
+        // answer which never goes stale: recovered types are a per-round
+        // snapshot, and a snapshot taken before the frame arithmetic settled
+        // showed the frame as an ordinary aggregate, which is exactly when this
+        // rule printed a stack slot as `local_20->field_0`. `DataType::Spacebase`
+        // still carries the distinction through inference; this asks the graph
+        // directly, so the decision cannot depend on the snapshot's age.
+        if let Some(frame) = data.spacebase
+            && super::stackframe::is_frame_derived(data, ptr, frame)
+        {
+            return 0;
+        }
         let cached = recover_types(data);
         let (factory, types) = (&cached.0, &cached.1);
         // A plain pointer only. A `PointerRel` already points into a container,
