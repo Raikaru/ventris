@@ -169,35 +169,6 @@ fn find_loop_variable(
     tail: GraphBlockId,
     slot: usize,
 ) -> Option<(OpId, OpId)> {
-    if std::env::var_os("VTF").is_some() {
-        let mut chain = Vec::new();
-        let mut current = Some(condition);
-        for _ in 0..6 {
-            let Some(value) = current else { break };
-            match data.varnode(value).def {
-                Some(def) => {
-                    chain.push(format!(
-                        "op{}:{}@b{:?}",
-                        def.0,
-                        data.op(def).opcode,
-                        data.op(def).parent.map(|b| b.0)
-                    ));
-                    current = data.op(def).inputs.first().copied();
-                }
-                None => {
-                    chain.push("free".into());
-                    break;
-                }
-            }
-        }
-        eprintln!(
-            "LVCHAIN head=b{} tail=b{} slot={} {}",
-            head.0,
-            tail.0,
-            slot,
-            chain.join(" <- ")
-        );
-    }
     let root = data.varnode(condition).def?;
     if is_call_or_marker(data, root) {
         return None;
@@ -210,34 +181,16 @@ fn find_loop_variable(
                 continue;
             };
             if data.op(definition).opcode == op::MULTIEQUAL {
-                let trace = std::env::var_os("VTF").is_some();
                 if data.op(definition).parent != Some(head) {
-                    if trace {
-                        eprintln!("LV phi not in head");
-                    }
                     continue;
                 }
                 let Some(carried) = data.op(definition).inputs.get(slot).copied() else {
-                    if trace {
-                        eprintln!("LV no carried input at slot");
-                    }
                     continue;
                 };
                 let Some(iterate) = data.varnode(carried).def else {
-                    if trace {
-                        eprintln!("LV carried input has no definition");
-                    }
                     continue;
                 };
                 if data.op(iterate).parent != Some(tail) || is_call_or_marker(data, iterate) {
-                    if trace {
-                        eprintln!(
-                            "LV iterate in b{:?} not tail b{} (opcode {})",
-                            data.op(iterate).parent.map(|b| b.0),
-                            tail.0,
-                            data.op(iterate).opcode
-                        );
-                    }
                     continue;
                 }
                 // `testTerminal` requires the statement be the last in its

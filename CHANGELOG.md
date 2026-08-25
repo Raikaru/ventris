@@ -282,6 +282,27 @@ All notable Ventris changes are documented here.
   table-backed switch the rule can claim, and `dl_G_MOVEWORD`'s `switch 0 vs 1`
   is a `BRANCHIND` whose table this pipeline does not recover. The rule is
   correct and tested; it has no corpus function to improve yet.
+- Localised what blocks the graph path from shipping as the default, which is
+  the last open item. `corpus-smoke` fails on the PS2 entries for exactly one
+  reason, and it is not the `declaration_order` naming question recorded earlier:
+  comparing every dimension of `_ZN9GameWorld12beginFadeOutEv` between the two
+  paths, ten agree and `nominal_fields` differs - the address-ordered path
+  observes `GameWorld.fadeAlpha`, `GameWorld.fadeOut` and the rest, the graph path
+  observes nothing.
+  The cause is a wrong store. The lift of that function contains four one-byte
+  `sb` stores, at `0x4a4`, `0x4a2`, `0x4a3`, `0x4a5`. The graph path emits six,
+  because two of them are two bytes wide by the time `SplitDatatype::splitStore`
+  sees them and split into a pair covering the neighbouring field as well. The
+  last of the six sets `fadeOut` back to zero, undoing the flag the function
+  exists to set. With the field names wrong, the nominal type cannot attach, and
+  the declared parameter degrades from `GameWorld *` to `uintptr_t` while the
+  body still spells `arg0->field_4a4` - an arrow on a non-pointer.
+  Established by measurement: `splitStore` reports `stored=2 covered=2
+  pieces=[1,1]` on both, the four lifted stores each carry a one-byte value, and
+  the widening is not `RuleDoubleStore` - disabling it leaves all six. Present at
+  `cf5d082`, so it predates this session's structuring work. What remains is to
+  name the pass that widens a one-byte store's value, which is the next thing to
+  do rather than a question for anyone.
 - For-loop recovery now works end to end, closing the chain this session has
   been following. `TRK_fill_mem` emits two `for` loops, the same two Ghidra
   emits, and the census finding `for 0 vs 2` is gone; `Emem_KillSwMember` went
