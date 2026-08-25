@@ -1113,6 +1113,8 @@ fn goto_targets(data: &Funcdata, tree: &super::structure::Structured) -> BTreeSe
                 pending.push(header);
                 pending.extend(cases.iter().map(|(_, case)| case));
             }
+            // A `break` names no target, so it needs no label.
+            Structured::Break | Structured::IfBreak { .. } => {}
             Structured::Basic(block) => {
                 // An unclaimed branch stays in the block that owns it, so its
                 // target needs a label just as much as an explicit `Goto`'s.
@@ -1309,6 +1311,14 @@ impl Emitter<'_> {
                     default,
                 });
                 statements
+            }
+            Structured::Break => vec![NativeStatement::Break],
+            Structured::IfBreak { test, taken } => {
+                vec![NativeStatement::IfElse {
+                    condition: self.condition_of(test, *taken),
+                    then_body: vec![NativeStatement::Break],
+                    else_body: Vec::new(),
+                }]
             }
             Structured::Goto { target, .. } => {
                 vec![NativeStatement::Goto(self.data.block(*target).start)]

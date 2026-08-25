@@ -282,6 +282,16 @@ All notable Ventris changes are documented here.
   table-backed switch the rule can claim, and `dl_G_MOVEWORD`'s `switch 0 vs 1`
   is a `BRANCHIND` whose table this pipeline does not recover. The rule is
   correct and tested; it has no corpus function to improve yet.
+- Ported `BlockGraph::scopeBreak` with the loop and goto overrides, which
+  `ActionFinalStructure` runs once the construct tree is built. A jump whose
+  target is the enclosing loop's exit is `break`, not `goto`. The pass carries
+  two indices down the tree: the block a construct falls through to, and the
+  block that leaves the innermost loop — a loop's body sees the loop's own exit
+  as the second, which is what makes the jump recognisable. Members of a list
+  take the next member's entry as their exit, needing `FlowBlock::getFrontLeaf`.
+  Measured: `0x80072c88` 23 gotos -> 21, `0x800a5a70` 2 -> 1.
+  Ghidra defines `f_continue_goto` and prints it but never sets it, so there is
+  deliberately no `continue` arm here.
 - Ported `ActionPreferComplement`, via `Funcdata::opFlipInPlaceTest` and
   `get_booleanflip`. A branch whose clause sits on the fall-through side used to
   be printed as `if (!(arg1 < 1))`; Ghidra asks whether the comparison can absorb

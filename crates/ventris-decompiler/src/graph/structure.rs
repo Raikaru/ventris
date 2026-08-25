@@ -85,6 +85,10 @@ pub enum Structured {
         from: GraphBlockId,
         target: GraphBlockId,
     },
+    /// A jump to the enclosing loop's exit, which C spells `break`.
+    Break,
+    /// A conditional jump to the enclosing loop's exit.
+    IfBreak { test: Condition, taken: bool },
     /// A multi-way branch and its cases.
     ///
     /// `header` is everything up to and including the indirect branch. Each case
@@ -136,7 +140,92 @@ type NodeId = usize;
 pub fn structure(data: &Funcdata, tables: &[super::jumptable::JumpTable]) -> Structured {
     let mut graph = Graph::of(data, tables);
     graph.collapse();
-    graph.finish()
+    let mut tree = graph.finish();
+    // `ActionFinalStructure` calls `BlockGraph::scopeBreak` once the tree is
+    // built, which is what turns a jump to a loop's exit into `break`.
+    scope_break(&mut tree, None, None);
+    tree
+}
+
+/// The first basic block a construct enters.
+///
+/// Ghidra's `FlowBlock::getFrontLeaf`. `scopeBreak` needs it to tell one member
+/// of a list what the next member is, which is that member's exit.
+fn front_block(node: &Structured) -> Option<GraphBlockId> {
+    match node {
+        Structured::Basic(block) => Some(*block),
+        Structured::List(members) => members.iter().find_map(front_block),
+        Structured::IfElse { header, .. }
+        | Structured::WhileDo { header, .. }
+        | Structured::Switch { header, .. } => front_block(header),
+        Structured::DoWhile { body, .. } | Structured::InfLoop { body } => front_block(body),
+        Structured::Goto { from, .. } => Some(*from),
+        Structured::IfGoto { .. } | Structured::Break | Structured::IfBreak { .. } => None,
+    }
+}
+
+/// Turn a jump to the enclosing loop's exit into `break`.
+///
+/// Port of `BlockGraph::scopeBreak` and the overrides on the loop and goto
+/// blocks. `exit` is the block control reaches when this construct falls through;
+/// `loop_exit` is the block that leaves the innermost enclosing loop. A loop
+/// introduces a new scope, so its own body sees the loop's exit as `loop_exit`
+/// — which is this construct's `exit`.
+fn scope_break(node: &mut Structured, exit: Option<GraphBlockId>, loop_exit: Option<GraphBlockId>) {
+    match node {
+        Structured::List(members) => {
+            for index in 0..members.len() {
+                // Each member's exit is the next member's entry; the last
+                // inherits the list's own.
+                let next = members.get(index + 1).and_then(front_block).or(exit);
+                scope_break(&mut members[index], next, loop_exit);
+            }
+        }
+        Structured::IfElse {
+            header,
+            then_body,
+            else_body,
+            ..
+        } => {
+            scope_break(header, None, loop_exit);
+            scope_break(then_body, exit, loop_exit);
+            if let Some(body) = else_body {
+                scope_break(body, exit, loop_exit);
+            }
+        }
+        Structured::WhileDo { header, body, .. } => {
+            // The loop's exit is whatever follows it, and its body is a new
+            // scope in which a jump there is a `break`.
+            scope_break(header, None, exit);
+            scope_break(body, front_block(header), exit);
+        }
+        Structured::DoWhile { body, .. } => scope_break(body, None, exit),
+        Structured::InfLoop { body } => scope_break(body, None, exit),
+        Structured::Switch { header, cases, .. } => {
+            scope_break(header, None, loop_exit);
+            for (_, case) in cases.iter_mut() {
+                scope_break(case, exit, loop_exit);
+            }
+        }
+        Structured::Goto { target, .. } => {
+            if loop_exit == Some(*target) {
+                *node = Structured::Break;
+            }
+        }
+        Structured::IfGoto {
+            test,
+            taken,
+            target,
+        } => {
+            if loop_exit == Some(*target) {
+                *node = Structured::IfBreak {
+                    test: test.clone(),
+                    taken: *taken,
+                };
+            }
+        }
+        Structured::Basic(_) | Structured::Break | Structured::IfBreak { .. } => {}
+    }
 }
 
 /// The collapsing graph: nodes that rules merge until one construct remains.
@@ -1354,7 +1443,11 @@ fn drop_jumps_to(node: &mut Structured, head: GraphBlockId) {
                 drop_jumps_to(case, head);
             }
         }
-        Structured::Basic(_) | Structured::Goto { .. } | Structured::IfGoto { .. } => {}
+        Structured::Basic(_)
+        | Structured::Goto { .. }
+        | Structured::IfGoto { .. }
+        | Structured::Break
+        | Structured::IfBreak { .. } => {}
     }
 }
 
@@ -1394,6 +1487,7 @@ fn collect_blocks(node: &Structured, into: &mut BTreeSet<GraphBlockId>) {
                 collect_blocks(case, into);
             }
         }
+        Structured::Break | Structured::IfBreak { .. } => {}
         Structured::Goto { .. } | Structured::IfGoto { .. } => {}
     }
 }
@@ -1768,7 +1862,11 @@ mod tests {
                 contains(header, predicate)
                     || cases.iter().any(|(_, case)| contains(case, predicate))
             }
-            Structured::Basic(_) | Structured::Goto { .. } | Structured::IfGoto { .. } => false,
+            Structured::Basic(_)
+            | Structured::Goto { .. }
+            | Structured::IfGoto { .. }
+            | Structured::Break
+            | Structured::IfBreak { .. } => false,
         }
     }
 
@@ -1948,6 +2046,69 @@ mod tests {
             "no table means no switch: {structured:?}"
         );
     }
+
+    #[test]
+    fn a_jump_to_a_loops_exit_becomes_a_break() {
+        // while (..) { if (..) goto after; .. }  after: ..
+        let mut tree = Structured::List(vec![
+            Structured::WhileDo {
+                header: Box::new(Structured::Basic(GraphBlockId(0))),
+                test: Condition::Branch {
+                    block: GraphBlockId(0),
+                    taken: true,
+                },
+                body: Box::new(Structured::List(vec![
+                    Structured::IfGoto {
+                        test: Condition::Branch {
+                            block: GraphBlockId(1),
+                            taken: true,
+                        },
+                        taken: true,
+                        target: GraphBlockId(9),
+                    },
+                    Structured::Basic(GraphBlockId(1)),
+                ])),
+                body_taken: true,
+            },
+            Structured::Basic(GraphBlockId(9)),
+        ]);
+        scope_break(&mut tree, None, None);
+        let Structured::List(members) = &tree else {
+            panic!("expected a list");
+        };
+        let Structured::WhileDo { body, .. } = &members[0] else {
+            panic!("expected the loop");
+        };
+        let Structured::List(body) = body.as_ref() else {
+            panic!("expected a body list");
+        };
+        assert!(
+            matches!(body[0], Structured::IfBreak { .. }),
+            "a jump to the block after the loop is a break, got {:?}",
+            body[0]
+        );
+
+        // The same jump outside any loop stays a goto: `loop_exit` is unset.
+        let mut plain = Structured::List(vec![
+            Structured::IfGoto {
+                test: Condition::Branch {
+                    block: GraphBlockId(1),
+                    taken: true,
+                },
+                taken: true,
+                target: GraphBlockId(9),
+            },
+            Structured::Basic(GraphBlockId(9)),
+        ]);
+        scope_break(&mut plain, None, None);
+        let Structured::List(members) = &plain else {
+            panic!("expected a list");
+        };
+        assert!(
+            matches!(members[0], Structured::IfGoto { .. }),
+            "outside a loop the jump has no break to become"
+        );
+    }
 }
 
 /// Whether a recovered construct's flow always leaves through a jump.
@@ -1972,8 +2133,11 @@ fn ends_in_transfer(node: &Structured) -> bool {
         Structured::Switch {
             cases, has_exit, ..
         } => !has_exit && cases.iter().all(|(_, case)| ends_in_transfer(case)),
+        // A `break` leaves the construct it is in, exactly as a `goto` does.
+        Structured::Break => true,
         Structured::Basic(_)
         | Structured::IfGoto { .. }
+        | Structured::IfBreak { .. }
         | Structured::WhileDo { .. }
         | Structured::DoWhile { .. }
         | Structured::InfLoop { .. } => false,
