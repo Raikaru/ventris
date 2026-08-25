@@ -23,6 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use ventris_pcode::op;
 
 use super::casts::needs_cast;
+use super::cover::Cover;
 use super::mergeaction::{Variables, merge_all};
 use super::types::Types;
 use super::{Funcdata, OpId, VarnodeId};
@@ -111,6 +112,13 @@ pub fn mark_explicit_named(
 
 /// As [`mark_explicit`], with a variable partition supplied by the caller.
 pub fn mark_explicit_with(data: &Funcdata, highs: Variables) -> Naming {
+    let dominance = super::heritage::compute_dominance(data);
+    let covers: BTreeMap<VarnodeId, Cover> = (0..data.varnode_count())
+        .map(|index| {
+            let value = VarnodeId(index as u32);
+            (value, Cover::of(data, value, &dominance))
+        })
+        .collect();
     let mut names: BTreeMap<u32, String> = BTreeMap::new();
     for (id, op) in data.live_ops() {
         let Some(output) = op.output else { continue };
@@ -127,13 +135,10 @@ pub fn mark_explicit_with(data: &Funcdata, highs: Variables) -> Naming {
             op::MULTIEQUAL | op::CALL | op::CALLIND | op::LOAD
         );
         let shared = varnode.descendants.len() > 1;
-        // A value that inlines into a later reader must still read the same
-        // operands there. If an operand's C variable is written again in
-        // between, the inlined expression silently reads the new value: the
-        // multiply in `allocEnemyEntity` was emitted after the increment of the
-        // counter it multiplies, so it multiplied the incremented value.
-        let operand_overwritten = operand_redefined_before_use(data, &highs, id, output);
-        if !effectful && !shared && !operand_overwritten {
+        // A value that inlines into a later reader reads its operands there,
+        // which is only correct while each is still live at that point.
+        let operand_dies = operand_dies_before_use(data, &covers, id, output);
+        if !effectful && !shared && !operand_dies {
             continue;
         }
         // The first definition encountered names the variable. Later versions
@@ -145,49 +150,43 @@ pub fn mark_explicit_with(data: &Funcdata, highs: Variables) -> Naming {
     Naming { names, highs }
 }
 
-/// Whether any operand's variable is written again before this value is read.
+/// Whether an operand is still live where this value would be inlined.
 ///
-/// Emission follows the graph's operation order, so a value that inlines lands
-/// at its reader. Ghidra keeps this honest with live ranges; the same conclusion
-/// follows here from comparing sequence numbers, which is what the emitted order
-/// is built from.
-fn operand_redefined_before_use(
+/// A value that inlines lands at its reader, so it reads its operands there. It
+/// may only do so while each operand is still live at that point: a variable
+/// written again in between holds a different value. `allocEnemyEntity`
+/// multiplied the incremented counter instead of the counter because of this.
+///
+/// The test is the operand's own live range, as Ghidra's is. An earlier version
+/// compared sequence numbers instead, which is sound but coarse: it named values
+/// whose operands were rewritten anywhere in the interval, even when the reader
+/// came first, and every extra name carries a declaration and usually a cast.
+fn operand_dies_before_use(
     data: &Funcdata,
-    highs: &Variables,
+    covers: &BTreeMap<VarnodeId, Cover>,
     def: OpId,
     output: VarnodeId,
 ) -> bool {
-    let Some(last_read) = data
-        .varnode(output)
-        .descendants
-        .iter()
-        .copied()
-        .filter_map(|reader| Some(data.op(reader).seq))
-        .max_by_key(|seq| (seq.address, seq.order))
-    else {
+    let readers: Vec<OpId> = data.varnode(output).descendants.iter().copied().collect();
+    if readers.is_empty() {
         return false;
-    };
-    let key = |seq: super::SeqNum| (seq.address, seq.order);
+    }
     for operand in data.op(def).inputs.iter().copied() {
         let varnode = data.varnode(operand);
-        if varnode.flags.constant {
+        if varnode.flags.constant || varnode.def.is_none() {
             continue;
         }
-        let Some(operand_def) = varnode.def else {
+        let Some(cover) = covers.get(&operand) else {
             continue;
         };
-        let group = highs.high_of(operand);
-        let from = key(data.op(operand_def).seq);
-        let to = key(last_read);
-        for (candidate, operation) in data.live_ops() {
-            let Some(written) = operation.output else {
+        for reader in readers.iter().copied() {
+            let Some(block) = data.op(reader).parent else {
                 continue;
             };
-            if candidate == operand_def || highs.high_of(written) != group {
+            let Some(index) = data.block(block).ops.iter().position(|op| *op == reader) else {
                 continue;
-            }
-            let at = key(operation.seq);
-            if at > from && at <= to {
+            };
+            if !cover.contains(block, index) {
                 return true;
             }
         }

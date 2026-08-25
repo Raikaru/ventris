@@ -339,6 +339,11 @@ All notable Ventris changes are documented here.
   inlined into its reader and read the *new* operand: `allocEnemyEntity`
   multiplied the incremented counter instead of the counter. This was a wrong
   answer, not a formatting difference.
+- That decision now uses the operand's live range, the criterion Ghidra uses,
+  rather than a comparison of sequence numbers. The coarse form was sound but
+  named values whose operands were rewritten anywhere in the interval even when
+  the reader came first, and every unnecessary name carries a declaration and
+  usually a cast.
 - The graph path stays opt-in. It leads the address-ordered path on seven census
   families and ties four, but it fails `corpus-smoke`'s semantic comparison on
   three PS2 entries the address-ordered path passes: two diverge on control-flow
