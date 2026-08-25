@@ -41,7 +41,7 @@ Heritage with real `MULTIEQUAL` placement and renaming, the Action and Rule
 framework, `ActionDeadCode` including dead frame stores, `ActionNonzeroMask`,
 `SubvariableFlow` with the `RuleSubvar*` family, `ActionInferTypes`, `FuncProto`
 argument recovery, `Cover` live ranges with `ActionMergeCopy`/`MergeAdjacent`/
-`MergeType`, `ActionSetCasts`, 38 `ruleaction` expression rules,
+`MergeType`, `ActionSetCasts`, 61 `ruleaction` expression rules,
 `ActionDeterminedBranch`/`RedundBranch`/`Unreachable`/`DoNothing`/
 `NormalizeBranches`/`Cse`/`MultiCse`, `ActionReturnRecovery`/`ActiveReturn`,
 `ActionNameVars`, `JumpBasic` table recovery with `ActionSwitchNorm`,
@@ -49,8 +49,12 @@ argument recovery, `Cover` live ranges with `ActionMergeCopy`/`MergeAdjacent`/
 `ConstantPtr`, and `CollapseStructure` with natural-loop analysis
 (`labelLoops`, `LoopBody::findBase`/`findExit`, `markExitsAsGotos`).
 
-That is 38 of Ghidra's 168 `Rule` subclasses and 25 of its 76 `Action`
-subclasses. The remainder, and what each needs, is tracked in `CHANGELOG.md`.
+That is 66 of Ghidra's 168 `Rule` subclasses and 28 of its 75 `Action`
+subclasses — 39% and 37%. The port is **not** complete. 102 rules and 47
+actions remain; of the missing rules, 68 are ordinary integer and boolean
+rewriting, 18 concern sub-variable and piece flow, 10 are pointer or
+type-directed, and 6 are floating-point. The remainder, and what each needs, is
+tracked in `CHANGELOG.md`.
 
 Select it with `VENTRIS_PIPELINE=graph`. Measured against the Ghidra 12.1.3
 decompiler on all 37 hash-verified corpus functions, the graph path leads the

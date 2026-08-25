@@ -249,6 +249,11 @@ All notable Ventris changes are documented here.
 - Measured against Ghidra on the corpus, the graph path improves to
   `unstructured-control-flow` 10 (from 13) and `missing-loop-or-switch` 4, against
   15 and 11 on the address-ordered default.
+- Port coverage, counted against the pinned Ghidra 12.1.3 headers: 66 of 168
+  `Rule` subclasses and 28 of 75 `Action` subclasses, 39% and 37%. 102 rules and
+  47 actions remain. Of the missing rules 68 are ordinary integer and boolean
+  rewriting, 18 concern sub-variable and piece flow, 10 are pointer or
+  type-directed, and 6 are floating-point.
 - Wired the third wave of ported passes into the graph pipeline: the twenty
   further expression rules, prototype and parameter recovery, and rich type
   inference with structure and array recovery. `excess-casts` and
