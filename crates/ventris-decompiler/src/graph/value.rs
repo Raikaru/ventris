@@ -138,8 +138,23 @@ pub fn mark_explicit_with(data: &Funcdata, highs: Variables) -> Naming {
         let load_must_be_named = op.opcode == op::LOAD
             && !(varnode.descendants.len() == 1
                 && nothing_writes_memory_before_use(data, id, output));
-        let effectful =
-            matches!(op.opcode, op::MULTIEQUAL | op::CALL | op::CALLIND) || load_must_be_named;
+        // A value a phi reads, merged into the same variable as that phi's
+        // output, is what advances the variable. `phi_copies` emits no
+        // assignment for it, because the assignment would read and write one
+        // name, so the update has to come from this value's own definition
+        // being a statement. Inlining it into a reader drops the update
+        // entirely: a loop counter kept its initial value and the loop never
+        // terminated.
+        let carries_an_update = varnode.descendants.iter().any(|reader| {
+            let operation = data.op(*reader);
+            operation.opcode == op::MULTIEQUAL
+                && operation
+                    .output
+                    .is_some_and(|merged| highs.high_of(merged) == highs.high_of(output))
+        });
+        let effectful = matches!(op.opcode, op::MULTIEQUAL | op::CALL | op::CALLIND)
+            || load_must_be_named
+            || carries_an_update;
         // A copy, extension or truncation of one constant is that constant in
         // different storage, and the printer writes a literal either way.
         // Naming it invents a variable the program does not contain: `iVar3 =

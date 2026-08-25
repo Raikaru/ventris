@@ -282,6 +282,42 @@ All notable Ventris changes are documented here.
   table-backed switch the rule can claim, and `dl_G_MOVEWORD`'s `switch 0 vs 1`
   is a `BRANCHIND` whose table this pipeline does not recover. The rule is
   correct and tested; it has no corpus function to improve yet.
+- Enabled `ConditionalJoin` by reaching Ghidra's branch representation, and
+  fixed the three correctness bugs that doing so exposed. Our lifter spells an
+  inverted conditional branch as a `BOOL_NEGATE`; Ghidra marks the CBRANCH with
+  `boolean_flip` and keeps one condition varnode, which is why `findDups` only
+  rejects a flip that has not propagated. `ActionCbranchFlip` folds the negation
+  into the branch by swapping its target and leaves the operation for its other
+  readers, exactly as the flag does. The joins then fire: the block dump shows
+  our block 43 at `start=800a6830 in=2 out=2` against Ghidra's block 7 at the
+  same address, with the body at `in=1 out=1`.
+  Three defects surfaced, all pre-existing and all silently wrong output:
+  `rule_while_do` left the composite looping onto itself, because `absorb`
+  derives a composite's exits from the absorbed members and a whiledo body's only
+  successor is the header. `ruleBlockInfLoop` then wrapped every recovered
+  `while` in a `while (true)`. The construct consumes the back edge -
+  `newBlockWhileDo` closes the loop inside the composite - so it now leaves
+  through the other branch and nowhere else.
+  `propagate_single_use_copies` removed a loop-carried update once its forward
+  reader absorbed it. The back edge is a reader the statement list cannot show,
+  so `pVar4 = pVar4 + 1` and `uVar6 = uVar6 - 1` disappeared and the loops
+  neither advanced nor terminated - they wrote the same address for ever.
+  Propagation inside a loop body now refuses a name the loop's test reads, or one
+  read at or before the assignment, the latter covering an update like `i = i - 1`
+  that reads itself.
+  `single_reader_after` exempted any construct that writes a name from counting
+  as a reader of it, on the grounds that it may read the name after that write.
+  That holds for an `if` and never for a loop, whose reads and writes are
+  circular. `reads_before_write` now answers the question in order, and reports a
+  loop as reading first whenever it reads at all. Without it an initializer was
+  substituted into the guard ahead of a loop and the loop ran on whatever the
+  variable happened to hold.
+  Measured on `TRK_fill_mem`: `if (c) do {...} while (c)` for the two loops
+  Ghidra recovers as `for` became `while` loops with initializers, updates and
+  tests all present and matching the oracle statement for statement. `0x80072c88`
+  21 gotos -> 19. `agrees` unchanged at 22 of 37; `missing-conditional` 2 -> 3,
+  from `TRK_fill_mem` joining a family whose finding - a trailing guarded loop we
+  do not recover - it already had. Three pinned tests.
 - Fixed the edge surgery `ConditionalJoin` depends on, which had two real
   defects found by running the experiment above.
   `move_out_edge` appended the new source to the predecessor list; Ghidra reaches

@@ -253,6 +253,63 @@ fn inverse_test(data: &Funcdata, operation: OpId) -> Option<i32> {
     }
 }
 
+/// Folds a branch's negated condition into the branch itself.
+pub struct ActionCbranchFlip;
+
+impl Action for ActionCbranchFlip {
+    fn name(&self) -> &'static str {
+        "cbranch-flip"
+    }
+
+    fn apply(&self, data: &mut Funcdata) -> usize {
+        let candidates: Vec<(GraphBlockId, OpId)> = data
+            .blocks()
+            .filter_map(|(block, _)| {
+                let branch = last_live_op(data, block)?;
+                (data.op(branch).opcode == op::CBRANCH).then_some((block, branch))
+            })
+            .collect();
+        let mut changed = 0;
+        for (block, branch) in candidates {
+            if data.block(block).successors.len() != 2 {
+                continue;
+            }
+            let Some(condition) = data.op(branch).inputs.get(1).copied() else {
+                continue;
+            };
+            let Some(def) = data.varnode(condition).def else {
+                continue;
+            };
+            if data.op(def).opcode != op::BOOL_NEGATE {
+                continue;
+            }
+            let Some(target) = branch_target_block(data, branch) else {
+                continue;
+            };
+            let other = data
+                .block(block)
+                .successors
+                .iter()
+                .copied()
+                .find(|successor| *successor != target);
+            let Some(other) = other else { continue };
+            let Some(source) = data.op(def).inputs.first().copied() else {
+                continue;
+            };
+            let size = data
+                .op(branch)
+                .inputs
+                .first()
+                .map(|value| data.varnode(*value).size)
+                .unwrap_or(4);
+            data.op_set_input(branch, source, 1);
+            set_branch_target(data, branch, other, size);
+            changed += 1;
+        }
+        changed
+    }
+}
+
 /// Normalizes a branch by inverting a branch-only comparison and its target.
 pub struct ActionNormalizeBranches;
 
@@ -301,16 +358,6 @@ impl Action for ActionNormalizeBranches {
                 .first()
                 .map(|value| data.varnode(*value).size)
                 .unwrap_or(4);
-            if data.op(def).opcode == op::BOOL_NEGATE {
-                let Some(source) = data.op(def).inputs.first().copied() else {
-                    continue;
-                };
-                data.op_set_input(branch, source, 1);
-                data.op_destroy(def);
-                set_branch_target(data, branch, other, size);
-                changed += 1;
-                continue;
-            }
             let Some(inverse) = inverse_test(data, def) else {
                 continue;
             };

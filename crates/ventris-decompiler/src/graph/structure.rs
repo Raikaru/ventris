@@ -886,6 +886,19 @@ impl<'a> Graph<'a> {
                 body: Box::new(inner),
             };
             self.absorb(node, &[body], structured);
+            // The body's only successor is this node, so `absorb` derives a
+            // self-edge from it and loses the real exit. The construct has
+            // consumed the back edge - `newBlockWhileDo` closes the loop inside
+            // the composite - so the composite leaves through the other branch
+            // and nowhere else. Without this the composite still loops onto
+            // itself and `ruleBlockInfLoop` wraps the whole `while` in a
+            // `while (true)`.
+            let exit = successors[1 - index];
+            self.nodes[node].successors = vec![exit];
+            self.nodes[node].predecessors.retain(|held| *held != node);
+            let entry = &mut self.nodes[exit].predecessors;
+            entry.retain(|held| *held != node);
+            entry.push(node);
             return true;
         }
         false

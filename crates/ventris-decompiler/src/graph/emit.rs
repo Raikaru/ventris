@@ -228,6 +228,18 @@ fn expression_depth(value: &Expr) -> usize {
 /// name the expression reads, which is the same condition that decided to name
 /// the value in the first place.
 fn propagate_single_use_copies(statements: &mut Vec<NativeStatement>) {
+    propagate_within(statements, None);
+}
+
+/// As [`propagate_single_use_copies`], told which names the enclosing loop reads
+/// on its next iteration.
+///
+/// A loop body's back edge is a reader the statement list cannot show. A name
+/// assigned in the body and read by the loop's test, or by a statement at or
+/// before the assignment, is read again on the next iteration, so the assignment
+/// is not dead once its forward reader has absorbed it: removing it left a loop
+/// counter at its initial value and the loop never terminated.
+fn propagate_within(statements: &mut Vec<NativeStatement>, carried: Option<&BTreeSet<String>>) {
     // Only within one straight run of statements. Crossing into or out of a
     // construct's body changes how many times the expression is evaluated.
     for statement in statements.iter_mut() {
@@ -237,11 +249,19 @@ fn propagate_single_use_copies(statements: &mut Vec<NativeStatement>) {
                 else_body,
                 ..
             } => {
-                propagate_single_use_copies(then_body);
-                propagate_single_use_copies(else_body);
+                propagate_within(then_body, carried);
+                propagate_within(else_body, carried);
             }
-            NativeStatement::While { body, .. } | NativeStatement::DoWhile { body, .. } => {
-                propagate_single_use_copies(body);
+            NativeStatement::While { condition, body }
+            | NativeStatement::DoWhile { body, condition } => {
+                let inner = source_names(condition);
+                propagate_within(body, Some(&inner));
+            }
+            NativeStatement::For {
+                condition, body, ..
+            } => {
+                let inner = condition.as_ref().map(source_names).unwrap_or_default();
+                propagate_within(body, Some(&inner));
             }
             _ => {}
         }
@@ -253,6 +273,21 @@ fn propagate_single_use_copies(statements: &mut Vec<NativeStatement>) {
             continue;
         };
         if !expression_is_pure(&source) || expression_depth(&source) > MAX_INLINE_DEPTH {
+            index += 1;
+            continue;
+        }
+        // Inside a loop the next iteration reads this name, either through the
+        // loop's test or through a statement it reaches before this assignment
+        // runs again - including the assignment itself, for an update like
+        // `i = i - 1`. Removing it once a later reader had absorbed it left a
+        // loop counter at its initial value and the loop never terminated.
+        if let Some(carried) = carried
+            && (carried.contains(&name) || {
+                let mut read = BTreeSet::new();
+                collect_read_names(&statements[..=index], &mut read, false);
+                read.contains(&name)
+            })
+        {
             index += 1;
             continue;
         }
@@ -281,6 +316,85 @@ fn propagate_single_use_copies(statements: &mut Vec<NativeStatement>) {
             _ => index += 1,
         }
     }
+}
+
+/// Whether a statement can read `name` before it writes it.
+///
+/// This decides whether a construct that writes a name may nonetheless be a
+/// reader of the value arriving at it. Walking in order answers that for an
+/// `if`: a body that assigns the name first reads only its own value afterwards.
+/// A loop cannot be answered that way - control returns to its top, so any read
+/// it contains can be of the incoming value - and is reported as reading first
+/// whenever it reads at all.
+fn reads_before_write(statement: &NativeStatement, name: &str) -> bool {
+    let reads = |value: &Expr| source_names(value).contains(name);
+    let body_reads = |body: &[NativeStatement]| {
+        let mut read = BTreeSet::new();
+        collect_read_names(body, &mut read, false);
+        read.contains(name)
+    };
+    match statement {
+        NativeStatement::While { condition, body }
+        | NativeStatement::DoWhile { body, condition } => reads(condition) || body_reads(body),
+        NativeStatement::For {
+            initializer,
+            condition,
+            step,
+            body,
+        } => {
+            condition.as_ref().is_some_and(reads)
+                || initializer
+                    .as_ref()
+                    .is_some_and(|held| reads_before_write(held, name))
+                || step
+                    .as_ref()
+                    .is_some_and(|held| reads_before_write(held, name))
+                || body_reads(body)
+        }
+        NativeStatement::IfElse {
+            condition,
+            then_body,
+            else_body,
+        } => {
+            if reads(condition) {
+                return true;
+            }
+            [then_body, else_body]
+                .into_iter()
+                .any(|body| run_reads_before_write(body, name))
+        }
+        NativeStatement::Switch {
+            expression,
+            cases,
+            default,
+        } => {
+            reads(expression)
+                || cases
+                    .iter()
+                    .any(|(_, body)| run_reads_before_write(body, name))
+                || run_reads_before_write(default, name)
+        }
+        // A read in a simple statement is counted before its own write, the way
+        // `p = p + q` reads the carried value and then replaces it.
+        other => {
+            let mut read = BTreeSet::new();
+            collect_read_names(std::slice::from_ref(other), &mut read, false);
+            read.contains(name)
+        }
+    }
+}
+
+/// As [`reads_before_write`], over a straight run that stops at the first write.
+fn run_reads_before_write(statements: &[NativeStatement], name: &str) -> bool {
+    for statement in statements {
+        if reads_before_write(statement, name) {
+            return true;
+        }
+        if writes_name(statement, name) {
+            return false;
+        }
+    }
+    false
 }
 
 /// Whether a statement writes `name` anywhere inside it, bodies included.
@@ -342,18 +456,19 @@ fn single_reader_after(
         let mut used = BTreeSet::new();
         collect_read_names(std::slice::from_ref(statement), &mut used, false);
         let ends_window = reads.iter().any(|read| writes_name(statement, read));
+        // A construct that writes the name may still read it first, and then
+        // the read is of the value being propagated. A loop is always in that
+        // position: its reads and writes are circular, so a read anywhere in it
+        // can be of the incoming value. Exempting a construct without asking
+        // let an initializer be substituted into a guard, and the loop after it
+        // ran on whatever the variable happened to hold.
         let compound = matches!(
             statement,
             NativeStatement::IfElse { .. }
                 | NativeStatement::While { .. }
                 | NativeStatement::DoWhile { .. }
-        );
-        // The read is counted before the write, because one statement commonly
-        // does both: `p = p + q` reads the carried value and then replaces it.
-        // Treating that as a write first meant the value looked as though it
-        // never reached a reader, and every link of an address chain kept its
-        // own name.
-        //
+                | NativeStatement::For { .. }
+        ) && !reads_before_write(statement, name);
         // That ordering is only knowable for a simple assignment. A construct
         // that writes one of these names somewhere in its body may well read it
         // *after* that write, in which case the read is of the new value and not
@@ -2537,6 +2652,116 @@ mod tests {
                 width: 1
             }),
             None
+        );
+    }
+    fn temp(name: &str) -> Expr {
+        Expr::Temporary {
+            name: name.into(),
+            width: 4,
+        }
+    }
+
+    fn assign(name: &str, source: Expr) -> NativeStatement {
+        NativeStatement::Assign {
+            destination: temp(name),
+            source,
+        }
+    }
+
+    fn minus_one(name: &str) -> Expr {
+        Expr::Binary {
+            op: crate::native::BinaryOp::Sub,
+            left: Box::new(temp(name)),
+            right: Box::new(Expr::Constant { value: 1, width: 4 }),
+        }
+    }
+
+    /// A loop body's update must survive even when its only forward reader
+    /// absorbs it: the next iteration reads it again through the back edge.
+    #[test]
+    fn a_loop_carried_update_is_not_propagated_away() {
+        let mut statements = vec![NativeStatement::While {
+            condition: temp("flag"),
+            body: vec![
+                assign("i", minus_one("i")),
+                assign(
+                    "flag",
+                    Expr::Binary {
+                        op: crate::native::BinaryOp::Equal,
+                        left: Box::new(temp("i")),
+                        right: Box::new(Expr::Constant { value: 0, width: 4 }),
+                    },
+                ),
+            ],
+        }];
+        propagate_single_use_copies(&mut statements);
+        let NativeStatement::While { body, .. } = &statements[0] else {
+            panic!("expected the loop");
+        };
+        assert_eq!(
+            body.len(),
+            2,
+            "the update must remain a statement, got {body:?}"
+        );
+        assert!(
+            matches!(
+                &body[0],
+                NativeStatement::Assign { destination, .. }
+                    if *destination == temp("i")
+            ),
+            "the counter's own assignment is what advances it"
+        );
+    }
+
+    /// An initializer read by a following loop has more than one reader, whether
+    /// or not the loop also writes the name.
+    #[test]
+    fn an_initializer_is_not_substituted_into_a_guard_a_loop_follows() {
+        let mut statements = vec![
+            assign("i", temp("count")),
+            NativeStatement::While {
+                condition: temp("i"),
+                body: vec![assign("i", minus_one("i"))],
+            },
+        ];
+        propagate_single_use_copies(&mut statements);
+        assert_eq!(
+            statements.len(),
+            2,
+            "the initializer must survive, got {statements:?}"
+        );
+        assert!(matches!(&statements[0], NativeStatement::Assign { .. }));
+    }
+
+    /// The ordered test that decides whether a construct writing a name may
+    /// still be a reader of the value arriving at it.
+    #[test]
+    fn a_construct_reads_before_writing_unless_it_assigns_first() {
+        let name = "i";
+        // An `if` that assigns before reading reads only its own value.
+        let assigns_first = NativeStatement::IfElse {
+            condition: temp("flag"),
+            then_body: vec![assign("i", temp("start")), assign("j", temp("i"))],
+            else_body: Vec::new(),
+        };
+        assert!(!reads_before_write(&assigns_first, name));
+
+        // The same `if` reading first does read the incoming value.
+        let reads_first = NativeStatement::IfElse {
+            condition: temp("flag"),
+            then_body: vec![assign("j", temp("i")), assign("i", temp("start"))],
+            else_body: Vec::new(),
+        };
+        assert!(reads_before_write(&reads_first, name));
+
+        // A loop is circular, so assigning first proves nothing.
+        let loop_assigns_first = NativeStatement::While {
+            condition: temp("flag"),
+            body: vec![assign("i", temp("start")), assign("j", temp("i"))],
+        };
+        assert!(
+            reads_before_write(&loop_assigns_first, name),
+            "control returns to the top, so the read can be of the incoming value"
         );
     }
 }

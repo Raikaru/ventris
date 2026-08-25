@@ -2016,7 +2016,7 @@ impl NativeDecompiler {
             }
         }
         let pipeline = graph::action::default_pipeline();
-        let control_flow: [&dyn graph::action::Action; 11] = [
+        let control_flow: [&dyn graph::action::Action; 12] = [
             &graph::branchaction::ActionDeterminedBranch,
             &graph::branchaction::ActionRedundBranch,
             &graph::branchaction::ActionDoNothing,
@@ -2026,6 +2026,7 @@ impl NativeDecompiler {
             // Resolving a loaded function pointer to a constant turns an
             // indirect call into a named callee, which then gets a prototype.
             &graph::condprop::ActionDeindirect,
+            &graph::branchaction::ActionCbranchFlip,
             // Ghidra runs `ActionNodeJoin` here, after the unreachable and
             // determined-branch passes and before the conditional ones. Merging
             // two blocks that test the same value removes an edge, which is what

@@ -37,8 +37,12 @@ impl super::action::Action for ActionNodeJoin {
 /// `ActionNodeJoin::apply`. Returns the number of joins performed.
 fn join_all(data: &mut Funcdata) -> usize {
     let mut count = 0;
+    // The blocks present when the pass starts. A joined block is new work the
+    // next pass will see; feeding it back into this one lets a join build on a
+    // graph the captured operand slots no longer describe.
+    let original = data.blocks.len();
     let mut index = 0;
-    while index < data.blocks.len() {
+    while index < original {
         let block = GraphBlockId(index as u32);
         index += 1;
         if data.block(block).successors.len() != 2 {
