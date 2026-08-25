@@ -61,6 +61,7 @@ pub fn emit_with_types(
 /// structuring pass recovered is emitted as the construct it recovered, so no
 /// later pass has to infer it back from labels.
 pub fn emit_structured(
+    tables: &[super::jumptable::JumpTable],
     data: &Funcdata,
     register_name: &dyn Fn(u32, u64, u32) -> Option<String>,
     types: &Types,
@@ -81,7 +82,7 @@ pub fn emit_structured(
         types,
         architecture,
     };
-    let tree = super::structure::structure(data);
+    let tree = super::structure::structure(data, tables);
     let scoped = emitter.scoped_names();
     let mut phi_copies: BTreeMap<GraphBlockId, Vec<NativeStatement>> = BTreeMap::new();
     for (block, copy) in emitter.resolver.phi_copies() {
@@ -1071,6 +1072,10 @@ fn goto_targets(data: &Funcdata, tree: &super::structure::Structured) -> BTreeSe
                 pending.push(body);
             }
             Structured::DoWhile { body, .. } | Structured::InfLoop { body } => pending.push(body),
+            Structured::Switch { header, cases, .. } => {
+                pending.push(header);
+                pending.extend(cases.iter().map(|(_, case)| case));
+            }
             Structured::Basic(block) => {
                 // An unclaimed branch stays in the block that owns it, so its
                 // target needs a label just as much as an explicit `Goto`'s.
@@ -1237,6 +1242,36 @@ impl Emitter<'_> {
                     condition: Expr::Constant { value: 1, width: 1 },
                     body: self.emit_tree(body, scoped, phi_copies, targets),
                 }]
+            }
+            Structured::Switch {
+                header,
+                selector,
+                cases,
+                has_exit,
+            } => {
+                let mut statements = self.emit_tree(header, scoped, phi_copies, targets);
+                // The indirect transfer the header ends with is replaced by the
+                // construct that claimed its edges.
+                statements
+                    .retain(|statement| !matches!(statement, NativeStatement::IndirectGoto(_)));
+                let mut labelled = Vec::new();
+                let mut default = Vec::new();
+                for (label, case) in cases {
+                    let mut body = self.emit_tree(case, scoped, phi_copies, targets);
+                    if *has_exit {
+                        body.push(NativeStatement::Break);
+                    }
+                    match label {
+                        Some(label) => labelled.push((*label, body)),
+                        None => default = body,
+                    }
+                }
+                statements.push(NativeStatement::Switch {
+                    expression: self.resolver.resolve(*selector),
+                    cases: labelled,
+                    default,
+                });
+                statements
             }
             Structured::Goto { target, .. } => {
                 vec![NativeStatement::Goto(self.data.block(*target).start)]

@@ -1910,6 +1910,7 @@ impl NativeDecompiler {
         function: &NativeFunction,
         abi: Option<&Abi>,
         call_prototypes: Option<&BTreeMap<u64, NativeCallPrototype>>,
+        memory: Option<&NativeMemory>,
     ) -> NativeDocument {
         let ssa = build_ssa(function);
         let mut solver = TypeSolver::default();
@@ -2100,6 +2101,18 @@ impl NativeDecompiler {
         // address-ordered emitter's output. Its rules assume that shape, and
         // running them over graph-emitted statements loses conditionals. The
         // graph's own rules already ran, on the graph.
+        // A switch's case labels live in the image, not the graph, so the
+        // structurer can only recover a multi-way construct when the table can
+        // be read. Without memory the branch keeps its edges and each becomes a
+        // `goto`, exactly as before: inventing labels would print alternatives
+        // as though they were a sequence.
+        let tables = memory
+            .map(|memory| {
+                graph::jumptable::recover_jump_tables(&data, &|address, width| {
+                    (memory.read)(address, width)
+                })
+            })
+            .unwrap_or_default();
         let recovered = graph::types::infer_types(&data, &BTreeMap::new());
         // The rich table keeps the structures and arrays that `Type` cannot
         // represent, which is what lets a field read render as `p->field_40`
@@ -2159,6 +2172,7 @@ impl NativeDecompiler {
             })
         });
         let statements = graph::emit::emit_structured(
+            &tables,
             &data,
             &naming,
             &recovered,

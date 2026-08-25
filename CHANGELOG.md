@@ -249,6 +249,30 @@ All notable Ventris changes are documented here.
 - Measured against Ghidra on the corpus, the graph path improves to
   `unstructured-control-flow` 10 (from 13) and `missing-loop-or-switch` 4, against
   15 and 11 on the address-ordered default.
+- Ported `CollapseStructure::ruleBlockSwitch`, the last collapse rule that
+  handles a node with more than two successors. Every other rule requires a
+  two-way branch, so an indirect branch was a node no construct could claim and
+  each of its edges left as a `goto`. The rule finds the exit block — a case
+  target that loops back, or that several paths reach, or that itself branches,
+  falling back to the single successor the cases share — checks that each case is
+  entered only by falling in from the switch and leaves only to that exit, and
+  collapses the lot into one construct.
+- Added `Structured::Switch` and its emission as `NativeStatement::Switch`, which
+  the printer already supported. It carries the selector varnode and each case's
+  recovered label, and the traversals that walk the construct tree
+  (`drop_jumps_to`, `collect_blocks`, `ends_in_transfer`, `goto_targets`) handle
+  it.
+- The case labels come from `jumptable::recover_jump_tables`, which reads the
+  table out of the image, so `decompile_via_graph` now takes the memory accessor
+  and threads the recovered tables to the structurer. **Without a table the rule
+  declines**: the cases are alternatives, and emitting them unlabelled would
+  print them as a sequence that runs in turn. Two tests pin both directions — a
+  multi-way branch with a table becomes a switch with no `goto`, and the same
+  branch without one keeps its edges.
+- Census unchanged at 22 agrees: none of the 37 corpus functions has a
+  table-backed switch the rule can claim, and `dl_G_MOVEWORD`'s `switch 0 vs 1`
+  is a `BRANCHIND` whose table this pipeline does not recover. The rule is
+  correct and tested; it has no corpus function to improve yet.
 - Tried and reverted `LoopBody::labelExitEdges`' candidate ordering. Ghidra
   orders a loop's exit-edge candidates interior-body-nodes first, then the head,
   then the tails in reverse ("exits from more preferred tails later"), with every

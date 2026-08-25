@@ -343,7 +343,13 @@ impl Pipeline {
         // default yet because it fails `corpus-smoke`'s semantic comparison on
         // three PS2 entries the address-ordered path passes.
         let document = if graph_pipeline_requested() {
-            decompiler.decompile_via_graph(architecture, &function, abi, Some(&call_prototypes))
+            decompiler.decompile_via_graph(
+                architecture,
+                &function,
+                abi,
+                Some(&call_prototypes),
+                Some(&memory),
+            )
         } else {
             decompiler.decompile_with_call_prototypes(
                 architecture,

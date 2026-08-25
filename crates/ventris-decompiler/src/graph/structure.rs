@@ -85,6 +85,20 @@ pub enum Structured {
         from: GraphBlockId,
         target: GraphBlockId,
     },
+    /// A multi-way branch and its cases.
+    ///
+    /// `header` is everything up to and including the indirect branch. Each case
+    /// is one recovered body; `has_exit` records whether the cases converge on a
+    /// block after the switch, which is what lets the emitter spell `break`.
+    Switch {
+        header: Box<Structured>,
+        /// The value the branch selects on.
+        selector: super::VarnodeId,
+        /// Each case's label and body. A case with no label is the default: the
+        /// table named no value for it.
+        cases: Vec<(Option<u64>, Structured)>,
+        has_exit: bool,
+    },
     /// One edge of a two-way branch that no construct claimed. The other edge
     /// remains the fallthrough, so the branch keeps its condition instead of
     /// becoming an unconditional jump that orphans it.
@@ -119,8 +133,8 @@ type NodeId = usize;
 ///
 /// The result is a single construct when the flow is fully structured, and a
 /// list containing `Goto` where it is not.
-pub fn structure(data: &Funcdata) -> Structured {
-    let mut graph = Graph::of(data);
+pub fn structure(data: &Funcdata, tables: &[super::jumptable::JumpTable]) -> Structured {
+    let mut graph = Graph::of(data, tables);
     graph.collapse();
     graph.finish()
 }
@@ -134,10 +148,12 @@ struct Graph<'a> {
     /// Count of edges given up as gotos, so a stalled collapse can tell whether
     /// re-marking loop exits made progress.
     surrendered: usize,
+    /// Recovered switch tables, so a multi-way branch can name its cases.
+    tables: &'a [super::jumptable::JumpTable],
 }
 
 impl<'a> Graph<'a> {
-    fn of(data: &'a Funcdata) -> Self {
+    fn of(data: &'a Funcdata, tables: &'a [super::jumptable::JumpTable]) -> Self {
         let mut nodes = Vec::new();
         let mut of_block = BTreeMap::new();
         for (id, _) in data.blocks() {
@@ -182,6 +198,7 @@ impl<'a> Graph<'a> {
             of_block,
             entry,
             surrendered: 0,
+            tables,
         }
     }
 
@@ -220,6 +237,7 @@ impl<'a> Graph<'a> {
                         continue;
                     }
                     if self.rule_cat(node)
+                        || self.rule_block_switch(node)
                         || self.rule_if_else(node)
                         || self.rule_while_do(node)
                         || self.rule_do_while(node)
@@ -885,6 +903,132 @@ impl<'a> Graph<'a> {
         })
     }
 
+    /// Whether this node's outgoing branch is an indirect multi-way one.
+    ///
+    /// Ghidra's `FlowBlock::isSwitchOut`, which is set when jump-table recovery
+    /// claimed the block's `BRANCHIND`.
+    fn is_switch_out(&self, node: NodeId) -> bool {
+        let block = self.nodes[node].exit;
+        self.data
+            .block(block)
+            .ops
+            .last()
+            .copied()
+            .is_some_and(|last| self.data.op(last).opcode == op::BRANCHIND)
+    }
+
+    /// A multi-way branch whose cases each fall to one block after the switch.
+    ///
+    /// Ghidra's `ruleBlockSwitch`. Every other rule here requires a two-way
+    /// branch, so without this an indirect branch is a node no construct can
+    /// claim and each of its edges becomes a `goto`.
+    fn rule_block_switch(&mut self, node: NodeId) -> bool {
+        if !self.is_switch_out(node) {
+            return false;
+        }
+        let successors = self.nodes[node].successors.clone();
+        if successors.len() < 2 {
+            return false;
+        }
+        // The "obvious" exit: a case target that loops back to the switch, or
+        // that several paths reach, or that itself branches.
+        let mut exit = None;
+        for successor in successors.iter().copied() {
+            if successor == node
+                || self.nodes[successor].successors.len() > 1
+                || self.nodes[successor].predecessors.len() > 1
+            {
+                exit = Some(successor);
+                break;
+            }
+        }
+        match exit {
+            None => {
+                // Every case target has one predecessor and at most one
+                // successor, so the first successor any of them has is the exit.
+                for successor in successors.iter().copied() {
+                    if self.is_switch_out(successor) {
+                        return false; // A nested switch resolves first.
+                    }
+                    if self.nodes[successor].successors.len() == 1 {
+                        let candidate = self.nodes[successor].successors[0];
+                        match exit {
+                            Some(known) if known != candidate => return false,
+                            _ => exit = Some(candidate),
+                        }
+                    }
+                }
+            }
+            Some(exit) => {
+                for successor in successors.iter().copied() {
+                    if successor == exit {
+                        continue; // The switch may go straight to the exit.
+                    }
+                    // A case can only be entered by falling into it from the
+                    // switch, and may leave only to the exit.
+                    if self.nodes[successor].predecessors.len() > 1
+                        || self.nodes[successor].successors.len() > 1
+                        || self.is_switch_out(successor)
+                    {
+                        return false;
+                    }
+                    if self.nodes[successor].successors.len() == 1
+                        && self.nodes[successor].successors[0] != exit
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+        let cases: Vec<NodeId> = successors
+            .iter()
+            .copied()
+            .filter(|successor| Some(*successor) != exit)
+            .collect();
+        if cases.is_empty() {
+            return false;
+        }
+        // Only a recovered table can name the cases. Without one the branch
+        // keeps its edges and each becomes a `goto`, because printing
+        // alternatives as an unlabelled sequence would say they run in turn.
+        let block = self.nodes[node].exit;
+        let Some(table) = self.tables.iter().find(|table| {
+            self.data
+                .block(block)
+                .ops
+                .iter()
+                .any(|candidate| *candidate == table.branch)
+        }) else {
+            return false;
+        };
+        let labelled: Vec<(Option<u64>, Structured)> = cases
+            .iter()
+            .copied()
+            .map(|case| {
+                let start = self.data.block(self.nodes[case].entry).start;
+                let label = table
+                    .cases
+                    .iter()
+                    .find(|(_, target)| *target == start)
+                    .map(|(label, _)| *label);
+                (label, self.nodes[case].body.clone())
+            })
+            .collect();
+        // Every case but the default must carry a label, or the construct would
+        // claim a case the table does not describe.
+        if labelled.iter().filter(|(label, _)| label.is_none()).count() > 1 {
+            return false;
+        }
+        let body = Structured::Switch {
+            header: Box::new(self.nodes[node].body.clone()),
+            selector: table.switch_value,
+            cases: labelled,
+            has_exit: exit.is_some(),
+        };
+        self.absorb(node, &cases, body);
+        true
+    }
+
     /// Surrenders one edge as a `goto` so collapsing can continue.
     ///
     /// The edge chosen is a back edge if there is one, because a loop that no
@@ -1075,6 +1219,12 @@ fn drop_jumps_to(node: &mut Structured, head: GraphBlockId) {
         Structured::DoWhile { body, .. } | Structured::InfLoop { body } => {
             drop_jumps_to(body, head)
         }
+        Structured::Switch { header, cases, .. } => {
+            drop_jumps_to(header, head);
+            for (_, case) in cases.iter_mut() {
+                drop_jumps_to(case, head);
+            }
+        }
         Structured::Basic(_) | Structured::Goto { .. } | Structured::IfGoto { .. } => {}
     }
 }
@@ -1108,6 +1258,12 @@ fn collect_blocks(node: &Structured, into: &mut BTreeSet<GraphBlockId>) {
         }
         Structured::DoWhile { body, .. } | Structured::InfLoop { body } => {
             collect_blocks(body, into)
+        }
+        Structured::Switch { header, cases, .. } => {
+            collect_blocks(header, into);
+            for (_, case) in cases {
+                collect_blocks(case, into);
+            }
         }
         Structured::Goto { .. } | Structured::IfGoto { .. } => {}
     }
@@ -1176,6 +1332,8 @@ impl Graph<'_> {
 
 #[cfg(test)]
 mod tests {
+    use ventris_lifter::REGISTER_SPACE;
+
     use super::*;
     use crate::graph::SeqNum;
 
@@ -1202,7 +1360,7 @@ mod tests {
         data.add_edge(first, second);
         data.add_edge(second, third);
 
-        let structured = structure(&data);
+        let structured = structure(&data, &[]);
         let Structured::List(members) = &structured else {
             panic!("expected a list, got {structured:?}");
         };
@@ -1226,7 +1384,7 @@ mod tests {
         data.add_edge(taken, join);
         data.add_edge(fallthrough, join);
 
-        let structured = structure(&data);
+        let structured = structure(&data, &[]);
         assert!(
             contains_if_else(&structured, true),
             "expected an if/else with both clauses: {structured:?}"
@@ -1245,7 +1403,7 @@ mod tests {
         data.add_edge(head, clause);
         data.add_edge(clause, after);
 
-        let structured = structure(&data);
+        let structured = structure(&data, &[]);
         assert!(
             contains_if_else(&structured, false),
             "expected an if with no else: {structured:?}"
@@ -1264,7 +1422,7 @@ mod tests {
         data.add_edge(head, after);
         data.add_edge(body, head);
 
-        let structured = structure(&data);
+        let structured = structure(&data, &[]);
         assert!(
             contains(&structured, &|node| matches!(
                 node,
@@ -1284,7 +1442,7 @@ mod tests {
         data.add_edge(head, head);
         data.add_edge(head, after);
 
-        let structured = structure(&data);
+        let structured = structure(&data, &[]);
         assert!(
             contains(&structured, &|node| matches!(
                 node,
@@ -1309,7 +1467,7 @@ mod tests {
         data.add_edge(left, right);
         data.add_edge(right, left);
 
-        let structured = structure(&data);
+        let structured = structure(&data, &[]);
         // The surrendered edge may be conditional or unconditional depending on
         // which one the collapse gives up; either is an unstructured transfer.
         assert!(
@@ -1340,7 +1498,7 @@ mod tests {
         data.add_edge(second, after);
         data.add_edge(clause, after);
 
-        let structured = structure(&data);
+        let structured = structure(&data, &[]);
         assert!(
             contains(&structured, &|node| matches!(
                 node,
@@ -1365,7 +1523,7 @@ mod tests {
         data.add_edge(head, after);
         data.add_edge(clause, after);
 
-        let structured = structure(&data);
+        let structured = structure(&data, &[]);
         assert!(
             !contains(&structured, &|node| matches!(
                 node,
@@ -1387,7 +1545,7 @@ mod tests {
         data.add_edge(entry, spin);
         data.add_edge(spin, spin);
 
-        let structured = structure(&data);
+        let structured = structure(&data, &[]);
         assert!(
             contains(&structured, &|node| matches!(
                 node,
@@ -1413,7 +1571,7 @@ mod tests {
         let ret = data.new_op(op::RETURN, seq(0x1010), vec![link]);
         data.op_insert_end(ret, bail);
 
-        let structured = structure(&data);
+        let structured = structure(&data, &[]);
         assert!(
             contains(&structured, &|node| matches!(
                 node,
@@ -1477,6 +1635,10 @@ mod tests {
             Structured::DoWhile { body, .. } | Structured::InfLoop { body } => {
                 contains(body, predicate)
             }
+            Structured::Switch { header, cases, .. } => {
+                contains(header, predicate)
+                    || cases.iter().any(|(_, case)| contains(case, predicate))
+            }
             Structured::Basic(_) | Structured::Goto { .. } | Structured::IfGoto { .. } => false,
         }
     }
@@ -1488,6 +1650,84 @@ mod tests {
                 Structured::IfElse { else_body, .. } if else_body.is_some() == with_else
             )
         })
+    }
+    #[test]
+    fn a_multi_way_branch_with_a_table_becomes_a_switch() {
+        // Every other rule here requires a two-way branch, so without
+        // `ruleBlockSwitch` an indirect branch is a node no construct claims and
+        // each of its edges leaves as a `goto`.
+        let mut data = Funcdata::default();
+        let head = data.new_block(0x1000);
+        let case_a = data.new_block(0x1010);
+        let case_b = data.new_block(0x1020);
+        let join = data.new_block(0x1030);
+        for (from, to) in [
+            (head, case_a),
+            (head, case_b),
+            (case_a, join),
+            (case_b, join),
+        ] {
+            data.add_edge(from, to);
+        }
+        let selector = data.new_varnode(REGISTER_SPACE, 0x10, 4);
+        data.mark_input(selector);
+        let branch = data.new_op(op::BRANCHIND, seq(0x1000), vec![selector]);
+        data.op_insert_end(branch, head);
+
+        let table = super::super::jumptable::JumpTable {
+            branch,
+            switch_value: selector,
+            cases: vec![(0, 0x1010), (1, 0x1020)],
+            default_target: None,
+        };
+        let structured = structure(&data, std::slice::from_ref(&table));
+        assert!(
+            contains(&structured, &|node| matches!(
+                node,
+                Structured::Switch { .. }
+            )),
+            "expected a switch construct, got {structured:?}"
+        );
+        assert!(
+            !contains(&structured, &|node| matches!(
+                node,
+                Structured::Goto { .. } | Structured::IfGoto { .. }
+            )),
+            "a fully structured switch needs no goto: {structured:?}"
+        );
+    }
+
+    #[test]
+    fn a_multi_way_branch_without_a_table_is_not_claimed() {
+        // The case labels live in the image. With no table the cases cannot be
+        // named, and printing alternatives as an unlabelled sequence would say
+        // they run in turn, so the branch must keep its edges.
+        let mut data = Funcdata::default();
+        let head = data.new_block(0x1000);
+        let case_a = data.new_block(0x1010);
+        let case_b = data.new_block(0x1020);
+        let join = data.new_block(0x1030);
+        for (from, to) in [
+            (head, case_a),
+            (head, case_b),
+            (case_a, join),
+            (case_b, join),
+        ] {
+            data.add_edge(from, to);
+        }
+        let selector = data.new_varnode(REGISTER_SPACE, 0x10, 4);
+        data.mark_input(selector);
+        let branch = data.new_op(op::BRANCHIND, seq(0x1000), vec![selector]);
+        data.op_insert_end(branch, head);
+
+        let structured = structure(&data, &[]);
+        assert!(
+            !contains(&structured, &|node| matches!(
+                node,
+                Structured::Switch { .. }
+            )),
+            "no table means no switch: {structured:?}"
+        );
     }
 }
 
@@ -1508,6 +1748,11 @@ fn ends_in_transfer(node: &Structured) -> bool {
         } => else_body
             .as_ref()
             .is_some_and(|other| ends_in_transfer(then_body) && ends_in_transfer(other)),
+        // A switch whose every case transfers has no fallthrough either, but
+        // only when it has no exit block for control to converge on.
+        Structured::Switch {
+            cases, has_exit, ..
+        } => !has_exit && cases.iter().all(|(_, case)| ends_in_transfer(case)),
         Structured::Basic(_)
         | Structured::IfGoto { .. }
         | Structured::WhileDo { .. }
