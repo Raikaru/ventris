@@ -51,10 +51,19 @@ argument recovery, `Cover` live ranges with `ActionMergeCopy`/`MergeAdjacent`/
 
 That is 109 of Ghidra's 168 `Rule` subclasses and 28 of its 75 `Action`
 subclasses — 65% and 37%. The port is **not** complete: 59 rules and 47 actions
-remain. Each omission is recorded in `CHANGELOG.md` with the Ghidra state it
-needs, and every one of them needs state this graph does not carry —
-`Datatype` metatypes, `CircleRange`, byte-consumption masks, address-tied and
-type-lock flags, or `FuncCallSpecs`/`ProtoModel`.
+remain by that count. Of the 59 rules, ten are recorded in `CHANGELOG.md` as
+needing Ghidra state this graph does not carry, one has no implementation in the
+pinned source, and 21 live outside `ruleaction.cc` in the double-precision and
+bit-field families; the rest are simply not done.
+
+Both figures count a Rust item carrying the C++ class's own name, which is the
+only definition that can be checked mechanically. It understates action
+coverage: `ActionHeritage`, `ActionSetCasts`, `ActionDeadCode` and
+`ActionMapGlobals` are ported as the `heritage`, `casts`, `deadcode` and
+`stackframe` modules rather than as same-named structs, and are cited there
+against the C++ they came from. Eighteen more actions are mentioned in the
+source, but some of those mentions record what could *not* be ported, so the
+count deliberately claims none of them.
 
 Select it with `VENTRIS_PIPELINE=graph`. Measured against the Ghidra 12.1.3
 decompiler on all 37 hash-verified corpus functions, the graph path leads the
