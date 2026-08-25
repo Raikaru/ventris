@@ -71,14 +71,16 @@ shipping address-ordered path on seven of the census families and ties four:
 | unreduced-flag-expression | 1 | **0** |
 | call-census | **3** | 4 |
 
-It is still opt-in. It fails `corpus-smoke`'s semantic comparison on the PS2
-entries, and the residual is now exactly two dimensions: `declaration_order` on
-seven functions and `casts` on five. Both are the same thing — the graph path
-names locals the address-ordered path inlines, and each name carries a
-declaration and usually a cast. Correctness is equal; verbosity is not. The
-remaining work is to name fewer values, which means merging address arithmetic
-into one variable rather than several. `agrees` counts functions with no
-classified difference at all, so it is the aggregate to read.
+It is still opt-in. It fails `corpus-smoke`'s semantic comparison on five PS2
+`alloc*` functions, on two dimensions: `declaration_order` (one local named
+where the baseline has none) and `casts` (two against one). Both come from the
+same place. The counter is read twice — once to scale, once to increment — so it
+is named once; the address-ordered path inlines it and reads memory twice
+instead. The extra cast is a return type of `int64_t` where the ABI's pointer
+width is 32; narrowing it needs return-type evidence this path does not yet
+have, and guessing would discard a real 64-bit return on a 64-bit ABI such as
+N64. `agrees` counts functions with no classified difference at all, so it is
+the aggregate to read.
 
 | Defect family | Address-ordered | Ported graph |
 |---|---:|---:|
