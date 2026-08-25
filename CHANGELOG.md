@@ -292,6 +292,21 @@ All notable Ventris changes are documented here.
 - A recovered structure field below its base no longer collapses to `field_0`.
   Clamping the offset to zero declared the same member twice, so the rendered C
   did not compile.
+- Reads at a recovered structure field render as `p->field_2868` instead of a
+  cast through a computed address. The rich type table is now threaded to the
+  resolver, since the shared `Type` cannot carry a structure. A field only forms
+  when the address computation inlines into the read and the offset is exactly a
+  field start: a named address already added the offset, and a read part-way into
+  a field is not that field.
+- Fixed a stack overflow in call-argument recovery. `is_used` looks through
+  merges to decide whether a value is real, and excluded only the value itself,
+  so two merges naming each other — an ordinary loop-carried value — recursed
+  until the stack ran out. `decompSZS_subroutine__FPUcPUc` crashed the
+  decompiler outright; it now decompiles, which is also why it starts appearing
+  in the structural families it fails.
+- A jump or return directly following another is dropped. A transfer computes
+  nothing, so removing an unreachable one loses no work — unlike the general
+  unreachable-code pruning, which did.
 
 - Added `LiftedInstruction::skips_delay_slot`, which reports the MIPS
   likely-branch shape so consumers stop treating its sequential successor as

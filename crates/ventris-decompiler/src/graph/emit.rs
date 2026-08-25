@@ -67,10 +67,13 @@ pub fn emit_structured(
     parameters: &BTreeMap<(u32, u64), (String, Type)>,
     stack_pointer: Option<super::guard::Location>,
     architecture: ventris_lifter::Architecture,
+    rich: &super::typefactory::RecoveredTypes,
+    factory: &super::typefactory::TypeFactory,
 ) -> Vec<NativeStatement> {
     let naming = mark_explicit_named(data, merge_all(data), types, stack_pointer);
-    let resolver =
-        Resolver::with_types(data, &naming, register_name, types).with_parameters(parameters);
+    let resolver = Resolver::with_types(data, &naming, register_name, types)
+        .with_parameters(parameters)
+        .with_rich(rich, factory);
     let emitter = Emitter {
         data,
         naming: &naming,
@@ -98,8 +101,50 @@ pub fn emit_structured(
     drop_trailing_gotos_to_following_label(&mut statements);
     prefer_non_empty_then(&mut statements);
     drop_self_assignments(&mut statements);
+    drop_transfers_after_a_transfer(&mut statements);
     drop_labels_nothing_needs(&mut statements);
     statements
+}
+
+/// Removes a jump or return that directly follows another, with no label
+/// between them.
+///
+/// This is the one thing safe to delete after an unconditional transfer: a
+/// transfer computes nothing, so removing an unreachable one loses no work.
+/// Anything else that follows may be reached by a jump from elsewhere and gets
+/// a label instead.
+fn drop_transfers_after_a_transfer(statements: &mut Vec<NativeStatement>) {
+    for statement in statements.iter_mut() {
+        match statement {
+            NativeStatement::IfElse {
+                then_body,
+                else_body,
+                ..
+            } => {
+                drop_transfers_after_a_transfer(then_body);
+                drop_transfers_after_a_transfer(else_body);
+            }
+            NativeStatement::While { body, .. } | NativeStatement::DoWhile { body, .. } => {
+                drop_transfers_after_a_transfer(body);
+            }
+            _ => {}
+        }
+    }
+    let mut index = 1;
+    while index < statements.len() {
+        let unreachable_transfer = matches!(
+            statements[index - 1],
+            NativeStatement::Goto(_) | NativeStatement::Return(_)
+        ) && matches!(
+            statements[index],
+            NativeStatement::Goto(_) | NativeStatement::Return(_)
+        );
+        if unreachable_transfer {
+            statements.remove(index);
+            continue;
+        }
+        index += 1;
+    }
 }
 
 /// Removes labels no jump names and no transfer strands.

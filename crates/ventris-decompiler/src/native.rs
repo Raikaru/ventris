@@ -1997,6 +1997,17 @@ impl NativeDecompiler {
         // running them over graph-emitted statements loses conditionals. The
         // graph's own rules already ran, on the graph.
         let recovered = graph::types::infer_types(&data, &BTreeMap::new());
+        // The rich table keeps the structures and arrays that `Type` cannot
+        // represent, which is what lets a field read render as `p->field_40`
+        // instead of a cast through a computed address.
+        let factory = graph::typefactory::TypeFactory::new(
+            abi.map(|abi| u32::from(abi.pointer_bits)).unwrap_or(32),
+        );
+        let rich = if std::env::var("VENTRIS_NO_RICH").is_ok() {
+            Default::default()
+        } else {
+            graph::typefactory::infer(&data, &factory, &BTreeMap::new())
+        };
         // Argument locations name themselves as parameters, which is how the
         // recovered prototype gets its arguments.
         let mut parameter_names: BTreeMap<(u32, u64), (String, Type)> = BTreeMap::new();
@@ -2050,6 +2061,8 @@ impl NativeDecompiler {
             &parameter_names,
             stack_slot,
             architecture,
+            &rich,
+            &factory,
         );
         // A matched save and restore of a callee-saved register says nothing
         // about what the function computes, and naming provably private stack

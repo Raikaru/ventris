@@ -165,6 +165,13 @@ pub struct Resolver<'a> {
     register_name: &'a dyn Fn(u32, u64, u32) -> Option<String>,
     types: &'a Types,
     parameters: &'a BTreeMap<(u32, u64), (String, Type)>,
+    /// Structures and arrays, which `Type` cannot represent. With them a read
+    /// at a known field offset renders as `p->field_40`; without them it can
+    /// only be a cast through a computed address.
+    rich: Option<(
+        &'a super::typefactory::RecoveredTypes,
+        &'a super::typefactory::TypeFactory,
+    )>,
 }
 
 impl<'a> Resolver<'a> {
@@ -189,7 +196,83 @@ impl<'a> Resolver<'a> {
             register_name,
             types,
             parameters: empty_parameters(),
+            rich: None,
         }
+    }
+
+    /// Supplies the recovered structure and array types.
+    pub fn with_rich(
+        mut self,
+        rich: &'a super::typefactory::RecoveredTypes,
+        factory: &'a super::typefactory::TypeFactory,
+    ) -> Self {
+        self.rich = Some((rich, factory));
+        self
+    }
+
+    /// The field a load's address names, when the base is a known structure.
+    fn field_access(
+        &self,
+        address: VarnodeId,
+        width: u32,
+        active: &mut BTreeSet<VarnodeId>,
+    ) -> Option<Expr> {
+        let (rich, _) = self.rich?;
+        // The address computation has to inline into this read. If it carries a
+        // name of its own then the offset is already added by an assignment,
+        // and naming the field here would add it a second time.
+        if self.naming.name_of(address).is_some() {
+            return None;
+        }
+        // The address expression inlines into this read, so it must be guarded
+        // exactly like any other inlined definition. Without this the base can
+        // resolve back through the read being built and the recursion never
+        // ends: `decompSZS_subroutine` overflowed the stack.
+        if !active.insert(address) {
+            return None;
+        }
+        let field = self.field_of(address, width, rich, active);
+        active.remove(&address);
+        field
+    }
+
+    fn field_of(
+        &self,
+        address: VarnodeId,
+        width: u32,
+        rich: &super::typefactory::RecoveredTypes,
+        active: &mut BTreeSet<VarnodeId>,
+    ) -> Option<Expr> {
+        use super::typefactory::DataType;
+        let def = self.data.varnode(address).def?;
+        let operation = self.data.op(def);
+        if !matches!(operation.opcode, op::INT_ADD | op::PTRSUB | op::PTRADD) {
+            return None;
+        }
+        let base = operation.inputs.first().copied()?;
+        let offset = operation
+            .inputs
+            .get(1)
+            .copied()
+            .filter(|value| self.data.varnode(*value).flags.constant)
+            .map(|value| self.data.varnode(value).offset)?;
+        let offset = u32::try_from(offset).ok()?;
+        let DataType::Pointer { to, .. } = rich.get(base)? else {
+            return None;
+        };
+        let DataType::Struct { fields, .. } = to.as_ref() else {
+            return None;
+        };
+        // Only an exact field start reads as that field. A read part-way into
+        // one is not the field, and naming it as such would be a lie.
+        let field = fields.iter().find(|field| field.offset == offset)?;
+        Some(Expr::Field {
+            // The guard has to be the caller's. Starting a fresh one here let a
+            // cyclic definition chain recurse until the stack overflowed.
+            base: Box::new(self.resolve_guarded(base, active)),
+            name: field.name.clone(),
+            width,
+        })
     }
 
     /// Names the locations the calling convention passes parameters in.
@@ -231,6 +314,9 @@ impl<'a> Resolver<'a> {
     }
 
     fn resolve_guarded(&self, value: VarnodeId, active: &mut BTreeSet<VarnodeId>) -> Expr {
+        if active.len() > 2000 {
+            panic!("resolve recursion depth {} at {value:?}", active.len());
+        }
         let varnode = self.data.varnode(value);
         if varnode.flags.constant {
             return Expr::Constant {
@@ -369,9 +455,14 @@ impl<'a> Resolver<'a> {
             }
             op::LOAD => {
                 let operand = op.inputs.get(1).copied()?;
+                let width = self.data.varnode(op.output?).size;
+                let address = input(1)?;
+                if let Some(field) = self.field_access(operand, width, active) {
+                    return Some(field);
+                }
                 Some(Expr::Load {
-                    address: Box::new(self.as_address(operand, input(1)?)),
-                    width: self.data.varnode(op.output?).size,
+                    address: Box::new(self.as_address(operand, address)),
+                    width,
                 })
             }
             _ => None,

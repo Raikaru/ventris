@@ -20,6 +20,7 @@
 //! `FuncCallSpecs::buildInputFromTrials` in `fspec.cc` at commit
 //! `8b4c91d4d5bd1549622bfbade0df199585b98365`.
 
+use std::collections::BTreeSet;
 use ventris_pcode::op;
 
 use super::guard::Location;
@@ -131,6 +132,16 @@ fn incoming_value(data: &Funcdata, call: OpId, location: Location) -> Option<Var
 /// function computed does; a register nobody ever wrote does not, and treating
 /// it as an argument invents one.
 fn is_used(data: &Funcdata, value: VarnodeId) -> bool {
+    is_used_guarded(data, value, &mut BTreeSet::new())
+}
+
+fn is_used_guarded(data: &Funcdata, value: VarnodeId, seen: &mut BTreeSet<VarnodeId>) -> bool {
+    // Two merges can name each other: that is what a loop-carried value looks
+    // like, and excluding only the value itself was not enough to stop the
+    // walk. `decompSZS_subroutine__FPUcPUc` recursed until the stack overflowed.
+    if !seen.insert(value) {
+        return false;
+    }
     let varnode = data.varnode(value);
     if varnode.flags.constant {
         return true;
@@ -142,10 +153,10 @@ fn is_used(data: &Funcdata, value: VarnodeId) -> bool {
             op::MULTIEQUAL | op::INDIRECT => data
                 .op(def)
                 .inputs
-                .iter()
-                .copied()
+                .clone()
+                .into_iter()
                 .filter(|operand| *operand != value)
-                .any(|operand| is_used(data, operand)),
+                .any(|operand| is_used_guarded(data, operand, seen)),
             _ => true,
         },
         // A value with no definition was never computed here. It can still be
@@ -287,5 +298,26 @@ mod tests {
             1
         );
         assert_eq!(data.op(call).inputs.len(), 2);
+    }
+
+    #[test]
+    fn mutually_referring_merges_do_not_recurse_forever() {
+        // Two merges naming each other is what a loop-carried value looks like.
+        // Excluding only the value itself left the walk cycling between them,
+        // and `decompSZS_subroutine__FPUcPUc` overflowed the stack.
+        let mut data = Funcdata::default();
+        let block = data.new_block(0x1000);
+        let first = data.new_varnode(REGISTER_SPACE, 0, 4);
+        let second = data.new_varnode(REGISTER_SPACE, 8, 4);
+
+        let left = data.new_op(op::MULTIEQUAL, seq(0x1000), vec![second]);
+        data.op_set_output(left, Some(first));
+        data.op_insert_end(left, block);
+
+        let right = data.new_op(op::MULTIEQUAL, seq(0x1004), vec![first]);
+        data.op_set_output(right, Some(second));
+        data.op_insert_end(right, block);
+
+        assert!(!is_used(&data, first), "a cycle of merges carries no value");
     }
 }
