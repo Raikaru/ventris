@@ -249,6 +249,30 @@ All notable Ventris changes are documented here.
 - Measured against Ghidra on the corpus, the graph path improves to
   `unstructured-control-flow` 10 (from 13) and `missing-loop-or-switch` 4, against
   15 and 11 on the address-ordered default.
+- Ported `SplitDatatype` from `subflow.cc` with its three rules,
+  `RuleSplitCopy`, `RuleSplitLoad`, and `RuleSplitStore`, in
+  `graph/splitdatatype.rs`. One instruction can move a whole structure; split,
+  it reads as the field assignments the source wrote. Rule coverage 125 -> 128
+  of 162.
+- `TypeFactory` gained the four operations the split needs: `hole_size`
+  (`getHoleSize`), `get_exact_piece` (`getExactPiece`),
+  `get_type_pointer_strip_array`, and `num_depend`. `get_exact_piece` returns a
+  structure of exactly the windowed fields where Ghidra returns a
+  `TypePartialStruct`, which is what a partial struct describes; a window that
+  splits a field is refused rather than approximated.
+- `Funcdata` gained `big_endian`, set from the architecture before any rule
+  runs. Which end a piece of a value comes from decides what every split means,
+  and the graph has no address space to ask.
+- Two facets of the source are absent and neither is reachable: the
+  `TYPE_PARTIALSTRUCT` metatype, and the proto-partial marking in
+  `buildOutConcats` (`setProtoPartial`/`setPartialRoot`), which is a hint for a
+  merge registry this graph does not have. The concatenation itself is built
+  identically. `Varnode::isAddrTied` maps to "not unique and not constant".
+- Scoped every test-only import and helper into its test module. `cargo fix`
+  had removed six imports that only `cfg(test)` code used, which a `cargo build`
+  cannot see; the suite then failed to compile and a verification filter keyed on
+  "FAILED" reported green over zero test results. Warnings are now zero and the
+  filter counts result lines.
 - Added `DataType::Spacebase`, Ghidra's `TypeSpacebase`, and `Funcdata.spacebase`
   to carry which register holds the frame base. `down_chain` keeps a pointer into
   the frame relative to the frame, and access-pattern struct recovery now

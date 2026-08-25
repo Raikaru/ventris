@@ -10,7 +10,7 @@
 //! range markup propagation; none of those are represented by `Funcdata`.
 
 use super::action::Rule;
-use super::{Funcdata, OpId, SeqNum, VarnodeId};
+use super::{Funcdata, OpId, VarnodeId};
 use ventris_pcode::op;
 
 fn mask(size: u32) -> u64 {
@@ -1567,6 +1567,7 @@ pub fn all() -> Vec<Box<dyn Rule>> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::SeqNum;
     use super::*;
     use ventris_lifter::REGISTER_SPACE;
 

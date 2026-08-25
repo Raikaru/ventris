@@ -29,13 +29,11 @@
 //! Source authority: the pinned Ghidra 12.1.3
 //! `Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc`.
 
-use std::collections::BTreeMap;
-
 use ventris_pcode::op;
 
 use super::action::Rule;
-use super::typefactory::{DataType, RecoveredTypes, TypeFactory, infer};
-use super::{Funcdata, OpId, SeqNum, VarnodeId};
+use super::typefactory::{DataType, RecoveredTypes, TypeFactory};
+use super::{Funcdata, OpId, VarnodeId};
 
 fn constant_value(data: &Funcdata, value: VarnodeId) -> Option<u64> {
     let vn = data.varnode(value);
@@ -703,6 +701,7 @@ impl Rule for RulePieceStructure {
 
 #[cfg(test)]
 mod tests {
+    use super::super::SeqNum;
     use super::*;
     use ventris_lifter::{RAM_SPACE, REGISTER_SPACE};
 

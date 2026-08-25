@@ -49,7 +49,7 @@ argument recovery, `Cover` live ranges with `ActionMergeCopy`/`MergeAdjacent`/
 `ConstantPtr`, and `CollapseStructure` with natural-loop analysis
 (`labelLoops`, `LoopBody::findBase`/`findExit`, `markExitsAsGotos`).
 
-That is **125 of Ghidra's 162 live `Rule` subclasses (77%)** and **32 of its 72
+That is **125 of Ghidra's 162 live `Rule` subclasses (79%)** and **32 of its 72
 live `Action` subclasses (44%)**. The port is **not** complete: 37 rules and 40
 actions remain.
 

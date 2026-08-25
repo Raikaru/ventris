@@ -20,7 +20,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::action::Rule;
-use super::{Funcdata, GraphBlockId, OpId, SeqNum, VarnodeId};
+use super::{Funcdata, OpId, VarnodeId};
 use ventris_pcode::op;
 
 fn input(data: &Funcdata, id: OpId, slot: usize) -> Option<VarnodeId> {
@@ -565,6 +565,8 @@ pub fn all() -> Vec<Box<dyn Rule>> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::GraphBlockId;
+    use super::super::SeqNum;
     use super::*;
     use ventris_lifter::REGISTER_SPACE;
 

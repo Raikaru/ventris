@@ -35,7 +35,7 @@
 //! mask transfer here would let inverse rules disagree and oscillate.
 
 use super::action::Rule;
-use super::{Funcdata, OpId, SeqNum, VarnodeId};
+use super::{Funcdata, OpId, VarnodeId};
 use ventris_pcode::op;
 
 fn mask(size: u32) -> u64 {

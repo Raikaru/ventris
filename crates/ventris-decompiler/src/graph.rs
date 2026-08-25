@@ -48,6 +48,7 @@ pub mod proto;
 pub mod protoaction;
 pub mod refine;
 pub mod rules;
+pub mod splitdatatype;
 pub mod splitvarnode;
 pub mod stackframe;
 pub mod storageaction;
@@ -179,6 +180,12 @@ pub struct Funcdata {
     /// times slower on one corpus function. This is the same reason the masks
     /// are cached.
     recovered_types: Cache<(typefactory::TypeFactory, typefactory::RecoveredTypes)>,
+    /// Whether the target's memory is big endian.
+    ///
+    /// Ghidra reads this from the address space. The graph has no architecture,
+    /// so the fact is carried explicitly: which end of a value a piece comes from
+    /// decides what every split of an aggregate means.
+    pub big_endian: bool,
     /// The register that holds the frame base, when the caller knows it.
     ///
     /// Ghidra's `Funcdata` reaches its architecture's stack space and

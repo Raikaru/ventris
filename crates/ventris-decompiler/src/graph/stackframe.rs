@@ -540,23 +540,6 @@ mod tests {
         arithmetic(data, block, op::INT_ADD, vec![sp, delta], size).1
     }
 
-    fn frame_store(
-        data: &mut Funcdata,
-        block: GraphBlockId,
-        offset: u64,
-        value: VarnodeId,
-    ) -> OpId {
-        let address = frame_address(data, block, offset, 4);
-        let space = data.new_constant(0, 4);
-        let store = data.new_op(
-            op::STORE,
-            seq(0x2000 + data.op_count() as u64 * 4, 0),
-            vec![space, address, value],
-        );
-        data.op_insert_end(store, block);
-        store
-    }
-
     #[test]
     fn stack_pointer_flow_collapses_chains_and_then_declines() {
         let mut data = Funcdata::default();

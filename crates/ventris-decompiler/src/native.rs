@@ -741,6 +741,38 @@ fn expression_type(value: &Expr, architecture: Architecture) -> Type {
     }
 }
 
+/// Whether the architecture's memory is big endian.
+///
+/// Ghidra reads this from the address space the value lives in. Every target
+/// here has one byte order for memory, so the architecture answers it. SuperH is
+/// switchable in hardware; both profiles are the big-endian configurations the
+/// pinned languages describe.
+fn architecture_is_big_endian(architecture: Architecture) -> bool {
+    match architecture {
+        Architecture::Mips32Be
+        | Architecture::N64
+        | Architecture::Ppc32
+        | Architecture::Ppc64
+        | Architecture::GameCube
+        | Architecture::M68k
+        | Architecture::Sh2
+        | Architecture::Sh4
+        | Architecture::Spu => true,
+        Architecture::X86_64
+        | Architecture::X86_32
+        | Architecture::AArch64
+        | Architecture::Arm32
+        | Architecture::Thumb
+        | Architecture::Mips32
+        | Architecture::Ps2
+        | Architecture::Ps1
+        | Architecture::Rv64
+        | Architecture::Rv32
+        | Architecture::M6502
+        | Architecture::Z80 => false,
+    }
+}
+
 fn abi_register_vnode(
     architecture: Architecture,
     register: &str,
@@ -1999,6 +2031,9 @@ impl NativeDecompiler {
             &graph::condprop::ActionConditionalExe,
             &graph::stackframe::ActionStackPtrFlow,
         ];
+        // Which end a piece of a value comes from decides what every split of
+        // an aggregate means, so the graph is told before any rule runs.
+        data.big_endian = architecture_is_big_endian(architecture);
         // `ActionSpacebase`, and it must happen before anything reads a type:
         // the recovered-type cache is cleared by graph edits, not by learning a
         // new fact about the architecture, so naming the frame base after the

@@ -147,6 +147,122 @@ impl TypeFactory {
         })
     }
 
+    /// The size of the undefined gap at `offset`, matching
+    /// `Datatype::getHoleSize`.
+    ///
+    /// Zero means the offset is not in a hole: either a component starts there
+    /// or the offset is past the end. Ghidra uses this to give a gap between
+    /// fields an undefined type of exactly the gap's width, so a split can step
+    /// across padding instead of refusing the whole aggregate.
+    pub fn hole_size(&self, ty: &DataType, offset: u32) -> u32 {
+        let DataType::Struct { fields, .. } = ty else {
+            return 0;
+        };
+        let total = byte_width(ty);
+        if offset >= total {
+            return 0;
+        }
+        if fields
+            .iter()
+            .any(|field| offset >= field.offset && offset < field.offset + byte_width(&field.ty))
+        {
+            return 0;
+        }
+        fields
+            .iter()
+            .map(|field| field.offset)
+            .filter(|start| *start > offset)
+            .min()
+            .unwrap_or(total)
+            .saturating_sub(offset)
+    }
+
+    /// The piece of an aggregate covering exactly `[offset, offset + size)`,
+    /// matching `TypeFactory::getExactPiece`.
+    ///
+    /// Ghidra returns a `TypePartialStruct` for a window that is not the whole
+    /// type. There is no partial metatype here, so a window over whole fields
+    /// becomes a structure of exactly those fields with their offsets rebased,
+    /// which is what a partial struct describes. A window that splits a field is
+    /// not a piece of the aggregate and yields `None`.
+    pub fn get_exact_piece(&self, ty: &DataType, offset: u32, size: u32) -> Option<DataType> {
+        if offset == 0 && size == byte_width(ty) {
+            return Some(ty.clone());
+        }
+        match ty {
+            DataType::Struct { name, fields } => {
+                let end = offset.checked_add(size)?;
+                let window: Vec<Field> = fields
+                    .iter()
+                    .filter(|field| {
+                        field.offset >= offset
+                            && field.offset + byte_width(&field.ty) <= end
+                            && byte_width(&field.ty) != 0
+                    })
+                    .map(|field| Field {
+                        offset: field.offset - offset,
+                        ty: field.ty.clone(),
+                        name: field.name.clone(),
+                    })
+                    .collect();
+                if window.is_empty() {
+                    return None;
+                }
+                // A field straddling either edge means this window is not a
+                // piece of the structure, and pretending otherwise would
+                // describe storage the caller is not accessing.
+                if fields.iter().any(|field| {
+                    let start = field.offset;
+                    let stop = field.offset + byte_width(&field.ty);
+                    start < end && stop > offset && (start < offset || stop > end)
+                }) {
+                    return None;
+                }
+                Some(self.intern(DataType::Struct {
+                    name: format!("{name}_{offset:x}_{size:x}"),
+                    fields: window,
+                }))
+            }
+            DataType::Array { element, .. } => {
+                let stride = byte_width(element).max(1);
+                if offset % stride != 0 || size % stride != 0 || size == 0 {
+                    return None;
+                }
+                Some(self.get_type_array(element.as_ref().clone(), (size / stride) as usize))
+            }
+            _ => None,
+        }
+    }
+
+    /// A pointer to `to`, pointing at the element when `to` is an array.
+    ///
+    /// `TypeFactory::getTypePointerStripArray`. A pointer to an array and a
+    /// pointer to its first element address the same byte, and Ghidra keeps the
+    /// element form so the pointer arithmetic that follows has a stride.
+    pub fn get_type_pointer_strip_array(&self, to: DataType, bits: u32) -> DataType {
+        match to {
+            DataType::Array { element, .. } => {
+                self.get_type_pointer_with_bits(element.as_ref().clone(), bits)
+            }
+            other => self.get_type_pointer_with_bits(other, bits),
+        }
+    }
+
+    /// The number of components, matching `Datatype::numDepend`.
+    pub fn num_depend(ty: &DataType) -> usize {
+        match ty {
+            DataType::Struct { fields, .. } => fields.len(),
+            DataType::Array { count, .. } => *count,
+            _ => 0,
+        }
+    }
+
+    /// The storage width in bytes, matching `Datatype::getAlignSize` for the
+    /// types this model has: none of them carry trailing alignment padding.
+    pub fn align_size(ty: &DataType) -> u32 {
+        byte_width(ty)
+    }
+
     /// Ghidra's `Datatype::typeOrder`: negative means the left type is more
     /// specific, positive means the right type is more specific.
     pub fn order(left: &DataType, right: &DataType) -> i32 {

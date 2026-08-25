@@ -20,7 +20,7 @@
 use ventris_pcode::op;
 
 use super::action::Rule;
-use super::{Funcdata, OpId, SeqNum, VarnodeId};
+use super::{Funcdata, OpId, VarnodeId};
 
 fn mask_for_size(size: u32) -> u64 {
     let bits = u64::from(size).saturating_mul(8);
@@ -659,6 +659,7 @@ impl Rule for RuleOrMask {
 
 #[cfg(test)]
 mod tests {
+    use super::super::SeqNum;
     use super::*;
     use ventris_lifter::REGISTER_SPACE;
 

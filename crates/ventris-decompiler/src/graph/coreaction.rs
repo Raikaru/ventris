@@ -7,8 +7,8 @@
 //! override/forced-goto state, tracked context and injection payloads, or
 //! high-level cast/type attachments).
 
+use super::Funcdata;
 use super::action::Action;
-use super::{Funcdata, SeqNum};
 
 /// Remove operations whose results have no observable consumer.
 ///
@@ -49,6 +49,7 @@ pub fn all() -> Vec<Box<dyn Action>> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::SeqNum;
     use super::*;
     use ventris_lifter::REGISTER_SPACE;
     use ventris_pcode::op;

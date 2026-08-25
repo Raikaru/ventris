@@ -15,7 +15,7 @@
 use ventris_pcode::op;
 
 use super::action::Rule;
-use super::{Funcdata, OpId, SeqNum, VarnodeId};
+use super::{Funcdata, OpId, VarnodeId};
 
 const UNCORRELATED: i32 = -1;
 const SAME: i32 = 0;
@@ -1557,13 +1557,14 @@ impl Rule for RuleNegateNegate {
     }
 }
 
-fn seq(address: u64) -> SeqNum {
-    SeqNum { address, order: 0 }
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::SeqNum;
     use super::*;
+
+    fn seq(address: u64) -> SeqNum {
+        SeqNum { address, order: 0 }
+    }
     use ventris_lifter::REGISTER_SPACE;
     use ventris_pcode::op;
 
