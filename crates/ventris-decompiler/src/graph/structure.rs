@@ -129,6 +129,11 @@ struct Node {
     successors: Vec<NodeId>,
     predecessors: Vec<NodeId>,
     collapsed: bool,
+    /// Set once `ruleBlockSwitch` has claimed this node's multi-way branch.
+    /// Ghidra's `f_switch_out` lives on the block, and the composite the switch
+    /// rule builds does not carry it, so the other rules stop deferring once the
+    /// switch is resolved.
+    switch_resolved: bool,
 }
 
 type NodeId = usize;
@@ -151,7 +156,7 @@ pub fn structure(data: &Funcdata, tables: &[super::jumptable::JumpTable]) -> Str
 ///
 /// Ghidra's `FlowBlock::getFrontLeaf`. `scopeBreak` needs it to tell one member
 /// of a list what the next member is, which is that member's exit.
-fn front_block(node: &Structured) -> Option<GraphBlockId> {
+pub(super) fn front_block(node: &Structured) -> Option<GraphBlockId> {
     match node {
         Structured::Basic(block) => Some(*block),
         Structured::List(members) => members.iter().find_map(front_block),
@@ -255,6 +260,7 @@ impl<'a> Graph<'a> {
                 successors: Vec::new(),
                 predecessors: Vec::new(),
                 collapsed: false,
+                switch_resolved: false,
             });
         }
         for (id, block) in data.blocks() {
@@ -324,13 +330,19 @@ impl<'a> Graph<'a> {
                     if self.nodes[node].collapsed {
                         continue;
                     }
+                    // `collapseInternal`'s rule chain, in its order. Ghidra's
+                    // `ruleBlockProperIf` — a single-sided `if`, the commonest
+                    // C construct — is the third rule tried, not a last
+                    // resort, and `ruleBlockSwitch` is the last, because a
+                    // switch absorbs its cases and running it early takes
+                    // blocks a loop or an `if` would have claimed.
                     if self.rule_cat(node)
-                        || self.rule_block_switch(node)
-                        || self.rule_case_fallthru(node)
+                        || self.rule_if_no_exit(node)
                         || self.rule_if_else(node)
                         || self.rule_while_do(node)
                         || self.rule_do_while(node)
                         || self.rule_inf_loop(node)
+                        || self.rule_block_switch(node)
                     {
                         inner_changed = true;
                         break;
@@ -338,9 +350,9 @@ impl<'a> Graph<'a> {
                 }
             }
 
-            // Only when nothing preferable applies. An `if` with no join
-            // matches shapes that a loop or an if/else would have claimed, so
-            // running it early loses those constructs.
+            // Only when nothing preferable applies: Ghidra's comment is that
+            // applying `ruleBlockIfNoExit` too early makes preferable rules
+            // miss, and `ruleCaseFallthru` shares the phase.
             let live: Vec<NodeId> = (0..self.nodes.len())
                 .filter(|node| !self.nodes[*node].collapsed)
                 .collect();
@@ -352,7 +364,7 @@ impl<'a> Graph<'a> {
                 if self.nodes[node].collapsed {
                     continue;
                 }
-                if self.rule_if_no_exit(node) || self.rule_block_if_return(node) {
+                if self.rule_block_if_return(node) || self.rule_case_fallthru(node) {
                     outer_changed = true;
                     break;
                 }
@@ -717,6 +729,12 @@ impl<'a> Graph<'a> {
 
     /// Two blocks in a chain become one.
     fn rule_cat(&mut self, node: NodeId) -> bool {
+        // "Switch must be resolved first": every rule ahead of `ruleBlockSwitch`
+        // refuses a multi-way branch, which is what lets the switch rule run
+        // last without the others taking its cases.
+        if self.is_switch_out(node) {
+            return false;
+        }
         if self.nodes[node].successors.len() != 1 {
             return false;
         }
@@ -750,6 +768,9 @@ impl<'a> Graph<'a> {
 
     /// A two-way branch whose clauses each rejoin at one place.
     fn rule_if_else(&mut self, node: NodeId) -> bool {
+        if self.is_switch_out(node) {
+            return false;
+        }
         if self.nodes[node].successors.len() != 2 {
             return false;
         }
@@ -789,6 +810,9 @@ impl<'a> Graph<'a> {
 
     /// A two-way branch where one side is a clause that rejoins the other.
     fn rule_if_no_exit(&mut self, node: NodeId) -> bool {
+        if self.is_switch_out(node) {
+            return false;
+        }
         if self.nodes[node].successors.len() != 2 {
             return false;
         }
@@ -832,6 +856,9 @@ impl<'a> Graph<'a> {
 
     /// A test at the top of a body that loops back to it.
     fn rule_while_do(&mut self, node: NodeId) -> bool {
+        if self.is_switch_out(node) {
+            return false;
+        }
         if self.nodes[node].successors.len() != 2 {
             return false;
         }
@@ -866,6 +893,9 @@ impl<'a> Graph<'a> {
 
     /// A body whose own terminator tests whether to repeat it.
     fn rule_do_while(&mut self, node: NodeId) -> bool {
+        if self.is_switch_out(node) {
+            return false;
+        }
         if self.nodes[node].successors.len() != 2 {
             return false;
         }
@@ -1079,6 +1109,9 @@ impl<'a> Graph<'a> {
     /// Ghidra's `FlowBlock::isSwitchOut`, which is set when jump-table recovery
     /// claimed the block's `BRANCHIND`.
     fn is_switch_out(&self, node: NodeId) -> bool {
+        if self.nodes[node].switch_resolved {
+            return false;
+        }
         let block = self.nodes[node].exit;
         self.data
             .block(block)
@@ -1197,6 +1230,9 @@ impl<'a> Graph<'a> {
             has_exit: exit.is_some(),
         };
         self.absorb(node, &cases, body);
+        // The composite is no longer a multi-way branch, so the rules that
+        // defer to `ruleBlockSwitch` may claim it now.
+        self.nodes[node].switch_resolved = true;
         true
     }
 
@@ -1452,7 +1488,7 @@ fn drop_jumps_to(node: &mut Structured, head: GraphBlockId) {
 }
 
 /// Every basic block a construct tree mentions.
-fn collect_blocks(node: &Structured, into: &mut BTreeSet<GraphBlockId>) {
+pub(super) fn collect_blocks(node: &Structured, into: &mut BTreeSet<GraphBlockId>) {
     match node {
         Structured::Basic(block) => {
             into.insert(*block);

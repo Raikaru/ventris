@@ -36,6 +36,7 @@ pub mod expr_piece;
 pub mod expr_ptr;
 pub mod expr_rules;
 pub mod expr_rules2;
+pub mod forloop;
 pub mod guard;
 pub mod heritage;
 pub mod jumptable;

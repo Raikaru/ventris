@@ -51,6 +51,10 @@ pub fn emit_with_types(
         resolver,
         types,
         architecture,
+        // The address-ordered path has no construct tree, so it recovers no
+        // `for` loops.
+        for_loops: BTreeMap::new(),
+        nonprinting: BTreeSet::new(),
     }
     .run()
 }
@@ -75,14 +79,25 @@ pub fn emit_structured(
     let resolver = Resolver::with_types(data, &naming, register_name, types)
         .with_parameters(parameters)
         .with_rich(rich, factory);
+    let tree = super::structure::structure(data, tables);
+    // `ActionStructureTransform` decides which loops print as `for` loops
+    // before anything is emitted, because the choice moves two statements out
+    // of the body and into the loop header.
+    let for_loops = super::forloop::find_for_loops(data, &tree);
+    let nonprinting = for_loops
+        .values()
+        .flat_map(|parts| [Some(parts.iterate), parts.initialize])
+        .flatten()
+        .collect();
     let emitter = Emitter {
         data,
         naming: &naming,
         resolver,
         types,
         architecture,
+        for_loops,
+        nonprinting,
     };
-    let tree = super::structure::structure(data, tables);
     let scoped = emitter.scoped_names();
     let mut phi_copies: BTreeMap<GraphBlockId, Vec<NativeStatement>> = BTreeMap::new();
     for (block, copy) in emitter.resolver.phi_copies() {
@@ -1151,6 +1166,13 @@ struct Emitter<'a> {
     naming: &'a Naming,
     resolver: Resolver<'a>,
     types: &'a Types,
+    /// The `for` loops the structurer recovered, keyed by the block their header
+    /// enters.
+    for_loops: BTreeMap<super::GraphBlockId, super::forloop::ForLoop>,
+    /// The initializer and iterator operations of those loops. Ghidra calls
+    /// `opMarkNonPrinting` on them, because the `for` header prints them and
+    /// they must not appear a second time in the body.
+    nonprinting: BTreeSet<OpId>,
     /// Needed to name SLEIGH userops: a `CALLOTHER` index means nothing without
     /// the architecture whose table defines it.
     architecture: ventris_lifter::Architecture,
@@ -1260,8 +1282,25 @@ impl Emitter<'_> {
                 let mut repeat = self.emit_tree(header, scoped, phi_copies, targets);
                 drop_stale_header_transfer(&mut repeat);
                 inner.extend(repeat);
+                let condition = self.condition_of(test, *body_taken);
+                // A loop whose variable was found prints as a `for`, with the
+                // initializer and iterator lifted into its header.
+                let parts = super::structure::front_block(header)
+                    .and_then(|entry| self.for_loops.get(&entry));
+                if let Some(parts) = parts {
+                    statements.push(NativeStatement::For {
+                        initializer: parts
+                            .initialize
+                            .and_then(|op| self.render(op, scoped))
+                            .map(Box::new),
+                        condition: Some(condition),
+                        step: self.render(parts.iterate, scoped).map(Box::new),
+                        body: inner,
+                    });
+                    return statements;
+                }
                 statements.push(NativeStatement::While {
-                    condition: self.condition_of(test, *body_taken),
+                    condition,
                     body: inner,
                 });
                 statements
@@ -1512,6 +1551,15 @@ impl Emitter<'_> {
             .collect()
     }
 
+    /// One operation as a statement, ignoring the non-printing marks. This is
+    /// how the initializer and iterator reach the `for` header they belong in.
+    fn render(&self, op: OpId, scoped: &BTreeSet<String>) -> Option<NativeStatement> {
+        match self.classify_op(op, scoped) {
+            Emission::Body(statement) | Emission::Terminator(statement) => Some(statement),
+            Emission::Skip => None,
+        }
+    }
+
     fn emit_body(
         &self,
         block: GraphBlockId,
@@ -1530,6 +1578,13 @@ impl Emitter<'_> {
     }
 
     fn classify(&self, op: OpId, scoped: &BTreeSet<String>) -> Emission {
+        if self.nonprinting.contains(&op) {
+            return Emission::Skip;
+        }
+        self.classify_op(op, scoped)
+    }
+
+    fn classify_op(&self, op: OpId, scoped: &BTreeSet<String>) -> Emission {
         let operation = self.data.op(op);
         match operation.opcode {
             // A named result is declared where it is defined; an unnamed one

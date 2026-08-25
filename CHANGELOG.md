@@ -282,6 +282,35 @@ All notable Ventris changes are documented here.
   table-backed switch the rule can claim, and `dl_G_MOVEWORD`'s `switch 0 vs 1`
   is a `BRANCHIND` whose table this pipeline does not recover. The rule is
   correct and tested; it has no corpus function to improve yet.
+- Corrected the collapse rule order to `collapseInternal`'s. Four rules were in
+  the wrong phase: `ruleBlockProperIf` (our `rule_if_no_exit`) is the third rule
+  of the main chain, not a last resort; `ruleBlockSwitch` is the last of it, not
+  the second; `ruleCaseFallthru` belongs in the stalled phase beside
+  `ruleBlockIfNoExit`, not the main chain.
+  Running the switch rule last is only safe because every rule ahead of it
+  refuses a multi-way branch - "switch must be resolved first" in Ghidra's own
+  comment. Those `isSwitchOut` guards were missing here, so an `if/else` could
+  take a switch's cases; two tests caught it immediately once the order changed.
+  A collapsed switch must then stop reporting itself as a multi-way branch, or it
+  blocks concatenation forever: Ghidra's flag lives on the block and the
+  composite it builds does not carry it.
+  Measured: no census or output change on the corpus. Kept because the order and
+  the guards are the documented algorithm and the old order was reachable-wrong.
+- Ported `BlockWhileDo::finalTransform`, `findLoopVariable` and
+  `findInitializer` as `graph::forloop`, deciding which `while` loops print as
+  `for` loops. The loop variable is found from the tested value rather than
+  guessed: the walk goes up its definitions, bounded at four as Ghidra bounds it,
+  looking for a phi in the head whose loop-carried input is written in the tail.
+  That input is the iterator; the phi's other input, if it terminates the block
+  ahead of the loop and that block flows nowhere else, is the initializer. Both
+  are marked non-printing, as `opMarkNonPrinting` marks them, so the `for` header
+  prints them once.
+  Where Ghidra moves a statement to the end of its block to qualify, this
+  requires it already be last - the side of `testTerminal` that needs no move.
+  Measured: recovers nothing on this corpus, because our structurer produces
+  `if (c) do {} while (c)` where Ghidra produces a single `while` for the same
+  rotated loops, and for-loop printing only applies to `BlockWhileDo`. The two
+  functions where Ghidra prints `for` are `TRK_fill_mem`'s middle loops.
 - Ported `BlockGraph::scopeBreak` with the loop and goto overrides, which
   `ActionFinalStructure` runs once the construct tree is built. A jump whose
   target is the enclosing loop's exit is `break`, not `goto`. The pass carries
