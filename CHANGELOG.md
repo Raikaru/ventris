@@ -282,6 +282,27 @@ All notable Ventris changes are documented here.
   table-backed switch the rule can claim, and `dl_G_MOVEWORD`'s `switch 0 vs 1`
   is a `BRANCHIND` whose table this pipeline does not recover. The rule is
   correct and tested; it has no corpus function to improve yet.
+- Nominal field names now reach the graph path's output, which closes
+  `nominal_fields` and moves the smoke failure from eight PS2 functions to five.
+  `rewrite_recovered_field_accesses` knew two spellings of a field access - the
+  address-ordered emitter's arithmetic under a cast, and an access already
+  carrying the nominal name - but not the third: the graph emitter has already
+  recovered the access and names the member after its offset, because only this
+  pass holds the name the source used. Unrecognised, the structure matched no
+  parameter, so the nominal type never attached and the declared parameter fell
+  back from `GameWorld *` to `uintptr_t` while the body still spelled
+  `arg0->field_4a4` - an arrow on a non-pointer.
+  `_ZN9GameWorld12beginFadeOutEv` on the graph path is now
+  `GameWorld * this_` with `this_->fadeOut`, `this_->fadeAlpha`,
+  `this_->drawFadeScreen` and `this_->fadeIn`, matching the address-ordered path
+  statement for statement bar one condition spelling.
+  What remains between the graph path and the default is the pair recorded
+  earlier, on the five `alloc*` functions only: `casts` 2 against 1, from a
+  redundant `(uintptr_t)` on an integer already being added to a pointer, and
+  `declaration_order`, where the graph names its field snapshot `uVar2` and the
+  gate exempts the address-ordered path's `mem_125090_2` as a renderer artifact.
+  The first is a real excess cast. The second is one construct with two spellings
+  and one of them exempted.
 - Fixed the wrong store, and it was `RulePropagateCopy` propagating a copy that
   changes width. A copy whose output and input differ in size is not a copy: it
   truncates or extends, and every reader of the output expects the output's width.

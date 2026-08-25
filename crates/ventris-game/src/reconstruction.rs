@@ -349,6 +349,14 @@ fn field_name_for_offset(offset: i64) -> String {
     }
 }
 
+/// How the graph emitter spells a field it recovered without a name for it.
+///
+/// It names the member after the offset, which is all it knows. This pass holds
+/// the nominal name, so it has to recognise that spelling to replace it.
+fn recovered_member(parameter: &str, offset: i64) -> String {
+    format!("{parameter}->field_{offset:x}")
+}
+
 fn rewrite_recovered_field_accesses(
     signature: &mut SourceSignature,
     structs: &[SourceStruct],
@@ -374,6 +382,8 @@ fn rewrite_recovered_field_accesses(
                             parameter.name,
                             field.offset.max(0)
                         )) || body.contains(&format!("{}->{}", parameter.name, field.name))
+                            || body
+                                .contains(&recovered_member(&parameter.name, field.offset.max(0)))
                     })
                     .count();
                 (index, count)
@@ -400,6 +410,16 @@ fn rewrite_recovered_field_accesses(
                     *body = body.replace(&access, &member);
                 }
             }
+            // The graph emitter has already recovered the access and named the
+            // member after its offset, because only this pass knows what the
+            // source called it. Rewriting that spelling is what lets a nominal
+            // field name reach the output at all: without it the accesses stayed
+            // `p->field_4a4`, the structure never matched a parameter, and the
+            // declared type fell back to `uintptr_t`.
+            let recovered = recovered_member(&parameter, field.offset.max(0));
+            *body = body.replace(&format!("({recovered}[0])"), &member);
+            *body = body.replace(&format!("({recovered})"), &member);
+            *body = replace_bare_member(body, &recovered, &member);
             strip_redundant_field_casts(body, field, &member);
             // A member declared as a byte array cannot be read or assigned
             // whole, so the recovered access needs its index. Without this the
@@ -853,5 +873,41 @@ mod tests {
         );
         assert_ne!(field_name_for_offset(-4), field_name_for_offset(0));
         assert_eq!(field_name_for_offset(0x10), "field_10");
+    }
+    /// The graph emitter names a recovered member after its offset, because only
+    /// this pass knows what the source called it. That spelling has to be
+    /// rewritten, or the structure matches no parameter and the declared type
+    /// falls back.
+    #[test]
+    fn an_offset_named_member_is_rewritten_to_its_nominal_name() {
+        let mut signature = SourceSignature {
+            name: "f".into(),
+            return_type: "void".into(),
+            parameters: vec![SourceParameter {
+                name: "arg0".into(),
+                c_type: "RecoveredStruct0 *".into(),
+            }],
+        };
+        let structs = vec![SourceStruct {
+            name: "GameWorld".into(),
+            parameter_name: Some("this_".into()),
+            fields: vec![SourceField {
+                offset: 0x4a4,
+                name: "fadeOut".into(),
+                c_type: "uint8_t".into(),
+                declarator_suffix: "[1]".into(),
+                width: 1,
+            }],
+            unresolved: Vec::new(),
+        }];
+        let mut body = String::from("void f(void) {\n    (arg0->field_4a4[0]) = 1;\n}\n");
+        rewrite_recovered_field_accesses(&mut signature, &structs, &mut body);
+        assert!(
+            body.contains("this_->fadeOut"),
+            "the nominal name must reach the body, got {body}"
+        );
+        assert!(!body.contains("field_4a4"), "got {body}");
+        assert_eq!(signature.parameters[0].c_type, "GameWorld *");
+        assert_eq!(signature.parameters[0].name, "this_");
     }
 }
