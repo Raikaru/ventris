@@ -282,6 +282,35 @@ All notable Ventris changes are documented here.
   table-backed switch the rule can claim, and `dl_G_MOVEWORD`'s `switch 0 vs 1`
   is a `BRANCHIND` whose table this pipeline does not recover. The rule is
   correct and tested; it has no corpus function to improve yet.
+- Added `tools/DumpBlocks.java`, which reports the basic-block graph Ghidra's
+  decompiler ends up with: per block, address range, in and out edge counts with
+  their indices, and the terminating opcode. The C output shows which constructs
+  were recovered but not the graph they came from, and every wrong guess this
+  session came from reasoning about that graph instead of reading it.
+- Measured, with that tool, why our loops structure differently, ending three
+  sessions of guessing. In `FUN_800a67d8` Ghidra's block 7 is
+  `start=800a6830 stop=800a6830 in=2 out=2`: a block holding one CBRANCH, entered
+  from the initializer block and from the body, with the body at `in=1 out=1`
+  flowing back to it. That is a joined block - `nodeJoinCreateBlock` sets a new
+  block's range to the single address of the CBRANCH it holds - so
+  `ConditionalJoin` does fire there, and its output is exactly the `BlockWhileDo`
+  that for-loop printing needs. Loop 1, at blocks 2 and 3, is a self-looping
+  block and stays `if` + `do`/`while`, matching Ghidra's own output. Two joins,
+  two `for` loops, one per whiledo.
+  Our join rejects those pairs for a specific and now-known reason: for `beq`
+  our lifter emits the comparison, and for `bne` the same comparison wrapped in
+  `BOOL_NEGATE`, so `findDups` compares `INT_EQUAL` against `BOOL_NEGATE` and
+  stops. Ghidra's lifter marks the branch with `boolean_flip` and keeps one
+  condition varnode, which is why `findDups` only has to reject a flip that has
+  not propagated yet.
+  Folding that negation into the branch - retargeting it and leaving the
+  operation for its other readers, which is what the flag does - makes the pairs
+  compare equal and the joins fire: `0x800a67d8` went from three `do`/`while`
+  loops to four `while` loops, and `0x80072c88` from 21 gotos to 19. It also
+  produced wrong code: the loop counter's decrement disappeared and the loops
+  became infinite, so the join's phi surgery is incorrect as ported. Reverted,
+  with the reproduction recorded here rather than shipped. The remaining work is
+  a defect in `setupMultiequals`/`cutDownMultiequals`, not a missing pass.
 - Ported `ConditionalJoin`, `ActionNodeJoin` and `Funcdata::nodeJoinCreateBlock`
   as `graph::nodejoin`, with `functionalEqualityLevel` as `graph::equality`. Two
   blocks that end in a CBRANCH on the same value and split the same two ways
