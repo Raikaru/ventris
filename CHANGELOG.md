@@ -330,6 +330,15 @@ All notable Ventris changes are documented here.
   stored an undefined register.
 - A hardwired-zero register read is replaced by the constant zero, so
   `addiu rd,zero,imm` folds instead of adding an undefined register.
+- `SUBPIECE` now has a spelling on the graph path: taking the low bytes is a
+  cast, taking bytes further up is a shift and a cast. Without it the truncation
+  heritage inserts had no rendering and appeared as an unnamed placeholder,
+  which is how `allocLightmap` lost its multiply.
+- A value is named at its definition when an operand's variable is written again
+  before the value is read. Emission follows graph order, so such a value
+  inlined into its reader and read the *new* operand: `allocEnemyEntity`
+  multiplied the incremented counter instead of the counter. This was a wrong
+  answer, not a formatting difference.
 - The graph path stays opt-in. It leads the address-ordered path on seven census
   families and ties four, but it fails `corpus-smoke`'s semantic comparison on
   three PS2 entries the address-ordered path passes: two diverge on control-flow

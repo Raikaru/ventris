@@ -127,7 +127,13 @@ pub fn mark_explicit_with(data: &Funcdata, highs: Variables) -> Naming {
             op::MULTIEQUAL | op::CALL | op::CALLIND | op::LOAD
         );
         let shared = varnode.descendants.len() > 1;
-        if !effectful && !shared {
+        // A value that inlines into a later reader must still read the same
+        // operands there. If an operand's C variable is written again in
+        // between, the inlined expression silently reads the new value: the
+        // multiply in `allocEnemyEntity` was emitted after the increment of the
+        // counter it multiplies, so it multiplied the incremented value.
+        let operand_overwritten = operand_redefined_before_use(data, &highs, id, output);
+        if !effectful && !shared && !operand_overwritten {
             continue;
         }
         // The first definition encountered names the variable. Later versions
@@ -137,6 +143,56 @@ pub fn mark_explicit_with(data: &Funcdata, highs: Variables) -> Naming {
             .or_insert_with(|| value_name(data, id, output));
     }
     Naming { names, highs }
+}
+
+/// Whether any operand's variable is written again before this value is read.
+///
+/// Emission follows the graph's operation order, so a value that inlines lands
+/// at its reader. Ghidra keeps this honest with live ranges; the same conclusion
+/// follows here from comparing sequence numbers, which is what the emitted order
+/// is built from.
+fn operand_redefined_before_use(
+    data: &Funcdata,
+    highs: &Variables,
+    def: OpId,
+    output: VarnodeId,
+) -> bool {
+    let Some(last_read) = data
+        .varnode(output)
+        .descendants
+        .iter()
+        .copied()
+        .filter_map(|reader| Some(data.op(reader).seq))
+        .max_by_key(|seq| (seq.address, seq.order))
+    else {
+        return false;
+    };
+    let key = |seq: super::SeqNum| (seq.address, seq.order);
+    for operand in data.op(def).inputs.iter().copied() {
+        let varnode = data.varnode(operand);
+        if varnode.flags.constant {
+            continue;
+        }
+        let Some(operand_def) = varnode.def else {
+            continue;
+        };
+        let group = highs.high_of(operand);
+        let from = key(data.op(operand_def).seq);
+        let to = key(last_read);
+        for (candidate, operation) in data.live_ops() {
+            let Some(written) = operation.output else {
+                continue;
+            };
+            if candidate == operand_def || highs.high_of(written) != group {
+                continue;
+            }
+            let at = key(operation.seq);
+            if at > from && at <= to {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// A name unique to one value.
@@ -448,6 +504,41 @@ impl<'a> Resolver<'a> {
                 // An extension between integers is what C does on assignment.
                 // Spelling it repeats the destination's declared type.
                 if !needs_cast(&self.type_of(operand), &ty) {
+                    return Some(value);
+                }
+                Some(Expr::Cast {
+                    ty,
+                    value: Box::new(value),
+                })
+            }
+            op::SUBPIECE => {
+                // Taking the low bytes of a value is a cast; taking bytes
+                // further up is a shift and then a cast. Without this arm the
+                // truncation heritage inserts for a narrow register read had no
+                // spelling and rendered as an unnamed placeholder.
+                let source = op.inputs.first().copied()?;
+                let shift = op
+                    .inputs
+                    .get(1)
+                    .copied()
+                    .filter(|value| self.data.varnode(*value).flags.constant)
+                    .map(|value| self.data.varnode(value).offset)
+                    .unwrap_or(0);
+                let ty = self.type_of(op.output?);
+                let value = input(0)?;
+                let value = if shift == 0 {
+                    value
+                } else {
+                    Expr::Binary {
+                        op: BinaryOp::Right,
+                        left: Box::new(value),
+                        right: Box::new(Expr::Constant {
+                            value: shift * 8,
+                            width: 4,
+                        }),
+                    }
+                };
+                if shift == 0 && !needs_cast(&self.type_of(source), &ty) {
                     return Some(value);
                 }
                 Some(Expr::Cast {
