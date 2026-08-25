@@ -249,8 +249,8 @@ All notable Ventris changes are documented here.
 - Measured against Ghidra on the corpus, the graph path improves to
   `unstructured-control-flow` 10 (from 13) and `missing-loop-or-switch` 4, against
   15 and 11 on the address-ordered default.
-- Measured, not yet fixed: the graph path emits a **wrong condition** in
-  `DBGEXIImm`. Where the address-ordered path and Ghidra both test
+- Measured, not yet fixed, and now localised to the renderer rather than the
+  rules: the graph path emits a **wrong condition** in `DBGEXIImm`. Where the address-ordered path and Ghidra both test
   `0 < (int32_t)(arg1 - 8)`, the graph path emits `0 < 1` — both operands
   constant. Bisected to rule `intlessequal`: with `VENTRIS_SKIP_RULE=intlessequal`
   the condition is correct, and skipping any other rule in `expr_bool` leaves it
@@ -260,6 +260,26 @@ All notable Ventris changes are documented here.
   not from the rewrite. `expr_memory` also masks the symptom when skipped. This is
   a correctness defect, not a rendering one, and it outranks every quality item
   below.
+  Probing the graph settled where it is not. The data flow is correct: the
+  comparison is `INT_SLESS(arg1 + 0xfffffff8, 1)`, whose negation is exactly
+  Ghidra's `0 < param_2 + -8`. The same function contains a second comparison
+  with a byte-identical definition — `INT_ADD` of the same register and the same
+  `0xfffffff8` — and that one renders correctly as `uVar8 < 1`. The only
+  difference between them is that the correct one's operand carries a name and
+  the wrong one's is inlined, so the defect is in resolving an unnamed
+  definition, not in the rewrite that produced it. `intlessequal` is necessary
+  for the shape to arise but is not itself wrong. Checking the pre-session file
+  versions confirms the bug predates this session's work.
+- Measured for prioritisation: rule coverage rose from 66 to 128 of 162 across
+  this session's waves while `agrees` stayed at 22 of 37 throughout. Of the 34
+  rules still unported, three are control-flow-shaped (`RuleCondNegate`,
+  `RuleConditionalMove`, `RuleSwitchSingle`) and the rest serve bitfields,
+  double-precision pairs, strings, segments, constant pools and peephole
+  arithmetic — families against which the corpus records no findings at all.
+  Coverage has decoupled from measured agreement, so it is the wrong thing to
+  optimise next. The exception is the mutable `BlockGraph`, which is both the
+  blocker for 15 unported actions and for the largest census family, and is
+  therefore the one piece of remaining port work that pays.
 - Measured for prioritisation: of 37 corpus functions the graph path leaves 11
   with stray `goto`s and 6 missing a loop or switch, which is the largest
   remaining quality gap by a wide margin. Instrumenting the structurer's
