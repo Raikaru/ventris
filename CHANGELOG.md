@@ -249,6 +249,28 @@ All notable Ventris changes are documented here.
 - Measured against Ghidra on the corpus, the graph path improves to
   `unstructured-control-flow` 10 (from 13) and `missing-loop-or-switch` 4, against
   15 and 11 on the address-ordered default.
+- Ported four `Action` subclasses, taking action coverage from 28 of 75 to 32.
+  `blockaction` has `ActionReturnSplit`, which clones a shared return epilog onto
+  each incoming path, and `ActionNodeJoin`, which joins two branches testing the
+  same condition. `storageaction` has `ActionShadowVar`. `coreaction` registers
+  `ActionDeadCode` as a real named pass over the existing `deadcode` module,
+  reporting that module's own change count.
+- Fifteen actions in those families were deliberately not ported. Four need
+  Ghidra's persistent mutable `BlockGraph` — `finalTransform`, `preferComplement`,
+  `buildCopy`/`collapseAll`, `orderBlocks`/`finalizePrinting` — and
+  `graph::structure` returns a temporary tree with no mutators. The rest need
+  `ScopeLocal` and symbol/type synchronisation, `FuncProto` lock state, the
+  architecture's `LanedRegister` and `SegmentOp` registries, or per-varnode flags
+  the graph does not carry: a direct-write mark, a consumed-byte mask, an
+  auto-live hold, a `storeUnmapped` bit.
+- `ActionSetCasts` is not registered: `graph::casts` holds only the `needs_cast`
+  predicates, and nothing in the graph stores a high-level type attachment for a
+  cast to be placed on. Cast placement happens in the emitter instead, which is
+  why the graph path emits no excess casts despite the action being absent.
+- Every newly registered action was required to argue that repeated application
+  converges, and to have a test showing the second call reports no change. The
+  fixpoint runs actions to exhaustion, and a pass that reports a change forever
+  never terminates — which is exactly what two earlier ports did.
 - Ported 13 further `Rule` subclasses, taking rule coverage to 122 of 168.
   `expr_float` has the floating-point rewrites (5), `expr_ptr` the pointer and
   type-directed ones (5), and `expr_memory` the direct-constant LOAD and STORE

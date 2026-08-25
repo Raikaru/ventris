@@ -1952,6 +1952,18 @@ impl NativeDecompiler {
         let skipped_passes: Vec<String> = std::env::var("VENTRIS_SKIP_PASS")
             .map(|value| value.split(',').map(str::trim).map(str::to_owned).collect())
             .unwrap_or_default();
+        // Newly ported actions, switchable by name so one can be attributed
+        // without a rebuild.
+        for action in graph::blockaction::all()
+            .into_iter()
+            .chain(graph::coreaction::all())
+            .chain(graph::storageaction::all())
+        {
+            if skipped_passes.iter().any(|skip| skip == action.name()) {
+                continue;
+            }
+            graph::action::Action::apply(action.as_ref(), &mut data);
+        }
         let pipeline = graph::action::default_pipeline();
         let control_flow: [&dyn graph::action::Action; 10] = [
             &graph::branchaction::ActionDeterminedBranch,
