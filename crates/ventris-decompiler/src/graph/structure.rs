@@ -208,13 +208,12 @@ impl<'a> Graph<'a> {
         // operator spans two blocks that every other rule would otherwise
         // treat as separate regions.
         self.collapse_conditions();
-        // Then loops are identified and their exits surrendered. Every
-        // structuring rule demands that a clause have exactly one predecessor,
-        // and a loop with a `break` violates that at the block after the loop.
-        // Marking the exits first is how Ghidra makes the loop itself visible;
-        // a greedy rule set without this step recovers the loop only when the
-        // body happens to be a single-entry chain.
-        self.mark_loop_exits();
+        // Loop exits are *not* surrendered up front. Ghidra's `collapseInternal`
+        // runs every rule to a fixpoint and only then lets `ruleBlockGoto` reach
+        // `selectGoto`, so an edge is given up only once nothing else applies.
+        // Surrendering before any rule has run hands away an edge the rules
+        // would have structured, and with `labelExitEdges` priority that first
+        // edge is an interior one — the worst choice available.
 
         let cap = self.nodes.len() * 4 + 16;
         let mut guard = 0;
@@ -295,41 +294,61 @@ impl<'a> Graph<'a> {
     fn mark_loop_exits(&mut self) {
         let dominance = compute_dominance(self.data);
         for (head, tails) in self.natural_loops(&dominance) {
-            let body = self.loop_body(head, &tails);
+            let mut tails = tails;
+            let (mut body, unique_count) = self.loop_body(head, &tails);
             let exit = self.loop_exit(&body, &tails);
-            // Every edge out of the body other than the chosen exit is a
-            // candidate for being unstructured, but only one is surrendered per
-            // pass.
-            //
-            // Ghidra builds the same candidate list in `emitLikelyEdges` and
-            // then `selectGoto` pops it one edge at a time, returning to the
-            // collapse rules after each. Surrendering the whole list at once —
-            // as this did — gives up edges the rules would have structured once
-            // the first one was gone, and each surrendered edge is a `goto` in
-            // the output that cannot be recovered later.
-            let leaving: Vec<(NodeId, NodeId)> = body
-                .iter()
-                .copied()
-                .flat_map(|node| {
-                    self.nodes[node]
-                        .successors
-                        .clone()
-                        .into_iter()
-                        .map(move |successor| (node, successor))
-                })
-                .filter(|(_, successor)| !body.contains(successor))
-                .filter(|(_, successor)| Some(*successor) != exit)
-                .collect();
+            self.extend_loop_body(&mut body, exit);
+            // The exit may only be recomputed after extension, because a block
+            // taken into the body is no longer a candidate exit.
+            let exit = self.loop_exit(&body, &tails);
+            self.order_tails(&mut tails, exit);
+
+            // `LoopBody::labelExitEdges`: the priority for removal is the middle
+            // of the body first, then the head, then the tails in reverse so the
+            // preferred tail's edges go last, and every edge to the official exit
+            // block after all of those.
+            let inside: BTreeSet<NodeId> = body.iter().copied().collect();
+            let exits_of = |node: NodeId| -> Vec<(NodeId, NodeId)> {
+                self.nodes[node]
+                    .successors
+                    .iter()
+                    .copied()
+                    .filter(|successor| !inside.contains(successor))
+                    .map(|successor| (node, successor))
+                    .collect()
+            };
+            let mut leaving: Vec<(NodeId, NodeId)> = Vec::new();
+            let mut to_exit: Vec<(NodeId, NodeId)> = Vec::new();
+            let classify = |edges: Vec<(NodeId, NodeId)>,
+                            leaving: &mut Vec<(NodeId, NodeId)>,
+                            to_exit: &mut Vec<(NodeId, NodeId)>| {
+                for edge in edges {
+                    if Some(edge.1) == exit {
+                        to_exit.push(edge);
+                    } else {
+                        leaving.push(edge);
+                    }
+                }
+            };
+            for node in body.iter().copied().skip(unique_count) {
+                classify(exits_of(node), &mut leaving, &mut to_exit);
+            }
+            classify(exits_of(head), &mut leaving, &mut to_exit);
+            for tail in tails.iter().rev().copied() {
+                if tail == head {
+                    continue;
+                }
+                classify(exits_of(tail), &mut leaving, &mut to_exit);
+            }
+            leaving.extend(to_exit);
             if leaving.is_empty() {
                 continue;
             }
-            // Which of the candidates to give up is the trace's decision, not a
-            // positional one. Ghidra runs `TraceDAG` from the loop head with the
-            // loop bottom as the finish block and the exit edges marked, so the
-            // trace stays inside the body and scores the edges that stall it
-            // against each other.
+            // One edge per pass, so the collapse rules get a chance between
+            // each: `selectGoto` advances through this list rather than
+            // surrendering all of it at once.
             let chosen = self
-                .traced_loop_edge(&body, head, &tails)
+                .traced_loop_edge(&inside, head, &tails)
                 .filter(|edge| leaving.contains(edge))
                 .or_else(|| leaving.first().copied());
             if let Some((node, successor)) = chosen {
@@ -337,6 +356,29 @@ impl<'a> Graph<'a> {
                 return;
             }
         }
+    }
+
+    /// Back edges, grouped by the loop head they return to.
+    ///
+    /// An edge is a back edge when its target dominates its source, which is
+    /// exactly Ghidra's `isBackEdgeIn` for a reducible graph.
+    fn natural_loops(&self, dominance: &super::heritage::Dominance) -> Vec<(NodeId, Vec<NodeId>)> {
+        let mut loops: BTreeMap<NodeId, Vec<NodeId>> = BTreeMap::new();
+        for node in 0..self.nodes.len() {
+            if self.nodes[node].collapsed {
+                continue;
+            }
+            for successor in self.nodes[node].successors.clone() {
+                if dominates(
+                    dominance,
+                    self.nodes[successor].entry,
+                    self.nodes[node].entry,
+                ) {
+                    loops.entry(successor).or_default().push(node);
+                }
+            }
+        }
+        loops.into_iter().collect()
     }
 
     /// The edge inside a loop body that `TraceDAG` judges least structurable.
@@ -400,53 +442,92 @@ impl<'a> Graph<'a> {
         })
     }
 
-    /// Back edges, grouped by the loop head they return to.
+    /// The loop body in `LoopBody::findBase` order.
     ///
-    /// An edge is a back edge when its target dominates its source, which is
-    /// exactly Ghidra's `isBackEdgeIn` for a reducible graph.
-    fn natural_loops(&self, dominance: &super::heritage::Dominance) -> Vec<(NodeId, Vec<NodeId>)> {
-        let mut loops: BTreeMap<NodeId, Vec<NodeId>> = BTreeMap::new();
-        for node in 0..self.nodes.len() {
-            if self.nodes[node].collapsed {
-                continue;
-            }
-            for successor in self.nodes[node].successors.clone() {
-                if dominates(
-                    dominance,
-                    self.nodes[successor].entry,
-                    self.nodes[node].entry,
-                ) {
-                    loops.entry(successor).or_default().push(node);
-                }
-            }
-        }
-        loops.into_iter().collect()
-    }
-
-    /// The natural loop body: the head, its tails, and everything that reaches a
-    /// tail without leaving through the head.
-    ///
-    /// `LoopBody::findBase` walks predecessors rather than successors, because
-    /// the body is what can reach the back edge, not what the head can reach.
-    fn loop_body(&self, head: NodeId, tails: &[NodeId]) -> BTreeSet<NodeId> {
-        let mut body: BTreeSet<NodeId> = BTreeSet::from([head]);
-        let mut pending: Vec<NodeId> = Vec::new();
+    /// The order is load-bearing, not incidental: the head and the tails come
+    /// first and `unique_count` records how many that is, so
+    /// `LoopBody::labelExitEdges` can address the non-head/tail nodes as the
+    /// tail of the list. The rest follow in the order the predecessor walk
+    /// discovers them. Returning a set instead — as this did — sorts the interior
+    /// by block number and loses the discovery order the exit-edge priority is
+    /// expressed in.
+    fn loop_body(&self, head: NodeId, tails: &[NodeId]) -> (Vec<NodeId>, usize) {
+        let mut body: Vec<NodeId> = vec![head];
+        let mut seen: BTreeSet<NodeId> = BTreeSet::from([head]);
         for tail in tails.iter().copied() {
-            if body.insert(tail) {
-                pending.push(tail);
+            if seen.insert(tail) {
+                body.push(tail);
             }
         }
-        while let Some(node) = pending.pop() {
+        let unique_count = body.len();
+        // Walk predecessors from index one, so the head is never traversed back
+        // through: what reaches the head from outside is not in the loop.
+        let mut index = 1;
+        while index < body.len() {
+            let node = body[index];
+            index += 1;
             for predecessor in self.nodes[node].predecessors.clone() {
-                if predecessor == head || self.nodes[predecessor].collapsed {
+                if self.nodes[predecessor].collapsed {
                     continue;
                 }
-                if body.insert(predecessor) {
-                    pending.push(predecessor);
+                if seen.insert(predecessor) {
+                    body.push(predecessor);
                 }
             }
         }
-        body
+        (body, unique_count)
+    }
+
+    /// `LoopBody::extend`: take in every block reachable only from the body
+    /// without passing the exit.
+    ///
+    /// A block every one of whose predecessors is already inside cannot be
+    /// reached from anywhere else, so it belongs to the loop even though no back
+    /// edge passes through it. Without this a tail-call-shaped region after the
+    /// last test counts as outside, and the edge into it is surrendered.
+    fn extend_loop_body(&self, body: &mut Vec<NodeId>, exit: Option<NodeId>) {
+        let mut seen: BTreeSet<NodeId> = body.iter().copied().collect();
+        let mut visits: BTreeMap<NodeId, usize> = BTreeMap::new();
+        let mut index = 0;
+        while index < body.len() {
+            let node = body[index];
+            index += 1;
+            for successor in self.nodes[node].successors.clone() {
+                if seen.contains(&successor) || Some(successor) == exit {
+                    continue;
+                }
+                let count = visits.entry(successor).or_insert(0);
+                *count += 1;
+                let incoming = self.nodes[successor]
+                    .predecessors
+                    .iter()
+                    .filter(|predecessor| !self.nodes[**predecessor].collapsed)
+                    .count();
+                if *count == incoming {
+                    seen.insert(successor);
+                    body.push(successor);
+                }
+            }
+        }
+    }
+
+    /// `LoopBody::orderTails`: put the tail that leaves to the exit first.
+    ///
+    /// `labelExitEdges` walks the tails in reverse, so the first tail's exit
+    /// edges are the last to be surrendered. The tail carrying the loop's own
+    /// exit is the one whose edges are worth keeping longest.
+    fn order_tails(&self, tails: &mut [NodeId], exit: Option<NodeId>) {
+        let Some(exit) = exit else { return };
+        if tails.len() <= 1 {
+            return;
+        }
+        let Some(preferred) = tails
+            .iter()
+            .position(|tail| self.nodes[*tail].successors.contains(&exit))
+        else {
+            return;
+        };
+        tails.swap(0, preferred);
     }
 
     /// The one block a structured loop may exit to.
@@ -454,7 +535,7 @@ impl<'a> Graph<'a> {
     /// `LoopBody::findExit` prefers an exit taken from a tail, because that is
     /// the loop's own test; an exit from the middle is a `break`, which has to
     /// become a goto.
-    fn loop_exit(&self, body: &BTreeSet<NodeId>, tails: &[NodeId]) -> Option<NodeId> {
+    fn loop_exit(&self, body: &[NodeId], tails: &[NodeId]) -> Option<NodeId> {
         for tail in tails.iter().copied() {
             if let Some(exit) = self.nodes[tail]
                 .successors

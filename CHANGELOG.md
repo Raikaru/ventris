@@ -282,21 +282,33 @@ All notable Ventris changes are documented here.
   table-backed switch the rule can claim, and `dl_G_MOVEWORD`'s `switch 0 vs 1`
   is a `BRANCHIND` whose table this pipeline does not recover. The rule is
   correct and tested; it has no corpus function to improve yet.
-- Tried and reverted `LoopBody::labelExitEdges`' candidate ordering. Ghidra
-  orders a loop's exit-edge candidates interior-body-nodes first, then the head,
-  then the tails in reverse ("exits from more preferred tails later"), with every
-  edge to the official exit block postponed to the end. Ported faithfully it
-  regressed the census: `agrees` 22 -> 21, `unstructured-control-flow` 11 -> 14,
-  `missing-loop-or-switch` 5 -> 11, and three of four sampled functions gained
-  `goto`s. Adding Ghidra's persistent candidate iterator as well
-  (`likelylistfull`/`likelyiter`, so successive stalls advance through the list
-  instead of re-offering its first entry) did not recover it either. Our
-  `loop_exit` was checked against `LoopBody::findExit` and already matches it, so
-  the exit choice is not the difference. Reverted to node order, which measures
-  22 agrees. Recorded rather than re-attempted: the ordering is only worth
-  anything alongside more of Ghidra's loop-body bookkeeping — `uniquecount`,
-  `orderTails`, `labelContainments` and `immed_container` — and a faithful port of
-  one piece that measures worse is not an improvement.
+- Ported the rest of `LoopBody`, which is what `labelExitEdges` needs to mean
+  anything. An earlier attempt at the ordering alone regressed the census
+  (`agrees` 22 -> 21, `unstructured-control-flow` 11 -> 14) and was reverted; with
+  the surrounding algorithm in place it is back at parity and no longer an
+  approximation.
+  - `findBase` order and `uniquecount`: the body is an ordered list with the head
+    and tails at the front, so `labelExitEdges` can address the interior as the
+    tail of the list. It was a `BTreeSet`, which sorts the interior by block
+    number and loses the discovery order the exit priority is expressed in.
+  - `extend`: a block every one of whose predecessors is already inside cannot be
+    reached from anywhere else, so it joins the body even with no back edge
+    through it. The exit is recomputed afterwards, because a block taken in is no
+    longer a candidate exit.
+  - `orderTails`: the tail that leaves to the exit moves first, and since
+    `labelExitEdges` walks the tails in reverse its edges are surrendered last.
+  - `labelExitEdges` priority: interior, then head, then tails in reverse, then
+    every edge to the official exit.
+- And the timing, which turned out to matter more than the ordering. Ghidra's
+  `collapseInternal` runs every rule to a fixpoint and only then lets
+  `ruleBlockGoto` reach `selectGoto`, so an edge is surrendered only when nothing
+  else applies. This called `mark_loop_exits` *before* the rule loop, handing away
+  an edge the rules would have structured — and under `labelExitEdges` priority
+  that first edge is an interior one, the worst available choice. Removing the
+  eager call is what brought the census back to 22 agrees. With both in place
+  `queryMapAddress_single` is two `goto`s worse and every other sampled function
+  is unchanged, so this is measured parity rather than a measured gain: what it
+  buys is that the structuring is the ported algorithm.
 - Ported `TraceDAG` from `blockaction.cc` into `graph/tracedag.rs`, with its
   `BranchPoint`, `BlockTrace` and `BadEdgeScore` helpers: `initialize`,
   `pushBranches`, `checkOpen`, `openBranch`, `checkRetirement`, `retireBranch`,
