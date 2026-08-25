@@ -423,6 +423,16 @@ impl Rule for RulePtrsubUndo {
         };
         let cached = recover_types(data);
         let (factory, types) = (&cached.0, &cached.1);
+        // A zero displacement into a structure is definitionally its first
+        // component, whatever the pointer chain below it adds. `extra_offset`
+        // sums that chain, so a `PTRSUB(p, 0)` feeding further pointer
+        // arithmetic could be judged as naming no component and undone — while
+        // `RuleStructOffset0`, reading the same base type, immediately recreated
+        // it. Deciding this from the base type alone is what makes the two rules
+        // agree by construction, which is the disjointness the module claims.
+        if value == 0 && pointer_target(&types, base).is_some_and(|target| is_structured(&target)) {
+            return 0;
+        }
         let extra = operation
             .output
             .map(|result| Self::extra_offset(data, result))
@@ -593,11 +603,32 @@ impl Rule for RuleStructOffset0 {
         {
             return 0;
         }
+        // Already the first component of something: this rule's own output.
+        //
+        // Ghidra does not need this test because its types live on the varnodes,
+        // so the `TypePointerRel` this rewrite produces is still there when the
+        // rule is next offered the operation. Types here are re-derived from the
+        // graph each round, and a fresh derivation labels the new pointer from
+        // its accesses again, so the type-level guard below evaporates and the
+        // rule re-fires on its own output: eight rounds, three hundred and
+        // eighty-six new varnodes each, on one corpus function. The shape it
+        // produces is what identifies it, and a shape cannot go stale.
+        if let Some(def) = data.varnode(ptr).def
+            && data.op(def).opcode == op::PTRSUB
+            && data
+                .op(def)
+                .inputs
+                .get(1)
+                .copied()
+                .and_then(|value| constant_value(data, value))
+                == Some(0)
+        {
+            return 0;
+        }
         let cached = recover_types(data);
         let (factory, types) = (&cached.0, &cached.1);
         // A plain pointer only. A `PointerRel` already points into a container,
-        // so rewriting it again would re-derive what is already derived — the
-        // loop this rule used to be unregistered for.
+        // so rewriting it again would re-derive what is already derived.
         if matches!(types.get(ptr), Some(DataType::PointerRel { .. })) {
             return 0;
         }
@@ -641,28 +672,45 @@ impl Rule for RuleStructOffset0 {
     }
 }
 
-/// A graph-facing portion of RulePieceStructure.  The storage/symbol half of
-/// the C++ rule needs `partialRoot`, symbol-entry identity, address-tied and
-/// proto-partial flags, none of which the graph models.  Its independent
-/// INT_ZEXT-to-PIECE transform is fully representable and is retained here.
+/// A graph-facing portion of RulePieceStructure. The storage/symbol half of the
+/// C++ rule needs `partialRoot`, symbol-entry identity, address-tied and
+/// proto-partial flags, none of which the graph models.
+///
+/// Implemented but not registered. The `INT_ZEXT`-to-`PIECE` transform looked
+/// representable, and it is — but nothing here can tell a widening that is
+/// really a structure being reassembled from an ordinary one, which is what
+/// Ghidra's proto-partial state records. With the precondition absent it fired
+/// on any zero-extension, and `RulePiece2Zext` is its exact inverse, so every
+/// one was converted and converted straight back: three hundred and eighty-four
+/// each way per round on one corpus function, eight rounds that never converged,
+/// and ten seconds of the sixteen that function took. With the precondition
+/// narrowed to the honest one — the extended value's own recovered type being
+/// the structure — it fires nowhere in the corpus, because inference types a
+/// zero-extension's output as an integer. Registering it needs the
+/// proto-partial state; the transform itself is a faithful port of the rest.
 pub struct RulePieceStructure;
 
+/// The structure this value *is*, when it is one.
+///
+/// This used to fall back to scanning every recovered type in the function for
+/// any pointer to a structure of the same width. That is not a precondition
+/// about the value being widened: it asks whether a structure of that size
+/// exists anywhere, so in a function containing one eight-byte structure every
+/// eight-byte `INT_ZEXT` qualified. `RulePiece2Zext` is this transform's exact
+/// inverse, so all of them were converted to `PIECE` and converted straight
+/// back, three hundred and eighty-four each way per round, forever. Ghidra
+/// separates the two with the proto-partial state that says a value really is a
+/// structure being reassembled; the type of the value itself is the part of that
+/// evidence this graph has.
 fn find_structured_type(
     types: &RecoveredTypes,
     output: VarnodeId,
     output_size: u32,
 ) -> Option<DataType> {
-    if let Some(ty) = types.get(output) {
-        if is_structured(ty) && byte_width(ty) == output_size {
-            return Some(ty.clone());
-        }
-    }
-    types.iter().find_map(|(_, ty)| match ty {
-        DataType::Pointer { to, .. } if is_structured(to) && byte_width(to) == output_size => {
-            Some(to.as_ref().clone())
-        }
-        _ => None,
-    })
+    types
+        .get(output)
+        .filter(|ty| is_structured(ty) && byte_width(ty) == output_size)
+        .cloned()
 }
 
 impl Rule for RulePieceStructure {
@@ -908,7 +956,7 @@ mod tests {
     }
 
     #[test]
-    fn piece_structure_converts_zext_across_recovered_storage_and_declines_plain_zext() {
+    fn piece_structure_declines_a_zext_that_is_not_itself_a_structure() {
         let mut data = Funcdata::default();
         let block = data.new_block(0x7000);
         let base = input_value(&mut data, 0, 4);
@@ -928,9 +976,13 @@ mod tests {
         // INT_ZEXT is unary in p-code; remove the temporary second input used
         // only to share the binary test helper.
         data.op_set_inputs(zext, vec![zext_input]);
-        assert_eq!(RulePieceStructure.apply_op(zext, &mut data), 1);
-        assert_eq!(data.op(zext).opcode, op::PIECE);
-        assert_eq!(data.op(zext).inputs.len(), 2);
+        // This zero-extension has nothing to do with the structure the two loads
+        // above recover; it merely happens to be as wide as one. The rule used to
+        // convert it, because its precondition asked whether a structure of that
+        // width existed anywhere in the function rather than whether this value
+        // was one. `RulePiece2Zext` then converted it back, forever.
+        assert_eq!(RulePieceStructure.apply_op(zext, &mut data), 0);
+        assert_eq!(data.op(zext).opcode, op::INT_ZEXT);
         assert_eq!(data.varnode(output).size, 8);
 
         let mut decline = Funcdata::default();
@@ -959,6 +1011,5 @@ pub fn all() -> Vec<Box<dyn Rule>> {
         Box::new(RulePtrsubUndo),
         Box::new(RuleStructOffset0),
         Box::new(RulePushPtr),
-        Box::new(RulePieceStructure),
     ]
 }

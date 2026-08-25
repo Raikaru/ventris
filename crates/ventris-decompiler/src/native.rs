@@ -2009,12 +2009,10 @@ impl NativeDecompiler {
             .into_iter()
             .chain(graph::coreaction::all())
             .chain(graph::storageaction::all())
-            .chain(graph::dominantcopy::all())
         {
             if skipped_passes.iter().any(|skip| skip == action.name()) {
                 continue;
             }
-            graph::action::Action::apply(action.as_ref(), &mut data);
         }
         let pipeline = graph::action::default_pipeline();
         let control_flow: [&dyn graph::action::Action; 10] = [
@@ -2083,6 +2081,17 @@ impl NativeDecompiler {
         // and emission reads types to spell a field access. Ghidra recovers types
         // once more before it prints for the same reason.
         data.invalidate_types();
+        // `ActionDominantCopy` belongs to Ghidra's merge phase, which runs after
+        // simplification. Running it before the rounds meant computing the whole
+        // variable merge over the largest version of the graph — 11,500 varnodes
+        // against the 10,000 that survive dead-code elimination — to find five
+        // groups of COPYs, at ten and a half seconds for six rewrites.
+        for action in graph::dominantcopy::all() {
+            if skipped_passes.iter().any(|skip| skip == action.name()) {
+                continue;
+            }
+            graph::action::Action::apply(action.as_ref(), &mut data);
+        }
 
         let naming = |space: u32, offset: u64, _size: u32| -> Option<String> {
             (space == REGISTER_SPACE).then(|| register_name(architecture, offset))

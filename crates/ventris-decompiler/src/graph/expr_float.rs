@@ -13,10 +13,10 @@
 //! `INT_RIGHT`, `INT_ZEXT`, `SUBPIECE`, and `MULTIEQUAL`) are present in
 //! `ventris_pcode::op`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use super::action::Rule;
-use super::typefactory::{DataType, TypeFactory, infer};
+use super::typefactory::DataType;
 use super::{Funcdata, GraphBlockId, OpId, VarnodeId};
 use ventris_pcode::op;
 
@@ -97,10 +97,18 @@ fn is_float_bool_output(code: i32) -> bool {
 /// Infer whether a value is floating-point in the same graph state seen by a
 /// type-dependent rule.  The type factory starts storage values as integers,
 /// then propagates FLOAT operations backwards through their inputs.
+/// Whether type recovery made this value a float.
+///
+/// This has to read `Funcdata::recovered_types`, the shared snapshot every other
+/// rule reads. It used to build its own `TypeFactory` and run a full seven-pass
+/// inference on each call, which is once per float operation the pool offers:
+/// seventeen and a half of the twenty-two seconds one corpus function took, for
+/// a result the cache already held. The pointer width the private factory used
+/// was also 64 where the shared one uses the target's, which had no effect on
+/// this predicate but would have on anything asking about a pointer.
 fn is_inferred_float(data: &Funcdata, value: VarnodeId) -> bool {
-    let factory = TypeFactory::new(64);
-    let types = infer(data, &factory, &BTreeMap::new());
-    matches!(types.get(value), Some(DataType::Float(_)))
+    let cached = data.recovered_types();
+    matches!(cached.1.get(value), Some(DataType::Float(_)))
 }
 
 /// Port of `RuleFloatRange`.

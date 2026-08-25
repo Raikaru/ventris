@@ -249,6 +249,28 @@ All notable Ventris changes are documented here.
 - Measured against Ghidra on the corpus, the graph path improves to
   `unstructured-control-flow` 10 (from 13) and `missing-loop-or-switch` 4, against
   15 and 11 on the address-ordered default.
+- `is_inferred_float` in `graph/expr_float.rs` built its own `TypeFactory` and
+  ran a full seven-pass inference on every call, bypassing
+  `Funcdata::recovered_types` entirely, so the round-boundary caching did nothing
+  for it. Once per float operation the pool offered: seventeen and a half of the
+  twenty-two seconds `queryMapAddress_single` took, for a result the shared
+  snapshot already held. It now reads the cache like every other rule.
+- Moved `ActionDominantCopy` after the round loop, where Ghidra's merge phase
+  runs. Before the rounds it computed the whole variable merge over the largest
+  version of the graph — 11,500 varnodes rather than the 10,000 that survive dead
+  code elimination — to find five COPY groups, at 10.6 seconds for six rewrites
+  that later passes made anyway; output is unchanged on every corpus function.
+- `RulePieceStructure`'s precondition asked whether a structure of the output's
+  width existed anywhere in the function rather than whether the value being
+  widened was one, so in a function containing one eight-byte structure every
+  eight-byte `INT_ZEXT` qualified. `RulePiece2Zext` is its exact inverse: 384
+  conversions each way per round, eight rounds that never converged, and 386 new
+  varnodes per round. Narrowed to the honest precondition it fires nowhere, so it
+  is now implemented-but-unregistered with `partialRoot`/proto-partial named as
+  what it needs — and the test that asserted the old behaviour asserted the bug,
+  so it now pins the decline.
+- Net effect on `queryMapAddress_single`: 50.0s -> 2.0s. Full census 150s ->
+  11.9s, single-image census 0.9s.
 - Types are recovered once per pipeline round instead of after every rewrite.
   `invalidate_masks` no longer drops the recovered-type snapshot; the pipeline
   calls the new `Funcdata::invalidate_types` at each round boundary and once more
