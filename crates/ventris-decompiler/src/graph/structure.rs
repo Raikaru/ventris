@@ -238,6 +238,7 @@ impl<'a> Graph<'a> {
                     }
                     if self.rule_cat(node)
                         || self.rule_block_switch(node)
+                        || self.rule_case_fallthru(node)
                         || self.rule_if_else(node)
                         || self.rule_while_do(node)
                         || self.rule_do_while(node)
@@ -1029,6 +1030,53 @@ impl<'a> Graph<'a> {
         true
     }
 
+    /// A switch case that falls through into another case.
+    ///
+    /// Ghidra's `ruleCaseFallthru`. C reaches a fallthrough case by omitting the
+    /// `break`, but this construct tree has no way to say "continue into the next
+    /// case", so the edge is surrendered as a `goto` and `ruleBlockSwitch` can
+    /// then claim the rest. A case qualifies when its single successor is reached
+    /// by exactly two edges — its own and the switch's — which is what makes the
+    /// successor another case rather than the exit.
+    fn rule_case_fallthru(&mut self, node: NodeId) -> bool {
+        if !self.is_switch_out(node) {
+            return false;
+        }
+        let successors = self.nodes[node].successors.clone();
+        let mut nonfallthru = 0usize;
+        let mut fallthru: Vec<NodeId> = Vec::new();
+        for successor in successors.iter().copied() {
+            if successor == node {
+                return false; // A switch cannot fall through to itself.
+            }
+            if self.nodes[successor].predecessors.len() > 2
+                || self.nodes[successor].successors.len() > 1
+            {
+                nonfallthru += 1;
+            } else if self.nodes[successor].successors.len() == 1 {
+                let target = self.nodes[successor].successors[0];
+                if self.nodes[target].predecessors.len() == 2
+                    && self.nodes[target].successors.len() <= 1
+                    && self.nodes[target]
+                        .predecessors
+                        .iter()
+                        .any(|predecessor| *predecessor == node)
+                {
+                    fallthru.push(successor);
+                }
+            }
+            if nonfallthru > 1 {
+                return false; // At most one exit that is not a fallthrough.
+            }
+        }
+        let Some(case) = fallthru.first().copied() else {
+            return false;
+        };
+        let target = self.nodes[case].successors[0];
+        self.surrender_edge(case, target);
+        true
+    }
+
     /// Surrenders one edge as a `goto` so collapsing can continue.
     ///
     /// The edge chosen is a back edge if there is one, because a loop that no
@@ -1695,6 +1743,96 @@ mod tests {
             )),
             "a fully structured switch needs no goto: {structured:?}"
         );
+    }
+
+    #[test]
+    fn a_case_falling_into_another_case_surrenders_that_edge() {
+        // `case_a` runs on and into `case_b` rather than leaving to the exit.
+        // `case_b` therefore has two predecessors, which makes it the switch's
+        // exit block, and the whole shape structures with no `goto` at all: the
+        // one labelled case breaks out to `case_b`, and a selector reaching
+        // `case_b` directly arrives at the same place. `ruleCaseFallthru` is
+        // offered after `ruleBlockSwitch` for exactly this reason — it only has
+        // to surrender an edge when the switch rule cannot claim the shape.
+        let mut data = Funcdata::default();
+        let head = data.new_block(0x1000);
+        let case_a = data.new_block(0x1010);
+        let case_b = data.new_block(0x1020);
+        let join = data.new_block(0x1030);
+        for (from, to) in [
+            (head, case_a),
+            (head, case_b),
+            (case_a, case_b),
+            (case_b, join),
+        ] {
+            data.add_edge(from, to);
+        }
+        let selector = data.new_varnode(REGISTER_SPACE, 0x10, 4);
+        data.mark_input(selector);
+        let branch = data.new_op(op::BRANCHIND, seq(0x1000), vec![selector]);
+        data.op_insert_end(branch, head);
+
+        let table = super::super::jumptable::JumpTable {
+            branch,
+            switch_value: selector,
+            cases: vec![(0, 0x1010), (1, 0x1020)],
+            default_target: None,
+        };
+        let structured = structure(&data, std::slice::from_ref(&table));
+        assert!(
+            contains(&structured, &|node| matches!(
+                node,
+                Structured::Switch { .. }
+            )),
+            "the switch should still be recovered: {structured:?}"
+        );
+        assert!(
+            !contains(&structured, &|node| matches!(
+                node,
+                Structured::Goto { .. } | Structured::IfGoto { .. }
+            )),
+            "this shape structures without surrendering an edge: {structured:?}"
+        );
+        // The fallthrough target is the exit, so only the one case is labelled.
+        let cases = collect_switch_cases(&structured);
+        assert_eq!(cases, vec![Some(0)], "unexpected cases: {structured:?}");
+    }
+
+    /// Every label a recovered switch claims.
+    fn collect_switch_cases(node: &Structured) -> Vec<Option<u64>> {
+        let mut found = Vec::new();
+        let mut pending = vec![node];
+        while let Some(current) = pending.pop() {
+            match current {
+                Structured::Switch { header, cases, .. } => {
+                    found.extend(cases.iter().map(|(label, _)| *label));
+                    pending.push(header);
+                    pending.extend(cases.iter().map(|(_, case)| case));
+                }
+                Structured::List(members) => pending.extend(members.iter()),
+                Structured::IfElse {
+                    header,
+                    then_body,
+                    else_body,
+                    ..
+                } => {
+                    pending.push(header);
+                    pending.push(then_body);
+                    if let Some(body) = else_body {
+                        pending.push(body);
+                    }
+                }
+                Structured::WhileDo { header, body, .. } => {
+                    pending.push(header);
+                    pending.push(body);
+                }
+                Structured::DoWhile { body, .. } | Structured::InfLoop { body } => {
+                    pending.push(body)
+                }
+                _ => {}
+            }
+        }
+        found
     }
 
     #[test]

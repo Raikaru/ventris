@@ -249,6 +249,15 @@ All notable Ventris changes are documented here.
 - Measured against Ghidra on the corpus, the graph path improves to
   `unstructured-control-flow` 10 (from 13) and `missing-loop-or-switch` 4, against
   15 and 11 on the address-ordered default.
+- Ported `CollapseStructure::ruleCaseFallthru`, the eleventh and last of
+  Ghidra's collapse rules. A case that runs on into another case cannot be spelled
+  by this construct tree — there is no "continue into the next case" — so the
+  fallthrough edge is surrendered and the switch rule claims the rest. It is
+  offered after `ruleBlockSwitch` for a reason the test makes concrete: when the
+  fallthrough target has two predecessors it *is* the switch's exit, and the whole
+  shape structures with no surrendered edge at all, one labelled case breaking out
+  to the same block a direct selector would reach.
+- `CollapseStructure` is now fully ported: all 11 collapse rules.
 - Ported `CollapseStructure::ruleBlockSwitch`, the last collapse rule that
   handles a node with more than two successors. Every other rule requires a
   two-way branch, so an indirect branch was a node no construct could claim and
