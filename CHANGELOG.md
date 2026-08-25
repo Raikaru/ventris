@@ -282,6 +282,28 @@ All notable Ventris changes are documented here.
   table-backed switch the rule can claim, and `dl_G_MOVEWORD`'s `switch 0 vs 1`
   is a `BRANCHIND` whose table this pipeline does not recover. The rule is
   correct and tested; it has no corpus function to improve yet.
+- Ported `ConditionalJoin`, `ActionNodeJoin` and `Funcdata::nodeJoinCreateBlock`
+  as `graph::nodejoin`, with `functionalEqualityLevel` as `graph::equality`. Two
+  blocks that end in a CBRANCH on the same value and split the same two ways
+  perform one test twice; the join builds a block that performs it once, phis
+  whatever the exits used to merge across those two edges, and leaves both
+  original blocks flowing into it.
+  Measured: 92 candidate pairs across four corpus functions, zero joins. Every
+  pair is rejected on the same ground, and it is the interesting one: a rotated
+  loop's guard tests `INT_EQUAL` where its latch tests `INT_NOTEQUAL`, so
+  `functionalEqualityLevel` stops at the differing opcode. Covered by synthetic
+  tests instead, which is the honest position for a data-flow mutation with no
+  live instance: the merging case, the different-exits rejection, and the
+  opposite-polarity rejection that explains the corpus result.
+  This does not close the for-loop gap. I predicted it would, on the observation
+  that Ghidra prints `for` for exactly the two `TRK_fill_mem` loops whose guard
+  and latch branch to the same two blocks - which is true, and is still the
+  sharpest evidence available - but the pass that converts those into a
+  `BlockWhileDo` is not this one. Only `BlockWhileDo` prints as `for`
+  (`emitBlockWhileDo` is the sole caller of `emitForLoop`), so a whiledo is
+  certainly what Ghidra has; which pass produces it is unidentified. That is the
+  fourth wrong guess about a cause this session, all four from reasoning ahead of
+  measuring.
 - Corrected the collapse rule order to `collapseInternal`'s. Four rules were in
   the wrong phase: `ruleBlockProperIf` (our `rule_if_no_exit`) is the third rule
   of the main chain, not a last resort; `ruleBlockSwitch` is the last of it, not

@@ -27,6 +27,7 @@ pub mod cover;
 pub mod deadcode;
 pub mod dominantcopy;
 pub mod emit;
+pub mod equality;
 pub mod expr_arith;
 pub mod expr_bool;
 pub mod expr_divmod;
@@ -44,6 +45,7 @@ pub mod marking;
 pub mod merge;
 pub mod mergeaction;
 pub mod namevars;
+pub mod nodejoin;
 pub mod nonzero;
 pub mod proto;
 pub mod protoaction;
@@ -564,6 +566,52 @@ impl Funcdata {
         self.invalidate_masks();
         self.ops[op.0 as usize].parent = Some(block);
         self.blocks[block.0 as usize].ops.push(op);
+    }
+
+    /// Detaches an operation from its block without destroying it.
+    ///
+    /// Ghidra's `opUninsert`. The operation keeps its operands and identity, so
+    /// it can be re-inserted elsewhere - which is how a merged CBRANCH moves
+    /// into the block that now performs the test.
+    pub fn op_uninsert(&mut self, op: OpId) {
+        self.invalidate_masks();
+        if let Some(block) = self.ops[op.0 as usize].parent.take() {
+            self.blocks[block.0 as usize].ops.retain(|held| *held != op);
+        }
+    }
+
+    /// Places an operation at the head of a block.
+    pub fn op_insert_begin(&mut self, op: OpId, block: GraphBlockId) {
+        self.invalidate_masks();
+        self.ops[op.0 as usize].parent = Some(block);
+        self.blocks[block.0 as usize].ops.insert(0, op);
+    }
+
+    /// Drops one operand, keeping the operand links of the rest current.
+    ///
+    /// Ghidra's `opRemoveInput`. A phi loses an input when the edge it stood for
+    /// is gone.
+    pub fn op_remove_input(&mut self, op: OpId, slot: usize) {
+        self.invalidate_masks();
+        if slot >= self.ops[op.0 as usize].inputs.len() {
+            return;
+        }
+        let removed = self.ops[op.0 as usize].inputs.remove(slot);
+        // The value keeps this reader only if another slot still holds it.
+        if !self.ops[op.0 as usize].inputs.contains(&removed) {
+            self.varnodes[removed.0 as usize].descendants.remove(&op);
+        }
+    }
+
+    /// Moves one out-edge of a block to a different source block.
+    ///
+    /// Ghidra's `BlockGraph::moveOutEdge`, which `nodeJoinCreateBlock` uses to
+    /// hand the two surviving exits to the new joined block.
+    pub fn move_out_edge(&mut self, from: GraphBlockId, to: GraphBlockId, new_from: GraphBlockId) {
+        if !self.remove_edge(from, to) {
+            return;
+        }
+        self.add_edge(new_from, to);
     }
 
     /// Removes an operation from the graph, releasing its operand links.

@@ -1,0 +1,432 @@
+//! Merging two conditional blocks that test the same thing.
+//!
+//! Port of `ConditionalJoin` and `ActionNodeJoin` from Ghidra 12.1.3's
+//! `blockaction.cc`, with `Funcdata::nodeJoinCreateBlock` from
+//! `funcdata_block.cc`.
+//!
+//! Two blocks that end in a CBRANCH on the same value and lead to the same two
+//! places are performing one test twice. Merging them into a new block that
+//! holds the test once removes a whole edge from the graph, and that is what
+//! lets the structuring rules see constructs they otherwise cannot: a guarded
+//! bottom-tested loop, whose guard and whose loop-back test are exactly such a
+//! pair, becomes a single `while` loop rather than an `if` wrapped around a
+//! `do`/`while`. That in turn is the shape for-loop recovery needs.
+
+use std::collections::BTreeMap;
+
+use ventris_pcode::op;
+
+use super::equality::{Equality, functional_equality};
+use super::{Funcdata, GraphBlockId, OpId, VarnodeId};
+
+/// Merges conditional blocks that test the same thing.
+pub struct ActionNodeJoin;
+
+impl super::action::Action for ActionNodeJoin {
+    fn name(&self) -> &'static str {
+        "node-join"
+    }
+
+    fn apply(&self, data: &mut Funcdata) -> usize {
+        join_all(data)
+    }
+}
+
+/// Merge every pair of conditional blocks that qualifies.
+///
+/// `ActionNodeJoin::apply`. Returns the number of joins performed.
+fn join_all(data: &mut Funcdata) -> usize {
+    let mut count = 0;
+    let mut index = 0;
+    while index < data.blocks.len() {
+        let block = GraphBlockId(index as u32);
+        index += 1;
+        if data.block(block).successors.len() != 2 {
+            continue;
+        }
+        let (first, second) = (
+            data.block(block).successors[0],
+            data.block(block).successors[1],
+        );
+        // Take the exit with fewer ways in: it is the one whose other
+        // predecessors are worth testing against this block.
+        let fewest = if data.block(first).predecessors.len() < data.block(second).predecessors.len()
+        {
+            first
+        } else {
+            second
+        };
+        if data.block(fewest).predecessors.len() == 1 {
+            continue;
+        }
+        let candidates: Vec<GraphBlockId> = data
+            .block(fewest)
+            .predecessors
+            .iter()
+            .copied()
+            .filter(|predecessor| *predecessor != block)
+            .collect();
+        for other in candidates {
+            if let Some(join) = Join::of(data, block, other) {
+                join.execute(data);
+                count += 1;
+                break;
+            }
+        }
+    }
+    count
+}
+
+/// A pair of conditional blocks that may be merged, and what merging them needs.
+struct Join {
+    block1: GraphBlockId,
+    block2: GraphBlockId,
+    exita: GraphBlockId,
+    exitb: GraphBlockId,
+    /// The edge indices into each exit, needed to know which phi input belongs
+    /// to which of the two blocks.
+    a_in1: usize,
+    a_in2: usize,
+    b_in1: usize,
+    b_in2: usize,
+    cbranch1: OpId,
+    cbranch2: OpId,
+    /// Value pairs the joined block must merge, in a stable order so the phis it
+    /// builds do not depend on hash iteration.
+    mergeneed: Vec<(VarnodeId, VarnodeId)>,
+}
+
+impl Join {
+    /// `ConditionalJoin::match`: the two blocks must split the same two ways.
+    fn of(data: &Funcdata, block1: GraphBlockId, block2: GraphBlockId) -> Option<Self> {
+        if block1 == block2 {
+            return None;
+        }
+        if data.block(block1).successors.len() != 2 || data.block(block2).successors.len() != 2 {
+            return None;
+        }
+        let exita = data.block(block1).successors[0];
+        let exitb = data.block(block1).successors[1];
+        if exita == exitb {
+            return None;
+        }
+        // The false exits must match, and so must the true exits.
+        if data.block(block2).successors[0] != exita || data.block(block2).successors[1] != exitb {
+            return None;
+        }
+        let a_in1 = edge_index(data, exita, block1)?;
+        let a_in2 = edge_index(data, exita, block2)?;
+        let b_in1 = edge_index(data, exitb, block1)?;
+        let b_in2 = edge_index(data, exitb, block2)?;
+
+        let mut join = Self {
+            block1,
+            block2,
+            exita,
+            exitb,
+            a_in1,
+            a_in2,
+            b_in1,
+            b_in2,
+            cbranch1: OpId(0),
+            cbranch2: OpId(0),
+            mergeneed: Vec::new(),
+        };
+        join.find_dups(data)?;
+        join.check_exit_block(data, exita, a_in1, a_in2);
+        join.check_exit_block(data, exitb, b_in1, b_in2);
+        Some(join)
+    }
+
+    /// `findDups`: the two tests must be on the same value, or on one pair of
+    /// values the joined block can merge.
+    fn find_dups(&mut self, data: &Funcdata) -> Option<()> {
+        self.cbranch1 = terminal_cbranch(data, self.block1)?;
+        self.cbranch2 = terminal_cbranch(data, self.block2)?;
+        let value1 = *data.op(self.cbranch1).inputs.get(1)?;
+        let value2 = *data.op(self.cbranch2).inputs.get(1)?;
+        if value1 == value2 {
+            return Some(());
+        }
+        // The join is only worth doing if the values will actually merge, which
+        // is the same question `RulePushMulti` asks afterwards.
+        if data.varnode(value1).def.is_none() || data.varnode(value2).def.is_none() {
+            return None;
+        }
+        match functional_equality(data, value1, value2) {
+            Equality::Same => Some(()),
+            Equality::Different => None,
+            Equality::Contingent(..) => {
+                // A COPY or SUBPIECE definition would make the merged value a
+                // narrowing of something already merged elsewhere.
+                let definition = data.op(data.varnode(value1).def?);
+                if matches!(definition.opcode, op::COPY | op::SUBPIECE) {
+                    return None;
+                }
+                self.need(value1, value2);
+                Some(())
+            }
+        }
+    }
+
+    /// `checkExitBlock`: whatever an exit already merges across these two edges
+    /// must be merged in the joined block instead.
+    fn check_exit_block(&mut self, data: &Funcdata, exit: GraphBlockId, in1: usize, in2: usize) {
+        for operation in data.block(exit).ops.clone() {
+            let held = data.op(operation);
+            if held.opcode == op::MULTIEQUAL {
+                let (Some(value1), Some(value2)) =
+                    (held.inputs.get(in1).copied(), held.inputs.get(in2).copied())
+                else {
+                    continue;
+                };
+                if value1 != value2 {
+                    self.need(value1, value2);
+                }
+            } else if held.opcode != op::COPY {
+                // The phis are at the head of a block, so the first thing that
+                // is neither a phi nor a copy ends them.
+                break;
+            }
+        }
+    }
+
+    fn need(&mut self, value1: VarnodeId, value2: VarnodeId) {
+        if !self.mergeneed.iter().any(|pair| *pair == (value1, value2)) {
+            self.mergeneed.push((value1, value2));
+        }
+    }
+
+    /// Perform the join.
+    fn execute(&self, data: &mut Funcdata) {
+        let join = self.create_block(data);
+        let merged = self.setup_multiequals(data, join);
+        self.move_cbranch(data, join, &merged);
+        self.cut_down_multiequals(data, self.exita, self.a_in1, self.a_in2, &merged);
+        self.cut_down_multiequals(data, self.exitb, self.b_in1, self.b_in2, &merged);
+    }
+
+    /// `Funcdata::nodeJoinCreateBlock`: a new block takes one out-edge to each
+    /// exit, and both original blocks flow into it.
+    fn create_block(&self, data: &mut Funcdata) -> GraphBlockId {
+        let address = data.op(self.cbranch1).seq.address;
+        let join = data.new_block(address);
+        // Of the two edges into each exit, drop the one from the block whose
+        // edge index is higher, and move the survivor onto the new block.
+        let (dropa, keepa) = if self.a_in1 > self.a_in2 {
+            (self.block1, self.block2)
+        } else {
+            (self.block2, self.block1)
+        };
+        let (dropb, keepb) = if self.b_in1 > self.b_in2 {
+            (self.block1, self.block2)
+        } else {
+            (self.block2, self.block1)
+        };
+        data.remove_edge(dropa, self.exita);
+        data.remove_edge(dropb, self.exitb);
+        data.move_out_edge(keepa, self.exita, join);
+        data.move_out_edge(keepb, self.exitb, join);
+        data.add_edge(self.block1, join);
+        data.add_edge(self.block2, join);
+        join
+    }
+
+    /// `setupMultiequals`: one phi in the joined block per pair that needs it.
+    fn setup_multiequals(
+        &self,
+        data: &mut Funcdata,
+        join: GraphBlockId,
+    ) -> BTreeMap<(VarnodeId, VarnodeId), VarnodeId> {
+        let mut merged = BTreeMap::new();
+        let seq = data.op(self.cbranch1).seq;
+        for (value1, value2) in self.mergeneed.iter().copied() {
+            let size = data.varnode(value1).size;
+            let phi = data.new_op(op::MULTIEQUAL, seq, vec![value1, value2]);
+            let output = data.new_unique(size);
+            data.op_set_output(phi, Some(output));
+            data.op_insert_end(phi, join);
+            merged.insert((value1, value2), output);
+        }
+        merged
+    }
+
+    /// `moveCbranch`: the first test moves into the joined block and reads the
+    /// merged value; the second is destroyed.
+    fn move_cbranch(
+        &self,
+        data: &mut Funcdata,
+        join: GraphBlockId,
+        merged: &BTreeMap<(VarnodeId, VarnodeId), VarnodeId>,
+    ) {
+        let value1 = data.op(self.cbranch1).inputs[1];
+        let value2 = data.op(self.cbranch2).inputs[1];
+        data.op_uninsert(self.cbranch1);
+        data.op_insert_end(self.cbranch1, join);
+        let value = if value1 == value2 {
+            value1
+        } else {
+            merged.get(&(value1, value2)).copied().unwrap_or(value1)
+        };
+        data.op_set_input(self.cbranch1, value, 1);
+        data.op_destroy(self.cbranch2);
+    }
+
+    /// `cutDownMultiequals`: an exit that merged across two edges now sees one,
+    /// carrying the value the joined block merged.
+    fn cut_down_multiequals(
+        &self,
+        data: &mut Funcdata,
+        exit: GraphBlockId,
+        in1: usize,
+        in2: usize,
+        merged: &BTreeMap<(VarnodeId, VarnodeId), VarnodeId>,
+    ) {
+        let (low, high) = if in1 > in2 { (in2, in1) } else { (in1, in2) };
+        for operation in data.block(exit).ops.clone() {
+            let held = data.op(operation);
+            if held.opcode == op::MULTIEQUAL {
+                let (Some(value1), Some(value2)) =
+                    (held.inputs.get(in1).copied(), held.inputs.get(in2).copied())
+                else {
+                    continue;
+                };
+                if value1 == value2 {
+                    data.op_remove_input(operation, high);
+                } else {
+                    let Some(substitute) = merged.get(&(value1, value2)).copied() else {
+                        continue;
+                    };
+                    data.op_remove_input(operation, high);
+                    data.op_set_input(operation, substitute, low);
+                }
+                if data.op(operation).inputs.len() == 1 {
+                    // A phi with one input is a copy, and it belongs at the head
+                    // of the block rather than among the phis.
+                    data.op_uninsert(operation);
+                    data.op_set_opcode(operation, op::COPY);
+                    data.op_insert_begin(operation, exit);
+                }
+            } else if held.opcode != op::COPY {
+                break;
+            }
+        }
+    }
+}
+
+/// The index of the edge from a predecessor into a block.
+fn edge_index(data: &Funcdata, block: GraphBlockId, predecessor: GraphBlockId) -> Option<usize> {
+    data.block(block)
+        .predecessors
+        .iter()
+        .position(|held| *held == predecessor)
+}
+
+/// The CBRANCH a block ends with, if it ends with one that has not had a pending
+/// boolean flip.
+fn terminal_cbranch(data: &Funcdata, block: GraphBlockId) -> Option<OpId> {
+    let last = data.block(block).ops.last().copied()?;
+    if data.op(last).opcode != op::CBRANCH {
+        return None;
+    }
+    Some(last)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::SeqNum;
+
+    fn seq(address: u64) -> SeqNum {
+        SeqNum { address, order: 0 }
+    }
+
+    /// Two blocks testing one value and splitting the same two ways become one
+    /// block that performs the test once.
+    #[test]
+    fn two_blocks_testing_the_same_value_merge_into_one() {
+        let mut data = Funcdata::default();
+        data.entry = 0x1000;
+        let guard = data.new_block(0x1000);
+        let latch = data.new_block(0x1010);
+        let taken = data.new_block(0x1020);
+        let fallthrough = data.new_block(0x1030);
+
+        // One value, tested by both blocks.
+        let counter = data.new_varnode(ventris_lifter::REGISTER_SPACE, 0, 4);
+        let zero = data.new_constant(0, 4);
+        let test = data.new_op(op::INT_NOTEQUAL, seq(0x1000), vec![counter, zero]);
+        let condition = data.new_unique(1);
+        data.op_set_output(test, Some(condition));
+        data.op_insert_end(test, guard);
+
+        for (block, address) in [(guard, 0x1020u64), (latch, 0x1020)] {
+            let target = data.new_varnode(ventris_lifter::RAM_SPACE, address, 4);
+            let branch = data.new_op(op::CBRANCH, seq(address), vec![target, condition]);
+            data.op_insert_end(branch, block);
+        }
+        // Both split the same two ways, in the same order.
+        data.add_edge(guard, taken);
+        data.add_edge(guard, fallthrough);
+        data.add_edge(latch, taken);
+        data.add_edge(latch, fallthrough);
+
+        let before = data.blocks.len();
+        assert_eq!(join_all(&mut data), 1, "the pair should have merged");
+        assert_eq!(data.blocks.len(), before + 1, "a joined block is created");
+
+        let join = GraphBlockId(before as u32);
+        assert_eq!(
+            data.block(join).successors,
+            vec![taken, fallthrough],
+            "the joined block takes both exits"
+        );
+        assert_eq!(data.block(guard).successors, vec![join]);
+        assert_eq!(data.block(latch).successors, vec![join]);
+        assert_eq!(
+            data.block(join)
+                .ops
+                .iter()
+                .filter(|op| data.op(**op).opcode == op::CBRANCH)
+                .count(),
+            1,
+            "the test is performed once"
+        );
+        // The exits each lost an edge, so neither block reaches them directly.
+        assert!(!data.block(guard).successors.contains(&taken));
+        assert!(!data.block(latch).successors.contains(&fallthrough));
+    }
+
+    /// Blocks that split to different places are not a pair, however alike
+    /// their tests are.
+    #[test]
+    fn blocks_splitting_to_different_places_do_not_merge() {
+        let mut data = Funcdata::default();
+        data.entry = 0x1000;
+        let guard = data.new_block(0x1000);
+        let latch = data.new_block(0x1010);
+        let shared = data.new_block(0x1020);
+        let one = data.new_block(0x1030);
+        let other = data.new_block(0x1040);
+
+        let counter = data.new_varnode(ventris_lifter::REGISTER_SPACE, 0, 4);
+        let zero = data.new_constant(0, 4);
+        let test = data.new_op(op::INT_NOTEQUAL, seq(0x1000), vec![counter, zero]);
+        let condition = data.new_unique(1);
+        data.op_set_output(test, Some(condition));
+        data.op_insert_end(test, guard);
+        for block in [guard, latch] {
+            let target = data.new_varnode(ventris_lifter::RAM_SPACE, 0x1020, 4);
+            let branch = data.new_op(op::CBRANCH, seq(0x1020), vec![target, condition]);
+            data.op_insert_end(branch, block);
+        }
+        data.add_edge(guard, shared);
+        data.add_edge(guard, one);
+        data.add_edge(latch, shared);
+        data.add_edge(latch, other);
+
+        let before = data.blocks.len();
+        assert_eq!(join_all(&mut data), 0);
+        assert_eq!(data.blocks.len(), before, "no block is created");
+    }
+}
