@@ -381,6 +381,20 @@ fn substitute_expr(target: &mut Expr, name: &str, value: &Expr) -> bool {
         Expr::Binary { left, right, .. } => {
             replaced |= substitute_expr(left, name, value);
             replaced |= substitute_expr(right, name, value);
+            // Substituting a named zero into an addition leaves `x + 0`, which
+            // the expression builder would never have emitted: it folds a zero
+            // displacement when it builds the operation. The literal only
+            // appears here, after propagation spends the name, so the fold has
+            // to happen here too.
+            if let Expr::Binary {
+                op: crate::native::BinaryOp::Add,
+                left,
+                right,
+            } = target
+                && matches!(right.as_ref(), Expr::Constant { value: 0, .. })
+            {
+                *target = (**left).clone();
+            }
         }
         Expr::Not(inner)
         | Expr::Neg(inner)
@@ -2118,6 +2132,61 @@ mod tests {
         assert_eq!(
             statements, before,
             "a deep expression is left behind a name"
+        );
+    }
+
+    #[test]
+    fn propagating_a_named_zero_leaves_no_addition() {
+        // The expression builder folds a zero displacement when it builds the
+        // operation, so `x + 0` can only appear later: propagation spends a name
+        // that held zero and writes the literal into an addition already built.
+        // That artifact put a `+ 0` beside every access the structure-offset
+        // rule rewrote, and it made a label read as a call site to the census.
+        let mut statements = vec![
+            NativeStatement::Declare {
+                name: "zero".into(),
+                ty: Type::Unsigned(32),
+                value: Expr::Constant { value: 0, width: 4 },
+            },
+            NativeStatement::Assign {
+                destination: Expr::Field {
+                    base: Box::new(Expr::Binary {
+                        op: crate::native::BinaryOp::Add,
+                        left: Box::new(Expr::Temporary {
+                            name: "p".into(),
+                            width: 4,
+                        }),
+                        right: Box::new(Expr::Temporary {
+                            name: "zero".into(),
+                            width: 4,
+                        }),
+                    }),
+                    name: "field_0".into(),
+                    width: 4,
+                },
+                source: Expr::Constant { value: 7, width: 4 },
+            },
+        ];
+        propagate_single_use_copies(&mut statements);
+        drop_assignments_nothing_reads(&mut statements);
+
+        let destination = statements
+            .iter()
+            .find_map(|statement| match statement {
+                NativeStatement::Assign { destination, .. } => Some(destination),
+                _ => None,
+            })
+            .expect("the assignment survives");
+        let Expr::Field { base, .. } = destination else {
+            panic!("expected a field access, got {destination:?}");
+        };
+        assert_eq!(
+            base.as_ref(),
+            &Expr::Temporary {
+                name: "p".into(),
+                width: 4
+            },
+            "a propagated zero must not leave an addition behind"
         );
     }
 }

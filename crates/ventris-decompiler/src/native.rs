@@ -1999,6 +1999,20 @@ impl NativeDecompiler {
             &graph::condprop::ActionConditionalExe,
             &graph::stackframe::ActionStackPtrFlow,
         ];
+        // `ActionSpacebase`, and it must happen before anything reads a type:
+        // the recovered-type cache is cleared by graph edits, not by learning a
+        // new fact about the architecture, so naming the frame base after the
+        // first rule has run leaves that rule's view of the stack behind.
+        if let Some(abi) = abi
+            && let Some(vnode) =
+                abi_register_vnode(architecture, abi.stack_pointer, abi.pointer_bits)
+        {
+            data.spacebase = Some(graph::guard::Location {
+                space: vnode.space,
+                offset: vnode.offset,
+                size: vnode.size,
+            });
+        }
         for _ in 0..GRAPH_PIPELINE_ROUNDS {
             let mut changed = graph::action::Action::apply(pipeline.as_ref(), &mut data);
             for pass in control_flow {

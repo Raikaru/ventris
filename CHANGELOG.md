@@ -249,6 +249,20 @@ All notable Ventris changes are documented here.
 - Measured against Ghidra on the corpus, the graph path improves to
   `unstructured-control-flow` 10 (from 13) and `missing-loop-or-switch` 4, against
   15 and 11 on the address-ordered default.
+- Added `DataType::Spacebase`, Ghidra's `TypeSpacebase`, and `Funcdata.spacebase`
+  to carry which register holds the frame base. `down_chain` keeps a pointer into
+  the frame relative to the frame, and access-pattern struct recovery now
+  declines a frame-derived root: components of the frame are Ghidra's symbol
+  table's business, never an access pattern's. The symbol table itself is still
+  absent, so nothing here names a local.
+- Registered `RuleStructOffset0`. Both facts it needed were found by building the
+  previous one and watching what broke: `PointerRel` stopped it matching its own
+  output, `Spacebase` stopped it printing a stack slot as `local_20->field_0`.
+- Fixed a `+ 0` artifact the rule exposed. The expression builder folds a zero
+  displacement when it builds `INT_ADD`/`PTRADD`/`PTRSUB`, but propagation spends
+  a name that held zero and writes the literal into an addition already built, so
+  the fold has to happen there too. It had made a label read as a call site to
+  the census, which is how `call-census` moved from 4 to 5 functions and back.
 - Added `DataType::PointerRel`, Ghidra's `TypePointerRel`: a pointer into the
   middle of a larger object, carrying the container and the byte offset. Two
   places now produce one — `down_chain` when it steps into a structure or array,

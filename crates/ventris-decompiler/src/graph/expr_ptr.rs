@@ -69,7 +69,7 @@ fn byte_width(ty: &DataType) -> u32 {
         | DataType::Pointer { bits, .. }
         | DataType::PointerRel { bits, .. } => bits.saturating_add(7) / 8,
         DataType::Bool => 1,
-        DataType::Void => 0,
+        DataType::Void | DataType::Spacebase => 0,
         DataType::Array { element, count } => {
             if *count == 0 {
                 0
@@ -549,20 +549,13 @@ impl Rule for RulePushPtr {
 /// `RuleStructOffset0`: an access through a pointer to a structure or array
 /// whose first component fills the access is an access to that component.
 ///
-/// Implemented but not registered, and the reason is now the right one. It used
-/// to be unregisterable because it could not terminate: it inserts
-/// `PTRSUB(ptr, 0)` and re-points the access, and the result inferred as
-/// pointer-to-structure again so the guard matched its own output forever. That
-/// is fixed — `down_chain` yields `DataType::PointerRel` when it steps into a
-/// container, as Ghidra's `TypePointerRel` does, and the guard below declines a
-/// relative pointer.
-///
-/// What blocks it now is the stack. Ghidra gives the frame a `TypeSpacebase`, so
-/// this rule never fires on a frame-relative pointer. Without that distinction
-/// it rewrites `sp - 0x20` into a structure pointer and prints a stack slot as
-/// `local_20->field_0`, which is not what the frame is. Registering it needs
-/// `TypeSpacebase`, or a frame-pointer fact reaching the rule; the rule itself
-/// is a faithful port of everything else.
+/// Two facts had to exist before this could be registered, and each was found by
+/// building the previous one and watching what broke. It inserts
+/// `PTRSUB(ptr, 0)` and re-points the access, so with only a plain pointer the
+/// result inferred as pointer-to-structure again and the guard matched its own
+/// output forever: `DataType::PointerRel` fixed that. It then rewrote the stack
+/// frame, printing a slot as `local_20->field_0`, because nothing distinguished
+/// the frame from an aggregate: `DataType::Spacebase` fixed that.
 pub struct RuleStructOffset0;
 
 impl Rule for RuleStructOffset0 {
@@ -953,6 +946,7 @@ pub fn all() -> Vec<Box<dyn Rule>> {
         Box::new(RulePtrArith),
         Box::new(RulePtraddUndo),
         Box::new(RulePtrsubUndo),
+        Box::new(RuleStructOffset0),
         Box::new(RulePushPtr),
         Box::new(RulePieceStructure),
     ]

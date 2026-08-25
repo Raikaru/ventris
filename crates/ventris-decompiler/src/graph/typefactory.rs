@@ -64,6 +64,14 @@ pub enum DataType {
         name: String,
         fields: Vec<Field>,
     },
+    /// `TypeSpacebase`: an address space treated as a structure.
+    ///
+    /// Ghidra resolves a component of this through the symbol table indexed by
+    /// the spacebase, which this pipeline does not have, so nothing here can
+    /// name a local. What the type carries is the distinction itself: the frame
+    /// is not an ordinary aggregate, so the rules and the access-pattern struct
+    /// recovery that key on "pointer to a structure" must not treat it as one.
+    Spacebase,
     /// Ghidra's `TypePointerRel`: a pointer into the middle of a larger object.
     ///
     /// `to` is what lies at the offset, exactly as a plain pointer's `to` is,
@@ -179,6 +187,23 @@ impl TypeFactory {
     /// add an offset to a pointer and return a pointer to the containing
     /// component.  The pointer width is preserved.
     pub fn down_chain(&self, ty: &DataType, offset: u32) -> Option<DataType> {
+        // A pointer into the frame stays a pointer into the frame. Ghidra would
+        // resolve the component through the symbol table indexed by the
+        // spacebase; lacking that table this still records which object is
+        // pointed into, which is what keeps frame arithmetic from being
+        // mistaken for a structure by access-pattern recovery.
+        if let Some(base) = self.spacebase_offset(ty) {
+            let bits = match ty {
+                DataType::Pointer { bits, .. } | DataType::PointerRel { bits, .. } => *bits,
+                _ => return None,
+            };
+            return Some(self.intern(DataType::PointerRel {
+                to: Box::new(DataType::Unknown(0)),
+                bits,
+                parent: Box::new(DataType::Spacebase),
+                offset: base.wrapping_add(offset),
+            }));
+        }
         let DataType::Pointer { to, bits } = ty else {
             return None;
         };
@@ -199,6 +224,22 @@ impl TypeFactory {
             }));
         }
         Some(self.get_type_pointer_with_bits(component, *bits))
+    }
+
+    /// The frame offset a pointer points at, when it points into the frame.
+    ///
+    /// This is the question `TypeSpacebase` exists to answer here, and it is why
+    /// the type is worth having without a symbol table behind it.
+    pub fn spacebase_offset(&self, ty: &DataType) -> Option<u32> {
+        match ty {
+            DataType::Pointer { to, .. } if matches!(to.as_ref(), DataType::Spacebase) => Some(0),
+            DataType::PointerRel { parent, offset, .. }
+                if matches!(parent.as_ref(), DataType::Spacebase) =>
+            {
+                Some(*offset)
+            }
+            _ => None,
+        }
     }
 
     /// The pointer a relative pointer behaves as when its provenance is not
@@ -339,7 +380,7 @@ pub fn to_native(ty: &DataType) -> crate::native::Type {
             crate::native::Type::Pointer(Box::new(to_native(to)))
         }
         DataType::Array { element, .. } => to_native(element),
-        DataType::Struct { .. } => crate::native::Type::Unknown,
+        DataType::Struct { .. } | DataType::Spacebase => crate::native::Type::Unknown,
     }
 }
 
@@ -351,7 +392,7 @@ fn byte_width(ty: &DataType) -> u32 {
         | DataType::Pointer { bits, .. }
         | DataType::PointerRel { bits, .. } => bits.saturating_add(7) / 8,
         DataType::Bool => 1,
-        DataType::Void => 0,
+        DataType::Void | DataType::Spacebase => 0,
         DataType::Array { element, count } => {
             if *count == 0 {
                 0
@@ -376,6 +417,7 @@ fn rank(ty: &DataType) -> u8 {
         DataType::PointerRel { .. } => 0,
         DataType::Pointer { .. } => 0,
         DataType::Struct { .. } => 1,
+        DataType::Spacebase => 1,
         DataType::Array { .. } => 2,
         DataType::Bool | DataType::Float(_) => 3,
         DataType::Int { .. } => 4,
@@ -999,6 +1041,16 @@ fn recover_access_types(
 
     let mut changed = false;
     for (root, set) in &grouped {
+        // The frame is not an ordinary object. Ghidra's components of a
+        // `TypeSpacebase` come from the symbol table, never from access
+        // patterns, so synthesising a structure here would print a stack slot as
+        // a field of a fabricated type.
+        if types
+            .get(root)
+            .is_some_and(|ty| factory.spacebase_offset(ty).is_some())
+        {
+            continue;
+        }
         let pointee = if !set.indexed.is_empty() && set.fields.is_empty() {
             let mut element = None;
             for (_, ty) in &set.indexed {
@@ -1483,6 +1535,41 @@ mod tests {
         assert_eq!(
             factory.strip_relative(&relative),
             factory.get_type_pointer(field)
+        );
+    }
+
+    #[test]
+    fn frame_arithmetic_stays_in_the_frame() {
+        // `sp - 0x20` is an `INT_ADD` of a wrapped constant. If that does not
+        // carry the spacebase through, the slot reads off it look exactly like
+        // fields of an unknown object and get a fabricated structure.
+        let mut data = Funcdata::default();
+        let block = data.new_block(0x1000);
+        let sp = data.new_varnode(REGISTER_SPACE, 0x1d0, 4);
+        let delta = data.new_constant(0xffff_ffe0, 4);
+        let sum = data.new_op(op::INT_ADD, seq(0x1000, 0), vec![sp, delta]);
+        let out = data.new_unique(4);
+        data.op_set_output(sum, Some(out));
+        data.op_insert_end(sum, block);
+        data.spacebase = Some(crate::graph::guard::Location {
+            space: REGISTER_SPACE,
+            offset: 0x1d0,
+            size: 4,
+        });
+
+        let (factory, types) = &*data.recovered_types();
+        assert!(
+            factory
+                .spacebase_offset(types.get(sp).expect("the frame base is typed"))
+                .is_some(),
+            "the frame base must be a pointer to the frame space, got {:?}",
+            types.get(sp)
+        );
+        assert_eq!(
+            factory.spacebase_offset(types.get(out).expect("the sum is typed")),
+            Some(0xffff_ffe0),
+            "frame arithmetic must stay in the frame, got {:?}",
+            types.get(out)
         );
     }
 }

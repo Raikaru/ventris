@@ -179,6 +179,13 @@ pub struct Funcdata {
     /// times slower on one corpus function. This is the same reason the masks
     /// are cached.
     recovered_types: Cache<(typefactory::TypeFactory, typefactory::RecoveredTypes)>,
+    /// The register that holds the frame base, when the caller knows it.
+    ///
+    /// Ghidra's `Funcdata` reaches its architecture's stack space and
+    /// `ActionSpacebase` marks the varnode holding it. This is the same fact,
+    /// carried explicitly because the graph has no architecture: it is what lets
+    /// type recovery tell the frame apart from an ordinary object.
+    pub spacebase: Option<guard::Location>,
 }
 
 /// A derived value held beside the graph it was computed from.
@@ -257,7 +264,27 @@ impl Funcdata {
             return cached;
         }
         let factory = typefactory::TypeFactory::new(32);
-        let types = typefactory::infer(self, &factory, &BTreeMap::new());
+        // `ActionSpacebase`: the varnode holding the frame base is typed as a
+        // pointer to the space, and locked, so access-pattern recovery cannot
+        // relabel the frame as a structure.
+        let mut seed = BTreeMap::new();
+        if let Some(location) = self.spacebase {
+            let pointer = factory.get_type_pointer_with_bits(
+                typefactory::DataType::Spacebase,
+                location.size.saturating_mul(8),
+            );
+            for index in 0..self.varnode_count() {
+                let id = VarnodeId(index as u32);
+                let value = self.varnode(id);
+                if value.space == location.space
+                    && value.offset == location.offset
+                    && value.def.is_none()
+                {
+                    seed.insert(id, pointer.clone());
+                }
+            }
+        }
+        let types = typefactory::infer(self, &factory, &seed);
         self.recovered_types.set((factory, types))
     }
 

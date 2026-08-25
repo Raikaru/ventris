@@ -299,6 +299,19 @@ pub struct Resolver<'a> {
     )>,
 }
 
+/// Whether a displacement is a zero constant, through any annotation.
+///
+/// A cast or a type annotation around the constant is still the constant. The
+/// first version of this test matched the bare literal only, and the zero
+/// offsets that carried a type survived as `+ 0` beside every access.
+fn is_zero_displacement(value: &Expr) -> bool {
+    match value {
+        Expr::Constant { value: 0, .. } => true,
+        Expr::Cast { value, .. } | Expr::Typed { value, .. } => is_zero_displacement(value),
+        _ => false,
+    }
+}
+
 impl<'a> Resolver<'a> {
     pub fn new(
         data: &'a Funcdata,
@@ -534,8 +547,19 @@ impl<'a> Resolver<'a> {
             // reads, which is why collapsing it here restores parameters at
             // call sites.
             op::COPY | op::CAST | op::INDIRECT => input(0),
+            // A zero displacement is not an addition. `PTRSUB(p, 0)` is
+            // Ghidra's way of saying "the first component of what p points at",
+            // and its printer spends that on the component access rather than
+            // emitting the offset; the same holds for a zero index on `PTRADD`
+            // and for plain `INT_ADD`. Writing it out put a `+ 0` beside every
+            // access the structure-offset rule rewrote.
             op::INT_ADD | op::PTRADD | op::PTRSUB => {
-                Some(binary(BinaryOp::Add, input(0)?, input(1)?))
+                let displacement = input(1)?;
+                if is_zero_displacement(&displacement) {
+                    input(0)
+                } else {
+                    Some(binary(BinaryOp::Add, input(0)?, displacement))
+                }
             }
             op::INT_SUB => Some(binary(BinaryOp::Sub, input(0)?, input(1)?)),
             op::INT_MULT => Some(binary(BinaryOp::Mul, input(0)?, input(1)?)),
