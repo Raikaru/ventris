@@ -246,9 +246,7 @@ fn propagate_single_use_copies(statements: &mut Vec<NativeStatement>) {
         if matches!(source, Expr::Constant { .. }) {
             let mut substituted = false;
             for at in (index + 1)..statements.len() {
-                if let Some((written, _)) = assigned_name_and_value(&statements[at])
-                    && written == name
-                {
+                if writes_name(&statements[at], &name) {
                     break;
                 }
                 substituted |= substitute_name(&mut statements[at], &name, &source);
@@ -266,6 +264,35 @@ fn propagate_single_use_copies(statements: &mut Vec<NativeStatement>) {
             }
             _ => index += 1,
         }
+    }
+}
+
+/// Whether a statement writes `name` anywhere inside it, bodies included.
+///
+/// `assigned_name_and_value` sees only a statement that *is* an assignment, so a
+/// write nested in an `if` or a loop body is invisible to it. Both propagation
+/// windows below close on a write, and closing them on the top-level test alone
+/// let a stale value cross a reassignment it could not see: a constant assigned
+/// before a construct was substituted into readers that follow a reassignment
+/// inside that construct, which is how `uVar6 < 1` became `0 < 1` on a corpus
+/// function.
+fn writes_name(statement: &NativeStatement, name: &str) -> bool {
+    if assigned_name_and_value(statement).is_some_and(|(written, _)| written == name) {
+        return true;
+    }
+    match statement {
+        NativeStatement::IfElse {
+            then_body,
+            else_body,
+            ..
+        } => then_body
+            .iter()
+            .chain(else_body)
+            .any(|nested| writes_name(nested, name)),
+        NativeStatement::While { body, .. } | NativeStatement::DoWhile { body, .. } => {
+            body.iter().any(|nested| writes_name(nested, name))
+        }
+        _ => false,
     }
 }
 
@@ -298,12 +325,26 @@ fn single_reader_after(
     for (offset, statement) in statements.iter().enumerate().skip(from + 1) {
         let mut used = BTreeSet::new();
         collect_read_names(std::slice::from_ref(statement), &mut used, false);
+        let ends_window = reads.iter().any(|read| writes_name(statement, read));
+        let compound = matches!(
+            statement,
+            NativeStatement::IfElse { .. }
+                | NativeStatement::While { .. }
+                | NativeStatement::DoWhile { .. }
+        );
         // The read is counted before the write, because one statement commonly
         // does both: `p = p + q` reads the carried value and then replaces it.
         // Treating that as a write first meant the value looked as though it
         // never reached a reader, and every link of an address chain kept its
         // own name.
-        if used.contains(name) {
+        //
+        // That ordering is only knowable for a simple assignment. A construct
+        // that writes one of these names somewhere in its body may well read it
+        // *after* that write, in which case the read is of the new value and not
+        // of the one being propagated. Counting it anyway substituted a constant
+        // into a reader that follows a reassignment, which is how `uVar6 < 1`
+        // became `0 < 1` on a corpus function.
+        if used.contains(name) && !(compound && ends_window) {
             if found.is_some() {
                 return None;
             }
@@ -317,10 +358,9 @@ fn single_reader_after(
             }
             found = Some(offset);
         }
-        // A statement that writes any name the expression reads ends the window.
-        if let Some((written, _)) = assigned_name_and_value(statement)
-            && reads.contains(&written)
-        {
+        // A statement that writes any name the expression reads ends the window,
+        // wherever inside it the write happens.
+        if ends_window {
             return found;
         }
     }
@@ -2187,6 +2227,106 @@ mod tests {
                 width: 4
             },
             "a propagated zero must not leave an addition behind"
+        );
+    }
+
+    #[test]
+    fn a_value_is_not_propagated_past_a_reassignment_inside_a_construct() {
+        // The window-closing test used to look only at whether the statement
+        // *was* an assignment, and the read-before-write allowance applied to
+        // every statement. A construct that reassigns the name in its body and
+        // then reads it therefore counted as the single reader of the old value,
+        // and the old value was substituted in: `uVar6 < 1` rendered as
+        // `0 < 1` on a corpus function, which is a wrong condition rather than
+        // an ugly one.
+        let mut statements = vec![
+            NativeStatement::Declare {
+                name: "v".into(),
+                ty: Type::Unsigned(32),
+                value: Expr::Constant { value: 0, width: 4 },
+            },
+            NativeStatement::IfElse {
+                condition: Expr::Temporary {
+                    name: "guard".into(),
+                    width: 4,
+                },
+                then_body: vec![
+                    // Reassigns `v`, so the read below is of the new value.
+                    NativeStatement::Assign {
+                        destination: Expr::Temporary {
+                            name: "v".into(),
+                            width: 4,
+                        },
+                        source: Expr::Temporary {
+                            name: "other".into(),
+                            width: 4,
+                        },
+                    },
+                    NativeStatement::Return(Some(Expr::Temporary {
+                        name: "v".into(),
+                        width: 4,
+                    })),
+                ],
+                else_body: Vec::new(),
+            },
+        ];
+        propagate_single_use_copies(&mut statements);
+
+        let NativeStatement::IfElse { then_body, .. } = statements
+            .iter()
+            .find(|statement| matches!(statement, NativeStatement::IfElse { .. }))
+            .expect("the construct survives")
+        else {
+            unreachable!()
+        };
+        let returned = then_body
+            .iter()
+            .find_map(|statement| match statement {
+                NativeStatement::Return(Some(value)) => Some(value),
+                _ => None,
+            })
+            .expect("the return survives");
+        // Within the body `v = other; return v;` legitimately collapses to
+        // `return other;`. What must not happen is the outer constant reaching
+        // it: the read follows a reassignment, so the old value is dead there.
+        assert_ne!(
+            returned,
+            &Expr::Constant { value: 0, width: 4 },
+            "a value was propagated past a reassignment inside the construct"
+        );
+    }
+
+    #[test]
+    fn a_carried_value_still_reaches_its_reader_in_a_simple_assignment() {
+        // The allowance this narrows is load-bearing: `p = p + q` reads the
+        // carried value before replacing it, and refusing that would give every
+        // link of an address chain its own name.
+        let mut statements = vec![
+            NativeStatement::Declare {
+                name: "p".into(),
+                ty: Type::Unsigned(32),
+                value: Expr::Constant { value: 8, width: 4 },
+            },
+            NativeStatement::Assign {
+                destination: Expr::Temporary {
+                    name: "p".into(),
+                    width: 4,
+                },
+                source: Expr::Binary {
+                    op: crate::native::BinaryOp::Add,
+                    left: Box::new(Expr::Temporary {
+                        name: "p".into(),
+                        width: 4,
+                    }),
+                    right: Box::new(Expr::Constant { value: 1, width: 4 }),
+                },
+            },
+        ];
+        propagate_single_use_copies(&mut statements);
+        assert_eq!(
+            statements.len(),
+            1,
+            "the carried constant should reach its reader and the name disappear"
         );
     }
 }

@@ -249,27 +249,26 @@ All notable Ventris changes are documented here.
 - Measured against Ghidra on the corpus, the graph path improves to
   `unstructured-control-flow` 10 (from 13) and `missing-loop-or-switch` 4, against
   15 and 11 on the address-ordered default.
-- Measured, not yet fixed, and now localised to the renderer rather than the
-  rules: the graph path emits a **wrong condition** in `DBGEXIImm`. Where the address-ordered path and Ghidra both test
-  `0 < (int32_t)(arg1 - 8)`, the graph path emits `0 < 1` — both operands
-  constant. Bisected to rule `intlessequal`: with `VENTRIS_SKIP_RULE=intlessequal`
-  the condition is correct, and skipping any other rule in `expr_bool` leaves it
-  wrong. The rule itself looks right in isolation — `x <= 0` becoming `x < 1` is
-  Ghidra's `RuleIntLessEqual`, and `!(x < 1)` is equivalent to `0 < x` — so the
-  constant in the *left* operand arrives from an interaction downstream of it,
-  not from the rewrite. `expr_memory` also masks the symptom when skipped. This is
-  a correctness defect, not a rendering one, and it outranks every quality item
-  below.
-  Probing the graph settled where it is not. The data flow is correct: the
-  comparison is `INT_SLESS(arg1 + 0xfffffff8, 1)`, whose negation is exactly
-  Ghidra's `0 < param_2 + -8`. The same function contains a second comparison
-  with a byte-identical definition — `INT_ADD` of the same register and the same
-  `0xfffffff8` — and that one renders correctly as `uVar8 < 1`. The only
-  difference between them is that the correct one's operand carries a name and
-  the wrong one's is inlined, so the defect is in resolving an unnamed
-  definition, not in the rewrite that produced it. `intlessequal` is necessary
-  for the shape to arise but is not itself wrong. Checking the pre-session file
-  versions confirms the bug predates this session's work.
+- Fixed the wrong condition in `DBGEXIImm`: the graph path emitted `0 < 1`
+  where Ghidra and the address-ordered path both test `0 < (int32_t)(arg1 - 8)`.
+  The data flow was always correct — `INT_SLESS(arg1 + 0xfffffff8, 1)`, whose
+  negation is Ghidra's form. Statement propagation substituted a dead value into
+  the reader.
+  `single_reader_after` counts a read before a write in the same statement,
+  deliberately, because `p = p + q` reads the carried value and then replaces it;
+  refusing that would give every link of an address chain its own name. But that
+  ordering is only knowable for a simple assignment. A *construct* that reassigns
+  the name in its body and then reads it was counted as the single reader of the
+  old value, so the old value — here a constant zero — was substituted past a
+  reassignment it could not see. The allowance now applies to simple statements
+  only, and the window-closing test recurses into bodies rather than looking at
+  the top level alone. Two tests pin both halves: one that a value must not cross
+  a reassignment inside a construct, and one that a carried value still reaches
+  its reader in `p = p + q`.
+  Rule `intlessequal` was necessary for the shape to arise and was never wrong,
+  which is why bisection pointed at it and reading it found nothing. Disabling
+  propagation was the measurement that located the real culprit.
+  `missing-loop-or-switch` drops from 6 findings to 5; nothing else moves.
 - Measured for prioritisation: rule coverage rose from 66 to 128 of 162 across
   this session's waves while `agrees` stayed at 22 of 37 throughout. Of the 34
   rules still unported, three are control-flow-shaped (`RuleCondNegate`,
