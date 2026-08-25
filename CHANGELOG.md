@@ -282,6 +282,23 @@ All notable Ventris changes are documented here.
   table-backed switch the rule can claim, and `dl_G_MOVEWORD`'s `switch 0 vs 1`
   is a `BRANCHIND` whose table this pipeline does not recover. The rule is
   correct and tested; it has no corpus function to improve yet.
+- Fixed the wrong store, and it was `RulePropagateCopy` propagating a copy that
+  changes width. A copy whose output and input differ in size is not a copy: it
+  truncates or extends, and every reader of the output expects the output's width.
+  Replacing the output with the input handed those readers a value of the wrong
+  size, which is how a one-byte `sb` arrived at `SplitDatatype::splitStore` as a
+  two-byte store and was split into a pair covering the neighbouring field.
+  `_ZN9GameWorld12beginFadeOutEv` now emits the four stores the machine performs,
+  in the order the address-ordered path emits them - `fadeOut = 1`,
+  `fadeAlpha = 0`, `drawFadeScreen = 1`, `fadeIn = 0` - instead of six ending in
+  a `fadeOut = 0` that undid the flag the function exists to set.
+  Found by probing `total_replace` and `op_set_input` for a store whose value
+  width changed, and reading the backtrace, rather than by reasoning about which
+  rule looked suspicious.
+  All gates green, 677 tests, census unchanged. `nominal_fields` on the graph path
+  is still `unavailable`: the parameter stays `uintptr_t` where the
+  address-ordered path recovers `GameWorld *`, so the nominal type has nothing to
+  attach to. That is now the only thing between the graph path and the default.
 - Localised what blocks the graph path from shipping as the default, which is
   the last open item. `corpus-smoke` fails on the PS2 entries for exactly one
   reason, and it is not the `declaration_order` naming question recorded earlier:

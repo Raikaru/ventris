@@ -238,6 +238,14 @@ impl Rule for RulePropagateCopy {
         // Copying between two named locations is an observable assignment.
         let out = data.varnode(output);
         let src = data.varnode(source);
+        // A copy that changes width is not a copy: it truncates or extends, and
+        // every reader of the output expects the output's width. Propagating one
+        // handed readers a value of the wrong size - a one-byte store became a
+        // two-byte store, which `SplitDatatype::splitStore` then split into a
+        // pair, so each byte written also cleared its neighbour.
+        if out.size != src.size {
+            return 0;
+        }
         let transparent = src.flags.constant
             || out.space == super::UNIQUE_SPACE
             || (out.space == src.space && out.offset == src.offset);
@@ -759,5 +767,69 @@ mod tests {
         let value = data.varnode(returned);
         assert!(value.flags.constant, "the chain folded to a constant");
         assert_eq!(value.offset, 5);
+    }
+    /// A copy that changes width truncates or extends; propagating it hands
+    /// every reader a value of the wrong size.
+    #[test]
+    fn a_width_changing_copy_is_not_propagated() {
+        let mut data = Funcdata::default();
+        let block = data.new_block(0x1000);
+        let wide = data.new_varnode(ventris_lifter::REGISTER_SPACE, 0, 2);
+        let narrow = data.new_varnode(ventris_lifter::REGISTER_SPACE, 0, 1);
+        let copy = data.new_op(
+            op::COPY,
+            SeqNum {
+                address: 0x1000,
+                order: 0,
+            },
+            vec![wide],
+        );
+        data.op_set_output(copy, Some(narrow));
+        data.op_insert_end(copy, block);
+        // Something has to read the output, or the rule declines for that reason.
+        let reader = data.new_op(
+            op::INT_ADD,
+            SeqNum {
+                address: 0x1004,
+                order: 0,
+            },
+            vec![narrow, narrow],
+        );
+        let sum = data.new_unique(1);
+        data.op_set_output(reader, Some(sum));
+        data.op_insert_end(reader, block);
+
+        assert_eq!(
+            RulePropagateCopy.apply_op(copy, &mut data),
+            0,
+            "one byte and two bytes are not the same value"
+        );
+        assert_eq!(data.op(copy).opcode, op::COPY, "the copy survives");
+
+        // The same copy at one width propagates.
+        let same = data.new_varnode(ventris_lifter::REGISTER_SPACE, 0, 2);
+        let other = data.new_unique(2);
+        let plain = data.new_op(
+            op::COPY,
+            SeqNum {
+                address: 0x1008,
+                order: 0,
+            },
+            vec![same],
+        );
+        data.op_set_output(plain, Some(other));
+        data.op_insert_end(plain, block);
+        let uses = data.new_op(
+            op::INT_ADD,
+            SeqNum {
+                address: 0x100c,
+                order: 0,
+            },
+            vec![other, other],
+        );
+        let total = data.new_unique(2);
+        data.op_set_output(uses, Some(total));
+        data.op_insert_end(uses, block);
+        assert_eq!(RulePropagateCopy.apply_op(plain, &mut data), 1);
     }
 }
