@@ -26,7 +26,7 @@ use super::casts::needs_cast;
 use super::cover::Cover;
 use super::mergeaction::{Variables, merge_all};
 use super::types::Types;
-use super::{Funcdata, OpId, VarnodeId};
+use super::{Funcdata, GraphBlockId, OpId, VarnodeId};
 use crate::native::{BinaryOp, Expr, NativeStatement, Type};
 
 /// Names assigned to variables that must be spelled once and referred to by
@@ -130,10 +130,16 @@ pub fn mark_explicit_with(data: &Funcdata, highs: Variables) -> Naming {
         // changed the location", and required merging has already put the value
         // before and after the operation in one variable, so naming the output
         // separately would declare a name nothing ever assigns.
-        let effectful = matches!(
-            op.opcode,
-            op::MULTIEQUAL | op::CALL | op::CALLIND | op::LOAD
-        );
+        // A load reads memory, so duplicating one re-reads it and moving one
+        // past a write reads the wrong thing. Neither happens when it has a
+        // single reader and nothing writes memory in between, and naming it
+        // then only adds a local: `beginFadeOut` declared `uVar2` for a value
+        // its only reader could spell inline.
+        let load_must_be_named = op.opcode == op::LOAD
+            && !(varnode.descendants.len() == 1
+                && nothing_writes_memory_before_use(data, id, output));
+        let effectful =
+            matches!(op.opcode, op::MULTIEQUAL | op::CALL | op::CALLIND) || load_must_be_named;
         // A copy, extension or truncation of one constant is that constant in
         // different storage, and the printer writes a literal either way.
         // Naming it invents a variable the program does not contain: `iVar3 =
@@ -151,7 +157,7 @@ pub fn mark_explicit_with(data: &Funcdata, highs: Variables) -> Naming {
         let shared = varnode.descendants.len() > 1;
         // A value that inlines into a later reader reads its operands there,
         // which is only correct while each is still live at that point.
-        let operand_dies = operand_dies_before_use(data, &covers, id, output);
+        let operand_dies = operand_is_shadowed_at_use(data, &highs, &covers, id, output);
         if !effectful && !shared && !operand_dies {
             continue;
         }
@@ -164,19 +170,51 @@ pub fn mark_explicit_with(data: &Funcdata, highs: Variables) -> Naming {
     Naming { names, highs }
 }
 
-/// Whether an operand is still live where this value would be inlined.
+/// Whether a load can move to its reader without crossing a write.
 ///
-/// A value that inlines lands at its reader, so it reads its operands there. It
-/// may only do so while each operand is still live at that point: a variable
-/// written again in between holds a different value. `allocEnemyEntity`
-/// multiplied the incremented counter instead of the counter because of this.
+/// Only within the defining block: a reader in another block may be reached by
+/// paths this does not see.
+fn nothing_writes_memory_before_use(data: &Funcdata, def: OpId, output: VarnodeId) -> bool {
+    let Some(reader) = data.varnode(output).descendants.first().copied() else {
+        return false;
+    };
+    let Some(block) = data.op(def).parent else {
+        return false;
+    };
+    if data.op(reader).parent != Some(block) {
+        return false;
+    }
+    let ops = &data.block(block).ops;
+    let Some(from) = ops.iter().position(|op| *op == def) else {
+        return false;
+    };
+    let Some(to) = ops.iter().position(|op| *op == reader) else {
+        return false;
+    };
+    if to <= from {
+        return false;
+    }
+    !ops[from + 1..to].iter().any(|op| {
+        matches!(
+            data.op(*op).opcode,
+            op::STORE | op::CALL | op::CALLIND | op::CALLOTHER
+        )
+    })
+}
+
+/// Whether another version of an operand's variable is live where this value
+/// would be inlined.
 ///
-/// The test is the operand's own live range, as Ghidra's is. An earlier version
-/// compared sequence numbers instead, which is sound but coarse: it named values
-/// whose operands were rewritten anywhere in the interval, even when the reader
-/// came first, and every extra name carries a declaration and usually a cast.
-fn operand_dies_before_use(
+/// A value that inlines lands at its reader and spells its operands there, so
+/// each operand's name must still mean the same thing at that point. What
+/// breaks that is not the operand's range ending — a chain of single-use values
+/// collapses precisely because each range ends at the next — but a *different*
+/// definition of the same C variable being live there. `allocEnemyEntity`
+/// multiplied the incremented counter because the increment was live at the
+/// multiply's reader.
+fn operand_is_shadowed_at_use(
     data: &Funcdata,
+    highs: &Variables,
     covers: &BTreeMap<VarnodeId, Cover>,
     def: OpId,
     output: VarnodeId,
@@ -185,22 +223,40 @@ fn operand_dies_before_use(
     if readers.is_empty() {
         return false;
     }
+    let sites: Vec<(GraphBlockId, usize)> = readers
+        .iter()
+        .filter_map(|reader| {
+            let block = data.op(*reader).parent?;
+            let index = data.block(block).ops.iter().position(|op| op == reader)?;
+            Some((block, index))
+        })
+        .collect();
     for operand in data.op(def).inputs.iter().copied() {
         let varnode = data.varnode(operand);
-        if varnode.flags.constant || varnode.def.is_none() {
+        if varnode.flags.constant {
             continue;
         }
-        let Some(cover) = covers.get(&operand) else {
+        let Some(operand_def) = varnode.def else {
             continue;
         };
-        for reader in readers.iter().copied() {
-            let Some(block) = data.op(reader).parent else {
+        let group = highs.high_of(operand);
+        for (candidate, operation) in data.live_ops() {
+            if candidate == operand_def {
+                continue;
+            }
+            let Some(written) = operation.output else {
                 continue;
             };
-            let Some(index) = data.block(block).ops.iter().position(|op| *op == reader) else {
+            if written == operand || highs.high_of(written) != group {
+                continue;
+            }
+            let Some(cover) = covers.get(&written) else {
                 continue;
             };
-            if !cover.contains(block, index) {
+            if sites
+                .iter()
+                .any(|(block, index)| cover.contains(*block, *index))
+            {
                 return true;
             }
         }
@@ -720,7 +776,33 @@ mod tests {
     }
 
     #[test]
-    fn a_load_is_named_so_the_memory_read_happens_once() {
+    fn a_load_read_twice_is_named_so_the_memory_read_happens_once() {
+        let mut data = Funcdata::default();
+        let block = data.new_block(0x1000);
+        let space = data.new_constant(0, 4);
+        let address = data.new_constant(0x2000, 4);
+        let load = data.new_op(op::LOAD, seq(0x1000), vec![space, address]);
+        let loaded = data.new_unique(4);
+        data.op_set_output(load, Some(loaded));
+        data.op_insert_end(load, block);
+        // Two readers: inlining would read memory twice.
+        let sum = data.new_op(op::INT_ADD, seq(0x1004), vec![loaded, loaded]);
+        let total = data.new_unique(4);
+        data.op_set_output(sum, Some(total));
+        data.op_insert_end(sum, block);
+        let ret = data.new_op(op::RETURN, seq(0x1008), vec![total]);
+        data.op_insert_end(ret, block);
+
+        let naming = mark_explicit(&data);
+        assert!(
+            naming.name_of(loaded).is_some(),
+            "a load with two readers is named so memory is read once"
+        );
+    }
+
+    #[test]
+    fn a_load_read_once_is_spelled_at_its_reader() {
+        // One reader is one read either way, so the name adds nothing.
         let mut data = Funcdata::default();
         let block = data.new_block(0x1000);
         let space = data.new_constant(0, 4);
@@ -733,7 +815,32 @@ mod tests {
         data.op_insert_end(ret, block);
 
         let naming = mark_explicit(&data);
-        assert_eq!(naming.len(), 1, "a load is not duplicated into its readers");
+        assert!(naming.name_of(loaded).is_none(), "one reader needs no name");
+    }
+
+    #[test]
+    fn a_load_is_named_when_a_write_separates_it_from_its_reader() {
+        // Moving the read past a write would read the wrong value, so the name
+        // is what pins it where it belongs.
+        let mut data = Funcdata::default();
+        let block = data.new_block(0x1000);
+        let space = data.new_constant(0, 4);
+        let address = data.new_constant(0x2000, 4);
+        let load = data.new_op(op::LOAD, seq(0x1000), vec![space, address]);
+        let loaded = data.new_unique(4);
+        data.op_set_output(load, Some(loaded));
+        data.op_insert_end(load, block);
+        let stored = data.new_constant(9, 4);
+        let store = data.new_op(op::STORE, seq(0x1004), vec![space, address, stored]);
+        data.op_insert_end(store, block);
+        let ret = data.new_op(op::RETURN, seq(0x1008), vec![loaded]);
+        data.op_insert_end(ret, block);
+
+        let naming = mark_explicit(&data);
+        assert!(
+            naming.name_of(loaded).is_some(),
+            "a load cannot move across a write to memory"
+        );
     }
 
     #[test]

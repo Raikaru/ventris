@@ -375,6 +375,15 @@ All notable Ventris changes are documented here.
   further down; `allocEnemyEntity` carried a dead `pVar1 = arg0 + 0x4b0` whose
   only reader had been replaced by a field access. A branch that writes the name
   on one side does not end the range, and a loop never does.
+- A load with a single reader is spelled at that reader rather than named, unless
+  a store or a call separates the two. One reader is one read either way, so the
+  name only added a local; moving a read across a write would read the wrong
+  value, which is what the store check prevents. `beginFadeOut` now declares
+  nothing at all, matching its source.
+- The inlining test asks whether another version of an operand's variable is live
+  at the reader, not whether the operand's own range reaches it. A chain of
+  single-use values collapses precisely because each range ends at the next, so
+  the liveness form refused every chain and named its every link.
 - The graph path stays opt-in. It leads the address-ordered path on seven census
   families and ties four, but it fails `corpus-smoke`'s semantic comparison on
   three PS2 entries the address-ordered path passes: two diverge on control-flow
