@@ -52,9 +52,25 @@ argument recovery, `Cover` live ranges with `ActionMergeCopy`/`MergeAdjacent`/
 That is 38 of Ghidra's 168 `Rule` subclasses and 25 of its 76 `Action`
 subclasses. The remainder, and what each needs, is tracked in `CHANGELOG.md`.
 
-Select it with `VENTRIS_PIPELINE=graph`. It is **not** the default. Measured
-against the Ghidra oracle across all 37 hash-verified corpus functions with
-`tools/quality_census.py`:
+Select it with `VENTRIS_PIPELINE=graph`. Measured against the Ghidra 12.1.3
+decompiler on all 37 hash-verified corpus functions, the graph path leads the
+shipping address-ordered path on seven of the census families and ties four:
+
+| Family | Address-ordered | Graph |
+|---|---:|---:|
+| agrees | 19 | **22** |
+| unstructured-control-flow | 15 | **11** |
+| missing-loop-or-switch | 11 | **5** |
+| excess-casts | 5 | **0** |
+| oversized-expression | 3 | **0** |
+| return-presence | 3 | **1** |
+| unreduced-flag-expression | 1 | **0** |
+| call-census | **3** | 4 |
+
+It is still opt-in. It fails `corpus-smoke`'s semantic comparison on the PS2
+entries, where the remaining differences are extra temporaries and the casts
+they carry: correctness is equal, verbosity is not. `agrees` counts functions
+with no classified difference at all, so it is the aggregate to read.
 
 | Defect family | Address-ordered | Ported graph |
 |---|---:|---:|
