@@ -249,6 +249,32 @@ All notable Ventris changes are documented here.
 - Measured against Ghidra on the corpus, the graph path improves to
   `unstructured-control-flow` 10 (from 13) and `missing-loop-or-switch` 4, against
   15 and 11 on the address-ordered default.
+- Ported `TraceDAG` from `blockaction.cc` into `graph/tracedag.rs`, with its
+  `BranchPoint`, `BlockTrace` and `BadEdgeScore` helpers: `initialize`,
+  `pushBranches`, `checkOpen`, `openBranch`, `checkRetirement`, `retireBranch`,
+  `removeTrace`, `selectBadEdge`, `processExitConflict`, `markPath`, `distance`
+  and `compareFinal`. It pushes a trace along every path out of every branch
+  point, opens a node only once all its incoming DAG edges have been traced, and
+  when nothing can advance scores the stuck traces against each other to pick the
+  edge to surrender. Five tests: a diamond, a straight line, a nested diamond
+  whose join has three predecessors, a cross edge, and one asserting the chosen
+  edge targets the shared join rather than the structured path through it.
+- Wired it in two places. `rule_goto` consults it before its own heuristic. More
+  importantly `mark_loop_exits` now surrenders **one** edge per pass and asks the
+  trace which one, bounded as Ghidra bounds it — rooted at the loop head, with a
+  tail as the finish block and the edges leaving the body excluded from the DAG,
+  which is `setFinishBlock` plus `setExitMarks`. It previously surrendered every
+  exit edge but one, unconditionally and all at once; Ghidra's `selectGoto` pops
+  its candidate list an edge at a time and re-runs the collapse rules between
+  each, so it gives up the fewest that let structuring proceed.
+- Measured effect so far: `queryMapAddress_single` drops from 22 `goto`s to 21 and
+  no function regresses; the census families are unchanged. The port is faithful
+  and the integration is at the right place, but it has not yet moved a function
+  into `agrees`, and saying otherwise would be false. `rule_goto` turns out to be
+  reached rarely — `mark_loop_exits` almost always makes progress first — so the
+  remaining work is in how the loop body and its official exit are chosen, which
+  is `LoopBody::labelExitEdges` and `emitLikelyEdges` ordering rather than the
+  trace itself.
 - Fixed the wrong condition in `DBGEXIImm`: the graph path emitted `0 < 1`
   where Ghidra and the address-ordered path both test `0 < (int32_t)(arg1 - 8)`.
   The data flow was always correct — `INT_SLESS(arg1 + 0xfffffff8, 1)`, whose

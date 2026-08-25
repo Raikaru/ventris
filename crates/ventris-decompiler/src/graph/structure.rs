@@ -22,6 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use ventris_pcode::op;
 
 use super::heritage::compute_dominance;
+use super::tracedag;
 use super::{Funcdata, GraphBlockId};
 
 /// The test a construct evaluates.
@@ -277,9 +278,16 @@ impl<'a> Graph<'a> {
         for (head, tails) in self.natural_loops(&dominance) {
             let body = self.loop_body(head, &tails);
             let exit = self.loop_exit(&body, &tails);
-            // Every edge out of the body other than the chosen exit is
-            // unstructured. Surrendering it now leaves the loop with the single
-            // entry and single exit the loop rules require.
+            // Every edge out of the body other than the chosen exit is a
+            // candidate for being unstructured, but only one is surrendered per
+            // pass.
+            //
+            // Ghidra builds the same candidate list in `emitLikelyEdges` and
+            // then `selectGoto` pops it one edge at a time, returning to the
+            // collapse rules after each. Surrendering the whole list at once —
+            // as this did — gives up edges the rules would have structured once
+            // the first one was gone, and each surrendered edge is a `goto` in
+            // the output that cannot be recovered later.
             let leaving: Vec<(NodeId, NodeId)> = body
                 .iter()
                 .copied()
@@ -293,10 +301,84 @@ impl<'a> Graph<'a> {
                 .filter(|(_, successor)| !body.contains(successor))
                 .filter(|(_, successor)| Some(*successor) != exit)
                 .collect();
-            for (node, successor) in leaving {
+            if leaving.is_empty() {
+                continue;
+            }
+            // Which of the candidates to give up is the trace's decision, not a
+            // positional one. Ghidra runs `TraceDAG` from the loop head with the
+            // loop bottom as the finish block and the exit edges marked, so the
+            // trace stays inside the body and scores the edges that stall it
+            // against each other.
+            let chosen = self
+                .traced_loop_edge(&body, head, &tails)
+                .filter(|edge| leaving.contains(edge))
+                .or_else(|| leaving.first().copied());
+            if let Some((node, successor)) = chosen {
                 self.surrender_edge(node, successor);
+                return;
             }
         }
+    }
+
+    /// The edge inside a loop body that `TraceDAG` judges least structurable.
+    ///
+    /// The trace is bounded exactly as Ghidra bounds it: rooted at the loop head,
+    /// finishing at a tail, and with the edges leaving the body excluded from the
+    /// DAG so the trace does not wander out of the loop. That is
+    /// `setExitMarks` plus `setFinishBlock`.
+    fn traced_loop_edge(
+        &self,
+        body: &BTreeSet<NodeId>,
+        head: NodeId,
+        tails: &[NodeId],
+    ) -> Option<(NodeId, usize)> {
+        let successors: Vec<Vec<NodeId>> = (0..self.nodes.len())
+            .map(|node| {
+                if body.contains(&node) {
+                    self.nodes[node].successors.clone()
+                } else {
+                    Vec::new()
+                }
+            })
+            .collect();
+        // An edge leaving the body, or returning to the head, is not a DAG edge.
+        let inside = |node: NodeId, index: usize| -> bool {
+            self.nodes[node]
+                .successors
+                .get(index)
+                .is_some_and(|successor| body.contains(successor) && *successor != head)
+        };
+        let dag_out = |node: NodeId, index: usize| inside(node, index);
+        let dag_in_count = |node: NodeId| {
+            body.iter()
+                .copied()
+                .flat_map(|from| {
+                    self.nodes[from]
+                        .successors
+                        .iter()
+                        .copied()
+                        .enumerate()
+                        .map(move |(index, to)| (from, index, to))
+                })
+                .filter(|(from, index, to)| *to == node && inside(*from, *index))
+                .count()
+        };
+        let roots = [head];
+        let edges = tracedag::TraceDag::new(tracedag::Dag {
+            successors: &successors,
+            dag_out: &dag_out,
+            dag_in_count: &dag_in_count,
+            roots: &roots,
+            finish: tails.first().copied(),
+        })
+        .run();
+        edges.into_iter().find_map(|edge| {
+            let index = self.nodes[edge.bottom]
+                .successors
+                .iter()
+                .position(|successor| *successor == edge.dest)?;
+            Some((edge.bottom, index))
+        })
     }
 
     /// Back edges, grouped by the loop head they return to.
@@ -739,6 +821,70 @@ impl<'a> Graph<'a> {
         false
     }
 
+    /// The edge `TraceDAG` judges least structurable, if it finds one.
+    ///
+    /// Ghidra generates its likely-unstructured edges by tracing every path out
+    /// of every branch point and scoring the traces that get stuck against each
+    /// other, rather than by scoring one edge at a time. The local heuristic
+    /// below cannot see that a join reached by three structured paths is fine
+    /// while a cross edge between two arms is not, because from one edge's point
+    /// of view they look the same.
+    fn traced_goto_edge(&self, live: &[NodeId]) -> Option<(NodeId, usize)> {
+        // A back edge is not part of the DAG, and neither is an edge whose
+        // target has already been collapsed away.
+        let back_edge = |node: NodeId, index: usize| -> bool {
+            self.nodes[node]
+                .successors
+                .get(index)
+                .is_some_and(|successor| self.nodes[*successor].entry <= self.nodes[node].entry)
+        };
+        let successors: Vec<Vec<NodeId>> = (0..self.nodes.len())
+            .map(|node| {
+                if self.nodes[node].collapsed {
+                    Vec::new()
+                } else {
+                    self.nodes[node].successors.clone()
+                }
+            })
+            .collect();
+        let dag_out = |node: NodeId, index: usize| !back_edge(node, index);
+        let dag_in_count = |node: NodeId| {
+            (0..self.nodes.len())
+                .filter(|from| !self.nodes[*from].collapsed)
+                .flat_map(|from| {
+                    self.nodes[from]
+                        .successors
+                        .iter()
+                        .copied()
+                        .enumerate()
+                        .map(move |(index, to)| (from, index, to))
+                })
+                .filter(|(from, index, to)| *to == node && !back_edge(*from, *index))
+                .count()
+        };
+        let roots: Vec<NodeId> = self
+            .entry
+            .filter(|entry| !self.nodes[*entry].collapsed)
+            .map(|entry| vec![entry])
+            .unwrap_or_else(|| live.first().copied().into_iter().collect());
+        let edges = tracedag::TraceDag::new(tracedag::Dag {
+            successors: &successors,
+            dag_out: &dag_out,
+            dag_in_count: &dag_in_count,
+            roots: &roots,
+            finish: None,
+        })
+        .run();
+        // The first edge the trace gave up is the one it scored worst.
+        edges.into_iter().find_map(|edge| {
+            let index = self.nodes[edge.bottom]
+                .successors
+                .iter()
+                .position(|successor| *successor == edge.dest)?;
+            (!self.nodes[edge.bottom].collapsed).then_some((edge.bottom, index))
+        })
+    }
+
     /// Surrenders one edge as a `goto` so collapsing can continue.
     ///
     /// The edge chosen is a back edge if there is one, because a loop that no
@@ -753,8 +899,16 @@ impl<'a> Graph<'a> {
         // one: `markExitsAsGotos` marks the edges *leaving* a loop, because the
         // back edge is the loop. Scoring it highest — as this did — hands the
         // loop to a goto and no later rule can recover it.
+        // Ask the trace first. It only answers when it found an edge it can
+        // justify; the scoring heuristic below remains the fallback.
         let mut choice: Option<(NodeId, usize, u32)> = None;
+        if let Some((node, index)) = self.traced_goto_edge(live) {
+            choice = Some((node, index, u32::MAX));
+        }
         for node in live.iter().copied() {
+            if choice.is_some_and(|(_, _, best)| best == u32::MAX) {
+                break;
+            }
             for (index, successor) in self.nodes[node].successors.iter().copied().enumerate() {
                 if self.nodes[node].successors.len() == 1 && successor == node {
                     continue;

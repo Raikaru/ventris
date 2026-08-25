@@ -55,6 +55,7 @@ pub mod storageaction;
 pub mod structure;
 pub mod subfloat;
 pub mod subflow;
+pub mod tracedag;
 pub mod typefactory;
 pub mod types;
 pub mod value;
