@@ -365,6 +365,16 @@ All notable Ventris changes are documented here.
 - A value that only re-spells a constant — a copy, extension or truncation of
   one — is no longer named. The printer writes a literal either way, so the name
   only added a declaration and a cast.
+  A value like that is also kept out of speculative variable merging, since
+  otherwise the group takes its name from another member and the constant is
+  assigned to it anyway. `required_union` is deliberately unaffected: a phi's
+  operands must share the phi's variable whatever they hold, and excluding them
+  there broke that invariant.
+- Dead-assignment removal is now position-aware. Liveness by name alone kept
+  every earlier assignment to a reused variable alive, because the name is read
+  further down; `allocEnemyEntity` carried a dead `pVar1 = arg0 + 0x4b0` whose
+  only reader had been replaced by a field access. A branch that writes the name
+  on one side does not end the range, and a loop never does.
 - The graph path stays opt-in. It leads the address-ordered path on seven census
   families and ties four, but it fails `corpus-smoke`'s semantic comparison on
   three PS2 entries the address-ordered path passes: two diverge on control-flow

@@ -371,14 +371,87 @@ fn substitute_expr(target: &mut Expr, name: &str, value: &Expr) -> bool {
 /// memory read is kept whatever its result is used for.
 fn drop_assignments_nothing_reads(statements: &mut Vec<NativeStatement>) {
     for _ in 0..8 {
+        let before = count_statements(statements);
+        drop_overwritten_assignments(statements);
         let mut read = BTreeSet::new();
         collect_read_names(statements, &mut read, true);
-        let before = count_statements(statements);
         retain_live_assignments(statements, &read);
         if count_statements(statements) == before {
             break;
         }
     }
+}
+
+/// Removes an assignment whose value is replaced before anything reads it.
+///
+/// Liveness by name alone is not enough: a variable reused for several values
+/// is read later under the same name, which kept every earlier assignment to it
+/// alive. `allocEnemyEntity` carried a dead `pVar1 = arg0 + 0x4b0` because the
+/// field access that replaced its only reader left the name in use further down.
+fn drop_overwritten_assignments(statements: &mut Vec<NativeStatement>) {
+    for statement in statements.iter_mut() {
+        match statement {
+            NativeStatement::IfElse {
+                then_body,
+                else_body,
+                ..
+            } => {
+                drop_overwritten_assignments(then_body);
+                drop_overwritten_assignments(else_body);
+            }
+            NativeStatement::While { body, .. } | NativeStatement::DoWhile { body, .. } => {
+                drop_overwritten_assignments(body);
+            }
+            _ => {}
+        }
+    }
+    let mut index = 0;
+    while index < statements.len() {
+        let Some((name, source)) = assigned_name_and_value(&statements[index]) else {
+            index += 1;
+            continue;
+        };
+        if !expression_is_pure(&source) {
+            index += 1;
+            continue;
+        }
+        if overwritten_before_read(statements, index, &name) {
+            statements.remove(index);
+            continue;
+        }
+        index += 1;
+    }
+}
+
+/// Whether the next thing to touch `name` after `from` writes it rather than
+/// reads it.
+fn overwritten_before_read(statements: &[NativeStatement], from: usize, name: &str) -> bool {
+    for statement in statements.iter().skip(from + 1) {
+        // A loop can run again, so a read anywhere inside one may observe this
+        // assignment on the next iteration.
+        if matches!(
+            statement,
+            NativeStatement::While { .. } | NativeStatement::DoWhile { .. }
+        ) {
+            return false;
+        }
+        let mut used = BTreeSet::new();
+        collect_read_names(std::slice::from_ref(statement), &mut used, false);
+        if used.contains(name) {
+            return false;
+        }
+        // A branch that writes the name on one side only leaves the other side
+        // reading this value, so only an unconditional write ends the range.
+        if matches!(statement, NativeStatement::IfElse { .. }) {
+            continue;
+        }
+        if let Some((written, _)) = assigned_name_and_value(statement)
+            && written == name
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn count_statements(statements: &[NativeStatement]) -> usize {

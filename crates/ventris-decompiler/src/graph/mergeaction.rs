@@ -86,6 +86,24 @@ fn can_merge(data: &Funcdata, value: VarnodeId) -> bool {
     !varnode.flags.constant && (varnode.def.is_some() || !varnode.descendants.is_empty())
 }
 
+/// Whether a value is a copy, extension or truncation of a single constant.
+fn respells_a_constant(data: &Funcdata, value: VarnodeId) -> bool {
+    let Some(def) = data.varnode(value).def else {
+        return false;
+    };
+    let operation = data.op(def);
+    if !matches!(
+        operation.opcode,
+        op::COPY | op::INT_SEXT | op::INT_ZEXT | op::SUBPIECE
+    ) {
+        return false;
+    }
+    operation
+        .inputs
+        .first()
+        .is_some_and(|input| data.varnode(*input).flags.constant)
+}
+
 /// Whether the recovered graph types agree for two values.
 ///
 /// A value not reached by inference still has the same unsigned-width
@@ -180,6 +198,14 @@ fn speculative_union(
     // overwrites destroys that evidence: the recovered prototype loses the
     // argument and every read of it renders as a local.
     if group_holds_input(data, variables, left) || group_holds_input(data, variables, right) {
+        return false;
+    }
+    // A value that only re-spells a constant is that constant in different
+    // storage. Merging one into a named group gives the constant a declaration
+    // and a cast no reader needs, and the name then spreads to every other
+    // member. This is refused for speculative merges only: `required_union`
+    // must still put a phi's operands in the phi's variable, whatever they hold.
+    if respells_a_constant(data, left) || respells_a_constant(data, right) {
         return false;
     }
     if !same_type(data, types, left, right) {
@@ -424,11 +450,13 @@ mod tests {
         let mut data = Funcdata::default();
         data.entry = 0x2000;
         let block = data.new_block(0x2000);
-        // Deliberately not a function input: `Merge::mergeTestSpeculative`
-        // refuses to merge an input speculatively, so an input here would make
-        // the adjacency test unobservable.
-        let seed_value = data.new_constant(3, 4);
-        let seeded = data.new_op(op::COPY, seq(0x1ffc), vec![seed_value]);
+        // Deliberately neither a function input nor a constant: the first is
+        // refused by `Merge::mergeTestSpeculative` and the second by the
+        // constant re-spelling rule, so either would make the adjacency test
+        // unobservable. A load is a real computation with neither property.
+        let space = data.new_constant(u64::from(ventris_lifter::RAM_SPACE), 4);
+        let address = data.new_constant(0x9000, 4);
+        let seeded = data.new_op(op::LOAD, seq(0x1ffc), vec![space, address]);
         let input = data.new_varnode(REGISTER_SPACE, 0, 4);
         data.op_set_output(seeded, Some(input));
         data.op_insert_end(seeded, block);
