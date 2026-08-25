@@ -395,6 +395,12 @@ All notable Ventris changes are documented here.
   collapsing one link of a chain leaves the next with a single reader.
   `allocEnemyEntity` goes from four declarations to one, and reads the counter
   once where the address-ordered path reads it twice.
+- Propagation stops at an expression depth of four, for the same reason
+  `ActionMarkExplicit` names a value whose expression grows too large: one
+  statement holding every term is unreadable. Unbounded folding turned eight
+  single-use shifts in `DBGEXIImm` into a 411-character line against the
+  oracle's widest of 87, which the census caught as `oversized-expression`. It is
+  94 characters now and that family is back to zero.
 - The graph path stays opt-in. It leads the address-ordered path on seven census
   families and ties four, but it fails `corpus-smoke`'s semantic comparison on
   three PS2 entries the address-ordered path passes: two diverge on control-flow

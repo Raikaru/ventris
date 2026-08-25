@@ -168,6 +168,41 @@ fn invert(condition: Expr) -> Expr {
     }
 }
 
+/// How deep an expression may grow before it is left behind a name.
+///
+/// `graph::marking`'s `MAX_EXPRESSION_DEPTH` guards against pathological
+/// graphs; this bound is about a line staying readable, so it is much tighter.
+/// Folding eight single-use shifts together produced a 411-character line in
+/// `DBGEXIImm`, where the oracle's widest is 87.
+const MAX_INLINE_DEPTH: usize = 4;
+
+/// The nesting depth of an expression.
+fn expression_depth(value: &Expr) -> usize {
+    match value {
+        Expr::Binary { left, right, .. } => 1 + expression_depth(left).max(expression_depth(right)),
+        Expr::Not(inner)
+        | Expr::Neg(inner)
+        | Expr::BitNot(inner)
+        | Expr::Cast { value: inner, .. }
+        | Expr::Typed { value: inner, .. }
+        | Expr::Load { address: inner, .. }
+        | Expr::Field { base: inner, .. } => 1 + expression_depth(inner),
+        Expr::Select {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            1 + expression_depth(condition)
+                .max(expression_depth(when_true))
+                .max(expression_depth(when_false))
+        }
+        Expr::Call { args, .. } | Expr::Builtin { args, .. } => {
+            1 + args.iter().map(expression_depth).max().unwrap_or(0)
+        }
+        _ => 0,
+    }
+}
+
 /// Substitutes a name that is assigned once and read once.
 ///
 /// Naming a value is what makes it read its operands where it is defined rather
@@ -201,7 +236,7 @@ fn propagate_single_use_copies(statements: &mut Vec<NativeStatement>) {
             index += 1;
             continue;
         };
-        if !expression_is_pure(&source) {
+        if !expression_is_pure(&source) || expression_depth(&source) > MAX_INLINE_DEPTH {
             index += 1;
             continue;
         }
@@ -2048,6 +2083,41 @@ mod tests {
                 width: 4,
             },
             "the assignment target must stay a name"
+        );
+    }
+
+    #[test]
+    fn a_deep_expression_keeps_its_name() {
+        // Folding every single-use term into one statement produced a
+        // 411-character line where the oracle's widest was 87.
+        let mut deep = Expr::Temporary {
+            name: "base".into(),
+            width: 4,
+        };
+        for _ in 0..MAX_INLINE_DEPTH + 1 {
+            deep = Expr::Binary {
+                op: crate::native::BinaryOp::Or,
+                left: Box::new(deep),
+                right: Box::new(Expr::Constant { value: 1, width: 4 }),
+            };
+        }
+        assert!(expression_depth(&deep) > MAX_INLINE_DEPTH);
+        let mut statements = vec![
+            NativeStatement::Declare {
+                name: "wide".into(),
+                ty: Type::Unsigned(32),
+                value: deep,
+            },
+            NativeStatement::Return(Some(Expr::Temporary {
+                name: "wide".into(),
+                width: 4,
+            })),
+        ];
+        let before = statements.clone();
+        propagate_single_use_copies(&mut statements);
+        assert_eq!(
+            statements, before,
+            "a deep expression is left behind a name"
         );
     }
 }
