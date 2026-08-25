@@ -307,6 +307,20 @@ All notable Ventris changes are documented here.
 - A jump or return directly following another is dropped. A transfer computes
   nothing, so removing an unreachable one loses no work — unlike the general
   unreachable-code pruning, which did.
+- Stores to a recovered field render as `p->field_4a4 = v`, and a field read no
+  longer requires its address to be unnamed. Resolving the base rather than the
+  offset address applies the offset once, which leaves the address temporary
+  with no readers.
+- Added removal of assignments and locals that nothing reads, for pure
+  right-hand sides only. Folding address arithmetic into a field access is what
+  strands them; a call or a memory read is never removed whatever its result is
+  used for.
+- Measured effect on the graph path: `excess-casts` goes from six functions to
+  none, and `agrees` from seventeen to twenty-two of thirty-seven. Against the
+  address-ordered default the graph path now leads on `agrees`, `excess-casts`,
+  `unstructured-control-flow`, `missing-loop-or-switch`, `return-presence`,
+  `oversized-expression` and `unreduced-flag-expression`, ties four families, and
+  trails only `call-census`.
 
 - Added `LiftedInstruction::skips_delay_slot`, which reports the MIPS
   likely-branch shape so consumers stop treating its sequential successor as

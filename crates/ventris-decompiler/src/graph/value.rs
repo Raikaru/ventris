@@ -210,6 +210,14 @@ impl<'a> Resolver<'a> {
         self
     }
 
+    /// The field an address names, for use as an assignment destination.
+    ///
+    /// A store to a recovered field is `p->field_4a4 = v`, which needs no cast
+    /// for the same reason a read does not.
+    pub fn field_lvalue(&self, address: VarnodeId, width: u32) -> Option<Expr> {
+        self.field_access(address, width, &mut BTreeSet::new())
+    }
+
     /// The field a load's address names, when the base is a known structure.
     fn field_access(
         &self,
@@ -218,12 +226,6 @@ impl<'a> Resolver<'a> {
         active: &mut BTreeSet<VarnodeId>,
     ) -> Option<Expr> {
         let (rich, _) = self.rich?;
-        // The address computation has to inline into this read. If it carries a
-        // name of its own then the offset is already added by an assignment,
-        // and naming the field here would add it a second time.
-        if self.naming.name_of(address).is_some() {
-            return None;
-        }
         // The address expression inlines into this read, so it must be guarded
         // exactly like any other inlined definition. Without this the base can
         // resolve back through the read being built and the recursion never

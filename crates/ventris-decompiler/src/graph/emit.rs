@@ -102,8 +102,216 @@ pub fn emit_structured(
     prefer_non_empty_then(&mut statements);
     drop_self_assignments(&mut statements);
     drop_transfers_after_a_transfer(&mut statements);
+    drop_assignments_nothing_reads(&mut statements);
     drop_labels_nothing_needs(&mut statements);
     statements
+}
+
+/// Removes an assignment to a name that nothing afterwards reads.
+///
+/// Address arithmetic that folds into a field access leaves its temporary
+/// behind: the read became `p->field_4a4`, so the `pVar1 = p + 0x4a4` that fed
+/// it has no reader left. Only pure right-hand sides are removed — a call or a
+/// memory read is kept whatever its result is used for.
+fn drop_assignments_nothing_reads(statements: &mut Vec<NativeStatement>) {
+    for _ in 0..8 {
+        let mut read = BTreeSet::new();
+        collect_read_names(statements, &mut read, true);
+        let before = count_statements(statements);
+        retain_live_assignments(statements, &read);
+        if count_statements(statements) == before {
+            break;
+        }
+    }
+}
+
+fn count_statements(statements: &[NativeStatement]) -> usize {
+    statements
+        .iter()
+        .map(|statement| match statement {
+            NativeStatement::IfElse {
+                then_body,
+                else_body,
+                ..
+            } => 1 + count_statements(then_body) + count_statements(else_body),
+            NativeStatement::While { body, .. } | NativeStatement::DoWhile { body, .. } => {
+                1 + count_statements(body)
+            }
+            _ => 1,
+        })
+        .sum()
+}
+
+/// Names read by any expression, excluding the destination of an assignment.
+fn collect_read_names(statements: &[NativeStatement], read: &mut BTreeSet<String>, _top: bool) {
+    for statement in statements {
+        match statement {
+            NativeStatement::Declare { value, .. } => collect_expr_names(value, read),
+            NativeStatement::Assign {
+                destination,
+                source,
+            } => {
+                // A destination that is not a plain name reads whatever it
+                // computes, so those operands stay live. A plain name is being
+                // written, not read — but it does keep its declaration alive.
+                match destination {
+                    Expr::Temporary { name, .. } => {
+                        read.insert(format!("declared:{name}"));
+                    }
+                    other => collect_expr_names(other, read),
+                }
+                collect_expr_names(source, read);
+            }
+            NativeStatement::Store { address, value, .. } => {
+                collect_expr_names(address, read);
+                collect_expr_names(value, read);
+            }
+            NativeStatement::Copy {
+                destination,
+                source,
+                ..
+            } => {
+                collect_expr_names(destination, read);
+                collect_expr_names(source, read);
+            }
+            NativeStatement::Call(call) => collect_expr_names(call, read),
+            NativeStatement::Return(Some(value)) => collect_expr_names(value, read),
+            NativeStatement::IfGoto { condition, .. } => collect_expr_names(condition, read),
+            NativeStatement::IfReturn { condition, value } => {
+                collect_expr_names(condition, read);
+                if let Some(value) = value {
+                    collect_expr_names(value, read);
+                }
+            }
+            NativeStatement::IndirectGoto(target) => collect_expr_names(target, read),
+            NativeStatement::IfElse {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                collect_expr_names(condition, read);
+                collect_read_names(then_body, read, false);
+                collect_read_names(else_body, read, false);
+            }
+            NativeStatement::While { condition, body }
+            | NativeStatement::DoWhile { body, condition } => {
+                collect_expr_names(condition, read);
+                collect_read_names(body, read, false);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn retain_live_assignments(statements: &mut Vec<NativeStatement>, read: &BTreeSet<String>) {
+    statements.retain_mut(|statement| {
+        match statement {
+            NativeStatement::Declare { name, value, .. } => {
+                if !read.contains(name) && expression_is_pure(value) {
+                    return false;
+                }
+            }
+            NativeStatement::Assign {
+                destination: Expr::Temporary { name, .. },
+                source,
+            } => {
+                if !read.contains(name) && expression_is_pure(source) {
+                    return false;
+                }
+            }
+            // A local declared for a merged value that nothing reads any more
+            // is left over from the same folding.
+            NativeStatement::DeclareLocal { name, .. } => {
+                if !read.contains(name) && !read.contains(&format!("declared:{name}")) {
+                    return false;
+                }
+            }
+            NativeStatement::IfElse {
+                then_body,
+                else_body,
+                ..
+            } => {
+                retain_live_assignments(then_body, read);
+                retain_live_assignments(else_body, read);
+            }
+            NativeStatement::While { body, .. } | NativeStatement::DoWhile { body, .. } => {
+                retain_live_assignments(body, read);
+            }
+            _ => {}
+        }
+        true
+    });
+}
+
+/// Whether an expression can be removed with its result.
+fn expression_is_pure(value: &Expr) -> bool {
+    match value {
+        Expr::Constant { .. }
+        | Expr::Parameter { .. }
+        | Expr::Register { .. }
+        | Expr::Temporary { .. }
+        | Expr::Global { .. } => true,
+        // A read touches memory whose contents may change, and a call does
+        // anything at all.
+        Expr::Load { .. } | Expr::Field { .. } | Expr::Call { .. } | Expr::Builtin { .. } => false,
+        Expr::Binary { left, right, .. } => expression_is_pure(left) && expression_is_pure(right),
+        Expr::Not(inner)
+        | Expr::Neg(inner)
+        | Expr::BitNot(inner)
+        | Expr::Cast { value: inner, .. }
+        | Expr::Typed { value: inner, .. } => expression_is_pure(inner),
+        Expr::Select {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            expression_is_pure(condition)
+                && expression_is_pure(when_true)
+                && expression_is_pure(when_false)
+        }
+    }
+}
+
+fn collect_expr_names(value: &Expr, read: &mut BTreeSet<String>) {
+    match value {
+        Expr::Temporary { name, .. } | Expr::Register { name, .. } => {
+            read.insert(name.clone());
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_expr_names(left, read);
+            collect_expr_names(right, read);
+        }
+        Expr::Not(inner)
+        | Expr::Neg(inner)
+        | Expr::BitNot(inner)
+        | Expr::Cast { value: inner, .. }
+        | Expr::Typed { value: inner, .. }
+        | Expr::Load { address: inner, .. }
+        | Expr::Field { base: inner, .. } => collect_expr_names(inner, read),
+        Expr::Call { callee, args, .. } => {
+            if let Some(callee) = callee {
+                collect_expr_names(callee, read);
+            }
+            for arg in args {
+                collect_expr_names(arg, read);
+            }
+        }
+        Expr::Builtin { args, .. } => {
+            for arg in args {
+                collect_expr_names(arg, read);
+            }
+        }
+        Expr::Select {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            collect_expr_names(condition, read);
+            collect_expr_names(when_true, read);
+            collect_expr_names(when_false, read);
+        }
+        _ => {}
+    }
 }
 
 /// Removes a jump or return that directly follows another, with no label
@@ -806,12 +1014,19 @@ impl Emitter<'_> {
                 ) else {
                     return Emission::Skip;
                 };
+                let width = self.data.varnode(value).size;
+                if let Some(field) = self.resolver.field_lvalue(address, width) {
+                    return Emission::Body(NativeStatement::Assign {
+                        destination: field,
+                        source: self.resolver.resolve(value),
+                    });
+                }
                 Emission::Body(NativeStatement::Store {
                     address: self
                         .resolver
                         .as_address(address, self.resolver.resolve(address)),
                     value: self.resolver.resolve(value),
-                    width: self.data.varnode(value).size,
+                    width,
                     volatile: false,
                 })
             }
