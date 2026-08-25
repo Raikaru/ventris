@@ -68,9 +68,13 @@ shipping address-ordered path on seven of the census families and ties four:
 | call-census | **3** | 4 |
 
 It is still opt-in. It fails `corpus-smoke`'s semantic comparison on the PS2
-entries, where the remaining differences are extra temporaries and the casts
-they carry: correctness is equal, verbosity is not. `agrees` counts functions
-with no classified difference at all, so it is the aggregate to read.
+entries, and the residual is now exactly two dimensions: `declaration_order` on
+seven functions and `casts` on five. Both are the same thing — the graph path
+names locals the address-ordered path inlines, and each name carries a
+declaration and usually a cast. Correctness is equal; verbosity is not. The
+remaining work is to name fewer values, which means merging address arithmetic
+into one variable rather than several. `agrees` counts functions with no
+classified difference at all, so it is the aggregate to read.
 
 | Defect family | Address-ordered | Ported graph |
 |---|---:|---:|

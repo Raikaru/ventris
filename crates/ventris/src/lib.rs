@@ -176,7 +176,9 @@ impl std::error::Error for PipelineError {}
 /// Still opt-in. Against the Ghidra oracle the graph path now leads on seven of
 /// the census families and ties four, but it fails `corpus-smoke`'s semantic
 /// comparison on three PS2 entries that the address-ordered path passes, so
-/// switching the default would trade a measured gain for a gate regression.
+/// switching the default would trade a measured gain for a gate regression. The
+/// residual is `declaration_order` and `casts`: this path names locals the other
+/// inlines, and each name carries a declaration and usually a cast.
 fn graph_pipeline_requested() -> bool {
     std::env::var("VENTRIS_PIPELINE")
         .map(|value| value.eq_ignore_ascii_case("graph"))
