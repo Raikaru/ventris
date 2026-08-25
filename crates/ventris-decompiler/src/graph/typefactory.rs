@@ -1035,9 +1035,17 @@ fn pointer_after_arithmetic(
     factory: &TypeFactory,
     pointer: &DataType,
 ) -> Option<DataType> {
-    if slot != 0 {
+    // `PTRADD` and `PTRSUB` name the pointer in slot zero by construction.
+    // `INT_ADD` is commutative and the graph's rules do transpose it, so the
+    // pointer may be on either side; Ghidra's `TypeOpIntAdd::propagateType`
+    // accepts both for the same reason. Rejecting slot one here meant a returned
+    // member address kept an integer type whenever the addition happened to be
+    // written the other way round.
+    if slot != 0 && operation.opcode != op::INT_ADD {
         return None;
     }
+    // The operand that is not the pointer is the offset.
+    let offset_slot = if slot == 0 { 1 } else { 0 };
     match operation.opcode {
         op::PTRSUB => {
             let offset = operation
@@ -1087,7 +1095,7 @@ fn pointer_after_arithmetic(
         op::INT_ADD => {
             let other = operation
                 .inputs
-                .get(1)
+                .get(offset_slot)
                 .and_then(|id| constant_value(data, *id));
             if let Some(offset) = other {
                 if offset == 0 {
@@ -1097,15 +1105,50 @@ fn pointer_after_arithmetic(
             }
             if operation
                 .inputs
-                .get(1)
+                .get(offset_slot)
                 .is_some_and(|id| scaled_index(data, *id).is_some())
             {
                 return Some(pointer.clone());
+            }
+            // The offset may be affine rather than either of those: a scaled
+            // index plus a constant, which is how element `i` of an array member
+            // is addressed. `base + C + i * S` points into the object whatever
+            // lies at `C`, and Ghidra reports the containing pointer type here,
+            // so a member found at `C` refines the result and its absence still
+            // leaves a pointer. Without this the sum fell through to no type at
+            // all and a returned member address rendered as an integer.
+            if let Some(offset) = operation.inputs.get(offset_slot).copied()
+                && let Some(constant) = affine_offset(data, offset)
+            {
+                return factory
+                    .down_chain(pointer, constant.min(u64::from(u32::MAX)) as u32)
+                    .or_else(|| Some(pointer.clone()));
             }
             None
         }
         _ => None,
     }
+}
+
+/// The constant part of an offset built as a scaled index plus a constant.
+///
+/// Returns nothing unless both parts are present, so a bare constant and a bare
+/// scaled index keep their own, more specific handling above.
+fn affine_offset(data: &Funcdata, value: VarnodeId) -> Option<u64> {
+    let definition = data.varnode(value).def?;
+    let operation = data.op(definition);
+    if operation.opcode != op::INT_ADD || operation.inputs.len() < 2 {
+        return None;
+    }
+    let left = operation.inputs[0];
+    let right = operation.inputs[1];
+    if scaled_index(data, left).is_some() {
+        return constant_value(data, right);
+    }
+    if scaled_index(data, right).is_some() {
+        return constant_value(data, left);
+    }
+    None
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -1686,6 +1729,106 @@ mod tests {
             Some(0xffff_ffe0),
             "frame arithmetic must stay in the frame, got {:?}",
             types.get(out)
+        );
+    }
+
+    #[test]
+    fn a_pointer_on_either_side_of_an_addition_still_points() {
+        // `INT_ADD` is commutative and the graph's own rules transpose it, so the
+        // pointer can end up in slot one. Ghidra's `TypeOpIntAdd::propagateType`
+        // reads whichever operand is the pointer; rejecting slot one dropped the
+        // type entirely and the sum rendered as an integer.
+        for pointer_slot in [0usize, 1] {
+            let mut data = Funcdata::default();
+            let block = data.new_block(0x1000);
+            let base = data.new_varnode(REGISTER_SPACE, 0x10, 4);
+            data.mark_input(base);
+            let offset = data.new_constant(0x20, 4);
+            let inputs = if pointer_slot == 0 {
+                vec![base, offset]
+            } else {
+                vec![offset, base]
+            };
+            let add = data.new_op(op::INT_ADD, seq(0x1000, 0), inputs);
+            let sum = data.new_unique(4);
+            data.op_set_output(add, Some(sum));
+            data.op_insert_end(add, block);
+
+            let factory = TypeFactory::new(32);
+            let structure = factory.get_type_struct_fields(
+                "container".to_owned(),
+                vec![Field {
+                    offset: 0x20,
+                    ty: DataType::Int {
+                        bits: 32,
+                        signed: false,
+                    },
+                    name: "field_20".to_owned(),
+                }],
+            );
+            let seed = BTreeMap::from([(base, factory.get_type_pointer(structure))]);
+            let types = infer(&data, &factory, &seed);
+            assert!(
+                matches!(
+                    types.get(sum),
+                    Some(DataType::Pointer { .. } | DataType::PointerRel { .. })
+                ),
+                "pointer in slot {pointer_slot} lost its type: {:?}",
+                types.get(sum)
+            );
+        }
+    }
+
+    #[test]
+    fn an_indexed_member_address_is_still_a_pointer() {
+        // `base + C + i * S` is how element `i` of an array member at offset `C`
+        // is addressed. The offset operand is neither a constant nor a bare
+        // scaled index but their sum, which used to fall through to no type at
+        // all, so a computed member address rendered as an integer.
+        let mut data = Funcdata::default();
+        let block = data.new_block(0x2000);
+        let base = data.new_varnode(REGISTER_SPACE, 0x10, 4);
+        let index = data.new_varnode(REGISTER_SPACE, 0x14, 4);
+        data.mark_input(base);
+        data.mark_input(index);
+        let stride = data.new_constant(0x70, 4);
+        let scaled = data.new_op(op::INT_MULT, seq(0x2000, 0), vec![index, stride]);
+        let scaled_out = data.new_unique(4);
+        data.op_set_output(scaled, Some(scaled_out));
+        data.op_insert_end(scaled, block);
+
+        let member = data.new_constant(0x4d0, 4);
+        let affine = data.new_op(op::INT_ADD, seq(0x2004, 0), vec![scaled_out, member]);
+        let affine_out = data.new_unique(4);
+        data.op_set_output(affine, Some(affine_out));
+        data.op_insert_end(affine, block);
+
+        let add = data.new_op(op::INT_ADD, seq(0x2008, 0), vec![base, affine_out]);
+        let sum = data.new_unique(4);
+        data.op_set_output(add, Some(sum));
+        data.op_insert_end(add, block);
+
+        let factory = TypeFactory::new(32);
+        let structure = factory.get_type_struct_fields(
+            "world".to_owned(),
+            vec![Field {
+                offset: 0x4b0,
+                ty: DataType::Int {
+                    bits: 32,
+                    signed: false,
+                },
+                name: "field_4b0".to_owned(),
+            }],
+        );
+        let seed = BTreeMap::from([(base, factory.get_type_pointer(structure))]);
+        let types = infer(&data, &factory, &seed);
+        assert!(
+            matches!(
+                types.get(sum),
+                Some(DataType::Pointer { .. } | DataType::PointerRel { .. })
+            ),
+            "an indexed member address lost its pointer type: {:?}",
+            types.get(sum)
         );
     }
 }

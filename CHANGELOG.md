@@ -249,6 +249,27 @@ All notable Ventris changes are documented here.
 - Measured against Ghidra on the corpus, the graph path improves to
   `unstructured-control-flow` 10 (from 13) and `missing-loop-or-switch` 4, against
   15 and 11 on the address-ordered default.
+- Corrected a misdiagnosis of the cutover blocker. `allocEnemyEntity`'s return
+  type was recorded as needing whole-program type information; it does not.
+  `dungeon_game.elf` carries `.debug_info`, `.debug_abbrev` and `.debug_line`,
+  and `game_world.cpp` appears in them, which is where Ghidra's
+  `GameWorld * __thiscall GameWorld::allocEnemyEntity(GameWorld *this)` and its
+  source-path comment come from. Ghidra read the prototype out of DWARF rather
+  than inferring it. Reading DWARF is a loader capability, separate from and much
+  smaller than whole-program type recovery; nothing in this pipeline reads it. The
+  `declaration_order` half of the blocker is unaffected and still stands on its
+  own evidence: Ghidra declares a local because it reads the counter once, and the
+  address-ordered path only matches by duplicating a memory read.
+- `INT_ADD` type propagation accepted a pointer only in slot zero. The operation
+  is commutative and the graph's own rules transpose it, and Ghidra's
+  `TypeOpIntAdd::propagateType` reads whichever operand is the pointer, so a
+  transposed sum lost its pointer type entirely.
+- `INT_ADD` also now propagates through an affine offset — a scaled index plus a
+  constant, which is how element `i` of an array member at offset `C` is
+  addressed. Previously only a bare constant or a bare scaled index was handled
+  and their sum fell through to no type at all. Both gaps are pinned by tests that
+  fail when the respective change is reverted; neither alters any corpus function
+  today, and that was measured rather than assumed.
 - `is_inferred_float` in `graph/expr_float.rs` built its own `TypeFactory` and
   ran a full seven-pass inference on every call, bypassing
   `Funcdata::recovered_types` entirely, so the round-boundary caching did nothing
