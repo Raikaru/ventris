@@ -282,6 +282,15 @@ All notable Ventris changes are documented here.
   table-backed switch the rule can claim, and `dl_G_MOVEWORD`'s `switch 0 vs 1`
   is a `BRANCHIND` whose table this pipeline does not recover. The rule is
   correct and tested; it has no corpus function to improve yet.
+- The graph path no longer builds the address-ordered SSA or runs its type
+  solver. It recovered types with `graph::types::infer_types` all along, and that
+  is what emission reads; the linear pass ran alongside only to fill
+  `NativeDocument::ssa` and `::types`, which nothing on this path consumes - the
+  one reader of `ssa` is a test on the address-ordered path. They are now left
+  empty, which is the honest statement that this document's types came from
+  somewhere else, and the objective's "instead of an address-ordered linear pass"
+  is true of this path rather than nearly true.
+  Gates unchanged: 678 tests, census identical, five PS2 smoke failures.
 - Nominal field names now reach the graph path's output, which closes
   `nominal_fields` and moves the smoke failure from eight PS2 functions to five.
   `rewrite_recovered_field_accesses` knew two spellings of a field access - the

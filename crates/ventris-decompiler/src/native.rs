@@ -1912,13 +1912,12 @@ impl NativeDecompiler {
         call_prototypes: Option<&BTreeMap<u64, NativeCallPrototype>>,
         memory: Option<&NativeMemory>,
     ) -> NativeDocument {
-        let ssa = build_ssa(function);
-        let mut solver = TypeSolver::default();
-        for constraint in &ssa.constraints {
-            solver.constrain(constraint.value, constraint.ty.clone());
-        }
-        let types = solver.solve();
-
+        // The address-ordered SSA and its type solver are not built here. This
+        // path recovers types with `graph::types::infer_types`, the ported
+        // inference, and that is what emission reads; running the linear pass as
+        // well only filled two document fields that nothing on this path reads.
+        // Leaving them empty is the honest statement that the types in this
+        // document came from somewhere else.
         let mut data = graph::Funcdata::from_lifted(function);
         // Only registers are guarded here. Memory locations are named by their
         // loads and stores, and guarding them without alias analysis invents a
@@ -2214,8 +2213,8 @@ impl NativeDecompiler {
             return_type,
             parameters,
             statements,
-            ssa,
-            types,
+            ssa: SsaFunction::default(),
+            types: Vec::new(),
             warnings: Vec::new(),
         }
     }
