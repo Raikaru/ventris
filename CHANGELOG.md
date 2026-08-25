@@ -249,6 +249,31 @@ All notable Ventris changes are documented here.
 - Measured against Ghidra on the corpus, the graph path improves to
   `unstructured-control-flow` 10 (from 13) and `missing-loop-or-switch` 4, against
   15 and 11 on the address-ordered default.
+- Measured, not yet fixed: the graph path emits a **wrong condition** in
+  `DBGEXIImm`. Where the address-ordered path and Ghidra both test
+  `0 < (int32_t)(arg1 - 8)`, the graph path emits `0 < 1` — both operands
+  constant. Bisected to rule `intlessequal`: with `VENTRIS_SKIP_RULE=intlessequal`
+  the condition is correct, and skipping any other rule in `expr_bool` leaves it
+  wrong. The rule itself looks right in isolation — `x <= 0` becoming `x < 1` is
+  Ghidra's `RuleIntLessEqual`, and `!(x < 1)` is equivalent to `0 < x` — so the
+  constant in the *left* operand arrives from an interaction downstream of it,
+  not from the rewrite. `expr_memory` also masks the symptom when skipped. This is
+  a correctness defect, not a rendering one, and it outranks every quality item
+  below.
+- Measured for prioritisation: of 37 corpus functions the graph path leaves 11
+  with stray `goto`s and 6 missing a loop or switch, which is the largest
+  remaining quality gap by a wide margin. Instrumenting the structurer's
+  short-circuit collapse showed the dominant decline is `second-has-many-preds`
+  (22 times on one function): the shared join block has several predecessors, so
+  collapsing it needs block *duplication*. That is Ghidra's mutable `BlockGraph`
+  with phi fixups — the state 15 of the 41 unported actions were recorded as
+  needing. It is unbuilt rather than unavailable, and building it is what closes
+  this family.
+- Also measured and isolated, each one function: `TRK_fill_mem` returns a value
+  where the oracle returns void and misses two `for` loops; `osContGetReadData`
+  recovers no parameters where the oracle does; `changeGroupID` emits one call the
+  oracle does not; and `DBGEXIImm` renders `(x << 29) & 0x1fffffff | x >> 3` where
+  the mask makes the whole first term dead, which Ghidra prints as `x >> 3`.
 - Added `ventris-format/src/mdebug.rs`, a MIPS symbolic debug reader, and
   `src/debuginfo.rs` holding the shared model both readers populate.
   `Image::debug_info` now merges them. It recovers 785 procedure names and their
