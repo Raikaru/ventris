@@ -27,10 +27,10 @@ pub mod emit;
 pub mod expr_arith;
 pub mod expr_bool;
 pub mod expr_divmod;
-pub mod expr_piece;
 pub mod expr_float;
-pub mod expr_ptr;
 pub mod expr_memory;
+pub mod expr_piece;
+pub mod expr_ptr;
 pub mod expr_rules;
 pub mod expr_rules2;
 pub mod guard;
@@ -165,8 +165,62 @@ pub struct Funcdata {
     /// difference but a correctness bug: `RuleHumptyOr` and `RuleAndDistribute`
     /// are exact inverses whose guards are complements, so two mask
     /// implementations made both fire and the fixpoint never converged.
-    masks: std::cell::RefCell<Option<std::rc::Rc<Vec<u64>>>>,
+    masks: Cache<Vec<u64>>,
+    /// Cached rich type recovery, cleared whenever the graph changes.
+    ///
+    /// The pointer rules each need the recovered types, and running the
+    /// seven-pass inference inside `apply_op` made the expression phase five
+    /// times slower on one corpus function. This is the same reason the masks
+    /// are cached.
+    recovered_types: Cache<(typefactory::TypeFactory, typefactory::RecoveredTypes)>,
 }
+
+/// A derived value held beside the graph it was computed from.
+///
+/// A cache is not part of the graph's value, so it takes no part in equality:
+/// two graphs that differ only in what has been computed about them are the
+/// same graph. It is also not cloned, because a clone's cache would describe
+/// the original.
+#[derive(Debug)]
+struct Cache<T>(std::cell::RefCell<Option<std::rc::Rc<T>>>);
+
+impl<T> Default for Cache<T> {
+    // Derived `Default` would require `T: Default`; an empty cache needs no
+    // such thing.
+    fn default() -> Self {
+        Self(std::cell::RefCell::new(None))
+    }
+}
+
+impl<T> Cache<T> {
+    fn get(&self) -> Option<std::rc::Rc<T>> {
+        self.0.borrow().clone()
+    }
+
+    fn set(&self, value: T) -> std::rc::Rc<T> {
+        let value = std::rc::Rc::new(value);
+        *self.0.borrow_mut() = Some(value.clone());
+        value
+    }
+
+    fn clear(&self) {
+        self.0.borrow_mut().take();
+    }
+}
+
+impl<T> Clone for Cache<T> {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl<T> PartialEq for Cache<T> {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl<T> Eq for Cache<T> {}
 
 impl Funcdata {
     /// The cached "may be non-zero" mask of every value.
@@ -174,17 +228,31 @@ impl Funcdata {
     /// Every rule that reasons about which bits can be set MUST read this, so
     /// that two rules never disagree about one value.
     pub fn nonzero_masks(&self) -> std::rc::Rc<Vec<u64>> {
-        if let Some(cached) = self.masks.borrow().as_ref() {
-            return cached.clone();
+        if let Some(cached) = self.masks.get() {
+            return cached;
         }
-        let computed = std::rc::Rc::new(crate::graph::nonzero::compute_masks(self));
-        *self.masks.borrow_mut() = Some(computed.clone());
-        computed
+        self.masks.set(crate::graph::nonzero::compute_masks(self))
     }
 
     /// Drops the mask cache. Called by every mutator.
     fn invalidate_masks(&self) {
-        self.masks.borrow_mut().take();
+        self.masks.clear();
+        self.recovered_types.clear();
+    }
+
+    /// The cached rich type recovery for this graph.
+    ///
+    /// Every rule that reasons about pointers, structures or arrays MUST read
+    /// this rather than running inference itself.
+    pub fn recovered_types(
+        &self,
+    ) -> std::rc::Rc<(typefactory::TypeFactory, typefactory::RecoveredTypes)> {
+        if let Some(cached) = self.recovered_types.get() {
+            return cached;
+        }
+        let factory = typefactory::TypeFactory::new(32);
+        let types = typefactory::infer(self, &factory, &BTreeMap::new());
+        self.recovered_types.set((factory, types))
     }
 
     pub fn varnode(&self, id: VarnodeId) -> &GraphVarnode {

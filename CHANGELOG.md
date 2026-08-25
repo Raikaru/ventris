@@ -249,6 +249,27 @@ All notable Ventris changes are documented here.
 - Measured against Ghidra on the corpus, the graph path improves to
   `unstructured-control-flow` 10 (from 13) and `missing-loop-or-switch` 4, against
   15 and 11 on the address-ordered default.
+- Ported 13 further `Rule` subclasses, taking rule coverage to 122 of 168.
+  `expr_float` has the floating-point rewrites (5), `expr_ptr` the pointer and
+  type-directed ones (5), and `expr_memory` the direct-constant LOAD and STORE
+  forms (2). The pointer rules are the first to consume the ported
+  `typefactory`, which is what made them portable at all.
+- `RuleStructOffset0` is implemented but deliberately not registered: it cannot
+  terminate with this type model. It inserts `PTRSUB(ptr, 0)` and re-points the
+  access; in Ghidra the new pointer carries a `TypePointerRel`, so the guard no
+  longer matches it, but `DataType` has no relative-pointer variant, so the
+  pointer still infers as pointer-to-structure and the rule fires on the same
+  access forever. With that rule alone active, `graph_pipeline` overflowed the
+  stack.
+- Recovered types are cached on the graph and invalidated by every mutator, as
+  the nonzero masks already were. Six pointer rules each ran the seven-pass
+  inference inside `apply_op`, which took one function's expression phase from
+  2.0s to 10.8s; it is 3.8s now.
+- Both caches are held in a wrapper that takes no part in `Funcdata`'s equality
+  and is not cloned. A cache is not part of the graph's value, and the mask
+  cache had silently made two otherwise identical graphs compare unequal.
+- `VENTRIS_SKIP_RULE` now applies to every rule batch rather than one module,
+  which is how the non-terminating rule above was identified.
 - Ported 43 further `Rule` subclasses across four new modules, taking rule
   coverage from 66 of 168 to 109 of 168. `expr_bool` has the boolean and
   comparison rewrites (13), `expr_arith` the integer and shift rewrites (12),

@@ -494,11 +494,14 @@ pub fn default_pipeline() -> Box<dyn Action> {
         .unwrap_or_default();
     // Each new batch is switchable so an oscillating pair can be attributed to
     // one batch without a rebuild per guess.
-    let batches: [(&str, Vec<Box<dyn Rule>>); 4] = [
+    let batches: [(&str, Vec<Box<dyn Rule>>); 7] = [
         ("expr_bool", super::expr_bool::all()),
         ("expr_arith", super::expr_arith::all()),
         ("expr_divmod", super::expr_divmod::all()),
         ("expr_piece", super::expr_piece::all()),
+        ("expr_float", super::expr_float::all()),
+        ("expr_ptr", super::expr_ptr::all()),
+        ("expr_memory", super::expr_memory::all()),
     ];
     let skipped_batches: Vec<String> = std::env::var("VENTRIS_SKIP_BATCH")
         .map(|value| value.split(',').map(str::trim).map(str::to_owned).collect())
@@ -508,6 +511,9 @@ pub fn default_pipeline() -> Box<dyn Action> {
             continue;
         }
         for rule in rules {
+            if dropped.iter().any(|name| name == rule.name()) {
+                continue;
+            }
             expression = expression.add_rule(rule);
         }
     }

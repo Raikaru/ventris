@@ -49,12 +49,11 @@ argument recovery, `Cover` live ranges with `ActionMergeCopy`/`MergeAdjacent`/
 `ConstantPtr`, and `CollapseStructure` with natural-loop analysis
 (`labelLoops`, `LoopBody::findBase`/`findExit`, `markExitsAsGotos`).
 
-That is 109 of Ghidra's 168 `Rule` subclasses and 28 of its 75 `Action`
-subclasses — 65% and 37%. The port is **not** complete: 59 rules and 47 actions
-remain by that count. Of the 59 rules, ten are recorded in `CHANGELOG.md` as
-needing Ghidra state this graph does not carry, one has no implementation in the
-pinned source, and 21 live outside `ruleaction.cc` in the double-precision and
-bit-field families; the rest are simply not done.
+That is 122 of Ghidra's 168 `Rule` subclasses and 28 of its 75 `Action`
+subclasses — 73% and 37%. The port is **not** complete: 46 rules and 47 actions
+remain by that count. Of the 46 rules, 21 live outside `ruleaction.cc` in the
+double-precision and bit-field families, and most of the rest are recorded in
+`CHANGELOG.md` as needing Ghidra state this graph does not carry.
 
 Both figures count a Rust item carrying the C++ class's own name, which is the
 only definition that can be checked mechanically. It understates action
