@@ -145,9 +145,13 @@ pub fn mark_explicit_with(data: &Funcdata, highs: Variables) -> Naming {
         // being a statement. Inlining it into a reader drops the update
         // entirely: a loop counter kept its initial value and the loop never
         // terminated.
+        // The same applies to a copy within one variable. Such a copy says
+        // nothing and is not printed, so if this value reached its variable only
+        // through that copy, nothing would assign it at all: a loop's
+        // initializer disappeared exactly this way.
         let carries_an_update = varnode.descendants.iter().any(|reader| {
             let operation = data.op(*reader);
-            operation.opcode == op::MULTIEQUAL
+            matches!(operation.opcode, op::MULTIEQUAL | op::COPY)
                 && operation
                     .output
                     .is_some_and(|merged| highs.high_of(merged) == highs.high_of(output))
@@ -740,6 +744,13 @@ impl<'a> Resolver<'a> {
                 // Merging made the operand and the result one variable, so the
                 // assignment would read and write the same name.
                 if self.naming.same_variable(output, operand) {
+                    continue;
+                }
+                // The same holds when two variables merely share a name: the
+                // copy carries no information and prints as `x = x`. This
+                // happens where a join introduced a merge whose operand already
+                // answers to the merged variable's name.
+                if self.naming.name_of(operand) == Some(name) {
                     continue;
                 }
                 copies.push((

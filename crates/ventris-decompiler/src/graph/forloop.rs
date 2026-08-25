@@ -169,6 +169,35 @@ fn find_loop_variable(
     tail: GraphBlockId,
     slot: usize,
 ) -> Option<(OpId, OpId)> {
+    if std::env::var_os("VTF").is_some() {
+        let mut chain = Vec::new();
+        let mut current = Some(condition);
+        for _ in 0..6 {
+            let Some(value) = current else { break };
+            match data.varnode(value).def {
+                Some(def) => {
+                    chain.push(format!(
+                        "op{}:{}@b{:?}",
+                        def.0,
+                        data.op(def).opcode,
+                        data.op(def).parent.map(|b| b.0)
+                    ));
+                    current = data.op(def).inputs.first().copied();
+                }
+                None => {
+                    chain.push("free".into());
+                    break;
+                }
+            }
+        }
+        eprintln!(
+            "LVCHAIN head=b{} tail=b{} slot={} {}",
+            head.0,
+            tail.0,
+            slot,
+            chain.join(" <- ")
+        );
+    }
     let root = data.varnode(condition).def?;
     if is_call_or_marker(data, root) {
         return None;
@@ -181,23 +210,46 @@ fn find_loop_variable(
                 continue;
             };
             if data.op(definition).opcode == op::MULTIEQUAL {
+                let trace = std::env::var_os("VTF").is_some();
                 if data.op(definition).parent != Some(head) {
+                    if trace {
+                        eprintln!("LV phi not in head");
+                    }
                     continue;
                 }
                 let Some(carried) = data.op(definition).inputs.get(slot).copied() else {
+                    if trace {
+                        eprintln!("LV no carried input at slot");
+                    }
                     continue;
                 };
                 let Some(iterate) = data.varnode(carried).def else {
+                    if trace {
+                        eprintln!("LV carried input has no definition");
+                    }
                     continue;
                 };
                 if data.op(iterate).parent != Some(tail) || is_call_or_marker(data, iterate) {
+                    if trace {
+                        eprintln!(
+                            "LV iterate in b{:?} not tail b{} (opcode {})",
+                            data.op(iterate).parent.map(|b| b.0),
+                            tail.0,
+                            data.op(iterate).opcode
+                        );
+                    }
                     continue;
                 }
                 // `testTerminal` requires the statement be the last in its
                 // block, and Ghidra only moves it there when that move is
                 // provably safe. Requiring it already be last keeps the port on
                 // the side that needs no move.
-                if last_printing_op(data, tail) != Some(iterate) {
+                // Ghidra moves the statement to the end of the tail rather
+                // than requiring it be there, so long as the move is safe.
+                let Some(last) = last_printing_op(data, tail) else {
+                    continue;
+                };
+                if !is_moveable(data, iterate, last) {
                     continue;
                 }
                 return Some((definition, iterate));
@@ -331,4 +383,217 @@ mod tests {
         ]);
         assert!(find_for_loops(&data, &tree).is_empty());
     }
+    /// A for-loop's iterator has to end the body, and Ghidra moves it there
+    /// rather than insisting it already is. The move must not cross a read of
+    /// the value it produces, nor carry a memory write across another.
+    #[test]
+    fn an_operation_moves_down_unless_something_in_between_conflicts() {
+        use crate::graph::SeqNum;
+        let seq = |address: u64| SeqNum { address, order: 0 };
+        let mut data = Funcdata::default();
+        let block = data.new_block(0x1000);
+        let counter = data.new_varnode(ventris_lifter::REGISTER_SPACE, 0, 4);
+        let one = data.new_constant(1, 4);
+
+        // step: counter - 1
+        let step = data.new_op(op::INT_SUB, seq(0x1000), vec![counter, one]);
+        let stepped = data.new_unique(4);
+        data.op_set_output(step, Some(stepped));
+        data.op_insert_end(step, block);
+        // Two unrelated computations follow it.
+        let filler = data.new_varnode(ventris_lifter::REGISTER_SPACE, 8, 4);
+        let mut last = step;
+        for _ in 0..2 {
+            let held = data.new_op(op::INT_ADD, seq(0x1004), vec![filler, one]);
+            let out = data.new_unique(4);
+            data.op_set_output(held, Some(out));
+            data.op_insert_end(held, block);
+            last = held;
+        }
+        assert!(
+            is_moveable(&data, step, last),
+            "nothing in between touches the value or its operands"
+        );
+        assert!(is_moveable(&data, step, step), "no movement is needed");
+
+        // A reader of the stepped value in between blocks the move.
+        let reader = data.new_op(op::INT_ADD, seq(0x1008), vec![stepped, one]);
+        let out = data.new_unique(4);
+        data.op_set_output(reader, Some(out));
+        data.op_insert_end(reader, block);
+        let tail = data.new_op(op::INT_ADD, seq(0x100c), vec![filler, one]);
+        let tail_out = data.new_unique(4);
+        data.op_set_output(tail, Some(tail_out));
+        data.op_insert_end(tail, block);
+        assert!(
+            !is_moveable(&data, step, tail),
+            "the result cannot move past something that reads it"
+        );
+    }
+
+    /// A memory operand cannot be reordered against a store that might alias it.
+    #[test]
+    fn a_memory_operand_does_not_cross_a_store() {
+        use crate::graph::SeqNum;
+        let seq = |address: u64| SeqNum { address, order: 0 };
+        let mut data = Funcdata::default();
+        let block = data.new_block(0x1000);
+        let held = data.new_varnode(ventris_lifter::RAM_SPACE, 0x2000, 4);
+        let one = data.new_constant(1, 4);
+        let step = data.new_op(op::INT_SUB, seq(0x1000), vec![held, one]);
+        let stepped = data.new_unique(4);
+        data.op_set_output(step, Some(stepped));
+        data.op_insert_end(step, block);
+
+        let address = data.new_varnode(ventris_lifter::REGISTER_SPACE, 0, 4);
+        let space = data.new_constant(u64::from(ventris_lifter::RAM_SPACE), 4);
+        let store = data.new_op(op::STORE, seq(0x1004), vec![space, address, one]);
+        data.op_insert_end(store, block);
+        assert!(
+            !is_moveable(&data, step, store),
+            "the store may write the location the operand reads"
+        );
+    }
+}
+
+/// Whether an operation can move down to a point in its own block.
+///
+/// Port of `PcodeOp::isMoveable`. A for-loop's iterator has to be the last
+/// statement of the body, and Ghidra moves it there instead of insisting it
+/// already is. The move is refused when it would cross a read of its own result,
+/// when it would carry a memory access across a conflicting one, or when either
+/// end is tied to an address that something in between also touches.
+fn is_moveable(data: &Funcdata, operation: OpId, point: OpId) -> bool {
+    if operation == point {
+        return true; // No movement necessary.
+    }
+    let held = data.op(operation);
+    let moving_load = held.opcode == op::LOAD;
+    if is_special(held.opcode) && !moving_load {
+        return false; // Anything else special stays where it is.
+    }
+    let Some(block) = held.parent else {
+        return false;
+    };
+    if data.op(point).parent != Some(block) {
+        return false; // Not in the same block.
+    }
+    let ops = &data.block(block).ops;
+    let (Some(from), Some(to)) = (
+        ops.iter().position(|id| *id == operation),
+        ops.iter().position(|id| *id == point),
+    ) else {
+        return false;
+    };
+    if from > to {
+        return false; // This is a move downwards only.
+    }
+    // The result cannot move past anything that reads it.
+    if let Some(output) = held.output {
+        for reader in data.varnode(output).descendants.iter().copied() {
+            if data.op(reader).parent != Some(block) {
+                continue;
+            }
+            if ops
+                .iter()
+                .position(|id| *id == reader)
+                .is_some_and(|at| at <= to)
+            {
+                return false;
+            }
+        }
+    }
+    // A value in a location the program can name elsewhere cannot be reordered
+    // against anything that might touch that location.
+    let tied: Vec<VarnodeId> = held
+        .inputs
+        .iter()
+        .copied()
+        .filter(|value| is_addrtied(data, *value))
+        .collect();
+    let output_tied = held.output.is_some_and(|value| is_addrtied(data, value));
+    // Crossing a call needs every operand and the result to be untied.
+    let cross_calls = !is_special(held.opcode)
+        && held.output.is_some()
+        && !output_tied
+        && held.inputs.iter().all(|value| !is_addrtied(data, *value));
+    for crossed in ops[from + 1..=to].iter().copied() {
+        let over = data.op(crossed);
+        if is_special(over.opcode) {
+            match over.opcode {
+                op::LOAD => {
+                    if output_tied {
+                        return false;
+                    }
+                }
+                op::STORE => {
+                    if moving_load || !tied.is_empty() || output_tied {
+                        return false;
+                    }
+                }
+                // These say something happened without saying what, so they do
+                // not themselves conflict.
+                op::INDIRECT | op::SEGMENTOP | op::CPOOLREF => {}
+                op::CALL | op::CALLIND => {
+                    if !cross_calls {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+        }
+        if let Some(written) = over.output {
+            if moving_load && is_addrtied(data, written) {
+                return false;
+            }
+            if tied.iter().any(|value| overlaps(data, *value, written)) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// An operation whose effect is more than computing its result.
+fn is_special(opcode: i32) -> bool {
+    matches!(
+        opcode,
+        op::LOAD
+            | op::STORE
+            | op::CALL
+            | op::CALLIND
+            | op::CALLOTHER
+            | op::RETURN
+            | op::BRANCH
+            | op::CBRANCH
+            | op::BRANCHIND
+            | op::INDIRECT
+            | op::MULTIEQUAL
+            | op::SEGMENTOP
+            | op::CPOOLREF
+            | op::NEW
+    )
+}
+
+/// Whether a value lives at an address the rest of the program can name.
+///
+/// Ghidra carries this as `addrtied`/`persist` flags. This model has no such
+/// flag, so the question is answered from the storage: a value in memory can be
+/// reached through a pointer and so conflicts with any access that might alias
+/// it, while a register or a temporary cannot. A volatile value conflicts with
+/// everything by definition.
+fn is_addrtied(data: &Funcdata, value: VarnodeId) -> bool {
+    let varnode = data.varnode(value);
+    varnode.flags.volatile || varnode.space == ventris_lifter::RAM_SPACE
+}
+
+/// Whether two values share any byte of storage.
+fn overlaps(data: &Funcdata, first: VarnodeId, second: VarnodeId) -> bool {
+    let (left, right) = (data.varnode(first), data.varnode(second));
+    if left.space != right.space {
+        return false;
+    }
+    let left_end = left.offset.saturating_add(u64::from(left.size));
+    let right_end = right.offset.saturating_add(u64::from(right.size));
+    left.offset < right_end && right.offset < left_end
 }

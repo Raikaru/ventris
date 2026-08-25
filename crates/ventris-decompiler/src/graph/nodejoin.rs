@@ -546,7 +546,11 @@ impl super::action::Rule for RulePushMulti {
             return 0;
         };
         // The surviving definition takes over the merge's output and moves into
-        // the merge block.
+        // the merge block. The merge has to release the value first: destroying
+        // an operation clears whatever it still claims as its output, so handing
+        // the value over and only then destroying the merge left the value with
+        // no definition at all - and a branch reading a free varnode.
+        data.op_set_output(id, None);
         data.op_set_output(def1, Some(output));
         data.op_uninsert(def1);
         match contingent {
@@ -554,7 +558,9 @@ impl super::action::Rule for RulePushMulti {
                 let Some(slot) = data.op(def1).inputs.iter().position(|held| *held == left) else {
                     // The operand order was settled by commuting, which this
                     // move cannot express; leave the merge alone.
-                    data.op_set_output(def1, None);
+                    data.op_set_output(def1, Some(first));
+                    data.op_set_output(id, Some(output));
+                    data.op_insert_begin(def1, block);
                     return 0;
                 };
                 let size = data.varnode(left).size;
@@ -567,7 +573,9 @@ impl super::action::Rule for RulePushMulti {
                     phi
                 });
                 let Some(value) = data.op(merged).output else {
-                    data.op_set_output(def1, None);
+                    data.op_set_output(def1, Some(first));
+                    data.op_set_output(id, Some(output));
+                    data.op_insert_begin(def1, block);
                     return 0;
                 };
                 data.op_set_input(def1, value, slot);

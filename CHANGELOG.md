@@ -282,6 +282,38 @@ All notable Ventris changes are documented here.
   table-backed switch the rule can claim, and `dl_G_MOVEWORD`'s `switch 0 vs 1`
   is a `BRANCHIND` whose table this pipeline does not recover. The rule is
   correct and tested; it has no corpus function to improve yet.
+- For-loop recovery now works end to end, closing the chain this session has
+  been following. `TRK_fill_mem` emits two `for` loops, the same two Ghidra
+  emits, and the census finding `for 0 vs 2` is gone; `Emem_KillSwMember` went
+  from one to two of its three. Four things had to be true at once, and the last
+  three were only reachable once maximal blocks made "the tail of the loop" mean
+  what Ghidra means by it.
+  Ported `PcodeOp::isMoveable`, which is how Ghidra puts the iterator at the end
+  of the body instead of requiring it to be there already: the move is refused
+  when it would cross a read of its own result, carry a memory access across a
+  conflicting one, or move a value tied to an address something in between also
+  touches. This model has no `addrtied` flag, so that question is answered from
+  the storage - memory can be reached through a pointer, a register cannot.
+  Fixed `RulePushMulti` handing a value over before the merge released it. An
+  operation clears whatever it still claims as its output when destroyed, so the
+  value ended up with no definition and the branch read a free varnode.
+  A copy whose two ends print as one name is not emitted. These are collapsed
+  merges - `cutDownMultiequals` turns a merge that lost all but one input into a
+  copy - and Ghidra's copy marking reaches the same conclusion. The test sits in
+  `classify` rather than `classify_op` so a `for` header can still spell such a
+  copy when it needs one as an initializer.
+  A value whose only reader is such a copy is now named. Otherwise nothing
+  assigns it at all: the copy is the statement that would have, and suppressing
+  it dropped a loop's initializer. Same rule as the loop-carried update, one
+  reader kind wider.
+  A `for` lifts a statement into its header only if the body stops printing it,
+  and only if it says something: a self-assignment is left alone rather than
+  suppressed in one place and declined in the other. The body no longer repeats
+  the header either, which a `while` must do and a `for` must not.
+  Measured: all gates green, 676 tests, census unchanged at 21/37 agreeing with
+  `unstructured-control-flow` at 9. One defect remains, recorded rather than
+  papered over: `TRK_fill_mem`'s first `for` is missing its initializer, and the
+  statement that computes it appears after both loops instead of before them.
 - Basic blocks are now maximal, as Ghidra's are. `block_leaders` treated every
   edge's target as a leader, and a fall-through is an edge, so the graph had one
   block per instruction: 45 blocks for `TRK_fill_mem` where Ghidra has 17. The

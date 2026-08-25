@@ -84,21 +84,33 @@ pub fn emit_structured(
     // before anything is emitted, because the choice moves two statements out
     // of the body and into the loop header.
     let for_loops = super::forloop::find_for_loops(data, &tree);
-    let nonprinting = for_loops
-        .values()
-        .flat_map(|parts| [Some(parts.iterate), parts.initialize])
-        .flatten()
-        .collect();
-    let emitter = Emitter {
+    let mut emitter = Emitter {
         data,
         naming: &naming,
         resolver,
         types,
         architecture,
         for_loops,
-        nonprinting,
+        nonprinting: BTreeSet::new(),
     };
     let scoped = emitter.scoped_names();
+    // Only suppress a statement the `for` header can actually spell. An
+    // initializer that produces no statement of its own is left where it is,
+    // which is what Ghidra does when `testTerminal` rejects it.
+    emitter.nonprinting = emitter
+        .for_loops
+        .values()
+        .flat_map(|parts| [Some(parts.iterate), parts.initialize])
+        .flatten()
+        // A statement that says nothing is not worth lifting into the header,
+        // and suppressing it in the body while the header declines to print it
+        // would lose it entirely.
+        .filter(|op| {
+            emitter
+                .render(*op, &scoped)
+                .is_some_and(|statement| !is_self_assignment(&statement))
+        })
+        .collect();
     let mut phi_copies: BTreeMap<GraphBlockId, Vec<NativeStatement>> = BTreeMap::new();
     for (block, copy) in emitter.resolver.phi_copies() {
         let copies = phi_copies.entry(block).or_default();
@@ -113,6 +125,7 @@ pub fn emit_structured(
     // is reachable even without a label of its own. Pruning applies inside a
     // construct's body, where the only way in is through the construct.
     statements.extend(emitter.emit_construct(&tree, &scoped, &phi_copies, &targets));
+    drop_self_assignments(&mut statements);
     drop_gotos_to_next_statement(&mut statements);
     drop_trailing_gotos_to_following_label(&mut statements);
     prefer_non_empty_then(&mut statements);
@@ -1128,14 +1141,40 @@ fn prefer_non_empty_then(statements: &mut Vec<NativeStatement>) {
 /// Merging is what creates these: two SSA values that a `COPY` related become
 /// one C variable, and the copy between them then reads and writes the same
 /// name. The statement carries no information once that has happened.
+/// Whether a statement assigns a name to itself.
+///
+/// The two sides need not be the same expression: one may carry a cast or a
+/// different storage width while naming the same variable, which is exactly what
+/// a copy between two versions of one variable looks like.
+fn is_self_assignment(statement: &NativeStatement) -> bool {
+    let NativeStatement::Assign {
+        destination,
+        source,
+    } = statement
+    else {
+        return false;
+    };
+    let bare = |value: &Expr| -> Option<String> {
+        let mut current = value;
+        loop {
+            match current {
+                Expr::Cast { value, .. } => current = value,
+                Expr::Temporary { name, .. } | Expr::Register { name, .. } => {
+                    return Some(name.clone());
+                }
+                Expr::Parameter { name, .. } => return Some(name.clone()),
+                _ => return None,
+            }
+        }
+    };
+    match (bare(destination), bare(source)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
 fn drop_self_assignments(statements: &mut Vec<NativeStatement>) {
-    statements.retain(|statement| match statement {
-        NativeStatement::Assign {
-            destination,
-            source,
-        } => destination != source,
-        _ => true,
-    });
+    statements.retain(|statement| !is_self_assignment(statement));
     for statement in statements.iter_mut() {
         match statement {
             NativeStatement::IfElse {
@@ -1160,6 +1199,7 @@ fn drop_self_assignments(statements: &mut Vec<NativeStatement>) {
 /// will be emitted. When it lands next, the jump says nothing, and it is the
 /// difference between output that reads as a `goto` ladder and output that
 /// reads as straight-line code.
+
 fn drop_gotos_to_next_statement(statements: &mut Vec<NativeStatement>) {
     let mut index = 0;
     while index + 1 < statements.len() {
@@ -1394,6 +1434,7 @@ impl Emitter<'_> {
                 let mut statements = self.emit_tree(header, scoped, phi_copies, targets);
                 drop_stale_header_transfer(&mut statements);
                 let mut inner = self.emit_tree(body, scoped, phi_copies, targets);
+                let body_only = inner.clone();
                 let mut repeat = self.emit_tree(header, scoped, phi_copies, targets);
                 drop_stale_header_transfer(&mut repeat);
                 inner.extend(repeat);
@@ -1403,14 +1444,22 @@ impl Emitter<'_> {
                 let parts = super::structure::front_block(header)
                     .and_then(|entry| self.for_loops.get(&entry));
                 if let Some(parts) = parts {
+                    // The header spells exactly what the body no longer does:
+                    // a statement is only lifted into it if it was suppressed.
+                    let lifted = |op: OpId| {
+                        self.nonprinting
+                            .contains(&op)
+                            .then(|| self.render(op, scoped))
+                            .flatten()
+                            .map(Box::new)
+                    };
                     statements.push(NativeStatement::For {
-                        initializer: parts
-                            .initialize
-                            .and_then(|op| self.render(op, scoped))
-                            .map(Box::new),
+                        initializer: parts.initialize.and_then(lifted),
                         condition: Some(condition),
-                        step: self.render(parts.iterate, scoped).map(Box::new),
-                        body: inner,
+                        step: lifted(parts.iterate),
+                        // A `for` advances through its own header, so the body
+                        // does not repeat the test block the way a `while` does.
+                        body: body_only,
                     });
                     return statements;
                 }
@@ -1694,6 +1743,21 @@ impl Emitter<'_> {
 
     fn classify(&self, op: OpId, scoped: &BTreeSet<String>) -> Emission {
         if self.nonprinting.contains(&op) {
+            return Emission::Skip;
+        }
+        // A copy whose two ends print as one name says nothing. These are what a
+        // merge becomes when it loses all but one input, which `cutDownMultiequals`
+        // leaves behind once a join has removed an edge; Ghidra's copy marking
+        // reaches the same conclusion. The test is here rather than in
+        // `classify_op` so that `render` can still spell such a copy when a `for`
+        // header needs it as an initializer.
+        let operation = self.data.op(op);
+        if operation.opcode == op::COPY
+            && let (Some(output), Some(input)) =
+                (operation.output, operation.inputs.first().copied())
+            && let Some(name) = self.naming.name_of(output)
+            && self.naming.name_of(input) == Some(name)
+        {
             return Emission::Skip;
         }
         self.classify_op(op, scoped)
