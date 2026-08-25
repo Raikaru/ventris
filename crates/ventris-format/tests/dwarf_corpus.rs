@@ -13,7 +13,7 @@
 
 use std::path::Path;
 
-use ventris_format::dwarf::DebugType;
+use ventris_format::debuginfo::DebugType;
 
 /// The pinned PS2 image, when the caller says where the corpus lives.
 ///
@@ -69,5 +69,50 @@ fn recovers_the_runtime_prototypes_the_dwarf_describes() {
             .values()
             .any(|function| function.return_type.is_none()),
         "expected at least one void-returning prototype"
+    );
+}
+
+#[test]
+fn recovers_the_programs_own_prototypes_from_mips_symbolic_debug() {
+    let Some(bytes) = corpus() else {
+        eprintln!("VENTRIS_CORPUS_DIR unset or image absent; skipping");
+        return;
+    };
+    let image = ventris_format::Image::parse(&bytes).expect("the ELF is parsed");
+    let info = image.debug_info(&bytes).expect("debug info parses");
+
+    // The function the whole exercise is about. Its name and source file come
+    // from `.mdebug`; its return type does not, and that is measured below.
+    let alloc = info
+        .functions
+        .get(&0x125080)
+        .expect("allocEnemyEntity is described in .mdebug");
+    eprintln!("{alloc:#?}");
+    assert!(
+        alloc.name.contains("allocEnemyEntity"),
+        "unexpected name {:?}",
+        alloc.name
+    );
+    assert!(
+        alloc
+            .source
+            .as_deref()
+            .is_some_and(|path| path.contains("game_world")),
+        "expected the source file, got {:?}",
+        alloc.source
+    );
+    // No return type is claimed. This toolchain's auxiliary type table holds
+    // placeholders — the monotonic basic-type sequence documented in `mdebug` —
+    // so inventing a `long` for a pointer-returning function would be worse than
+    // leaving it open.
+    assert!(
+        alloc.return_type.is_none(),
+        "no type should be claimed from a placeholder table, got {:?}",
+        alloc.return_type
+    );
+    // The runtime's DWARF prototypes must survive the merge.
+    assert!(
+        info.functions.values().any(|f| f.name == "_fpadd_parts"),
+        "the DWARF prototypes were lost when .mdebug was merged in"
     );
 }

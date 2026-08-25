@@ -937,12 +937,41 @@ fn propagate_op(
                 }
             }
         }
-        op::INT_SDIV
-        | op::INT_SREM
-        | op::INT_SRIGHT
-        | op::INT_SEXT
-        | op::INT_2COMP
-        | op::INT_NEGATE => {
+        // An extension is an integer widening unless it is the ABI widening a
+        // pointer to the register that carries it, which the pointer arm below
+        // recognises. The integer typing has to remain the default: making the
+        // pointer case a separate arm ahead of this one silently stopped every
+        // sign extension from typing its operands as signed.
+        op::INT_SEXT | op::INT_ZEXT => {
+            let widened = operation
+                .inputs
+                .first()
+                .copied()
+                .and_then(|input| types.get(&input).cloned())
+                .filter(|ty| matches!(ty, DataType::Pointer { .. }))
+                .and_then(|pointer| {
+                    pointer_after_arithmetic(data, &operation, 0, factory, &pointer)
+                });
+            if let (Some(output), Some(widened)) = (operation.output, widened) {
+                set_here!(output, widened);
+                return changed;
+            }
+            let signed = operation.opcode == op::INT_SEXT;
+            for value in operation
+                .output
+                .into_iter()
+                .chain(operation.inputs.first().copied())
+            {
+                set_here!(
+                    value,
+                    DataType::Int {
+                        bits: data.varnode(value).size.saturating_mul(8),
+                        signed,
+                    }
+                );
+            }
+        }
+        op::INT_SDIV | op::INT_SREM | op::INT_SRIGHT | op::INT_2COMP | op::INT_NEGATE => {
             if let Some(output) = operation.output {
                 set_here!(
                     output,
@@ -1092,6 +1121,21 @@ fn pointer_after_arithmetic(
                 _ => None,
             }
         }
+        // A pointer widened to the register that carries it is still that
+        // pointer. The PS2 ABI returns a 32-bit pointer in a 64-bit register by
+        // sign-extending it, so the returned value's definition is an
+        // `INT_SEXT` over the address computation, and dropping the type there
+        // is what made a returned member address an `int64_t`. The width test is
+        // the ABI's: only an extension from exactly the target's pointer width
+        // can be a widened pointer.
+        op::INT_SEXT | op::INT_ZEXT => {
+            let input = operation.inputs.first().copied()?;
+            let output = operation.output?;
+            let input_bits = data.varnode(input).size.saturating_mul(8);
+            let output_bits = data.varnode(output).size.saturating_mul(8);
+            (input_bits == factory.pointer_bits && output_bits > input_bits)
+                .then(|| pointer.clone())
+        }
         op::INT_ADD => {
             let other = operation
                 .inputs
@@ -1130,10 +1174,18 @@ fn pointer_after_arithmetic(
     }
 }
 
-/// The constant part of an offset built as a scaled index plus a constant.
+/// The constant part of an offset built as a runtime amount plus a constant.
 ///
-/// Returns nothing unless both parts are present, so a bare constant and a bare
-/// scaled index keep their own, more specific handling above.
+/// The runtime part is deliberately unconstrained. An index scaled by a
+/// multiply is the textbook shape, but a compiler is equally free to reach the
+/// same address through a truncation of a wider product — which is what the
+/// PS2 build does, so requiring `INT_MULT` here declined the case this exists
+/// for. What matters is that a constant displacement is present, because that
+/// is the offset the member lives at; whatever is added alongside walks
+/// elements.
+///
+/// A bare constant and a bare scaled index keep their own, more specific
+/// handling above, so this returns nothing unless the sum really has both parts.
 fn affine_offset(data: &Funcdata, value: VarnodeId) -> Option<u64> {
     let definition = data.varnode(value).def?;
     let operation = data.op(definition);
@@ -1142,13 +1194,13 @@ fn affine_offset(data: &Funcdata, value: VarnodeId) -> Option<u64> {
     }
     let left = operation.inputs[0];
     let right = operation.inputs[1];
-    if scaled_index(data, left).is_some() {
-        return constant_value(data, right);
+    match (constant_value(data, left), constant_value(data, right)) {
+        // Both constant is not affine; it is a constant, and the caller already
+        // folded that case.
+        (Some(_), Some(_)) => None,
+        (Some(constant), None) | (None, Some(constant)) => Some(constant),
+        (None, None) => None,
     }
-    if scaled_index(data, right).is_some() {
-        return constant_value(data, left);
-    }
-    None
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -1830,5 +1882,67 @@ mod tests {
             "an indexed member address lost its pointer type: {:?}",
             types.get(sum)
         );
+    }
+
+    #[test]
+    fn widening_a_pointer_to_its_register_keeps_it_pointing() {
+        // The PS2 ABI returns a 32-bit pointer in a 64-bit register by sign
+        // extending it, so the returned value's definition is an `INT_SEXT` over
+        // the address computation. Typing that as a signed integer said the
+        // function returned an integer, and the emitted `return` carried a cast
+        // to `int64_t` on a pointer expression.
+        let mut data = Funcdata::default();
+        let block = data.new_block(0x1000);
+        let base = data.new_varnode(REGISTER_SPACE, 0x10, 4);
+        data.mark_input(base);
+        let extend = data.new_op(op::INT_SEXT, seq(0x1000, 0), vec![base]);
+        let wide = data.new_unique(8);
+        data.op_set_output(extend, Some(wide));
+        data.op_insert_end(extend, block);
+
+        let factory = TypeFactory::new(32);
+        let structure = factory.get_type_struct_fields(
+            "world".to_owned(),
+            vec![Field {
+                offset: 0,
+                ty: DataType::Int {
+                    bits: 32,
+                    signed: false,
+                },
+                name: "field_0".to_owned(),
+            }],
+        );
+        let seed = BTreeMap::from([(base, factory.get_type_pointer(structure))]);
+        let types = infer(&data, &factory, &seed);
+        assert!(
+            matches!(types.get(wide), Some(DataType::Pointer { .. })),
+            "a widened pointer must stay a pointer, got {:?}",
+            types.get(wide)
+        );
+    }
+
+    #[test]
+    fn widening_an_integer_still_types_it_by_signedness() {
+        // The pointer case must not cost the ordinary one: an extension of an
+        // integer is a signed or unsigned widening, and a separate arm ahead of
+        // the integer group silently removed that.
+        for (opcode, signed) in [(op::INT_SEXT, true), (op::INT_ZEXT, false)] {
+            let mut data = Funcdata::default();
+            let block = data.new_block(0x1000);
+            let base = data.new_varnode(REGISTER_SPACE, 0x10, 4);
+            data.mark_input(base);
+            let extend = data.new_op(opcode, seq(0x1000, 0), vec![base]);
+            let wide = data.new_unique(8);
+            data.op_set_output(extend, Some(wide));
+            data.op_insert_end(extend, block);
+
+            let factory = TypeFactory::new(32);
+            let types = infer(&data, &factory, &BTreeMap::new());
+            assert_eq!(
+                types.get(wide),
+                Some(&DataType::Int { bits: 64, signed }),
+                "extension {opcode} lost its integer typing"
+            );
+        }
     }
 }

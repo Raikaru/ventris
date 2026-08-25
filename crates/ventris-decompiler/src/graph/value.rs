@@ -594,6 +594,20 @@ impl<'a> Resolver<'a> {
                 };
                 let operand = op.inputs.first().copied()?;
                 let value = input(0)?;
+                // Widening a pointer to the register that carries it is the
+                // ABI's doing, not a conversion the source wrote: the PS2 ABI
+                // returns a 32-bit pointer in a 64-bit register by sign
+                // extending it. Spelling that as a cast to `int64_t` says the
+                // function returns an integer, which is the opposite of what
+                // type recovery just concluded.
+                if let Some((rich, _)) = self.rich
+                    && rich.get(operand).is_some_and(|ty| {
+                        matches!(ty, super::typefactory::DataType::Pointer { .. })
+                    })
+                    && self.data.varnode(operand).size < width
+                {
+                    return Some(value);
+                }
                 // An extension between integers is what C does on assignment.
                 // Spelling it repeats the destination's declared type.
                 if !needs_cast(&self.type_of(operand), &ty) {

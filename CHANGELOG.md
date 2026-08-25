@@ -249,6 +249,42 @@ All notable Ventris changes are documented here.
 - Measured against Ghidra on the corpus, the graph path improves to
   `unstructured-control-flow` 10 (from 13) and `missing-loop-or-switch` 4, against
   15 and 11 on the address-ordered default.
+- Added `ventris-format/src/mdebug.rs`, a MIPS symbolic debug reader, and
+  `src/debuginfo.rs` holding the shared model both readers populate.
+  `Image::debug_info` now merges them. It recovers 785 procedure names and their
+  source files from `dungeon_game.elf`, including
+  `_ZN9GameWorld16allocEnemyEntityEv` at `0x125080` attributed to
+  `/Users/Lampert/.../game_world.cpp` — the same path Ghidra prints. The header's
+  fields five and six are the *procedure* descriptors, not the file descriptors;
+  reading them as the file table walked 785 procedure records as though they were
+  72-byte file headers and every field came out as noise, which a test now pins.
+- It supplies names and source files and deliberately no types. The auxiliary
+  type table in this image is a placeholder: for `game_world.cpp` it holds the
+  monotonic sequence `0x03, 0x05, 0x07, ...` at alternating slots, decoding as
+  `long`, `unsigned long`, `char` in basic-type declaration order rather than as
+  any procedure's type, and the file emits no `stParam` symbols at all. This
+  toolchain recorded names and addresses and no types. Decoding it faithfully
+  would hand the decompiler a `long` return for a pointer-returning function.
+- So Ghidra's `GameWorld *` is inference after all, seeded by the demangled class
+  name — which makes the gap ours, and local. Two fixes closed it, both measured
+  from the actual definition chain rather than guessed:
+  - `affine_offset` required the runtime part of `base + C + runtime` to be an
+    `INT_MULT`. The PS2 build reaches the same address through a `SUBPIECE` of a
+    wider product, so requiring a multiply declined the case the function exists
+    for. Only the presence of a constant displacement matters.
+  - A pointer widened to the register that carries it is still that pointer. The
+    ABI returns a 32-bit pointer in a 64-bit register by sign-extending it, so the
+    returned value's definition is an `INT_SEXT` over the address computation, and
+    typing that as a signed integer is what made the return an `int64_t`. The
+    width test is the ABI's: only an extension from exactly the target's pointer
+    width qualifies. The emitter elides that widening rather than spelling it as a
+    cast, because it is the ABI's doing and not a conversion the source wrote.
+  - The pointer case is an arm ahead of the integer group, and a test pins that an
+    ordinary extension still types its operands by signedness: placing it as a
+    separate arm first silently stopped every sign extension from doing so.
+- `casts` is now closed on all five PS2 alloc functions: `2 vs 1` became `1 vs 1`.
+  The graph path's `corpus-smoke` residual is one dimension,
+  `declaration_order`, which discriminates by the local's name as recorded above.
 - Added a DWARF 2 reader, `ventris-format/src/dwarf.rs`, reachable as
   `Image::debug_info`. It recovers function prototypes — entry address, name,
   return type, parameter names and types — resolving typedefs and qualifiers

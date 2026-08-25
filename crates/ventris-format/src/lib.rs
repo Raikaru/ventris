@@ -26,7 +26,9 @@
 #![forbid(unsafe_code)]
 
 use ventris_addr::{Addr, SpaceKind, SpaceTable};
+pub mod debuginfo;
 pub mod dwarf;
+pub mod mdebug;
 mod metadata;
 
 pub use metadata::{ImageMetadata, ImageRelocation, ImageSymbol};
@@ -481,8 +483,13 @@ impl Image {
     /// answer different questions: one says where a name lives, the other says
     /// what its type is. An image with no debug sections returns an empty set
     /// rather than an error.
-    pub fn debug_info(&self, source: &[u8]) -> Result<dwarf::DebugInfo, FormatError> {
-        dwarf::extract(source, &self.format)
+    pub fn debug_info(&self, source: &[u8]) -> Result<debuginfo::DebugInfo, FormatError> {
+        // DWARF first: where both formats describe a function, DWARF carries
+        // parameter names that MIPS symbolic records separately and aggregate
+        // members it does not resolve here.
+        let mut recovered = dwarf::extract(source, &self.format)?;
+        recovered.merge(mdebug::extract(source, &self.format)?);
+        Ok(recovered)
     }
 
     /// Load an image with an explicit loader or deterministic auto-detection.

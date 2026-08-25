@@ -23,97 +23,8 @@
 
 use std::collections::BTreeMap;
 
+use super::debuginfo::{DebugFunction, DebugInfo, DebugParameter, DebugType};
 use super::{ElfFacts, Endian, Format, FormatError};
-
-/// Everything the reader recovers from an image's debug information.
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
-pub struct DebugInfo {
-    /// Function prototypes, keyed by entry address.
-    pub functions: BTreeMap<u64, DebugFunction>,
-}
-
-/// One function's prototype as the compiler recorded it.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct DebugFunction {
-    pub entry: u64,
-    /// The name as written, undecorated: DWARF records the source name.
-    pub name: String,
-    /// The declared return type. `None` is a function returning nothing, which
-    /// DWARF spells as an absent `DW_AT_type` rather than a void type.
-    pub return_type: Option<DebugType>,
-    pub parameters: Vec<DebugParameter>,
-    /// Source file, when the compilation unit named one.
-    pub source: Option<String>,
-}
-
-/// One declared parameter.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct DebugParameter {
-    pub name: Option<String>,
-    pub ty: DebugType,
-}
-
-/// A declared type, reduced to what a decompiler can act on.
-///
-/// Qualifiers (`const`, `volatile`) and typedefs are resolved through rather
-/// than represented: they do not change storage, and the pipeline's own type
-/// model has nowhere to put them.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum DebugType {
-    Bool,
-    Int {
-        bits: u32,
-        signed: bool,
-    },
-    Float {
-        bits: u32,
-    },
-    Pointer {
-        bits: u32,
-        to: Box<DebugType>,
-    },
-    /// A named aggregate and its size in bytes. Members are not read yet.
-    Aggregate {
-        name: Option<String>,
-        bytes: u32,
-    },
-    Array {
-        element: Box<DebugType>,
-        count: Option<u64>,
-    },
-    /// A type the reader understood the shape of but not the contents, carrying
-    /// whatever width was declared.
-    Opaque {
-        bytes: Option<u32>,
-    },
-    /// `void`, reachable only as a pointer's target.
-    Void,
-}
-
-impl DebugType {
-    /// The storage width in bytes, when the declaration fixed one.
-    pub fn byte_size(&self) -> Option<u32> {
-        match self {
-            Self::Bool => Some(1),
-            Self::Int { bits, .. } | Self::Float { bits } => Some(bits.div_ceil(8)),
-            Self::Pointer { bits, .. } => Some(bits.div_ceil(8)),
-            Self::Aggregate { bytes, .. } => Some(*bytes),
-            Self::Array { element, count } => {
-                let stride = element.byte_size()?;
-                let count = u32::try_from((*count)?).ok()?;
-                stride.checked_mul(count)
-            }
-            Self::Opaque { bytes } => *bytes,
-            Self::Void => None,
-        }
-    }
-
-    /// Whether this type addresses memory, which is the fact a return type most
-    /// needs to carry.
-    pub fn is_pointer(&self) -> bool {
-        matches!(self, Self::Pointer { .. })
-    }
-}
 
 /// Read the debug information from an image, or nothing when it carries none.
 ///
@@ -154,7 +65,7 @@ pub fn extract(source: &[u8], format: &Format) -> Result<DebugInfo, FormatError>
 }
 
 /// Section contents keyed by name, when the image has a section-name table.
-fn named_sections<'a>(
+pub(crate) fn named_sections<'a>(
     source: &'a [u8],
     facts: &ElfFacts,
 ) -> Result<Option<BTreeMap<&'a str, &'a [u8]>>, FormatError> {
@@ -188,10 +99,7 @@ fn named_sections<'a>(
         let Ok(name) = std::str::from_utf8(&rest[..end]) else {
             continue;
         };
-        if !name.starts_with(".debug_") {
-            continue;
-        }
-        if let Ok(bytes) = super::metadata::section_bytes(source, header, "ELF debug section") {
+        if let Ok(bytes) = super::metadata::section_bytes(source, header, "ELF section") {
             found.insert(name, bytes);
         }
     }
