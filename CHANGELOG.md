@@ -351,6 +351,15 @@ All notable Ventris changes are documented here.
   number of times. A definition is only removed once a use has actually been
   replaced — the first attempt removed it unconditionally and left an undefined
   value, which is a wrong answer rather than a tidier one.
+- A negated test wrapped around a whole function body becomes a guard clause:
+  `if (!C) { BODY } return;` is written `if (C) { return; } BODY`. Both describe
+  the same program, but the second says what the condition means, and it is the
+  shape the authors wrote — `beginFadeOut`'s source is a guard clause and the
+  smoke baseline records one. A test with an `else`, or a single-statement body,
+  is left alone.
+- A value that only re-spells a constant — a copy, extension or truncation of
+  one — is no longer named. The printer writes a literal either way, so the name
+  only added a declaration and a cast.
 - The graph path stays opt-in. It leads the address-ordered path on seven census
   families and ties four, but it fails `corpus-smoke`'s semantic comparison on
   three PS2 entries the address-ordered path passes: two diverge on control-flow

@@ -134,6 +134,20 @@ pub fn mark_explicit_with(data: &Funcdata, highs: Variables) -> Naming {
             op.opcode,
             op::MULTIEQUAL | op::CALL | op::CALLIND | op::LOAD
         );
+        // A copy, extension or truncation of one constant is that constant in
+        // different storage, and the printer writes a literal either way.
+        // Naming it invents a variable the program does not contain: `iVar3 =
+        // 0x70` came with a declaration and a cast its reader did not need.
+        let respells_a_constant = matches!(
+            op.opcode,
+            op::COPY | op::INT_SEXT | op::INT_ZEXT | op::SUBPIECE
+        ) && op
+            .inputs
+            .first()
+            .is_some_and(|input| data.varnode(*input).flags.constant);
+        if respells_a_constant {
+            continue;
+        }
         let shared = varnode.descendants.len() > 1;
         // A value that inlines into a later reader reads its operands there,
         // which is only correct while each is still live at that point.

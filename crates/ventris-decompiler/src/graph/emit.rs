@@ -105,7 +105,59 @@ pub fn emit_structured(
     propagate_single_use_copies(&mut statements);
     drop_assignments_nothing_reads(&mut statements);
     drop_labels_nothing_needs(&mut statements);
+    // Last: the guard clause needs the exit to be the statement after the test,
+    // and a label sits between them until the labels nothing needs are gone.
+    prefer_guard_clause(&mut statements);
     statements
+}
+
+/// Turns a negated test wrapped around the whole body into a guard clause.
+///
+/// `if (!C) { BODY } return;` and `if (C) { return; } BODY` describe the same
+/// program, but the second is what the condition means: C is the case that has
+/// nothing to do. Recovered structuring produces the first, because it names the
+/// edge the branch takes rather than the edge that leaves.
+fn prefer_guard_clause(statements: &mut Vec<NativeStatement>) {
+    // Two statements: the test around everything, and the function's own exit.
+    if statements.len() < 2 {
+        return;
+    }
+    if !matches!(statements.last(), Some(NativeStatement::Return(None))) {
+        return;
+    }
+    let at = statements.len() - 2;
+    let NativeStatement::IfElse {
+        condition,
+        then_body,
+        else_body,
+    } = &statements[at]
+    else {
+        return;
+    };
+    // An `else` already says which side is which, and a single-statement body
+    // reads better inline than behind a guard.
+    if !else_body.is_empty() || then_body.len() < 2 {
+        return;
+    }
+    let condition = invert(condition.clone());
+    let body = then_body.clone();
+    statements.splice(
+        at..=at,
+        std::iter::once(NativeStatement::IfElse {
+            condition,
+            then_body: vec![NativeStatement::Return(None)],
+            else_body: Vec::new(),
+        })
+        .chain(body),
+    );
+}
+
+/// The negation of a condition, undoing one rather than stacking two.
+fn invert(condition: Expr) -> Expr {
+    match condition {
+        Expr::Not(inner) => *inner,
+        other => Expr::Not(Box::new(other)),
+    }
 }
 
 /// Substitutes a name that is assigned once and read once.
@@ -1803,6 +1855,67 @@ mod tests {
         ];
         let before = statements.clone();
         propagate_single_use_copies(&mut statements);
+        assert_eq!(statements, before);
+    }
+
+    #[test]
+    fn a_negated_test_around_the_body_becomes_a_guard_clause() {
+        let body: Vec<NativeStatement> = (0..2)
+            .map(|index| NativeStatement::Assign {
+                destination: Expr::Temporary {
+                    name: format!("v{index}"),
+                    width: 4,
+                },
+                source: Expr::Constant {
+                    value: index,
+                    width: 4,
+                },
+            })
+            .collect();
+        let mut statements = vec![
+            NativeStatement::IfElse {
+                condition: Expr::Not(Box::new(Expr::Temporary {
+                    name: "done".into(),
+                    width: 1,
+                })),
+                then_body: body.clone(),
+                else_body: Vec::new(),
+            },
+            NativeStatement::Return(None),
+        ];
+        prefer_guard_clause(&mut statements);
+        assert_eq!(
+            statements[0],
+            NativeStatement::IfElse {
+                condition: Expr::Temporary {
+                    name: "done".into(),
+                    width: 1,
+                },
+                then_body: vec![NativeStatement::Return(None)],
+                else_body: Vec::new(),
+            },
+            "the guard tests the case with nothing to do"
+        );
+        assert_eq!(&statements[1..3], &body[..]);
+    }
+
+    #[test]
+    fn a_test_with_an_else_is_left_alone() {
+        // An `else` already says which side is which, so inverting the test
+        // would only move the bodies around.
+        let mut statements = vec![
+            NativeStatement::IfElse {
+                condition: Expr::Temporary {
+                    name: "c".into(),
+                    width: 1,
+                },
+                then_body: vec![NativeStatement::Return(None), NativeStatement::Return(None)],
+                else_body: vec![NativeStatement::Return(None)],
+            },
+            NativeStatement::Return(None),
+        ];
+        let before = statements.clone();
+        prefer_guard_clause(&mut statements);
         assert_eq!(statements, before);
     }
 }
