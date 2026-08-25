@@ -26,6 +26,7 @@
 #![forbid(unsafe_code)]
 
 use ventris_addr::{Addr, SpaceKind, SpaceTable};
+pub mod dwarf;
 mod metadata;
 
 pub use metadata::{ImageMetadata, ImageRelocation, ImageSymbol};
@@ -472,6 +473,16 @@ impl Image {
     /// bounded container facts, not a copy of the input file.
     pub fn metadata(&self, source: &[u8]) -> Result<ImageMetadata, FormatError> {
         metadata::extract(source, &self.format)
+    }
+
+    /// Debug information, when the container carries any.
+    ///
+    /// Separate from `metadata` because a symbol table and a debug section
+    /// answer different questions: one says where a name lives, the other says
+    /// what its type is. An image with no debug sections returns an empty set
+    /// rather than an error.
+    pub fn debug_info(&self, source: &[u8]) -> Result<dwarf::DebugInfo, FormatError> {
+        dwarf::extract(source, &self.format)
     }
 
     /// Load an image with an explicit loader or deterministic auto-detection.

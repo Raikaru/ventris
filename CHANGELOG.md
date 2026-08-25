@@ -249,6 +249,24 @@ All notable Ventris changes are documented here.
 - Measured against Ghidra on the corpus, the graph path improves to
   `unstructured-control-flow` 10 (from 13) and `missing-loop-or-switch` 4, against
   15 and 11 on the address-ordered default.
+- Added a DWARF 2 reader, `ventris-format/src/dwarf.rs`, reachable as
+  `Image::debug_info`. It recovers function prototypes — entry address, name,
+  return type, parameter names and types — resolving typedefs and qualifiers
+  through to storage. Later DWARF versions are skipped by version rather than
+  misread: version 5 moved the header fields, and a confidently wrong prototype
+  is worse than none because it is believed. Covered by synthetic units for the
+  LEB128 boundaries, reference resolution, and the version guard, plus a corpus
+  test behind `VENTRIS_CORPUS_DIR`.
+- And it does not fix the five PS2 functions, which is the second time I have
+  attributed Ghidra's `GameWorld *` to the wrong source. The DWARF in
+  `dungeon_game.elf` describes only the linked-in runtime: 17 prototypes, all
+  libgcc. `allocEnemyEntity` and `game_world.cpp` appear solely in the image's
+  240 KB `.mdebug` section — MIPS symbolic debug, a valid `HDRR` with 785 file
+  descriptors, 6346 symbols and 1775 aux type entries. That is where Ghidra read
+  the prototype. Reading it is a separate format, not an extension of this one.
+  The corpus test documents the boundary rather than asserting the game functions
+  are missing, so an `.mdebug` reader will make them appear without failing a test
+  that demanded their absence.
 - Chased the remaining `corpus-smoke` failure to the bottom. Both residual
   dimensions on the five PS2 alloc functions are artifacts, and on the substance
   the graph path is the better output of the two.

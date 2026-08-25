@@ -27,7 +27,9 @@ pub struct ImageRelocation {
 }
 
 #[derive(Copy, Clone, Debug)]
-struct Section {
+pub(crate) struct Section {
+    /// Offset of the section's name in the section-name table.
+    pub(crate) name: u32,
     kind: u32,
     offset: u64,
     size: u64,
@@ -134,7 +136,10 @@ fn parse_elf(source: &[u8], facts: &ElfFacts) -> Result<ImageMetadata, FormatErr
     Ok(metadata)
 }
 
-fn section_table(source: &[u8], facts: &ElfFacts) -> Result<(usize, usize, usize), FormatError> {
+pub(crate) fn section_table(
+    source: &[u8],
+    facts: &ElfFacts,
+) -> Result<(usize, usize, usize), FormatError> {
     let (offset, entry_size, count) = if facts.class_bits == 64 {
         (
             u64_at(source, 40, facts.endian).ok_or(FormatError::Truncated("e_shoff"))?,
@@ -158,7 +163,7 @@ fn section_table(source: &[u8], facts: &ElfFacts) -> Result<(usize, usize, usize
     Ok((offset, entry_size, count))
 }
 
-fn section(
+pub(crate) fn section(
     source: &[u8],
     facts: &ElfFacts,
     table: usize,
@@ -172,6 +177,7 @@ fn section(
                 .ok_or(FormatError::Malformed("ELF section index"))?,
         )
         .ok_or(FormatError::Malformed("ELF section offset"))?;
+    let header = offset;
     let header_size = if facts.class_bits == 64 { 64 } else { 40 };
     if entry_size < header_size || source.get(offset..offset + header_size).is_none() {
         return Err(FormatError::Truncated("ELF section header"));
@@ -194,6 +200,8 @@ fn section(
         )
     };
     Ok(Section {
+        name: u32_at(source, header, facts.endian)
+            .ok_or(FormatError::Truncated("ELF section name"))?,
         kind: kind.ok_or(FormatError::Truncated("ELF section type"))?,
         offset: offset.ok_or(FormatError::Truncated("ELF section offset"))?,
         size: size.ok_or(FormatError::Truncated("ELF section size"))?,
@@ -202,7 +210,7 @@ fn section(
     })
 }
 
-fn section_bytes<'a>(
+pub(crate) fn section_bytes<'a>(
     source: &'a [u8],
     section: &Section,
     label: &'static str,
@@ -326,7 +334,7 @@ fn string_at(offset: u32, strings: Option<&[u8]>) -> Option<String> {
     Some(String::from_utf8_lossy(&bytes[..end]).into_owned())
 }
 
-fn u16_at(bytes: &[u8], offset: usize, endian: Endian) -> Option<u16> {
+pub(crate) fn u16_at(bytes: &[u8], offset: usize, endian: Endian) -> Option<u16> {
     let bytes: [u8; 2] = bytes.get(offset..offset.checked_add(2)?)?.try_into().ok()?;
     Some(match endian {
         Endian::Little => u16::from_le_bytes(bytes),
