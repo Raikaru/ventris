@@ -365,6 +365,25 @@ fn graph_return_type(
     if returned.is_empty() {
         return Type::Void;
     }
+    // A returned pointer is pointer-width, whatever register held it. On a
+    // 64-bit register file the value's storage says 64 bits, so the shared
+    // `Type` table reports `int64_t` and the caller has to cast the address
+    // computation twice. Ghidra reports `GameWorld *` for the same function.
+    // The rich table is consulted only for this: a genuine 64-bit integer
+    // return recovers as an integer, not a pointer, so it is left alone.
+    let rich = data.recovered_types();
+    if let Some(pointee) = returned
+        .iter()
+        .filter_map(|value| rich.1.get(*value))
+        .find_map(|recovered| match recovered {
+            graph::typefactory::DataType::Pointer { to, .. } => {
+                Some(graph::typefactory::to_native(to))
+            }
+            _ => None,
+        })
+    {
+        return Type::Pointer(Box::new(pointee));
+    }
     returned
         .iter()
         .filter_map(|value| types.get(*value).cloned())

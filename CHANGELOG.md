@@ -249,6 +249,20 @@ All notable Ventris changes are documented here.
 - Measured against Ghidra on the corpus, the graph path improves to
   `unstructured-control-flow` 10 (from 13) and `missing-loop-or-switch` 4, against
   15 and 11 on the address-ordered default.
+- A returned pointer is reported at pointer width rather than at the width of
+  the register that held it, when type recovery says the value is a pointer. A
+  64-bit register file otherwise made every returned address an `int64_t`, which
+  the caller then had to cast twice. A genuine 64-bit integer return recovers as
+  an integer, so it is unaffected.
+- Established why the graph path still cannot become the default, having chased
+  it to the end. Both remaining divergences are baseline artifacts, not defects:
+  Ghidra also declares a local in the five PS2 `alloc*` functions, so
+  `declaration_order` expecting none is unreachable without duplicating a memory
+  read, and the return type stays `int64_t` because the structure recovered from
+  one function has only the field that function touches — `down_chain` correctly
+  declines to call the return offset a member. Ghidra names it from whole-program
+  type information. The blocker is therefore whole-program types, and it is
+  recorded as such rather than worked around.
 - Ported the structural half of Ghidra's `SplitVarnode`, the double-precision
   pair recovery from `double.cc`: constant and pair construction, the
   lo/hi/whole relationship, whole discovery through PIECE and SUBPIECE,

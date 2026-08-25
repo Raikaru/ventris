@@ -88,16 +88,29 @@ shipping address-ordered path on seven of the census families and ties four:
 | unreduced-flag-expression | 1 | **0** |
 | call-census | **3** | 4 |
 
-It is still opt-in. It fails `corpus-smoke`'s semantic comparison on five PS2
-`alloc*` functions, on two dimensions: `declaration_order` (one local named
-where the baseline has none) and `casts` (two against one). Both come from the
-same place. The counter is read twice — once to scale, once to increment — so it
-is named once; the address-ordered path inlines it and reads memory twice
-instead. The extra cast is a return type of `int64_t` where the ABI's pointer
-width is 32; narrowing it needs return-type evidence this path does not yet
-have, and guessing would discard a real 64-bit return on a 64-bit ABI such as
-N64. `agrees` counts functions with no classified difference at all, so it is
-the aggregate to read.
+It is still opt-in, and the reason is now understood rather than merely
+measured. It fails `corpus-smoke`'s semantic comparison on five PS2 `alloc*`
+functions, on two dimensions, and neither is a defect in this path:
+
+- **`declaration_order`** expects no locals, because the C++ source writes
+  `enemyEntities[enemyCount++]` and C has no post-increment expression. Ghidra
+  declares a local here too — its oracle for `allocEnemyEntity` is
+  `int iVar1; iVar1 = *(int *)(this + 0x4b0); ...`. The graph path matches
+  Ghidra; the address-ordered path only scores better by duplicating the memory
+  read, which is worse output. The baseline is source-derived and unreachable by
+  either decompiler without that duplication.
+- **`casts`** counts two against one, because the return type is `int64_t`
+  where Ghidra says `GameWorld *`. A returned pointer is now reported at pointer
+  width when type recovery says the value is a pointer, but it does not fire
+  here: the returned expression is `arg0 + 0x4d0`, and the structure recovered
+  from this function has only the one field it touches at `0x4b0`, so
+  `down_chain` correctly declines to call `0x4d0` a member. Ghidra names it
+  because it knows the whole program's `GameWorld`; single-function recovery
+  cannot.
+
+So the cutover is blocked on whole-program type information, not on this
+pipeline. `agrees` counts functions with no classified difference at all, so it
+is the aggregate to read.
 
 | Defect family | Address-ordered | Ported graph |
 |---|---:|---:|
