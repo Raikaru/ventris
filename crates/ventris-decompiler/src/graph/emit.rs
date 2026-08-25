@@ -367,7 +367,10 @@ fn drop_transfers_after_a_transfer(statements: &mut Vec<NativeStatement>) {
 fn drop_labels_nothing_needs(statements: &mut Vec<NativeStatement>) {
     let mut named = BTreeSet::new();
     collect_jump_targets(statements, &mut named);
-    retain_needed_labels(statements, &named, true);
+    // Nothing precedes the first statement, so the function's own entry is not
+    // "after a transfer". Passing `true` here kept a label on every leading
+    // block, which printed a run of empty `loc_*:` lines.
+    retain_needed_labels(statements, &named, false);
 }
 
 fn collect_jump_targets(statements: &[NativeStatement], named: &mut BTreeSet<u64>) {

@@ -321,6 +321,21 @@ All notable Ventris changes are documented here.
   `unstructured-control-flow`, `missing-loop-or-switch`, `return-presence`,
   `oversized-expression` and `unreduced-flag-expression`, ties four families, and
   trails only `call-census`.
+- Heritage now resolves a narrow read of part of a wider definition. It keyed
+  definitions on the exact `(space, offset, size)` triple, so `sb v1` after
+  `addiu v1,zero,1` read a location nothing had ever defined and printed the bare
+  register name, losing the constant. A read whose bytes lie inside a dominating
+  definition is now a `SUBPIECE` of it, measured from the correct end for the
+  target's endianness. `beginFadeOut` and `beginFadeIn` now store `1` where they
+  stored an undefined register.
+- A hardwired-zero register read is replaced by the constant zero, so
+  `addiu rd,zero,imm` folds instead of adding an undefined register.
+- The graph path stays opt-in. It leads the address-ordered path on seven census
+  families and ties four, but it fails `corpus-smoke`'s semantic comparison on
+  three PS2 entries the address-ordered path passes: two diverge on control-flow
+  shape and one still loses a multiply whose result the lifter routes through a
+  wide temporary. Switching the default would trade a measured gain for a gate
+  regression, so it is not switched.
 
 - Added `LiftedInstruction::skips_delay_slot`, which reports the MIPS
   likely-branch shape so consumers stop treating its sequential successor as

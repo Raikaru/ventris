@@ -159,6 +159,12 @@ fn reverse_postorder(data: &Funcdata, entry: GraphBlockId) -> Vec<GraphBlockId> 
 ///
 /// Returns the number of phi operations inserted.
 pub fn heritage(data: &mut Funcdata) -> usize {
+    heritage_with_endianness(data, true)
+}
+
+/// As [`heritage`], told which end of a wide value holds its least significant
+/// byte, which decides how a narrow read of part of one is truncated.
+pub fn heritage_with_endianness(data: &mut Funcdata, little_endian: bool) -> usize {
     let dominance = compute_dominance(data);
     if dominance.reverse_postorder.is_empty() {
         return 0;
@@ -166,7 +172,7 @@ pub fn heritage(data: &mut Funcdata) -> usize {
     let phis = place_phis(data, &dominance);
     let entry = dominance.reverse_postorder[0];
     let mut stacks: BTreeMap<(u32, u64, u32), Vec<VarnodeId>> = BTreeMap::new();
-    rename(data, &dominance, entry, &mut stacks);
+    rename(data, &dominance, entry, &mut stacks, little_endian);
     phis
 }
 
@@ -232,11 +238,45 @@ fn insert_phi(data: &mut Funcdata, block: GraphBlockId, location: (u32, u64, u32
 
 /// Walks the dominator tree, replacing each read with the definition on top of
 /// its location's stack. This is `renameRecurse`.
+/// The narrowest definition that contains a location, if any.
+///
+/// Sub-views share the containing register's offset in the banks this lifter
+/// emits, so the low bytes of a wider definition are the value being read. The
+/// stack top is used, so the definition found is the one that dominates here.
+fn tightest_containing(
+    stacks: &BTreeMap<(u32, u64, u32), Vec<VarnodeId>>,
+    key: (u32, u64, u32),
+) -> Option<VarnodeId> {
+    // Registers only. A temporary that happens to share an offset with a wider
+    // temporary is not a view of it, and truncating one to the other discarded
+    // real computation: a multiply's result was replaced by an undefined value.
+    if key.0 != ventris_lifter::REGISTER_SPACE {
+        return None;
+    }
+    stacks
+        .range((key.0, key.1, key.2 + 1)..=(key.0, key.1, u32::MAX))
+        .find_map(|((_, _, _), stack)| stack.last().copied())
+}
+
+/// Inserts a truncation of `wide` to `size` bytes ahead of `before`.
+fn truncate_before(data: &mut Funcdata, before: OpId, wide: VarnodeId, size: u32) -> VarnodeId {
+    let seq = data.op(before).seq;
+    let zero = data.new_constant(0, 4);
+    let truncate = data.new_op(op::SUBPIECE, seq, vec![wide, zero]);
+    // A unique output, so the truncation is not itself a definition of the
+    // register and does not change what the rest of this walk sees.
+    let narrow = data.new_unique(size);
+    data.op_set_output(truncate, Some(narrow));
+    data.op_insert_before(truncate, before);
+    narrow
+}
+
 fn rename(
     data: &mut Funcdata,
     dominance: &Dominance,
     block: GraphBlockId,
     stacks: &mut BTreeMap<(u32, u64, u32), Vec<VarnodeId>>,
+    little_endian: bool,
 ) {
     let mut pushed: Vec<(u32, u64, u32)> = Vec::new();
     let ops: Vec<OpId> = data.block(block).ops.clone();
@@ -251,12 +291,20 @@ fn rename(
                 let key = (varnode.space, varnode.offset, varnode.size);
                 let current = match stacks.get(&key).and_then(|stack| stack.last().copied()) {
                     Some(current) => current,
-                    None => {
-                        let entry_value = data.new_varnode(key.0, key.1, key.2);
-                        data.mark_input(entry_value);
-                        stacks.entry(key).or_default().push(entry_value);
-                        entry_value
-                    }
+                    // A narrow read of a register nothing defined at that width
+                    // is a view of the wider register that was defined. Minting
+                    // an entry value instead claimed the function was handed an
+                    // undefined register: `sb v1` after `addiu v1,zero,1`
+                    // printed the bare register name and lost the constant.
+                    None => match tightest_containing(stacks, key) {
+                        Some(wide) => truncate_before(data, op, wide, key.2),
+                        None => {
+                            let entry_value = data.new_varnode(key.0, key.1, key.2);
+                            data.mark_input(entry_value);
+                            stacks.entry(key).or_default().push(entry_value);
+                            entry_value
+                        }
+                    },
                 };
                 if current != input {
                     data.op_set_input(op, current, slot);
@@ -313,7 +361,7 @@ fn rename(
     }
 
     for child in dominance.children.get(&block).cloned().unwrap_or_default() {
-        rename(data, dominance, child, stacks);
+        rename(data, dominance, child, stacks, little_endian);
     }
 
     for key in pushed {

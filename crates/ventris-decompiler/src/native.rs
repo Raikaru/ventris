@@ -1896,6 +1896,11 @@ impl NativeDecompiler {
                 }
             }
         }
+        // A hardwired-zero register reads as the constant zero. The lifter
+        // emits it as an ordinary register, so without this `addiu v1,zero,1`
+        // stays an addition of an undefined register and the constant is never
+        // folded: every store of it rendered as the bare register name.
+        replace_hardwired_zero_reads(&mut data, architecture);
         graph::guard::guard_calls(&mut data, &locations, &effects);
         // A return reads the convention's result storage. Without this the
         // returned value has no reader, dead code removes the computation, and
@@ -1911,7 +1916,7 @@ impl NativeDecompiler {
                 .collect();
             graph::guard::guard_returns(&mut data, &result);
         }
-        graph::heritage::heritage(&mut data);
+        graph::heritage::heritage_with_endianness(&mut data, is_little_endian(architecture));
         // Arguments must be recovered while the guards that name each
         // location's value at the call still exist: simplification collapses
         // them once nothing distinguishes their effect.
@@ -3212,6 +3217,37 @@ fn global_identifier(name: &str, address: u64) -> String {
         identifier.insert(0, '_');
     }
     identifier
+}
+
+/// Rewrites every read of the architecture's hardwired-zero register to the
+/// constant zero.
+fn replace_hardwired_zero_reads(data: &mut graph::Funcdata, architecture: Architecture) {
+    let zero_offset = match architecture {
+        Architecture::AArch64 => 0x4000 + 31 * 8,
+        Architecture::Mips32
+        | Architecture::Mips32Be
+        | Architecture::Ps1
+        | Architecture::Ps2
+        | Architecture::N64 => 0,
+        Architecture::Rv64 | Architecture::Rv32 => 0x2000,
+        _ => return,
+    };
+    let operations: Vec<graph::OpId> = data.live_ops().map(|(id, _)| id).collect();
+    for id in operations {
+        let inputs = data.op(id).inputs.clone();
+        for (slot, value) in inputs.into_iter().enumerate() {
+            let varnode = data.varnode(value);
+            if varnode.flags.constant
+                || varnode.space != REGISTER_SPACE
+                || varnode.offset != zero_offset
+            {
+                continue;
+            }
+            let size = varnode.size;
+            let zero = data.new_constant(0, size);
+            data.op_set_input(id, zero, slot);
+        }
+    }
 }
 
 fn is_zero_register(architecture: Architecture, v: Varnode) -> bool {

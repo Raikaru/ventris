@@ -364,11 +364,16 @@ fn rewrite_recovered_field_accesses(
                     .fields
                     .iter()
                     .filter(|field| {
+                        // Either spelling counts. The address-ordered emitter
+                        // writes the access as arithmetic under a cast; the
+                        // graph emitter already recovered the field, and only
+                        // this pass knows the declared member type, so the
+                        // access still has to be normalised here.
                         body.contains(&format!(
                             "({} + 0x{:x})",
                             parameter.name,
                             field.offset.max(0)
-                        ))
+                        )) || body.contains(&format!("{}->{}", parameter.name, field.name))
                     })
                     .count();
                 (index, count)
@@ -396,6 +401,13 @@ fn rewrite_recovered_field_accesses(
                 }
             }
             strip_redundant_field_casts(body, field, &member);
+            // A member declared as a byte array cannot be read or assigned
+            // whole, so the recovered access needs its index. Without this the
+            // graph emitter's `p->field_4b8 = v` did not compile.
+            if !field.declarator_suffix.is_empty() {
+                let bare = format!("{parameter}->{}", field.name);
+                *body = replace_bare_member(body, &bare, &member);
+            }
         }
         *body = preserve_residual_byte_arithmetic(body, &parameter);
         let desired_name = structure
@@ -427,6 +439,35 @@ fn rewrite_recovered_field_accesses(
         }
     }
 }
+/// Replaces a member access that is not already indexed or parenthesised.
+///
+/// The same field name is a prefix of nothing else, but the already-rewritten
+/// form contains the bare form, so a plain `replace` would rewrite its own
+/// output.
+fn replace_bare_member(body: &str, bare: &str, member: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    while let Some(at) = rest.find(bare) {
+        let (before, after) = rest.split_at(at);
+        out.push_str(before);
+        let tail = &after[bare.len()..];
+        let already_indexed = tail.starts_with('[');
+        let inside_rewrite = before.ends_with('(') && tail.starts_with(')');
+        let longer_name = tail
+            .chars()
+            .next()
+            .is_some_and(|next| next.is_alphanumeric() || next == '_');
+        if already_indexed || inside_rewrite || longer_name {
+            out.push_str(bare);
+        } else {
+            out.push_str(member);
+        }
+        rest = tail;
+    }
+    out.push_str(rest);
+    out
+}
+
 fn strip_redundant_field_casts(body: &mut String, field: &SourceField, member: &str) {
     *body = body.replace(&format!("({})({member})", field.c_type), member);
     if field.width == 1 {

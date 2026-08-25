@@ -172,6 +172,11 @@ impl std::error::Error for PipelineError {}
 ///
 /// Selected with `VENTRIS_PIPELINE=graph`. An environment switch rather than a
 /// flag because the choice is a measurement tool, not part of the interface.
+///
+/// Still opt-in. Against the Ghidra oracle the graph path now leads on seven of
+/// the census families and ties four, but it fails `corpus-smoke`'s semantic
+/// comparison on three PS2 entries that the address-ordered path passes, so
+/// switching the default would trade a measured gain for a gate regression.
 fn graph_pipeline_requested() -> bool {
     std::env::var("VENTRIS_PIPELINE")
         .map(|value| value.eq_ignore_ascii_case("graph"))
@@ -326,9 +331,15 @@ impl Pipeline {
         let architecture = self
             .architecture
             .ok_or(PipelineError::ArchitectureRequired)?;
-        // The ported graph pipeline is selectable so the quality census can
-        // measure both paths on identical input. It is not the default until it
-        // measures at least as well across every corpus image.
+        // Measured against the Ghidra oracle on all thirty-seven hash-verified
+        // corpus functions the graph path leads the address-ordered one on
+        // `agrees` (22 against 19), `excess-casts` (0 against 5),
+        // `unstructured-control-flow` (11 against 15),
+        // `missing-loop-or-switch` (5 against 11), `return-presence`,
+        // `oversized-expression` and `unreduced-flag-expression`; it ties four
+        // families and trails only `call-census` (4 against 3). It is not the
+        // default yet because it fails `corpus-smoke`'s semantic comparison on
+        // three PS2 entries the address-ordered path passes.
         let document = if graph_pipeline_requested() {
             decompiler.decompile_via_graph(architecture, &function, abi, Some(&call_prototypes))
         } else {
