@@ -249,6 +249,29 @@ All notable Ventris changes are documented here.
 - Measured against Ghidra on the corpus, the graph path improves to
   `unstructured-control-flow` 10 (from 13) and `missing-loop-or-switch` 4, against
   15 and 11 on the address-ordered default.
+- Ported the structural half of Ghidra's `SplitVarnode`, the double-precision
+  pair recovery from `double.cc`: constant and pair construction, the
+  lo/hi/whole relationship, whole discovery through PIECE and SUBPIECE,
+  definition-point discovery, same-block feasibility, and the adjacency and
+  memory-conflict helpers. On top of it, `RuleDoubleLoad` and `RuleDoubleStore`
+  collapse a contiguous pair of accesses into one wide access.
+- Ported `RuleSubfloatConvert` as a transactional graph-local `SubfloatFlow`
+  that traces precision through merges, copies and floating operations and only
+  rewrites after a complete successful trace.
+- Seven rules in the double-precision family stay unported, each with the exact
+  C++ member named: `RuleDoubleIn` and `RuleDoubleOut` need the `isPrecisLo`,
+  `isPrecisHi`, `isAddrTied` and `getSymbolEntry` varnode facets and
+  `combineInputVarnodes`; the three `RuleSplit*` rules need `SplitDatatype`; the
+  two `RuleString*` rules need `StringSequence`/`HeapSequence` and the
+  character-type machinery.
+- `RuleDumptyHumpLate` is not registered. It differs from the live
+  `RuleDumptyHump` only in that Ghidra schedules it in a later action group, and
+  this pipeline has no phase state, so the two would compete for the same
+  operand shapes — an inverse pair that never converges.
+- The bit-field family from `bitfield.cc` is not landed and its module is not
+  present. A port was attempted; it did not converge on compiling, so nothing
+  from it is in the tree. An empty module would have claimed a port that does not
+  exist.
 - Corrected the coverage denominators. The earlier counts of 168 rules and 75
   actions were produced by a regex that matched class declarations inside
   comments; Ghidra's headers declare 6 rules and 3 actions entirely commented
