@@ -249,6 +249,26 @@ All notable Ventris changes are documented here.
 - Measured against Ghidra on the corpus, the graph path improves to
   `unstructured-control-flow` 10 (from 13) and `missing-loop-or-switch` 4, against
   15 and 11 on the address-ordered default.
+- Chased the remaining `corpus-smoke` failure to the bottom. Both residual
+  dimensions on the five PS2 alloc functions are artifacts, and on the substance
+  the graph path is the better output of the two.
+  - `declaration_order` discriminates by the local's *name*, not by semantics.
+    `_source_declaration_order` deliberately filters names matching
+    `(?:call|mem)_[0-9a-f]+`, documented as "renderer implementation details, not
+    recovered source declaration evidence". The address-ordered path materialises
+    its snapshot as `mem_125090_2` and is filtered; the graph path materialises
+    the same snapshot as `uVar2` and is counted. Both are the same thing: a value
+    read once and used twice with a store to that field in between, which is
+    exactly the category the filter describes.
+  - `casts` differs because the address-ordered path returns `uint32_t` — a
+    narrower and wrong type for a function returning a pointer — so it needs no
+    widening cast, while the graph path returns `int64_t` and casts once more.
+    The correct answer is a pointer, and that comes from DWARF.
+  - Substantively: the address-ordered path reads `field_4b0` twice, once for the
+    multiply and once for the increment. The graph path reads it once. The gate
+    rewards the duplicated read.
+  No baseline, filter, or local-naming convention was changed to act on this. The
+  remedy is a shipping-default decision and the evidence is recorded for it.
 - Corrected a misdiagnosis of the cutover blocker. `allocEnemyEntity`'s return
   type was recorded as needing whole-program type information; it does not.
   `dungeon_game.elf` carries `.debug_info`, `.debug_abbrev` and `.debug_line`,
