@@ -49,23 +49,29 @@ argument recovery, `Cover` live ranges with `ActionMergeCopy`/`MergeAdjacent`/
 `ConstantPtr`, and `CollapseStructure` with natural-loop analysis
 (`labelLoops`, `LoopBody::findBase`/`findExit`, `markExitsAsGotos`).
 
-That is 122 of Ghidra's 168 `Rule` subclasses and 32 of its 75 `Action`
-subclasses — 73% and 43%. The port is **not** complete: 46 rules and 47 actions
-remain by that count. Of the 46 rules, 21 live outside `ruleaction.cc` in the
-double-precision and bit-field families, and most of the rest are recorded in
-`CHANGELOG.md` as needing Ghidra state this graph does not carry. The action gap
-is now the larger one, and it is mostly structural: fifteen of the remaining
-actions need Ghidra's persistent mutable `BlockGraph`, its `ScopeLocal` symbol
-table, or `FuncProto` lock state, none of which this graph has.
+That is **122 of Ghidra's 162 live `Rule` subclasses (75%)** and **31 of its 72
+live `Action` subclasses (43%)**. The port is **not** complete: 40 rules and 41
+actions remain.
 
-Both figures count a Rust item carrying the C++ class's own name, which is the
-only definition that can be checked mechanically. It understates action
-coverage: `ActionHeritage`, `ActionSetCasts`, `ActionDeadCode` and
-`ActionMapGlobals` are ported as the `heritage`, `casts`, `deadcode` and
-`stackframe` modules rather than as same-named structs, and are cited there
-against the C++ they came from. Eighteen more actions are mentioned in the
-source, but some of those mentions record what could *not* be ported, so the
-count deliberately claims none of them.
+Both figures are counted mechanically and can be rechecked: strip `//` and
+`/* */` comments from the pinned headers, match `class X : public Rule` and
+`class X : public Action`, and intersect with `pub struct X` in
+`crates/ventris-decompiler/src/graph`. Ghidra's headers also declare 6 rules and
+3 actions entirely inside comments — `RuleRightShiftSub`, `RuleUndistribute`,
+`RuleShiftLess`, `ActionCse` and others — which are not part of the build and so
+are not counted. `ActionCse` is the one exception in the other direction: it is
+ported here and registered, but Ghidra ships it commented out, so this
+decompiler runs a pass Ghidra does not.
+
+The count understates action coverage in one respect: `ActionHeritage`,
+`ActionSetCasts`, `ActionDeadCode` and `ActionMapGlobals` are ported as the
+`heritage`, `casts`, `deadcode` and `stackframe` modules and cited there against
+the C++ they came from, but only `ActionDeadCode` also exists as a same-named
+struct. Fifteen further actions are recorded in `CHANGELOG.md` as needing state
+this graph does not carry — Ghidra's persistent mutable `BlockGraph`, its
+`ScopeLocal` symbol table, `FuncProto` locks, the `LanedRegister` and `SegmentOp`
+registries, or per-varnode flags such as a direct-write mark or a consumed-byte
+mask.
 
 Select it with `VENTRIS_PIPELINE=graph`. Measured against the Ghidra 12.1.3
 decompiler on all 37 hash-verified corpus functions, the graph path leads the

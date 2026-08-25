@@ -249,6 +249,16 @@ All notable Ventris changes are documented here.
 - Measured against Ghidra on the corpus, the graph path improves to
   `unstructured-control-flow` 10 (from 13) and `missing-loop-or-switch` 4, against
   15 and 11 on the address-ordered default.
+- Corrected the coverage denominators. The earlier counts of 168 rules and 75
+  actions were produced by a regex that matched class declarations inside
+  comments; Ghidra's headers declare 6 rules and 3 actions entirely commented
+  out, which are not in the build. The live counts are 162 and 72, so coverage
+  is 122/162 rules and 31/72 actions rather than /168 and /75. `RuleShiftLess`,
+  `RuleRightShiftSub` and `RuleUndistribute` were three of the phantom entries,
+  which is why no implementation could be found for them.
+- Noted the one case running in the other direction: `ActionCse` and
+  `ActionMultiCse` are registered here, but Ghidra ships `ActionCse` commented
+  out. This decompiler runs a common-subexpression pass Ghidra does not.
 - Ported four `Action` subclasses, taking action coverage from 28 of 75 to 32.
   `blockaction` has `ActionReturnSplit`, which clones a shared return epilog onto
   each incoming path, and `ActionNodeJoin`, which joins two branches testing the
