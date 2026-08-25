@@ -49,12 +49,12 @@ argument recovery, `Cover` live ranges with `ActionMergeCopy`/`MergeAdjacent`/
 `ConstantPtr`, and `CollapseStructure` with natural-loop analysis
 (`labelLoops`, `LoopBody::findBase`/`findExit`, `markExitsAsGotos`).
 
-That is 66 of Ghidra's 168 `Rule` subclasses and 28 of its 75 `Action`
-subclasses — 39% and 37%. The port is **not** complete. 102 rules and 47
-actions remain; of the missing rules, 68 are ordinary integer and boolean
-rewriting, 18 concern sub-variable and piece flow, 10 are pointer or
-type-directed, and 6 are floating-point. The remainder, and what each needs, is
-tracked in `CHANGELOG.md`.
+That is 109 of Ghidra's 168 `Rule` subclasses and 28 of its 75 `Action`
+subclasses — 65% and 37%. The port is **not** complete: 59 rules and 47 actions
+remain. Each omission is recorded in `CHANGELOG.md` with the Ghidra state it
+needs, and every one of them needs state this graph does not carry —
+`Datatype` metatypes, `CircleRange`, byte-consumption masks, address-tied and
+type-lock flags, or `FuncCallSpecs`/`ProtoModel`.
 
 Select it with `VENTRIS_PIPELINE=graph`. Measured against the Ghidra 12.1.3
 decompiler on all 37 hash-verified corpus functions, the graph path leads the

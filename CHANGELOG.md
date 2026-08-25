@@ -249,6 +249,30 @@ All notable Ventris changes are documented here.
 - Measured against Ghidra on the corpus, the graph path improves to
   `unstructured-control-flow` 10 (from 13) and `missing-loop-or-switch` 4, against
   15 and 11 on the address-ordered default.
+- Ported 43 further `Rule` subclasses across four new modules, taking rule
+  coverage from 66 of 168 to 109 of 168. `expr_bool` has the boolean and
+  comparison rewrites (13), `expr_arith` the integer and shift rewrites (12),
+  `expr_divmod` the division, modulo and carry idioms (10, including
+  `RuleDivOpt`'s exact 128-bit `calcDivisor` arithmetic), and `expr_piece` the
+  PIECE and SUBPIECE rewrites (8). Each is switchable with
+  `VENTRIS_SKIP_BATCH` so an oscillating pair can be attributed to one batch.
+- Eleven rules in those families were deliberately not ported, each because it
+  needs Ghidra state this graph does not carry: `Datatype` metatypes and equate
+  symbols (`RuleAddUnsigned`), endianness-aware allocation (`RuleLeftRight`),
+  precise-high/low flags (`RuleSubCommute`), `CircleRange` (`RuleRangeMeld`),
+  byte-consumption masks (`RuleOrConsume`), address-tied and type-lock flags
+  (`RuleExtensionPush`), `functionalEqualityLevel` (`RulePushMulti`), branch
+  metadata and `CloneBlockOps` (`RuleConditionalMove`). `RuleShiftLess` has no
+  implementation in the pinned source to port. `RuleMultNegOne` is the exact
+  inverse of `Rule2Comp2Mult` with no provenance to separate them, so only the
+  canonical direction is registered.
+- An unknown register no longer renders as `reg`. Every unnamed offset shared
+  that one identifier, so distinct registers became the same value in the
+  output: all six arguments of `vm_boot`'s `setCopReg` calls collapsed into one
+  name. Unknown registers are now spelled by their offset, and the R4300
+  coprocessor-0 file is named — verified against `vm_boot`, whose five observed
+  offsets are `Index`, `EntryLo0`, `EntryLo1`, `PageMask` and `EntryHi`, exactly
+  what the oracle prints. `unresolved-value` is now zero on the graph path.
 - Port coverage, counted against the pinned Ghidra 12.1.3 headers: 66 of 168
   `Rule` subclasses and 28 of 75 `Action` subclasses, 39% and 37%. 102 rules and
   47 actions remain. Of the missing rules 68 are ordinary integer and boolean

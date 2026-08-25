@@ -3544,6 +3544,77 @@ fn ps2_register_names() -> &'static BTreeMap<u64, &'static str> {
     &NAMES
 }
 
+/// The R4300 coprocessor-0 register file, as SLEIGH names it.
+///
+/// Verified against `vm_boot`: the offsets observed there are `0x2000 + n * 8`
+/// for n = 0, 2, 3, 5 and 10, which are `Index`, `EntryLo0`, `EntryLo1`,
+/// `PageMask` and `EntryHi` — exactly what the oracle prints for the same five
+/// `setCopReg` calls. Only N64 is claimed here because only N64 is verified.
+const R4300_COP0_REGISTERS: [&str; 32] = [
+    "Index",
+    "Random",
+    "EntryLo0",
+    "EntryLo1",
+    "Context",
+    "PageMask",
+    "Wired",
+    "Reserved07",
+    "BadVAddr",
+    "Count",
+    "EntryHi",
+    "Compare",
+    "Status",
+    "Cause",
+    "EPC",
+    "PRId",
+    "Config",
+    "LLAddr",
+    "WatchLo",
+    "WatchHi",
+    "XContext",
+    "Reserved21",
+    "Reserved22",
+    "Reserved23",
+    "Reserved24",
+    "Reserved25",
+    "ParityError",
+    "CacheError",
+    "TagLo",
+    "TagHi",
+    "ErrorEPC",
+    "Reserved31",
+];
+
+/// The coprocessor-0 register at a register-space offset, if this is one.
+fn cop0_register_name(architecture: Architecture, offset: u64) -> Option<&'static str> {
+    if architecture != Architecture::N64 {
+        return None;
+    }
+    let index = offset.checked_sub(0x2000)?;
+    if index % 8 != 0 {
+        return None;
+    }
+    R4300_COP0_REGISTERS.get((index / 8) as usize).copied()
+}
+
+/// The spelling for a register this architecture's table does not name.
+///
+/// Every unknown offset used to render as `reg`, so two different registers
+/// became the same identifier and the output said they were one value. The
+/// offset is what is actually known, so that is what is spelled: the COP0
+/// registers in `vm_boot` are a different bank from the general-purpose file and
+/// all six arguments of its `setCopReg` calls collapsed into one name.
+fn unknown_register_name(offset: u64) -> String {
+    format!("reg_{offset:x}")
+}
+
+/// A register's name, preferring a coprocessor name where one applies.
+fn named_register(architecture: Architecture, offset: u64) -> String {
+    cop0_register_name(architecture, offset)
+        .map(str::to_owned)
+        .unwrap_or_else(|| unknown_register_name(offset))
+}
+
 fn register_name(architecture: Architecture, offset: u64) -> String {
     match architecture {
         Architecture::X86_64 => [
@@ -3551,15 +3622,15 @@ fn register_name(architecture: Architecture, offset: u64) -> String {
             "r12", "r13", "r14", "r15",
         ]
         .get((offset / 8) as usize)
-        .unwrap_or(&"reg")
-        .to_string(),
+        .map(|name| (*name).to_owned())
+        .unwrap_or_else(|| named_register(architecture, offset)),
         Architecture::X86_32 => [
             "eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi", "r8d", "r9d", "r10d", "r11d",
             "r12d", "r13d", "r14d", "r15d",
         ]
         .get((offset / 8) as usize)
-        .unwrap_or(&"reg")
-        .to_string(),
+        .map(|name| (*name).to_owned())
+        .unwrap_or_else(|| named_register(architecture, offset)),
         Architecture::AArch64 => format!("x{}", offset.saturating_sub(0x4000) / 8),
         Architecture::Rv64 => format!("x{}", offset.saturating_sub(0x2000) / 8),
         Architecture::Rv32 => format!("x{}", offset.saturating_sub(0x2000) / 4),
@@ -3573,8 +3644,8 @@ fn register_name(architecture: Architecture, offset: u64) -> String {
                     "lr", "pc",
                 ]
                 .get(offset.saturating_sub(32).checked_div(4).unwrap_or_default() as usize)
-                .unwrap_or(&"reg")
-                .to_string()
+                .map(|name| (*name).to_owned())
+                .unwrap_or_else(|| named_register(architecture, offset))
             }
         }
         Architecture::Mips32 | Architecture::Mips32Be | Architecture::Ps1 => {
@@ -3588,15 +3659,15 @@ fn register_name(architecture: Architecture, offset: u64) -> String {
                     "k0", "k1", "gp", "sp", "fp", "ra",
                 ]
                 .get((offset / 4) as usize)
-                .unwrap_or(&"reg")
-                .to_string()
+                .map(|name| (*name).to_owned())
+                .unwrap_or_else(|| named_register(architecture, offset))
             }
         }
         Architecture::Ps2 => ps2_register_names()
             .get(&offset)
             .copied()
-            .unwrap_or("reg")
-            .to_string(),
+            .map(str::to_owned)
+            .unwrap_or_else(|| named_register(architecture, offset)),
         Architecture::N64 => {
             let fpu_offset = offset.saturating_sub(0x200);
             if offset >= 0x200 && fpu_offset < 32 * 8 && fpu_offset % 8 == 0 {
@@ -3608,8 +3679,8 @@ fn register_name(architecture: Architecture, offset: u64) -> String {
                     "k0", "k1", "gp", "sp", "fp", "ra",
                 ]
                 .get((offset / 8) as usize)
-                .unwrap_or(&"reg")
-                .to_string()
+                .map(|name| (*name).to_owned())
+                .unwrap_or_else(|| named_register(architecture, offset))
             }
         }
         Architecture::Ppc32 | Architecture::GameCube => {
@@ -3641,8 +3712,8 @@ fn register_name(architecture: Architecture, offset: u64) -> String {
             "a6", "a7", "pc",
         ]
         .get((offset / 4) as usize)
-        .unwrap_or(&"reg")
-        .to_string(),
+        .map(|name| (*name).to_owned())
+        .unwrap_or_else(|| named_register(architecture, offset)),
         Architecture::Sh2 | Architecture::Sh4 => {
             if offset / 4 < 16 {
                 format!("r{}", offset / 4)
@@ -3655,12 +3726,12 @@ fn register_name(architecture: Architecture, offset: u64) -> String {
         Architecture::Spu => format!("r{}", offset / 16),
         Architecture::M6502 => ["a", "x", "y", "sp", "p", "pc"]
             .get(offset as usize)
-            .unwrap_or(&"reg")
-            .to_string(),
+            .map(|name| (*name).to_owned())
+            .unwrap_or_else(|| named_register(architecture, offset)),
         Architecture::Z80 => ["a", "f", "b", "c", "d", "e", "h", "l", "sp", "pc"]
             .get(offset as usize)
-            .unwrap_or(&"reg")
-            .to_string(),
+            .map(|name| (*name).to_owned())
+            .unwrap_or_else(|| named_register(architecture, offset)),
     }
 }
 
