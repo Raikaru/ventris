@@ -102,8 +102,16 @@ pub fn emit_structured(
     prefer_non_empty_then(&mut statements);
     drop_self_assignments(&mut statements);
     drop_transfers_after_a_transfer(&mut statements);
-    propagate_single_use_copies(&mut statements);
-    drop_assignments_nothing_reads(&mut statements);
+    // Each substitution can expose another: collapsing one link of an address
+    // chain leaves the next with a single reader.
+    for _ in 0..8 {
+        let before = count_statements(&statements);
+        propagate_single_use_copies(&mut statements);
+        drop_assignments_nothing_reads(&mut statements);
+        if count_statements(&statements) == before {
+            break;
+        }
+    }
     drop_labels_nothing_needs(&mut statements);
     // Last: the guard clause needs the exit to be the statement after the test,
     // and a label sits between them until the labels nothing needs are gone.
@@ -253,31 +261,33 @@ fn single_reader_after(
 ) -> Option<usize> {
     let mut found = None;
     for (offset, statement) in statements.iter().enumerate().skip(from + 1) {
-        // A statement that writes any name the expression reads ends the window,
-        // and one that writes the carried name means the value never reached a
-        // reader at all.
+        let mut used = BTreeSet::new();
+        collect_read_names(std::slice::from_ref(statement), &mut used, false);
+        // The read is counted before the write, because one statement commonly
+        // does both: `p = p + q` reads the carried value and then replaces it.
+        // Treating that as a write first meant the value looked as though it
+        // never reached a reader, and every link of an address chain kept its
+        // own name.
+        if used.contains(name) {
+            if found.is_some() {
+                return None;
+            }
+            // A construct evaluates its body an unknown number of times, so a
+            // value carried into one is not carried to a single reader.
+            if matches!(
+                statement,
+                NativeStatement::While { .. } | NativeStatement::DoWhile { .. }
+            ) {
+                return None;
+            }
+            found = Some(offset);
+        }
+        // A statement that writes any name the expression reads ends the window.
         if let Some((written, _)) = assigned_name_and_value(statement)
             && reads.contains(&written)
         {
             return found;
         }
-        let mut used = BTreeSet::new();
-        collect_read_names(std::slice::from_ref(statement), &mut used, false);
-        if !used.contains(name) {
-            continue;
-        }
-        if found.is_some() {
-            return None;
-        }
-        // A construct evaluates its body an unknown number of times, so a value
-        // carried into one is not carried to a single reader.
-        if matches!(
-            statement,
-            NativeStatement::While { .. } | NativeStatement::DoWhile { .. }
-        ) {
-            return None;
-        }
-        found = Some(offset);
     }
     found
 }
@@ -288,7 +298,17 @@ fn substitute_name(statement: &mut NativeStatement, name: &str, value: &Expr) ->
         NativeStatement::Assign {
             destination,
             source,
-        } => substitute_expr(destination, name, value) | substitute_expr(source, name, value),
+        } => {
+            // A plain name on the left is being written, not read. Substituting
+            // there produced `(uintptr_t)(iVar5) = ...`, which is not an lvalue.
+            let wrote_here =
+                matches!(destination, Expr::Temporary { name: other, .. } if other == name);
+            let mut replaced = substitute_expr(source, name, value);
+            if !wrote_here {
+                replaced |= substitute_expr(destination, name, value);
+            }
+            replaced
+        }
         NativeStatement::Store {
             address, value: v, ..
         } => substitute_expr(address, name, value) | substitute_expr(v, name, value),
@@ -1990,5 +2010,44 @@ mod tests {
         let before = statements.clone();
         prefer_guard_clause(&mut statements);
         assert_eq!(statements, before);
+    }
+
+    #[test]
+    fn a_write_target_is_never_substituted() {
+        // The name on the left of an assignment is written, not read. Replacing
+        // it yields something that is not an lvalue.
+        let mut statements = vec![
+            NativeStatement::Declare {
+                name: "p".into(),
+                ty: Type::Unsigned(32),
+                value: Expr::Constant { value: 8, width: 4 },
+            },
+            NativeStatement::Assign {
+                destination: Expr::Temporary {
+                    name: "p".into(),
+                    width: 4,
+                },
+                source: Expr::Binary {
+                    op: crate::native::BinaryOp::Add,
+                    left: Box::new(Expr::Temporary {
+                        name: "p".into(),
+                        width: 4,
+                    }),
+                    right: Box::new(Expr::Constant { value: 1, width: 4 }),
+                },
+            },
+        ];
+        propagate_single_use_copies(&mut statements);
+        let NativeStatement::Assign { destination, .. } = &statements[statements.len() - 1] else {
+            panic!("expected the assignment to survive: {statements:?}");
+        };
+        assert_eq!(
+            destination,
+            &Expr::Temporary {
+                name: "p".into(),
+                width: 4,
+            },
+            "the assignment target must stay a name"
+        );
     }
 }

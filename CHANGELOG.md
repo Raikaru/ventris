@@ -384,6 +384,17 @@ All notable Ventris changes are documented here.
   at the reader, not whether the operand's own range reaches it. A chain of
   single-use values collapses precisely because each range ends at the next, so
   the liveness form refused every chain and named its every link.
+- Copy propagation counts a statement's read before its write, since one
+  statement commonly does both: `p = p + q` reads the carried value and then
+  replaces it. Treating that as a write first made the value look as though it
+  never reached a reader, so every link of an address chain kept its own name.
+  It also never substitutes an assignment's target, which is written rather than
+  read — doing so produced `(uintptr_t)(iVar5) = ...`, not an lvalue. Both are
+  pinned by tests.
+- Propagation and dead-assignment removal now iterate together, because
+  collapsing one link of a chain leaves the next with a single reader.
+  `allocEnemyEntity` goes from four declarations to one, and reads the counter
+  once where the address-ordered path reads it twice.
 - The graph path stays opt-in. It leads the address-ordered path on seven census
   families and ties four, but it fails `corpus-smoke`'s semantic comparison on
   three PS2 entries the address-ordered path passes: two diverge on control-flow
