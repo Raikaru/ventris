@@ -487,3 +487,113 @@ mod tests {
         );
     }
 }
+
+/// Simplify a merge whose branches build the same value.
+///
+/// Port of `RulePushMulti` from `ruleaction.cc`. `ConditionalJoin` merges two
+/// blocks that test the same thing and leaves behind a phi of the two tests;
+/// `findDups` accepts the join in the first place *because* this rule will
+/// apply afterwards - the comment there says so. Pushing the merge below the
+/// duplicated operation turns `phi(a == 0, b == 0)` into `phi(a, b) == 0`, which
+/// is what leaves the branch reading one comparison of one merged value.
+///
+/// That shape is also what for-loop recovery looks for: a condition whose
+/// definition leads to the loop's phi, rather than being a phi itself.
+pub struct RulePushMulti;
+
+impl super::action::Rule for RulePushMulti {
+    fn name(&self) -> &'static str {
+        "pushmulti"
+    }
+
+    fn op_list(&self) -> Vec<i32> {
+        vec![op::MULTIEQUAL]
+    }
+
+    fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
+        if data.op(id).inputs.len() != 2 {
+            return 0;
+        }
+        let first = data.op(id).inputs[0];
+        let second = data.op(id).inputs[1];
+        let (Some(def1), Some(def2)) = (data.varnode(first).def, data.varnode(second).def) else {
+            return 0;
+        };
+        let contingent = match functional_equality(data, first, second) {
+            Equality::Same => None,
+            Equality::Contingent(left, right) => Some((left, right)),
+            Equality::Different => return 0,
+        };
+        // A SUBPIECE is pulled towards its reader, not pushed towards its
+        // definition, so pushing a merge below one would fight that.
+        if data.op(def1).opcode == op::SUBPIECE {
+            return 0;
+        }
+        // The COPY case merges two shadowing values and needs an existing merge
+        // to fold into; without one there is nothing to gain.
+        if data.op(def1).opcode == op::COPY {
+            return 0;
+        }
+        let Some(block) = data.op(id).parent else {
+            return 0;
+        };
+        // Each branch's value must exist only for this merge, or moving its
+        // definition would move it away from another reader.
+        if data.lone_descend(first) != Some(id) || data.lone_descend(second) != Some(id) {
+            return 0;
+        }
+        let Some(output) = data.op(id).output else {
+            return 0;
+        };
+        // The surviving definition takes over the merge's output and moves into
+        // the merge block.
+        data.op_set_output(def1, Some(output));
+        data.op_uninsert(def1);
+        match contingent {
+            Some((left, right)) => {
+                let Some(slot) = data.op(def1).inputs.iter().position(|held| *held == left) else {
+                    // The operand order was settled by commuting, which this
+                    // move cannot express; leave the merge alone.
+                    data.op_set_output(def1, None);
+                    return 0;
+                };
+                let size = data.varnode(left).size;
+                let seq = data.op(id).seq;
+                let merged = existing_merge(data, block, left, right).unwrap_or_else(|| {
+                    let phi = data.new_op(op::MULTIEQUAL, seq, vec![left, right]);
+                    let value = data.new_unique(size);
+                    data.op_set_output(phi, Some(value));
+                    data.op_insert_begin(phi, block);
+                    phi
+                });
+                let Some(value) = data.op(merged).output else {
+                    data.op_set_output(def1, None);
+                    return 0;
+                };
+                data.op_set_input(def1, value, slot);
+                data.op_insert_after(def1, merged);
+            }
+            None => data.op_insert_begin(def1, block),
+        }
+        data.op_destroy(id);
+        data.op_destroy(def2);
+        1
+    }
+}
+
+/// A merge of exactly these two values already in this block.
+///
+/// The first half of Ghidra's `findSubstitute`. The second half searches for a
+/// common subexpression to reuse; skipping it only means building a merge that
+/// could have been shared, never a wrong one.
+fn existing_merge(
+    data: &Funcdata,
+    block: GraphBlockId,
+    first: VarnodeId,
+    second: VarnodeId,
+) -> Option<OpId> {
+    data.block(block).ops.iter().copied().find(|held| {
+        let operation = data.op(*held);
+        operation.opcode == op::MULTIEQUAL && operation.inputs == vec![first, second]
+    })
+}

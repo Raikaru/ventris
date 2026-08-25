@@ -1558,6 +1558,7 @@ pub fn all() -> Vec<Box<dyn Rule>> {
         Box::new(RuleXorSwap),
         Box::new(RuleOrPredicate),
         Box::new(RuleBooleanNegate),
+        Box::new(super::nodejoin::RulePushMulti),
         Box::new(RuleDoubleSub),
         Box::new(RuleHumptyDumpty),
         Box::new(RuleDumptyHump),

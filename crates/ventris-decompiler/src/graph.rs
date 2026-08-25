@@ -919,16 +919,45 @@ impl Funcdata {
     }
 }
 
-/// Addresses that begin a basic block: the entry and every branch target.
+/// Addresses that begin a basic block.
+///
+/// A basic block runs from a leader to the next, and Ghidra's are maximal: flow
+/// enters only at the top and leaves only at the bottom. So a leader is the
+/// entry, a branch target, the instruction after a branch, or a join - and
+/// crucially *not* the target of a plain fall-through that nothing else reaches.
+///
+/// Treating every fall-through target as a leader gives one block per
+/// instruction. The graph is still correct, and structuring still recovers the
+/// same constructs by concatenating, but every ported algorithm that reasons
+/// about a block as a unit is then working on the wrong unit: "the last
+/// operation in the block", which decides a for-loop's iterator, a condition
+/// block's complexity and where a statement may be moved to, means nothing when
+/// the block holds one instruction.
 fn block_leaders(function: &NativeFunction) -> BTreeSet<u64> {
     let mut leaders = BTreeSet::from([function.entry]);
+    let mut arrivals: BTreeMap<u64, usize> = BTreeMap::new();
+    let mut departures: BTreeMap<u64, usize> = BTreeMap::new();
     for (source, target) in &function.edges {
-        leaders.insert(*target);
-        if let Some(instruction) = function.instructions.get(source) {
-            let sequential = source.wrapping_add(u64::from(instruction.pcode.len));
-            if *target != sequential {
-                leaders.insert(sequential);
-            }
+        *arrivals.entry(*target).or_default() += 1;
+        *departures.entry(*source).or_default() += 1;
+    }
+    for (source, target) in &function.edges {
+        // A join: flow arrives from more than one place, so it cannot be in the
+        // middle of a block.
+        if arrivals.get(target).copied().unwrap_or(0) > 1 {
+            leaders.insert(*target);
+        }
+        let Some(instruction) = function.instructions.get(source) else {
+            continue;
+        };
+        let sequential = source.wrapping_add(u64::from(instruction.pcode.len));
+        if *target != sequential {
+            // A branch ends its block, and both of its destinations begin one.
+            leaders.insert(*target);
+            leaders.insert(sequential);
+        } else if departures.get(source).copied().unwrap_or(0) > 1 {
+            // The fall-through side of a conditional branch.
+            leaders.insert(*target);
         }
     }
     leaders.retain(|address| function.instructions.contains_key(address));
@@ -1112,5 +1141,61 @@ mod tests {
         let other = data.new_varnode(ventris_lifter::REGISTER_SPACE, 16, 4);
         assert!(data.varnode(wide).overlaps(data.varnode(byte)));
         assert_eq!(data.varnode(wide).overlaps(data.varnode(other)), false);
+    }
+    /// A straight run of instructions is one block, and only a branch, a join or
+    /// the instruction after a branch starts a new one.
+    #[test]
+    fn a_straight_run_of_instructions_is_a_single_block() {
+        use ventris_lifter::{Flow, LiftedInstruction};
+        use ventris_pcode::InstPcode;
+        let instruction = |address: u64, flow: Flow| LiftedInstruction {
+            address,
+            bytes: vec![0, 0, 0, 0],
+            pcode: InstPcode {
+                len: 4,
+                space: ventris_lifter::RAM_SPACE,
+                offset: address,
+                ops: Vec::new(),
+            },
+            flow,
+            embedded_delay_slot_bytes: 0,
+        };
+        let mut instructions = BTreeMap::new();
+        for address in [0x1000u64, 0x1004, 0x1008] {
+            instructions.insert(
+                address,
+                instruction(address, Flow::FallThrough(address + 4)),
+            );
+        }
+        instructions.insert(
+            0x100c,
+            instruction(
+                0x100c,
+                Flow::Conditional {
+                    target: 0x1004,
+                    fallthrough: 0x1010,
+                },
+            ),
+        );
+        instructions.insert(0x1010, instruction(0x1010, Flow::Return));
+        let function = NativeFunction {
+            entry: 0x1000,
+            instructions,
+            // The back edge makes 0x1004 a join; 0x1010 is the branch's other
+            // destination.
+            edges: BTreeSet::from([
+                (0x1000, 0x1004),
+                (0x1004, 0x1008),
+                (0x1008, 0x100c),
+                (0x100c, 0x1004),
+                (0x100c, 0x1010),
+            ]),
+            calls: BTreeSet::new(),
+        };
+        assert_eq!(
+            block_leaders(&function).iter().copied().collect::<Vec<_>>(),
+            vec![0x1000, 0x1004, 0x1010],
+            "0x1008 and 0x100c continue their block"
+        );
     }
 }

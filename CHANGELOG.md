@@ -282,6 +282,31 @@ All notable Ventris changes are documented here.
   table-backed switch the rule can claim, and `dl_G_MOVEWORD`'s `switch 0 vs 1`
   is a `BRANCHIND` whose table this pipeline does not recover. The rule is
   correct and tested; it has no corpus function to improve yet.
+- Basic blocks are now maximal, as Ghidra's are. `block_leaders` treated every
+  edge's target as a leader, and a fall-through is an edge, so the graph had one
+  block per instruction: 45 blocks for `TRK_fill_mem` where Ghidra has 17. The
+  graph was not wrong and structuring recovered the same constructs by
+  concatenating, which is why this survived so long - but every ported algorithm
+  that treats a block as a unit was working on the wrong unit. "The last
+  operation in the block" decides a for-loop's iterator, a condition block's
+  complexity, and whether a statement may be moved; it means nothing when the
+  block holds one instruction.
+  A leader is now the entry, a branch target, the instruction after a branch, or
+  a join - not the target of a plain fall-through nothing else reaches.
+  Measured: `0x80072c88` 19 gotos -> 12 and 7 `do`/`while` -> 3 with 2 `while`,
+  `0x8000b580` 4 -> 2, `0x800a94d8` 1 -> 0. Census `unstructured-control-flow`
+  11 functions -> 9, the largest family and the one this campaign has been aimed
+  at. Against that, `missing-conditional` 3 -> 6 and `agrees` 22 -> 21: structured
+  flow absorbs `if (c) goto` pairs into loops, and three functions now emit fewer
+  `if`s than the oracle. Kept because the representation is the one every ported
+  algorithm assumes, and the remaining differences are now differences in rules
+  rather than in the units those rules run on.
+- Ported `RulePushMulti`, which `ConditionalJoin::findDups` names as its reason
+  for accepting a join at all: the merge it leaves behind, `phi(a == 0, b == 0)`,
+  is pushed below the duplicated comparison to become `phi(a, b) == 0`. Fires
+  twice on `TRK_fill_mem`. `findSubstitute`'s common-subexpression half is not
+  ported - skipping it builds a merge that could have been shared, never a wrong
+  one.
 - Enabled `ConditionalJoin` by reaching Ghidra's branch representation, and
   fixed the three correctness bugs that doing so exposed. Our lifter spells an
   inverted conditional branch as a `BOOL_NEGATE`; Ghidra marks the CBRANCH with
