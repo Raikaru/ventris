@@ -1977,6 +1977,7 @@ impl NativeDecompiler {
             .into_iter()
             .chain(graph::coreaction::all())
             .chain(graph::storageaction::all())
+            .chain(graph::dominantcopy::all())
         {
             if skipped_passes.iter().any(|skip| skip == action.name()) {
                 continue;

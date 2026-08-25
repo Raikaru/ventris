@@ -249,6 +249,26 @@ All notable Ventris changes are documented here.
 - Measured against Ghidra on the corpus, the graph path improves to
   `unstructured-control-flow` 10 (from 13) and `missing-loop-or-switch` 4, against
   15 and 11 on the address-ordered default.
+- Ported `ActionDominantCopy`, with `Merge::processCopyTrims`,
+  `processHighDominantCopy` and `buildDominantCopy` from `merge.cc`. Merging
+  inserts a COPY wherever it trims a live range, so one variable can be written
+  by several COPYs reading the same source; where one dominates the others, a
+  single COPY at the dominating block replaces them. Ghidra's
+  `FlowBlock::findCommonBlock` is recovered by intersecting dominator chains,
+  which needs no persistent block tree.
+  Two parts are absent and neither is reachable: the union-resolution branch
+  cannot be entered because `DataType` has no union variant, and
+  `processHighRedundantCopy` marks a COPY non-printing rather than removing it,
+  which `GraphOp` cannot express — that pass is left unported rather than
+  approximated, since removing what Ghidra only hides would delete an
+  assignment.
+- This one had previously been recorded as blocked on absent Ghidra state, which
+  was wrong: it needed only COPY grouping and dominance, both already present.
+  Of the eleven actions never examined, nine really are one-line delegations to
+  `Funcdata` phase flags — `startProcessing`, `startCleanUp`, `markIndirectOnly`,
+  `spacebase`, `setHighLevel` — that this pipeline has no equivalent for, and
+  wrapping them would produce exactly the no-op actions deleted earlier.
+  `ActionMergeMultiEntry` needs `ScopeLocal`'s multi-entry symbol iteration.
 - A returned pointer is reported at pointer width rather than at the width of
   the register that held it, when type recovery says the value is a pointer. A
   64-bit register file otherwise made every returned address an `int64_t`, which

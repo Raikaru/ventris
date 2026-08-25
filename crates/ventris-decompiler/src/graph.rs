@@ -25,6 +25,7 @@ pub mod condprop;
 pub mod coreaction;
 pub mod cover;
 pub mod deadcode;
+pub mod dominantcopy;
 pub mod emit;
 pub mod expr_arith;
 pub mod expr_bool;
