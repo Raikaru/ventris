@@ -282,6 +282,21 @@ All notable Ventris changes are documented here.
   table-backed switch the rule can claim, and `dl_G_MOVEWORD`'s `switch 0 vs 1`
   is a `BRANCHIND` whose table this pipeline does not recover. The rule is
   correct and tested; it has no corpus function to improve yet.
+- Fixed the edge surgery `ConditionalJoin` depends on, which had two real
+  defects found by running the experiment above.
+  `move_out_edge` appended the new source to the predecessor list; Ghidra reaches
+  the target through `replaceInEdge` and keeps the in-edge *index*. Operand slots
+  of a `MULTIEQUAL` are positional against that list, so appending reassigned
+  every operand from that slot onward.
+  `remove_edge` here also dropped the predecessor's merge operand - correct for
+  its usual callers, and wrong for this one: Ghidra's `removeEdge` is control flow
+  only, and `cutDownMultiequals` repairs the phis itself from the slots as they
+  were before any edge moved. Doing both destroyed the loop's phi. Added
+  `remove_edge_keeping_merges` for callers that own the repair, and left
+  `remove_edge` as the default.
+  Verified against the failure it explains: with the branch-negation fold in
+  place the lost decrement comes back. Pinned by tests on both primitives, which
+  is what the join needs whether or not it is reachable today.
 - Added `tools/DumpBlocks.java`, which reports the basic-block graph Ghidra's
   decompiler ends up with: per block, address range, in and out edge counts with
   their indices, and the terminating opcode. The C output shows which constructs

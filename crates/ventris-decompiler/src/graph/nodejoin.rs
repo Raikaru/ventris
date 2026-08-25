@@ -223,8 +223,10 @@ impl Join {
         } else {
             (self.block2, self.block1)
         };
-        data.remove_edge(dropa, self.exita);
-        data.remove_edge(dropb, self.exitb);
+        // Control flow only: the phis in the exits are repaired by
+        // `cut_down_multiequals`, from the slots as they were before this.
+        data.remove_edge_keeping_merges(dropa, self.exita);
+        data.remove_edge_keeping_merges(dropb, self.exitb);
         data.move_out_edge(keepa, self.exita, join);
         data.move_out_edge(keepb, self.exitb, join);
         data.add_edge(self.block1, join);
@@ -428,5 +430,56 @@ mod tests {
         let before = data.blocks.len();
         assert_eq!(join_all(&mut data), 0);
         assert_eq!(data.blocks.len(), before, "no block is created");
+    }
+    /// The edge primitives the join relies on must preserve merge-operand
+    /// alignment, because `cut_down_multiequals` repairs the phis afterwards
+    /// using the slots as they were before any edge moved.
+    #[test]
+    fn moving_an_edge_keeps_its_position_in_the_predecessor_list() {
+        let mut data = Funcdata::default();
+        let first = data.new_block(0x1000);
+        let second = data.new_block(0x1010);
+        let third = data.new_block(0x1020);
+        let exit = data.new_block(0x1030);
+        let replacement = data.new_block(0x1040);
+        for block in [first, second, third] {
+            data.add_edge(block, exit);
+        }
+        assert_eq!(data.block(exit).predecessors, vec![first, second, third]);
+
+        data.move_out_edge(second, exit, replacement);
+        assert_eq!(
+            data.block(exit).predecessors,
+            vec![first, replacement, third],
+            "the new source takes the old slot rather than being appended"
+        );
+        assert!(!data.block(second).successors.contains(&exit));
+        assert!(data.block(replacement).successors.contains(&exit));
+    }
+
+    #[test]
+    fn removing_an_edge_for_the_join_leaves_merge_operands_alone() {
+        let mut data = Funcdata::default();
+        let first = data.new_block(0x1000);
+        let second = data.new_block(0x1010);
+        let exit = data.new_block(0x1020);
+        data.add_edge(first, exit);
+        data.add_edge(second, exit);
+
+        let one = data.new_varnode(ventris_lifter::REGISTER_SPACE, 0, 4);
+        let two = data.new_varnode(ventris_lifter::REGISTER_SPACE, 8, 4);
+        let phi = data.new_op(op::MULTIEQUAL, seq(0x1020), vec![one, two]);
+        let output = data.new_unique(4);
+        data.op_set_output(phi, Some(output));
+        data.op_insert_end(phi, exit);
+
+        assert!(data.remove_edge_keeping_merges(first, exit));
+        assert_eq!(data.block(exit).predecessors, vec![second]);
+        assert_eq!(
+            data.op(phi).inputs,
+            vec![one, two],
+            "the operands are the caller's to repair, and the slots must still \
+             mean what they meant"
+        );
     }
 }

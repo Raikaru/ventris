@@ -603,15 +603,60 @@ impl Funcdata {
         }
     }
 
-    /// Moves one out-edge of a block to a different source block.
+    /// Gives one edge a different source, keeping its position.
     ///
-    /// Ghidra's `BlockGraph::moveOutEdge`, which `nodeJoinCreateBlock` uses to
-    /// hand the two surviving exits to the new joined block.
+    /// Ghidra's `BlockGraph::moveOutEdge`, which reaches the target through
+    /// `replaceInEdge` and so preserves the in-edge *index*. That matters more
+    /// than it looks: a `MULTIEQUAL`'s operand slots are positional against the
+    /// predecessor list, so appending the new source instead of replacing in
+    /// place would silently reassign every operand from that slot onward.
+    ///
+    /// Merge operands are deliberately untouched. The edge still delivers the
+    /// same value, it simply arrives from somewhere else.
     pub fn move_out_edge(&mut self, from: GraphBlockId, to: GraphBlockId, new_from: GraphBlockId) {
-        if !self.remove_edge(from, to) {
+        self.invalidate_masks();
+        let Some(slot) = self.blocks[to.0 as usize]
+            .predecessors
+            .iter()
+            .position(|candidate| *candidate == from)
+        else {
             return;
+        };
+        self.blocks[to.0 as usize].predecessors[slot] = new_from;
+        self.blocks[from.0 as usize]
+            .successors
+            .retain(|candidate| *candidate != to);
+        let successors = &mut self.blocks[new_from.0 as usize].successors;
+        if !successors.contains(&to) {
+            successors.push(to);
         }
-        self.add_edge(new_from, to);
+    }
+
+    /// Removes one edge and leaves the merge operands alone.
+    ///
+    /// Ghidra's `BlockGraph::removeEdge`, which is a control-flow operation
+    /// only: `ConditionalJoin` repairs the affected `MULTIEQUAL`s itself, in
+    /// `cutDownMultiequals`, using the operand slots as they were before any
+    /// edge moved. Dropping an operand here would leave that repair working
+    /// from indices that no longer mean anything.
+    ///
+    /// Callers own the repair. `remove_edge` is the one to reach for otherwise.
+    pub fn remove_edge_keeping_merges(&mut self, from: GraphBlockId, to: GraphBlockId) -> bool {
+        self.invalidate_masks();
+        if !self.blocks[from.0 as usize].successors.contains(&to) {
+            return false;
+        }
+        self.blocks[from.0 as usize]
+            .successors
+            .retain(|candidate| *candidate != to);
+        if let Some(slot) = self.blocks[to.0 as usize]
+            .predecessors
+            .iter()
+            .position(|candidate| *candidate == from)
+        {
+            self.blocks[to.0 as usize].predecessors.remove(slot);
+        }
+        true
     }
 
     /// Removes an operation from the graph, releasing its operand links.
