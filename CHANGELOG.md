@@ -249,6 +249,18 @@ All notable Ventris changes are documented here.
 - Measured against Ghidra on the corpus, the graph path improves to
   `unstructured-control-flow` 10 (from 13) and `missing-loop-or-switch` 4, against
   15 and 11 on the address-ordered default.
+- Measured Ghidra against the `declaration_order` baseline that blocks the
+  default switch, rather than continuing to reason about it. Applying the smoke
+  tool's own declaration extractor to the Ghidra oracle gives `['iVar1']` for
+  `allocEnemyEntity` and `allocLightmap`, against a baseline of `[]`. So that
+  expectation is not what Ghidra produces either; the address-ordered path meets
+  it only by duplicating a memory read. `beginFadeOut` now agrees with Ghidra at
+  zero declarations on both paths.
+  The baseline is not being changed. Every available mechanism — relaxing the
+  comparison, or recording a different expectation — amounts to editing the gate
+  that judges this work, and the payoff would be a default switch rather than
+  better output. The finding is recorded instead, and the graph path stays
+  opt-in.
 - Ported `ActionDominantCopy`, with `Merge::processCopyTrims`,
   `processHighDominantCopy` and `buildDominantCopy` from `merge.cc`. Merging
   inserts a COPY wherever it trims a live range, so one variable can be written
