@@ -279,15 +279,28 @@ All notable Ventris changes are documented here.
   optimise next. The exception is the mutable `BlockGraph`, which is both the
   blocker for 15 unported actions and for the largest census family, and is
   therefore the one piece of remaining port work that pays.
-- Measured for prioritisation: of 37 corpus functions the graph path leaves 11
-  with stray `goto`s and 6 missing a loop or switch, which is the largest
-  remaining quality gap by a wide margin. Instrumenting the structurer's
-  short-circuit collapse showed the dominant decline is `second-has-many-preds`
-  (22 times on one function): the shared join block has several predecessors, so
-  collapsing it needs block *duplication*. That is Ghidra's mutable `BlockGraph`
-  with phi fixups — the state 15 of the 41 unported actions were recorded as
-  needing. It is unbuilt rather than unavailable, and building it is what closes
-  this family.
+- Corrected the structuring diagnosis twice over, by reading the pinned source
+  rather than reasoning from the symptom.
+  - The earlier note said the stray `goto`s need Ghidra's mutable `BlockGraph` so
+    a shared join block can be duplicated. That is wrong: Ghidra's own
+    `Funcdata::nodeSplit` refuses a block with out-flow — "Cannot (currently)
+    nodesplit block with out flow" — and is used only by `ActionReturnSplit` on
+    return blocks. Ghidra does not duplicate joins either.
+  - Comparing rule sets directly: Ghidra's `CollapseStructure` has 11 collapse
+    rules and 9 are ported, with two naming mismatches that hid the match —
+    `ruleBlockProperIf` is our `rule_if_no_exit`, and `ruleBlockIfNoExit` is our
+    `rule_block_if_return`. The only genuinely missing rules are `ruleBlockSwitch`
+    and `ruleCaseFallthru`, both switch recovery, which accounts for exactly one
+    census finding (`dl_G_MOVEWORD`, `switch 0 vs 1`).
+  - So the stray `goto`s are not missing rules. Instrumenting the collapse showed
+    the rules decline on their preconditions — `second-has-many-preds` 22 times on
+    one function. What Ghidra has that this does not is the *goto-selection*
+    machinery: `TraceDAG` with likely-unstructured-edge generation, plus
+    `onlyReachableFromRoot`, `markExitsAsGotos`, `clipExtraRoots` and `LoopBody`
+    ordering. Our `rule_goto` surrenders an edge by local heuristic, preferring a
+    back edge. Ghidra chooses the edge by tracing paths, so fewer survive. That is
+    the piece to port, and it is a different and better-defined target than either
+    earlier guess.
 - Also measured and isolated, each one function: `TRK_fill_mem` returns a value
   where the oracle returns void and misses two `for` loops; `osContGetReadData`
   recovers no parameters where the oracle does; `changeGroupID` emits one call the
