@@ -64,6 +64,20 @@ pub enum DataType {
         name: String,
         fields: Vec<Field>,
     },
+    /// Ghidra's `TypePointerRel`: a pointer into the middle of a larger object.
+    ///
+    /// `to` is what lies at the offset, exactly as a plain pointer's `to` is,
+    /// and `parent`/`offset` record which object it points into and where. That
+    /// provenance is what stops a rule from re-deriving a pointer it already
+    /// derived: `RuleStructOffset0` matches a pointer *to* a structure, and the
+    /// pointer it produces points *into* one, so its own output no longer
+    /// matches and the rewrite terminates.
+    PointerRel {
+        to: Box<DataType>,
+        bits: u32,
+        parent: Box<DataType>,
+        offset: u32,
+    },
 }
 
 /// A small interning factory mirroring the identity-sharing role of Ghidra's
@@ -169,7 +183,33 @@ impl TypeFactory {
             return None;
         };
         let (component, _) = self.sub_type(to, offset)?;
+        // Ghidra's `downChain` yields a `TypePointerRel` when it steps into a
+        // container, carrying the container and the offset. Returning a plain
+        // pointer instead lost that provenance, and a rule whose guard tests
+        // "pointer to a structure" then matched its own output forever.
+        if matches!(
+            to.as_ref(),
+            DataType::Struct { .. } | DataType::Array { .. }
+        ) {
+            return Some(self.intern(DataType::PointerRel {
+                to: Box::new(component),
+                bits: *bits,
+                parent: to.clone(),
+                offset,
+            }));
+        }
         Some(self.get_type_pointer_with_bits(component, *bits))
+    }
+
+    /// The pointer a relative pointer behaves as when its provenance is not
+    /// wanted, matching `TypePointerRel::getStripped`.
+    pub fn strip_relative(&self, ty: &DataType) -> DataType {
+        match ty {
+            DataType::PointerRel { to, bits, .. } => {
+                self.get_type_pointer_with_bits(to.as_ref().clone(), *bits)
+            }
+            other => other.clone(),
+        }
     }
 
     fn intern(&self, ty: DataType) -> DataType {
@@ -293,7 +333,11 @@ pub fn to_native(ty: &DataType) -> crate::native::Type {
         }
         DataType::Float(bits) => crate::native::Type::Float(*bits),
         DataType::Void => crate::native::Type::Void,
-        DataType::Pointer { to, .. } => crate::native::Type::Pointer(Box::new(to_native(to))),
+        DataType::Pointer { to, .. } | DataType::PointerRel { to, .. } => {
+            // A relative pointer renders as an ordinary pointer: its provenance
+            // guides rewriting, not printing.
+            crate::native::Type::Pointer(Box::new(to_native(to)))
+        }
         DataType::Array { element, .. } => to_native(element),
         DataType::Struct { .. } => crate::native::Type::Unknown,
     }
@@ -304,7 +348,8 @@ fn byte_width(ty: &DataType) -> u32 {
         DataType::Unknown(bits)
         | DataType::Int { bits, .. }
         | DataType::Float(bits)
-        | DataType::Pointer { bits, .. } => bits.saturating_add(7) / 8,
+        | DataType::Pointer { bits, .. }
+        | DataType::PointerRel { bits, .. } => bits.saturating_add(7) / 8,
         DataType::Bool => 1,
         DataType::Void => 0,
         DataType::Array { element, count } => {
@@ -326,6 +371,9 @@ fn bit_width(ty: &DataType) -> u32 {
 
 fn rank(ty: &DataType) -> u8 {
     match ty {
+        // A relative pointer is at least as specific as a plain one: it says
+        // the same thing and names the container as well.
+        DataType::PointerRel { .. } => 0,
         DataType::Pointer { .. } => 0,
         DataType::Struct { .. } => 1,
         DataType::Array { .. } => 2,
@@ -838,11 +886,14 @@ fn pointer_after_arithmetic(
                 .inputs
                 .get(1)
                 .and_then(|id| constant_value(data, *id))?;
-            if offset == 0 {
-                Some(pointer.clone())
-            } else {
-                factory.down_chain(pointer, offset.min(u64::from(u32::MAX)) as u32)
-            }
+            // Offset zero is not the identity here. `PTRSUB(p, 0)` on a
+            // pointer to a container is Ghidra's way of saying "the first
+            // component of that container", and its result is a
+            // `TypePointerRel`. Returning the operand's own type instead is
+            // what let `RuleStructOffset0` match its own output forever.
+            factory
+                .down_chain(pointer, offset.min(u64::from(u32::MAX)) as u32)
+                .or_else(|| (offset == 0).then(|| pointer.clone()))
         }
         op::PTRADD => {
             let index = operation
@@ -1371,5 +1422,67 @@ mod tests {
             crate::native::Type::Pointer(inner)
                 if matches!(*inner, crate::native::Type::Unknown)
         ));
+    }
+
+    #[test]
+    fn stepping_into_a_container_yields_a_relative_pointer() {
+        // Ghidra's `downChain` returns a `TypePointerRel` here, and that
+        // provenance is load-bearing: a rule whose guard reads "pointer to a
+        // structure" must not match the pointer it just produced, or it rewrites
+        // the same access forever. `RuleStructOffset0` did exactly that until
+        // this variant existed.
+        let factory = TypeFactory::new(32);
+        let field = DataType::Int {
+            bits: 32,
+            signed: false,
+        };
+        let structure = factory.get_type_struct_fields(
+            "container".to_owned(),
+            vec![Field {
+                offset: 0,
+                ty: field.clone(),
+                name: "field_0".to_owned(),
+            }],
+        );
+        let pointer = factory.get_type_pointer(structure.clone());
+
+        let stepped = factory
+            .down_chain(&pointer, 0)
+            .expect("offset zero steps into the first component");
+        match &stepped {
+            DataType::PointerRel {
+                to, parent, offset, ..
+            } => {
+                assert_eq!(to.as_ref(), &field);
+                assert_eq!(parent.as_ref(), &structure);
+                assert_eq!(*offset, 0);
+            }
+            other => panic!("expected a relative pointer, got {other:?}"),
+        }
+        assert!(
+            !matches!(stepped, DataType::Pointer { .. }),
+            "a relative pointer must not read as a plain pointer to the container"
+        );
+    }
+
+    #[test]
+    fn a_relative_pointer_strips_to_a_plain_one() {
+        // `TypePointerRel::getStripped`: the same pointer without provenance,
+        // for the places that only want to know what is pointed at.
+        let factory = TypeFactory::new(32);
+        let field = DataType::Int {
+            bits: 32,
+            signed: true,
+        };
+        let relative = DataType::PointerRel {
+            to: Box::new(field.clone()),
+            bits: 32,
+            parent: Box::new(DataType::Void),
+            offset: 8,
+        };
+        assert_eq!(
+            factory.strip_relative(&relative),
+            factory.get_type_pointer(field)
+        );
     }
 }

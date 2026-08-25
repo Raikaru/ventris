@@ -66,7 +66,8 @@ fn byte_width(ty: &DataType) -> u32 {
         DataType::Unknown(bits)
         | DataType::Int { bits, .. }
         | DataType::Float(bits)
-        | DataType::Pointer { bits, .. } => bits.saturating_add(7) / 8,
+        | DataType::Pointer { bits, .. }
+        | DataType::PointerRel { bits, .. } => bits.saturating_add(7) / 8,
         DataType::Bool => 1,
         DataType::Void => 0,
         DataType::Array { element, count } => {
@@ -545,19 +546,23 @@ impl Rule for RulePushPtr {
 
 /// Drill a LOAD/STORE through the first component of a recovered structure or
 /// array by inserting PTRSUB(pointer,0).
-/// Not registered: this rule cannot terminate with the graph's type model.
+/// `RuleStructOffset0`: an access through a pointer to a structure or array
+/// whose first component fills the access is an access to that component.
 ///
-/// It inserts `PTRSUB(ptr, 0)` and re-points the access at the result. In Ghidra
-/// the new pointer carries a `TypePointerRel` — "points at offset 0 inside that
-/// structure" — so the rule's own guard no longer matches it. `DataType` has no
-/// relative-pointer variant, so the rewritten pointer still infers as
-/// pointer-to-structure and the rule fires on the same access forever, growing
-/// the graph until the stack runs out. Measured: `graph_pipeline`'s
-/// `no_statement_follows_an_unconditional_transfer` overflowed with this rule
-/// alone active.
+/// Implemented but not registered, and the reason is now the right one. It used
+/// to be unregisterable because it could not terminate: it inserts
+/// `PTRSUB(ptr, 0)` and re-points the access, and the result inferred as
+/// pointer-to-structure again so the guard matched its own output forever. That
+/// is fixed — `down_chain` yields `DataType::PointerRel` when it steps into a
+/// container, as Ghidra's `TypePointerRel` does, and the guard below declines a
+/// relative pointer.
 ///
-/// The implementation is kept because it is a faithful port of everything the
-/// graph can express; it needs `TypePointerRel` to be safe to run.
+/// What blocks it now is the stack. Ghidra gives the frame a `TypeSpacebase`, so
+/// this rule never fires on a frame-relative pointer. Without that distinction
+/// it rewrites `sp - 0x20` into a structure pointer and prints a stack slot as
+/// `local_20->field_0`, which is not what the frame is. Registering it needs
+/// `TypeSpacebase`, or a frame-pointer fact reaching the rule; the rule itself
+/// is a faithful port of everything else.
 pub struct RuleStructOffset0;
 
 impl Rule for RuleStructOffset0 {
@@ -587,6 +592,12 @@ impl Rule for RuleStructOffset0 {
         };
         let cached = recover_types(data);
         let (factory, types) = (&cached.0, &cached.1);
+        // A plain pointer only. A `PointerRel` already points into a container,
+        // so rewriting it again would re-derive what is already derived — the
+        // loop this rule used to be unregistered for.
+        if matches!(types.get(ptr), Some(DataType::PointerRel { .. })) {
+            return 0;
+        }
         let Some(target) = pointer_target(&types, ptr) else {
             return 0;
         };

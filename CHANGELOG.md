@@ -249,6 +249,22 @@ All notable Ventris changes are documented here.
 - Measured against Ghidra on the corpus, the graph path improves to
   `unstructured-control-flow` 10 (from 13) and `missing-loop-or-switch` 4, against
   15 and 11 on the address-ordered default.
+- Added `DataType::PointerRel`, Ghidra's `TypePointerRel`: a pointer into the
+  middle of a larger object, carrying the container and the byte offset. Two
+  places now produce one — `down_chain` when it steps into a structure or array,
+  and `PTRSUB(p, 0)`, which is not the identity but Ghidra's spelling of "the
+  first component of that container".
+- That fixes the reason `RuleStructOffset0` could not terminate. It inserts
+  `PTRSUB(ptr, 0)` and re-points the access; with only a plain pointer the
+  result inferred as pointer-to-structure again and the rule matched its own
+  output forever. The guard now declines a relative pointer, and
+  `graph_pipeline` no longer overflows with the rule active.
+- It is still not registered, for a different and better-understood reason:
+  Ghidra gives the stack frame a `TypeSpacebase`, so the rule never fires on a
+  frame-relative pointer. Without that, it rewrote `sp - 0x20` into a structure
+  pointer and printed a stack slot as `local_20->field_0`. Registering it needs
+  `TypeSpacebase` or a frame-pointer fact reaching rules. The earlier note
+  claiming it needed `TypePointerRel` was correct but incomplete.
 - Measured Ghidra against the `declaration_order` baseline that blocks the
   default switch, rather than continuing to reason about it. Applying the smoke
   tool's own declaration extractor to the Ghidra oracle gives `['iVar1']` for
