@@ -102,9 +102,213 @@ pub fn emit_structured(
     prefer_non_empty_then(&mut statements);
     drop_self_assignments(&mut statements);
     drop_transfers_after_a_transfer(&mut statements);
+    propagate_single_use_copies(&mut statements);
     drop_assignments_nothing_reads(&mut statements);
     drop_labels_nothing_needs(&mut statements);
     statements
+}
+
+/// Substitutes a name that is assigned once and read once.
+///
+/// Naming a value is what makes it read its operands where it is defined rather
+/// than where it is used, so a name that carries a value to exactly one reader
+/// and nothing else has served its purpose and can be spelled at that reader
+/// instead. The substitution is refused when anything between the two writes a
+/// name the expression reads, which is the same condition that decided to name
+/// the value in the first place.
+fn propagate_single_use_copies(statements: &mut Vec<NativeStatement>) {
+    // Only within one straight run of statements. Crossing into or out of a
+    // construct's body changes how many times the expression is evaluated.
+    for statement in statements.iter_mut() {
+        match statement {
+            NativeStatement::IfElse {
+                then_body,
+                else_body,
+                ..
+            } => {
+                propagate_single_use_copies(then_body);
+                propagate_single_use_copies(else_body);
+            }
+            NativeStatement::While { body, .. } | NativeStatement::DoWhile { body, .. } => {
+                propagate_single_use_copies(body);
+            }
+            _ => {}
+        }
+    }
+    let mut index = 0;
+    while index < statements.len() {
+        let Some((name, source)) = assigned_name_and_value(&statements[index]) else {
+            index += 1;
+            continue;
+        };
+        if !expression_is_pure(&source) {
+            index += 1;
+            continue;
+        }
+        // A constant has no operands that anything could invalidate, so it goes
+        // to every reader rather than to one. Naming one costs a declaration and
+        // says the value came from somewhere, which it did not.
+        if matches!(source, Expr::Constant { .. }) {
+            let mut substituted = false;
+            for at in (index + 1)..statements.len() {
+                if let Some((written, _)) = assigned_name_and_value(&statements[at])
+                    && written == name
+                {
+                    break;
+                }
+                substituted |= substitute_name(&mut statements[at], &name, &source);
+            }
+            if substituted {
+                statements.remove(index);
+                continue;
+            }
+        }
+        let mut reads = source_names(&source);
+        reads.insert(name.clone());
+        match single_reader_after(statements, index, &name, &reads) {
+            Some(at) if substitute_name(&mut statements[at], &name, &source) => {
+                statements.remove(index);
+            }
+            _ => index += 1,
+        }
+    }
+}
+
+fn assigned_name_and_value(statement: &NativeStatement) -> Option<(String, Expr)> {
+    match statement {
+        NativeStatement::Declare { name, value, .. } => Some((name.clone(), value.clone())),
+        NativeStatement::Assign {
+            destination: Expr::Temporary { name, .. },
+            source,
+        } => Some((name.clone(), source.clone())),
+        _ => None,
+    }
+}
+
+fn source_names(value: &Expr) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    collect_expr_names(value, &mut names);
+    names
+}
+
+/// The index of the only later statement reading `name`, if the substitution is
+/// safe up to that point.
+fn single_reader_after(
+    statements: &[NativeStatement],
+    from: usize,
+    name: &str,
+    reads: &BTreeSet<String>,
+) -> Option<usize> {
+    let mut found = None;
+    for (offset, statement) in statements.iter().enumerate().skip(from + 1) {
+        // A statement that writes any name the expression reads ends the window,
+        // and one that writes the carried name means the value never reached a
+        // reader at all.
+        if let Some((written, _)) = assigned_name_and_value(statement)
+            && reads.contains(&written)
+        {
+            return found;
+        }
+        let mut used = BTreeSet::new();
+        collect_read_names(std::slice::from_ref(statement), &mut used, false);
+        if !used.contains(name) {
+            continue;
+        }
+        if found.is_some() {
+            return None;
+        }
+        // A construct evaluates its body an unknown number of times, so a value
+        // carried into one is not carried to a single reader.
+        if matches!(
+            statement,
+            NativeStatement::While { .. } | NativeStatement::DoWhile { .. }
+        ) {
+            return None;
+        }
+        found = Some(offset);
+    }
+    found
+}
+
+fn substitute_name(statement: &mut NativeStatement, name: &str, value: &Expr) -> bool {
+    match statement {
+        NativeStatement::Declare { value: target, .. } => substitute_expr(target, name, value),
+        NativeStatement::Assign {
+            destination,
+            source,
+        } => substitute_expr(destination, name, value) | substitute_expr(source, name, value),
+        NativeStatement::Store {
+            address, value: v, ..
+        } => substitute_expr(address, name, value) | substitute_expr(v, name, value),
+        NativeStatement::Copy {
+            destination,
+            source,
+            ..
+        } => substitute_expr(destination, name, value) | substitute_expr(source, name, value),
+        NativeStatement::Call(call) => substitute_expr(call, name, value),
+        NativeStatement::Return(Some(result)) => substitute_expr(result, name, value),
+        NativeStatement::IfGoto { condition, .. } => substitute_expr(condition, name, value),
+        NativeStatement::IfReturn {
+            condition,
+            value: result,
+        } => {
+            let mut replaced = substitute_expr(condition, name, value);
+            if let Some(result) = result {
+                replaced |= substitute_expr(result, name, value);
+            }
+            replaced
+        }
+        NativeStatement::IndirectGoto(target) => substitute_expr(target, name, value),
+        NativeStatement::IfElse { condition, .. } => substitute_expr(condition, name, value),
+        _ => false,
+    }
+}
+
+fn substitute_expr(target: &mut Expr, name: &str, value: &Expr) -> bool {
+    if matches!(target, Expr::Temporary { name: other, .. } if other == name) {
+        *target = value.clone();
+        return true;
+    }
+    let mut replaced = false;
+    match target {
+        Expr::Binary { left, right, .. } => {
+            replaced |= substitute_expr(left, name, value);
+            replaced |= substitute_expr(right, name, value);
+        }
+        Expr::Not(inner)
+        | Expr::Neg(inner)
+        | Expr::BitNot(inner)
+        | Expr::Cast { value: inner, .. }
+        | Expr::Typed { value: inner, .. }
+        | Expr::Load { address: inner, .. }
+        | Expr::Field { base: inner, .. } => {
+            replaced |= substitute_expr(inner, name, value);
+        }
+        Expr::Call { callee, args, .. } => {
+            if let Some(callee) = callee {
+                replaced |= substitute_expr(callee, name, value);
+            }
+            for arg in args {
+                replaced |= substitute_expr(arg, name, value);
+            }
+        }
+        Expr::Builtin { args, .. } => {
+            for arg in args {
+                replaced |= substitute_expr(arg, name, value);
+            }
+        }
+        Expr::Select {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            replaced |= substitute_expr(condition, name, value);
+            replaced |= substitute_expr(when_true, name, value);
+            replaced |= substitute_expr(when_false, name, value);
+        }
+        _ => {}
+    }
+    replaced
 }
 
 /// Removes an assignment to a name that nothing afterwards reads.
@@ -1523,5 +1727,82 @@ mod tests {
                 .any(|statement| matches!(statement, NativeStatement::Call(Expr::Builtin { .. }))),
             "branch-state bookkeeping was printed: {statements:?}"
         );
+    }
+
+    #[test]
+    fn a_carried_value_is_spelled_at_its_only_reader() {
+        let mut statements = vec![
+            NativeStatement::Declare {
+                name: "iVar4".into(),
+                ty: Type::Signed(32),
+                value: Expr::Temporary {
+                    name: "iVar3".into(),
+                    width: 4,
+                },
+            },
+            NativeStatement::Return(Some(Expr::Temporary {
+                name: "iVar4".into(),
+                width: 4,
+            })),
+        ];
+        propagate_single_use_copies(&mut statements);
+        assert_eq!(
+            statements,
+            vec![NativeStatement::Return(Some(Expr::Temporary {
+                name: "iVar3".into(),
+                width: 4,
+            }))]
+        );
+    }
+
+    #[test]
+    fn a_definition_survives_when_no_use_is_replaced() {
+        // Removing the definition without replacing a use leaves an undefined
+        // value, which is a wrong answer rather than a tidier one.
+        let mut statements = vec![
+            NativeStatement::Declare {
+                name: "iVar3".into(),
+                ty: Type::Signed(32),
+                value: Expr::Constant {
+                    value: 0x70,
+                    width: 4,
+                },
+            },
+            NativeStatement::Return(Some(Expr::Temporary {
+                name: "other".into(),
+                width: 4,
+            })),
+        ];
+        let before = statements.clone();
+        propagate_single_use_copies(&mut statements);
+        assert_eq!(statements, before);
+    }
+
+    #[test]
+    fn a_value_read_twice_is_not_substituted() {
+        let mut statements = vec![
+            NativeStatement::Declare {
+                name: "iVar3".into(),
+                ty: Type::Signed(32),
+                value: Expr::Temporary {
+                    name: "base".into(),
+                    width: 4,
+                },
+            },
+            NativeStatement::Call(Expr::Builtin {
+                name: "f",
+                args: vec![Expr::Temporary {
+                    name: "iVar3".into(),
+                    width: 4,
+                }],
+            }),
+            NativeStatement::Return(Some(Expr::Temporary {
+                name: "iVar3".into(),
+                width: 4,
+            })),
+        ];
+        let before = statements.clone();
+        propagate_single_use_copies(&mut statements);
+        assert_eq!(statements, before);
     }
 }

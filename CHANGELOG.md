@@ -344,6 +344,13 @@ All notable Ventris changes are documented here.
   named values whose operands were rewritten anywhere in the interval even when
   the reader came first, and every unnecessary name carries a declaration and
   usually a cast.
+- Added single-use copy propagation over the emitted statements. A name that
+  carries a value to exactly one reader and nothing else has served its purpose
+  and is spelled at that reader instead; the substitution stops at anything that
+  writes a name the expression reads, and at a loop, whose body runs an unknown
+  number of times. A definition is only removed once a use has actually been
+  replaced — the first attempt removed it unconditionally and left an undefined
+  value, which is a wrong answer rather than a tidier one.
 - The graph path stays opt-in. It leads the address-ordered path on seven census
   families and ties four, but it fails `corpus-smoke`'s semantic comparison on
   three PS2 entries the address-ordered path passes: two diverge on control-flow
