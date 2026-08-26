@@ -6,6 +6,15 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- A jump whose label was never emitted is now removed, so the output is valid C.
+  It arises when structuring surrenders an edge into a region later analysis
+  proved unreachable and therefore never printed: `drop_labels_nothing_needs`
+  removed labels no jump names, but nothing removed jumps no label answers.
+  `__FrameCallback__Fl` had three such jumps and `TRK_fill_mem` two before any of
+  this session's work, so the defect is not new. The complement pass runs to a
+  fixed point with the label pruner, since each exposes the other.
+  `__FrameCallback__Fl` now emits zero gotos, matching the oracle, and
+  `unstructured-control-flow` falls 4 -> 3.
 - A relative p-code destination past an instruction's last operation is a branch
   to the next address, and is now spelled as one. `__FrameCallback__Fl` has four
   such branches (target 16 in a thirteen-operation instruction). Their taken edge

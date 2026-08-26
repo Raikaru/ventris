@@ -142,6 +142,14 @@ pub fn emit_structured(
         }
     }
     drop_labels_nothing_needs(&mut statements);
+    // A jump whose label was dropped, and a label whose last jump was dropped,
+    // each expose the other, so both run until neither finds anything.
+    for _ in 0..8 {
+        if drop_gotos_to_missing_labels(&mut statements) == 0 {
+            break;
+        }
+        drop_labels_nothing_needs(&mut statements);
+    }
     // Last: the guard clause needs the exit to be the statement after the test,
     // and a label sits between them until the labels nothing needs are gone.
     prefer_guard_clause(&mut statements);
@@ -962,6 +970,55 @@ fn drop_labels_nothing_needs(statements: &mut Vec<NativeStatement>) {
     // "after a transfer". Passing `true` here kept a label on every leading
     // block, which printed a run of empty `loc_*:` lines.
     retain_needed_labels(statements, &named, false);
+}
+
+/// Removes a jump whose label is nowhere in the output.
+///
+/// A `goto` to a label that was never emitted is not valid C. It arises when
+/// structuring surrenders an edge into a region that later analysis proved
+/// unreachable and so never printed: the jump can no longer execute, and Ghidra
+/// prints neither the region nor the jump.
+fn drop_gotos_to_missing_labels(statements: &mut Vec<NativeStatement>) -> usize {
+    let mut labelled = BTreeSet::new();
+    collect_labels(statements, &mut labelled);
+    remove_unlabelled_jumps(statements, &labelled)
+}
+
+fn collect_labels(statements: &[NativeStatement], labelled: &mut BTreeSet<u64>) {
+    for statement in statements {
+        if let NativeStatement::Label(address) = statement {
+            labelled.insert(*address);
+        }
+        for body in nested_bodies_ref(statement) {
+            collect_labels(body, labelled);
+        }
+    }
+}
+
+fn remove_unlabelled_jumps(
+    statements: &mut Vec<NativeStatement>,
+    labelled: &BTreeSet<u64>,
+) -> usize {
+    let mut removed = 0;
+    let mut index = 0;
+    while index < statements.len() {
+        let drop = match &statements[index] {
+            NativeStatement::Goto(target) | NativeStatement::IfGoto { target, .. } => {
+                !labelled.contains(target)
+            }
+            _ => false,
+        };
+        if drop {
+            statements.remove(index);
+            removed += 1;
+            continue;
+        }
+        for body in nested_bodies(&mut statements[index]) {
+            removed += remove_unlabelled_jumps(body, labelled);
+        }
+        index += 1;
+    }
+    removed
 }
 
 fn collect_jump_targets(statements: &[NativeStatement], named: &mut BTreeSet<u64>) {
@@ -2989,5 +3046,43 @@ mod tests {
             panic!("the loop is gone");
         };
         assert_eq!(body, &vec![NativeStatement::Goto(0x3000)]);
+    }
+
+    /// A jump to a label that was never emitted is not valid C. It survives when
+    /// structuring surrendered an edge into a region later analysis proved
+    /// unreachable and so never printed.
+    #[test]
+    fn a_goto_whose_label_is_missing_is_dropped() {
+        let mut statements = vec![
+            NativeStatement::IfGoto {
+                condition: Expr::Constant { value: 1, width: 1 },
+                target: 0x4000,
+            },
+            NativeStatement::While {
+                condition: Expr::Constant { value: 1, width: 1 },
+                body: vec![NativeStatement::Goto(0x4000), NativeStatement::Goto(0x3000)],
+            },
+            NativeStatement::Label(0x3000),
+            NativeStatement::Return(None),
+        ];
+        assert_eq!(
+            drop_gotos_to_missing_labels(&mut statements),
+            2,
+            "both jumps to the unemitted label go, at either nesting depth"
+        );
+        // The leading conditional jump is gone, so the loop is now first.
+        let NativeStatement::While { body, .. } = &statements[0] else {
+            panic!("the loop is gone: {statements:?}");
+        };
+        assert_eq!(
+            body,
+            &vec![NativeStatement::Goto(0x3000)],
+            "the jump to a label that exists is kept"
+        );
+        assert_eq!(
+            statements.len(),
+            3,
+            "only the two unlabelled jumps were removed: {statements:?}"
+        );
     }
 }
