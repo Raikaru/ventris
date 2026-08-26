@@ -16,6 +16,7 @@ use ventris_target::{Abi, AbiRegisterClass, ArgumentRegisterMode};
 mod actions;
 mod c_score;
 mod control_flow;
+mod declaration;
 mod frame;
 mod heritage;
 mod printer;
@@ -313,6 +314,29 @@ pub struct NativeDocument {
     pub ssa: SsaFunction,
     pub types: Vec<TypeConstraint>,
     pub warnings: Vec<String>,
+    /// The recovered prototype, when a calling convention was known.
+    ///
+    /// Ghidra's `PrintC::emitFunctionDeclaration` reads the prototype and the
+    /// local scope rather than re-deriving the signature from the body, so both
+    /// travel with the document for the printer to read.
+    pub prototype: Option<graph::funcproto::FuncProto>,
+    pub scope: Option<graph::scope::ScopeLocal>,
+}
+
+impl Default for NativeDocument {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            return_type: Type::Void,
+            parameters: Vec::new(),
+            statements: Vec::new(),
+            ssa: SsaFunction::default(),
+            types: Vec::new(),
+            warnings: Vec::new(),
+            prototype: None,
+            scope: None,
+        }
+    }
 }
 
 impl NativeDocument {
@@ -1890,6 +1914,8 @@ impl NativeDecompiler {
             ssa,
             types,
             warnings,
+            prototype: None,
+            scope: None,
         }
     }
 
@@ -2236,7 +2262,96 @@ impl NativeDecompiler {
                     .map(to_location)
                     .collect(),
             );
+            // `ActionActiveParam` registers a trial per model location and
+            // decides it; `ActionInputPrototype` promotes the survivors into
+            // parameters. Without the promotion the prototype held no
+            // parameters whatever the prototype passes decided.
+            let mut inputs = graph::callproto::ParamActive::new();
+            for location in proto.model_input_storage() {
+                inputs.register(*location);
+            }
+            for trial in inputs.trials_mut() {
+                let held = (0..data.varnode_count())
+                    .map(|index| graph::VarnodeId(index as u32))
+                    .find(|value| {
+                        let varnode = data.varnode(*value);
+                        varnode.flags.input
+                            && varnode.space == trial.location.space
+                            && varnode.offset == trial.location.offset
+                            && varnode.size == trial.location.size
+                    });
+                match held {
+                    // Ghidra decides a trial with `ancestorRealistic`: an input
+                    // the function never reads is not a parameter.
+                    Some(value) if !data.varnode(value).descendants.is_empty() => {
+                        trial.value = Some(value);
+                        trial.mark_active();
+                    }
+                    _ => trial.mark_no_use(),
+                }
+            }
+            // Ghidra's `ParamListStandard::buildTrialMap` keeps an unreferenced
+            // trial that sits *before* a referenced one: the parameter exists,
+            // the function just ignores it. Only the trailing unused run is
+            // dropped. Without this a hole truncates the list, because
+            // `ParamActive::used` is a leading run of active trials.
+            let last_used = inputs
+                .trials()
+                .iter()
+                .rposition(|trial| trial.is_active())
+                .map(|index| index + 1)
+                .unwrap_or(0);
+            for trial in inputs.trials_mut().iter_mut().take(last_used) {
+                if !trial.is_active() {
+                    trial.mark_active();
+                }
+            }
+            graph::parampromote::promote_input_trials(&data, &mut proto, &inputs);
+            // Ghidra names a parameter through the symbol its scope holds, and
+            // `emitPrototypeInputs` prints the type alone when there is no
+            // symbol. Until scope population lands, name them the way the body
+            // already refers to them - a signature whose names disagree with the
+            // body's is not valid C.
+            for index in 0..proto.params().len() {
+                if proto
+                    .get_param(index)
+                    .is_some_and(|parameter| parameter.get_name().is_empty())
+                {
+                    let (location, ty) = {
+                        let parameter = proto.get_param(index).expect("checked above");
+                        (parameter.get_address(), parameter.get_type().clone())
+                    };
+                    proto.set_param_parts(index, format!("arg{index}"), location, ty);
+                }
+            }
+            let mut returns = graph::callproto::ParamActive::new();
+            for location in proto.model_output_storage() {
+                returns.register(*location);
+            }
+            let returned = data.live_ops().find_map(|(_, operation)| {
+                (operation.opcode == ventris_pcode::op::RETURN)
+                    .then(|| operation.inputs.get(1).copied())
+                    .flatten()
+            });
+            for trial in returns.trials_mut() {
+                match returned {
+                    Some(value)
+                        if data.varnode(value).space == trial.location.space
+                            && data.varnode(value).offset == trial.location.offset =>
+                    {
+                        trial.value = Some(value);
+                        trial.mark_active();
+                    }
+                    _ => trial.mark_no_use(),
+                }
+            }
+            graph::parampromote::promote_output_trials(&data, &mut proto, &returns);
             data.set_func_proto(proto);
+            // `ScopeLocal::restructure` gathers the stack's varnodes into ranges
+            // and enters a symbol for each. It runs after the prototype so the
+            // parameter entries exist, and before anything that reads the scope.
+            let scope = graph::scopepopulate::build_local_scope(&data, ventris_lifter::RAM_SPACE);
+            data.set_scope_local(scope);
         }
         let statements = graph::emit::emit_structured(
             &tables,
@@ -2268,7 +2383,29 @@ impl NativeDecompiler {
             });
         }
         promote_frame_slots(&mut statements, &stable_registers);
-        let parameters = recover_parameters(abi, &statements);
+        // Ghidra's signature comes from the prototype, so the document's
+        // parameter list does too. `SourceReconstruction::from_signature` also
+        // reads this list, so deriving it from statements here was enough to
+        // keep the whole prototype layer out of the rendered output.
+        let recovered_parameters = data.func_proto().map(|proto| {
+            proto
+                .params()
+                .iter()
+                .enumerate()
+                .map(|(index, parameter)| NativeParameter {
+                    name: if parameter.get_name().is_empty() {
+                        format!("arg{index}")
+                    } else {
+                        parameter.get_name().to_owned()
+                    },
+                    ty: parameter.get_type().clone(),
+                })
+                .collect::<Vec<_>>()
+        });
+        let parameters = match recovered_parameters {
+            Some(recovered) if !recovered.is_empty() => recovered,
+            _ => recover_parameters(abi, &statements),
+        };
         let return_type = graph_return_type(&data, &recovered, architecture);
         NativeDocument {
             name: format!("sub_{:x}", function.entry),
@@ -2278,6 +2415,8 @@ impl NativeDecompiler {
             ssa: SsaFunction::default(),
             types: Vec::new(),
             warnings: data.warnings().to_vec(),
+            prototype: data.func_proto().cloned(),
+            scope: data.scope_local().cloned(),
         }
     }
 
@@ -5121,6 +5260,8 @@ mod tests {
             ssa: SsaFunction::default(),
             types: Vec::new(),
             warnings: Vec::new(),
+            prototype: None,
+            scope: None,
         };
         let c = document.render();
         assert!(c.contains("if (flag) {"), "{c}");
@@ -5187,6 +5328,8 @@ mod tests {
                 ssa: SsaFunction::default(),
                 types: Vec::new(),
                 warnings: Vec::new(),
+                prototype: None,
+                scope: None,
             };
             let c = document.render();
             assert!(c.contains(&format!("goto loc_{external_target:x};")), "{c}");
@@ -5232,6 +5375,8 @@ mod tests {
             ssa: SsaFunction::default(),
             types: Vec::new(),
             warnings: Vec::new(),
+            prototype: None,
+            scope: None,
         };
         let c = document.render();
         assert!(c.contains("if (flag) {"), "{c}");
@@ -5312,6 +5457,8 @@ mod tests {
                 ssa: SsaFunction::default(),
                 types: Vec::new(),
                 warnings: Vec::new(),
+                prototype: None,
+                scope: None,
             };
             let c = document.render();
             assert!(c.contains("goto *(switch_target);"), "{c}");
@@ -5349,6 +5496,8 @@ mod tests {
             ssa: SsaFunction::default(),
             types: Vec::new(),
             warnings: Vec::new(),
+            prototype: None,
+            scope: None,
         };
         let c = document.render();
         assert_eq!(c.matches("goto loc_1020;").count(), 2, "{c}");
@@ -5388,6 +5537,8 @@ mod tests {
             ssa: SsaFunction::default(),
             types: Vec::new(),
             warnings: Vec::new(),
+            prototype: None,
+            scope: None,
         };
         let c = document.render();
         assert!(c.contains("g_score = eax;"), "{c}");
@@ -5422,6 +5573,8 @@ mod tests {
             ssa: SsaFunction::default(),
             types: Vec::new(),
             warnings: Vec::new(),
+            prototype: None,
+            scope: None,
         };
         let c = document.render();
         assert!(

@@ -509,6 +509,38 @@ All notable Ventris changes are documented here.
   `ActionSegmentize` needs a `SegmentOp` registry and segmented address-space
   metadata that no supported architecture defines here. `ActionLaneDivide` needs
   a laned-register registry and lane-description machinery.
+- The prototype now drives the signature, closing the dead chain that made the
+  whole prototype layer inert. Four separate breaks, each measured:
+  - Nothing promoted a recovered trial into a `ProtoParameter`, so the prototype
+    held zero parameters no matter what the prototype passes decided.
+    `graph/parampromote.rs` ports `FuncProto::updateInputTypes`/
+    `updateOutputTypes`, and the pipeline now registers a trial per model input
+    location and decides it the way `ActionActiveParam` does.
+  - A trial can survive without a value. `ParamListStandard::buildTrialMap`
+    keeps an unreferenced trial that sits *before* a referenced one - the
+    convention still passes something in that slot - so only the trailing unused
+    run is dropped. Without this a hole truncated the parameter list.
+  - `native/declaration.rs` ports `PrintC::emitFunctionDeclaration`,
+    `emitPrototypeOutput`, `emitPrototypeInputs`, `emitVarDecl`,
+    `emitVarDeclStatement` and `emitSymbolScope`. The printer reads the prototype
+    and the local scope instead of re-deriving the signature from the body.
+  - `SourceReconstruction::from_signature` rewrites the signature from
+    `NativeDocument::parameters`, so substituting only the printer was invisible.
+    That list now comes from the prototype too.
+- `graph/scopepopulate.rs` ports `MapState`, `ScopeLocal::restructure` and
+  `restructureVarnode` from `varmap.cc`, so `Funcdata::scope_local` is populated:
+  stack varnodes and frame-relative accesses become ranges with real
+  `UsePoint` liveness, a recycled slot at disjoint points becomes two symbols,
+  and escape comes from `AliasChecker::has_local_alias`. The four passes in
+  `graph/scopeconsumers.rs` are registered as a `localrecovery` group and in the
+  expression pool, no longer dormant.
+- `graph/varnodeprops.rs` ports the consume arm of `ActionVarnodeProps` -
+  `(getNZMask() & getConsume()) == 0` replaces a value with zero - but is NOT
+  registered. Measured twice: it costs an agreeing function because zeroing an
+  input removes its readers and the convention-claimed input is then judged not
+  to be a parameter. Ghidra's consume propagation treats convention storage as
+  consumed; `deadcode::propagate` has no such sink, and adding one is the
+  prerequisite.
 - Ported the representable half of `Merge::mergeTestRequired`. A required merge
   is not unconditional in Ghidra: two address-tied values at different addresses
   are different storage and must not share a variable, and a function input must

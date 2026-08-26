@@ -538,6 +538,8 @@ pub fn default_pipeline() -> Box<dyn Action> {
     // operations the other rules match on, so running them earlier hides work.
     expression = expression
         .add_rule(Box::new(super::protoconstraints::RulePiecePathology))
+        .add_rule(Box::new(super::scopeconsumers::RulePtrsubCharConstant))
+        .add_rule(Box::new(super::scopeconsumers::RuleStringCopy))
         .add_rule(Box::new(RulePropagateCopy))
         .add_rule(Box::new(RuleIndirectCollapse));
     // Prototype and parameter recovery runs before the expression set: an
@@ -601,6 +603,19 @@ pub fn default_pipeline() -> Box<dyn Action> {
             cleanup = cleanup.add_rule(rule);
         }
         pipeline = pipeline.add(Box::new(FixedPoint::new(Box::new(cleanup))));
+    }
+    // Ghidra's `localrecovery` group, which reads the local scope:
+    // ActionRestructureVarnode at coreaction.cc:5555-5557 and
+    // ActionMappedLocalSync at 5741-5743.
+    if !skip("localrecovery") {
+        let mut localrecovery = ActionGroup::new("localrecovery");
+        for action in [
+            Box::new(super::scopeconsumers::ActionRestructureVarnode) as Box<dyn Action>,
+            Box::new(super::scopeconsumers::ActionMappedLocalSync),
+        ] {
+            localrecovery = localrecovery.add(action);
+        }
+        pipeline = pipeline.add(Box::new(localrecovery));
     }
     // Ghidra's `protorecovery` group: prototype recovery reads the function's
     // FuncProto, which the graph path populates from the target ABI.

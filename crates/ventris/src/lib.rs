@@ -614,7 +614,8 @@ mod tests {
         let address = "0x80010000";
         let expected = "uint32_t sub_80010000(uint32_t arg0, uint32_t arg1, uint32_t arg2)";
         let analysis = pipeline.analyze(address, 32, &Hints::default()).unwrap();
-        assert!(analysis.document.render().contains(expected));
+        let rendered = analysis.document.render();
+        assert!(rendered.contains(expected), "{rendered}");
         let source = pipeline
             .decompile(address, 32, &Hints::default())
             .unwrap()

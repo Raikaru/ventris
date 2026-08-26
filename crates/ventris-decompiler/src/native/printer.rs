@@ -28,27 +28,43 @@ pub(super) fn render_document(document: &NativeDocument) -> String {
         out.push('\n');
     }
 
-    let parameters = if document.parameters.is_empty() {
-        "void".to_owned()
-    } else {
-        document
-            .parameters
-            .iter()
-            .map(|parameter| {
-                format!(
-                    "{} {}",
-                    render_type(&parameter.ty),
-                    escape_identifier(&parameter.name)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    out.push_str(&format!(
-        "{} {}({parameters})\n",
-        render_type(&document.return_type),
-        escape_identifier(&document.name)
-    ));
+    // Ghidra emits the signature from the prototype, not from the body:
+    // `PrintC::emitFunctionDeclaration` reads `getFuncProto()` and enters
+    // `getScopeLocal()` for the parameter symbols. Re-deriving it from emitted
+    // statements is what left the whole prototype layer inert.
+    match super::declaration::render_optional_function_declaration(
+        document.prototype.as_ref(),
+        document.scope.as_ref(),
+        &document.name,
+    ) {
+        Some(declaration) => {
+            out.push_str(&declaration);
+            out.push('\n');
+        }
+        None => {
+            let parameters = if document.parameters.is_empty() {
+                "void".to_owned()
+            } else {
+                document
+                    .parameters
+                    .iter()
+                    .map(|parameter| {
+                        format!(
+                            "{} {}",
+                            render_type(&parameter.ty),
+                            escape_identifier(&parameter.name)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            out.push_str(&format!(
+                "{} {}({parameters})\n",
+                render_type(&document.return_type),
+                escape_identifier(&document.name)
+            ));
+        }
+    }
     out.push_str("{\n");
     for statement in &document.statements {
         render_statement(statement, &mut out, 0);
@@ -704,6 +720,8 @@ mod tests {
             ssa: SsaFunction::default(),
             types: Vec::new(),
             warnings: Vec::new(),
+            prototype: None,
+            scope: None,
         }
     }
 
@@ -852,6 +870,8 @@ mod tests {
             ssa: Default::default(),
             types: Vec::new(),
             warnings: vec!["prototype could not be recovered".into()],
+            prototype: None,
+            scope: None,
         };
         let rendered = render_document(&document);
         assert!(

@@ -52,6 +52,7 @@ pub mod mergeaction;
 pub mod namevars;
 pub mod nodejoin;
 pub mod nonzero;
+pub mod parampromote;
 pub mod proto;
 pub mod protoaction;
 pub mod protoconstraints;
@@ -60,6 +61,7 @@ pub mod refine;
 pub mod rules;
 pub mod scope;
 pub mod scopeconsumers;
+pub mod scopepopulate;
 pub mod splitdatatype;
 pub mod splitvarnode;
 pub mod stackframe;
@@ -72,6 +74,7 @@ pub mod tracedag;
 pub mod typefactory;
 pub mod types;
 pub mod value;
+pub mod varnodeprops;
 
 use std::collections::{BTreeMap, BTreeSet};
 
