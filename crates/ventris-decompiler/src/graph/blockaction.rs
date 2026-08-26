@@ -23,11 +23,7 @@ fn last_live_op(data: &Funcdata, block: GraphBlockId) -> Option<OpId> {
 }
 
 fn branch_target(data: &Funcdata, branch: OpId) -> Option<GraphBlockId> {
-    let target = data.op(branch).inputs.first().copied()?;
-    let address = data.varnode(target).offset;
-    data.blocks()
-        .find(|(_, block)| block.start == address)
-        .map(|(id, _)| id)
+    data.branch_target(branch)
 }
 
 fn can_clone_return_value(data: &Funcdata, value: VarnodeId) -> bool {

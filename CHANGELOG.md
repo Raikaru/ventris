@@ -6,6 +6,23 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- Every pass that asks where a branch goes now uses one resolver.
+  `branchaction.rs`, `blockaction.rs`, `structuretransform.rs` and
+  `jumptable.rs` each mapped a branch's destination varnode to a block by
+  matching `block.start == offset`. For a relative p-code destination the offset
+  is an operation index, so the match found nothing and `ActionDeterminedBranch`,
+  the block actions and the guard analysis all silently became no-ops on any
+  instruction that branches internally. `Funcdata::branch_target` resolves both
+  forms, `Funcdata::block_starting_at` is the address-only lookup, and the entry
+  lookups now require `start_order == 0` so a mid-instruction block can never be
+  mistaken for the entry. `__FrameCallback__Fl` drops from eleven gotos to five
+  and from 123 rendered lines to 94.
+- Consequence, measured and accepted: with the dead branch now correctly folded,
+  `__FrameCallback__Fl`'s only `return` carrying a value was in it, so the
+  function became void where the oracle returns `undefined2 *` -
+  `return-presence` 1 -> 2. `agrees` holds at 26. The value was previously
+  printed only inside an `if (0)` that should never have survived, so this is a
+  real defect surfacing rather than a new one.
 - Consecutive blocks within one instruction now fall through to each other.
   With the p-code split in place but no fall-through edge, the guarded body of an
   internal branch had no successor at all and read as a dead end. Inert on the

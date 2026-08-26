@@ -283,7 +283,7 @@ impl<'a> Graph<'a> {
         }
         let entry = data
             .blocks()
-            .find(|(_, block)| block.start == data.entry)
+            .find(|(_, block)| block.start == data.entry && block.start_order == 0)
             .map(|(id, _)| id)
             .or_else(|| data.blocks().next().map(|(id, _)| id))
             .and_then(|id| of_block.get(&id).copied());

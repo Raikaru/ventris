@@ -37,7 +37,7 @@ pub fn compute_dominance(data: &Funcdata) -> Dominance {
     // first block so a graph assembled without an address still analyses.
     let entry = data
         .blocks()
-        .find(|(_, block)| block.start == data.entry)
+        .find(|(_, block)| block.start == data.entry && block.start_order == 0)
         .map(|(id, _)| id)
         .or_else(|| data.blocks().next().map(|(id, _)| id));
     let Some(entry) = entry else {

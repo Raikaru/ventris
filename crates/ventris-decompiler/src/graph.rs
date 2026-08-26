@@ -1015,6 +1015,38 @@ impl Funcdata {
         true
     }
 
+    /// The block beginning at an instruction boundary.
+    ///
+    /// One instruction can hold several blocks, so an address alone is not a
+    /// block identity: only the one at p-code index zero begins at the address.
+    pub fn block_starting_at(&self, address: u64) -> Option<GraphBlockId> {
+        self.blocks()
+            .find(|(_, block)| block.start == address && block.start_order == 0)
+            .map(|(id, _)| id)
+    }
+
+    /// The block a branch transfers to when taken.
+    ///
+    /// A destination in the constant space is a relative p-code branch within
+    /// the branching instruction, so it names an operation rather than an
+    /// address. Resolving it as an address finds the wrong block or none, which
+    /// silently disables every pass that asks where a branch goes.
+    pub fn branch_target(&self, branch: OpId) -> Option<GraphBlockId> {
+        let operation = &self.ops[branch.0 as usize];
+        let target = *operation.inputs.first()?;
+        let varnode = &self.varnodes[target.0 as usize];
+        if varnode.space == CONST_SPACE {
+            let seq = operation.seq;
+            let relative = varnode.offset as i64;
+            let order = u32::try_from(i64::from(seq.order).checked_add(relative)?).ok()?;
+            return self
+                .blocks()
+                .find(|(_, block)| block.start == seq.address && block.start_order == order)
+                .map(|(id, _)| id);
+        }
+        self.block_starting_at(varnode.offset)
+    }
+
     /// Removes a block that only transfers control, connecting its predecessors
     /// straight to its successor.
     ///
@@ -1026,7 +1058,10 @@ impl Funcdata {
     pub fn splice_block(&mut self, block: GraphBlockId) -> bool {
         self.invalidate_masks();
         let candidate = &self.blocks[block.0 as usize];
-        if candidate.dead || candidate.successors.len() != 1 || candidate.start == self.entry {
+        if candidate.dead
+            || candidate.successors.len() != 1
+            || (candidate.start == self.entry && candidate.start_order == 0)
+        {
             return false;
         }
         let successor = candidate.successors[0];
@@ -1091,7 +1126,7 @@ impl Funcdata {
         self.invalidate_masks();
         let entry = self
             .blocks()
-            .find(|(_, block)| block.start == self.entry)
+            .find(|(_, block)| block.start == self.entry && block.start_order == 0)
             .map(|(id, _)| id)
             .or_else(|| self.blocks().next().map(|(id, _)| id));
         let Some(entry) = entry else { return 0 };
@@ -1670,6 +1705,25 @@ mod tests {
             data.block(at(2)).successors,
             vec![at(3)],
             "the guarded body falls through to the join rather than dead-ending"
+        );
+        // Every pass that asks where a branch goes must resolve the relative
+        // destination, not read it as an address. Reading it as an address finds
+        // nothing here, which silently turned those passes into no-ops.
+        let branch = data
+            .block(at(0))
+            .ops
+            .last()
+            .copied()
+            .expect("the guard ends in the branch");
+        assert_eq!(
+            data.branch_target(branch),
+            Some(at(3)),
+            "the branch is taken to the join, skipping the guarded body"
+        );
+        assert_eq!(
+            data.block_starting_at(0x1000),
+            Some(at(0)),
+            "only the block at p-code index zero begins at the address"
         );
     }
 }

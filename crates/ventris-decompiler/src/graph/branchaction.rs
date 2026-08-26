@@ -33,11 +33,9 @@ fn last_live_op(data: &Funcdata, block: GraphBlockId) -> Option<OpId> {
 }
 
 fn branch_target_block(data: &Funcdata, branch: OpId) -> Option<GraphBlockId> {
-    let target = data.op(branch).inputs.first().copied()?;
-    let address = data.varnode(target).offset;
-    data.blocks()
-        .find(|(_, block)| block.start == address)
-        .map(|(id, _)| id)
+    // A relative p-code destination names an operation, not an address, so the
+    // shared resolver is the only correct way to ask where a branch goes.
+    data.branch_target(branch)
 }
 
 fn address_for_block(data: &mut Funcdata, block: GraphBlockId, size: u32) -> VarnodeId {

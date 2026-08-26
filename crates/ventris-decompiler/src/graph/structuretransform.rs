@@ -149,10 +149,9 @@ fn last_live_op(data: &Funcdata, block: GraphBlockId) -> Option<OpId> {
 
 /// Find the block named by a branch target varnode.
 fn target_block(data: &Funcdata, target: super::VarnodeId) -> Option<GraphBlockId> {
-    let address = data.varnode(target).offset;
-    data.blocks()
-        .find(|(_, block)| block.start == address)
-        .map(|(id, _)| id)
+    // Only an instruction-boundary block can be named by an address; a relative
+    // p-code destination is resolved by `Funcdata::branch_target` from its op.
+    data.block_starting_at(data.varnode(target).offset)
 }
 
 /// Plan the branch-edge part of complementing one condition leaf.

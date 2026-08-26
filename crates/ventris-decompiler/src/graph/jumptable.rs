@@ -314,11 +314,7 @@ fn condition_to_switch(
     branch_block: GraphBlockId,
     cbranch: OpId,
 ) -> Option<bool> {
-    let target_value = *data.op(cbranch).inputs.first()?;
-    let target = data
-        .blocks()
-        .find(|(_, block)| block.start == data.varnode(target_value).offset)
-        .map(|(block, _)| block)?;
+    let target = data.branch_target(cbranch)?;
     let successors = &data.block(guard_block).successors;
     if successors.len() != 2 {
         return None;
