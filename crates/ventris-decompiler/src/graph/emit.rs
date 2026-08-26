@@ -545,12 +545,6 @@ fn substitute_name(statement: &mut NativeStatement, name: &str, value: &Expr) ->
     }
 }
 
-/// The complement of a comparison, when the operator can absorb the negation.
-///
-/// Port of `get_booleanflip` together with the cases `opFlipInPlaceTest` accepts.
-/// The ordered comparisons flip by swapping their operands as well as their
-/// operator, because `!(a < b)` is `b <= a` and not `a >= b` in an expression
-/// tree that has no `>=`.
 fn flip_boolean(condition: &Expr) -> Option<Expr> {
     use crate::native::BinaryOp;
     match condition {
@@ -1064,9 +1058,31 @@ fn drop_stale_header_transfer(statements: &mut Vec<NativeStatement>) {
     }
 }
 
+/// Drops a `goto label` that sits in trailing position, however deeply nested
+/// inside trailing `if` bodies, when `label` is what follows the whole
+/// construct.
+///
+/// Falling out of a trailing `if` lands exactly where the jump was going, so the
+/// jump says nothing. Ghidra renders these as plain nesting: `__osRealloc` has
+/// five jumps to its shared epilogue and the oracle emits none.
+///
+/// Only `if` is followed. A trailing jump out of a loop is an early exit, and
+/// out of a `switch` case it is a `break` - dropping either would fall into the
+/// loop's next iteration or the next case instead.
 fn drop_trailing_goto(body: &mut Vec<NativeStatement>, label: u64) {
-    if matches!(body.last(), Some(NativeStatement::Goto(target)) if *target == label) {
-        body.pop();
+    match body.last_mut() {
+        Some(NativeStatement::Goto(target)) if *target == label => {
+            body.pop();
+        }
+        Some(NativeStatement::IfElse {
+            then_body,
+            else_body,
+            ..
+        }) => {
+            drop_trailing_goto(then_body, label);
+            drop_trailing_goto(else_body, label);
+        }
+        _ => {}
     }
 }
 
@@ -2919,5 +2935,54 @@ mod tests {
         );
         retain_live_assignments(&mut statements, &read);
         assert_eq!(statements[0], assignment);
+    }
+    /// `__osRealloc` reached its shared epilogue with five jumps where the
+    /// oracle emits none: each sat in trailing position inside nested `if`s,
+    /// so falling out already lands on the label.
+    #[test]
+    fn a_trailing_goto_nested_in_ifs_is_dropped() {
+        let mut statements = vec![
+            NativeStatement::IfElse {
+                condition: Expr::Constant { value: 1, width: 1 },
+                then_body: vec![NativeStatement::IfElse {
+                    condition: Expr::Constant { value: 1, width: 1 },
+                    then_body: vec![NativeStatement::Goto(0x3000)],
+                    else_body: Vec::new(),
+                }],
+                else_body: Vec::new(),
+            },
+            NativeStatement::Label(0x3000),
+            NativeStatement::Return(None),
+        ];
+        drop_trailing_gotos_to_following_label(&mut statements);
+        let NativeStatement::IfElse { then_body, .. } = &statements[0] else {
+            panic!("the outer if is gone");
+        };
+        let NativeStatement::IfElse { then_body, .. } = &then_body[0] else {
+            panic!("the inner if is gone");
+        };
+        assert!(
+            then_body.is_empty(),
+            "the redundant jump survived: {then_body:?}"
+        );
+    }
+
+    /// A trailing jump out of a loop is an early exit, not a fallthrough:
+    /// dropping it would fall into the next iteration instead.
+    #[test]
+    fn a_trailing_goto_out_of_a_loop_is_kept() {
+        let mut statements = vec![
+            NativeStatement::While {
+                condition: Expr::Constant { value: 1, width: 1 },
+                body: vec![NativeStatement::Goto(0x3000)],
+            },
+            NativeStatement::Label(0x3000),
+            NativeStatement::Return(None),
+        ];
+        drop_trailing_gotos_to_following_label(&mut statements);
+        let NativeStatement::While { body, .. } = &statements[0] else {
+            panic!("the loop is gone");
+        };
+        assert_eq!(body, &vec![NativeStatement::Goto(0x3000)]);
     }
 }

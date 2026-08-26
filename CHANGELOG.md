@@ -493,6 +493,12 @@ All notable Ventris changes are documented here.
   `unstructured-control-flow` at 9. One defect remains, recorded rather than
   papered over: `TRK_fill_mem`'s first `for` is missing its initializer, and the
   statement that computes it appears after both loops instead of before them.
+- A jump in trailing position inside nested `if` bodies is now dropped, since
+  falling out of the nesting lands where the jump was going. `__osRealloc` went
+  from five jumps to none and `unstructured-control-flow` from 7 corpus
+  functions to 3, with `agrees` up from 22 to 25 of 37. Only `if` is followed:
+  a trailing jump out of a loop is an early exit and out of a `switch` case a
+  `break`, and dropping either would change where control lands.
 - An expression statement's operands are now collected as reads. The arm was
   missing from `collect_read_names` entirely, so liveness could not see them.
 - Ported Ghidra's bitfield cleanup rules into `graph/bitfield.rs`: five of the
