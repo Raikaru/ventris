@@ -509,6 +509,49 @@ All notable Ventris changes are documented here.
   `ActionSegmentize` needs a `SegmentOp` registry and segmented address-space
   metadata that no supported architecture defines here. `ActionLaneDivide` needs
   a laned-register registry and lane-description machinery.
+- Recovered `dl_G_MOVEWORD__5emu64Fv`'s switch, which took fixing five separate
+  defects in the chain - the function went from 34 lines ending in a bare
+  `uVar6();` to 167 lines with a `switch`, 5 cases and 8 calls:
+  - `parse_scaled` rejected a LOAD-produced index. Ghidra's `findSmallestNormal`
+    permits a one-byte value when a LOAD is in the path, and PPC indexes with
+    `lbz`.
+  - `find_guard` rejected a reversed comparison with the constant on the left.
+  - `Pipeline::target_memory_value` refused every target but GBA, so no jump
+    table could ever be read, and its fold was hardcoded little-endian which
+    would have byte-swapped a PPC table. Now any target, with the architecture's
+    byte order.
+  - `sleigh_flow` reported `Flow::Return` for the `BRANCHIND`, so `discover`
+    never followed the table and the case bodies were never lifted.
+  - The provisional graph needed `heritage` before the address chain was
+    walkable, and the expression pipeline before it folded - which is exactly why
+    Ghidra's restart re-runs the analysis rather than re-reading the raw graph.
+- `Pipeline::discover_through_jump_tables` is Ghidra's restart at the layer where
+  re-lifting is possible (`flow.cc:771-805`): recover the table from a
+  provisional graph, discover from every case and default target, merge the
+  instructions, and add the branch-to-case edges the structurer needs. Skippable
+  with `VENTRIS_NO_MULTISTAGE`. Attributed: `missing-conditional` 6 to 5,
+  `call-census` 4 to 3, `missing-loop-or-switch` 3 to 2, `return-presence` 2 to 3.
+- `sleigh_flow` kept the fallthrough of a conditional return. PPC `beqlr` is
+  `if (!cond) goto next` followed by the return; scanning p-code in reverse hit
+  the return first, reported an unconditional return, deleted the not-taken
+  successor and stopped discovery dead. `TRK_fill_mem` went from 38 instructions
+  stopping at `0x800a6880` to 48 reaching `0x800a6890`, which closed both of its
+  `missing-loop-or-switch` differences. The file already had `skips_to_fallthrough`
+  for the analogous likely-branch case.
+- The `blockaction`/`coreaction`/`storageaction` loop in `native.rs` iterated
+  every action, checked the skip list, and never called `apply` - so
+  `ActionNodeJoin`, `ActionDeadCode` and `ActionShadowVar` had never run.
+  `ActionReturnSplit` stays excluded: bisected against `corpus-smoke`, it alone
+  diverges control flow on two PS2 functions.
+- `Graph::surrendered` was compared before and after `mark_loop_exits` to detect
+  progress but never incremented anywhere, so the comparison always said no and
+  the collapse fell through to `rule_goto` instead of retrying with the exits it
+  had just marked.
+- `ActionVarnodeProps` is now registered, and measurably earns it: skipping it
+  makes `missing-parameters` worse. It took moving prototype recovery inside the
+  round loop, where Ghidra does it - `ActionActiveParam` decides trials and
+  `ActionInputPrototype` promotes them once per round, so the decision converges
+  with the graph instead of being taken once after every pass has run.
 - Reverted a parameter-trial classification that traded a hard gate for a soft
   one. Marking a pure input inactive when every use reaches only a CALL argument
   made `osContGetReadData` render one parameter, matching the oracle exactly - but

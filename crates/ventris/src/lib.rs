@@ -324,6 +324,12 @@ impl Pipeline {
         let Some(architecture) = self.architecture else {
             return function;
         };
+        // Skippable so a regression can be attributed to this stage without a
+        // rebuild. Every behaviour added late in a session needs this: a change
+        // inside pipeline wiring with no switch cost five commits of bisection.
+        if std::env::var_os("VENTRIS_NO_MULTISTAGE").is_some() {
+            return function;
+        }
         let read = |address, width| self.target_memory_value(address, width);
         for _ in 0..MULTISTAGE_ROUNDS {
             let mut data = ventris_decompiler::graph::Funcdata::from_lifted(&function);
