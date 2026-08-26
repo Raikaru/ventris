@@ -6,6 +6,63 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- `AncestorRealistic` is ported as the state machine it is, replacing a walk that
+  answered a different question. `enterNode`/`uponPop` classify each path as
+  success, fail, failkill or *solid*, and the interesting rule is what happens at
+  a merge: solid movement along one path overrides a failkill along another,
+  while a failkill without solid movement is a failure. The conservative walk it
+  replaces reported "anything suspicious anywhere", so it refused arguments
+  Ghidra accepts. `allowFailingPath` is honoured too - `checkInputTrialUse` sets
+  it for a register trial and clears it only for a stack one.
+- Three of `AncestorRealistic`'s tests have no representation and read as false,
+  which is their default for operations this port builds: `isIncidentalCopy`,
+  `isStoreUnmapped`, and `isReturnAddress` on a guard output. Each is set by a
+  Ghidra pass this port does not have, and none can be inferred without inventing
+  the fact.
+- `Varnode::unaffected` is modelled. `setInputVarnode` marks an input at a
+  location the convention preserves, and `AncestorRealistic` fails outright on
+  such an input: a register every callee preserves cannot be how this call's
+  argument arrived.
+- `ActionDirectWrite` is ported and registered in both of Ghidra's positions. The
+  property answers "could a variable in the source have held this value", and
+  `AncestorRealistic` consults it on every unwritten input it reaches, so the two
+  had to land together. One sub-branch stays out: Ghidra treats a `COPY` as a
+  direct write when the original operation was really a `STORE`
+  (`Varnode::isStackStore`), which needs a flag recording that provenance.
+- `Merge::processHighRedundantCopy` and `markRedundantCopies` are ported, with
+  `PcodeOp::nonprinting` on `GraphOp` and the emitter honouring it. Two `COPY`s of
+  one value into one variable are one assignment in the source; the later one is
+  silenced rather than removed, because the value it defines is still read.
+  `checkCopyPair` is the guard - the earlier copy must dominate, and no other
+  write of the variable may intervene.
+- `Merge::mergeMultiEntry` is ported into the variable partition, in Ghidra's
+  position between the required and the speculative merges. Every facility its
+  old note called missing now exists: the multi-entry symbol tree in
+  `graph::scope`, the partition in `graph::mergeaction`, and `graph::cover` for
+  the conflict test.
+- `RuleMultiCollapse`'s functional-equality path is ported, including the
+  block-local `cseFindInBlock` it needs and `BlockBasic::earliestUse` to bound it.
+  Two branches that compute the same thing from the same operands collapse to
+  that computation; `nofunc` still refuses when the base branch is a marker or
+  unwritten, because neither can be matched except by being the very same value.
+- Value resolution stops at an indirect creation. Its first operand is the
+  placeholder standing for "no previous value", so resolving through it printed
+  the constant zero where a call's result belongs: `getBuiltInTexture` compared
+  `0 == 0`, and before the creation existed at all it compared `0x150000 == 0` -
+  the address a `lui` had left in the return register. It now compares the value
+  the call returned.
+- The remaining exclusions are proved rather than asserted. `ActionVarnodeProps`'s
+  read-only arm is gated on `readonlypropagate`, which `Architecture::resetDefaults`
+  sets to `false` (`architecture.cc:1426`), so the oracle never runs it either;
+  its volatile and auto-live-hold arms would iterate empty sets.
+  `ActionForceGoto` and `ActionRestartGroup` need an `Override`, and every one of
+  Ghidra's override sources is user input. `ActionConstbase` needs the
+  architecture's tracked-context set, an input rather than an analysis - Ghidra on
+  this corpus prints `unaff_r13` for the same reason we do. `ActionSetCasts` is
+  ported as the per-operand decision the emitter consults, which is where a cast
+  is observable. `ActionReturnSplit` needs the *structured* goto set that
+  `gatherReturnGotos` reads, which means structuring inside the main loop, not a
+  guard.
 - `Heritage::guardCalls`'s *second* arm is ported, and it is the one that makes
   argument recovery possible at all. A call instruction names no arguments, so
   Ghidra appends a free varnode per candidate parameter location *before*

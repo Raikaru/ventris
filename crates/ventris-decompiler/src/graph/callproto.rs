@@ -289,6 +289,271 @@ pub fn ancestor_realistic(data: &Funcdata, value: VarnodeId) -> bool {
     matches!(ancestor_verdict(data, value), AncestorVerdict::Realistic)
 }
 
+/// The traversal outcomes of `AncestorRealistic`.
+///
+/// Ghidra's `pop_success`, `pop_fail`, `pop_failkill` and `pop_solid`. The last
+/// two are what make the analysis more than a reachability walk: `pop_solid`
+/// says the function performed a real operation on the way to the parameter, and
+/// `pop_failkill` says one path arrived from a location a callee had destroyed.
+/// Solid movement on one path of a merge overrides a failkill on another; a
+/// failkill without solid movement is a failure.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum Pop {
+    Success,
+    Fail,
+    FailKill,
+    Solid,
+}
+
+/// One frame of the depth-first ancestor traversal.
+struct AncestorState {
+    op: OpId,
+    slot: usize,
+    seen_solid: bool,
+    seen_kill: bool,
+}
+
+/// Whether the value reaching `slot` of `op` arrived the way a parameter does.
+///
+/// A faithful port of `AncestorRealistic::execute`, `enterNode` and `uponPop`
+/// (`funcdata_varnode.cc`). The conservative walk this replaces answered a
+/// different question - "is anything on any path suspicious" - and so refused
+/// arguments Ghidra accepts and accepted some it refuses.
+///
+/// Three of Ghidra's tests have no representation here and are read as false,
+/// which is their default for operations this graph builds: `isIncidentalCopy`
+/// (a copy the lifter marks as bookkeeping), `isStoreUnmapped`, and
+/// `isReturnAddress` on a guard output. Each is set by a Ghidra pass this port
+/// does not have; none can be inferred without inventing the fact.
+pub fn ancestor_realistic_at(data: &Funcdata, op: OpId, slot: usize) -> bool {
+    // `checkInputTrialUse` passes `allowFail = true` for a register location and
+    // `false` only for a stack one, so a failkill that solid movement covers is
+    // not an outright failure here.
+    let allow_failing_path = data
+        .op(op)
+        .inputs
+        .get(slot)
+        .copied()
+        .is_some_and(|value| data.varnode(value).space != ventris_lifter::RAM_SPACE);
+    let Some(start) = data.op(op).inputs.get(slot).copied() else {
+        return false;
+    };
+    // "If the parameter itself is an input, we don't consider this realistic, we
+    // expect to see active movement into the parameter."
+    if data.varnode(start).flags.input {
+        return false;
+    }
+    let mut marked: BTreeSet<VarnodeId> = BTreeSet::new();
+    let mut stack: Vec<AncestorState> = vec![AncestorState {
+        op,
+        slot,
+        seen_solid: false,
+        seen_kill: false,
+    }];
+    let mut multi_depth = 0usize;
+    let mut command = None;
+    // The traversal is bounded the way Ghidra bounds it with `trim_recurse_max`.
+    for _ in 0..ANCESTOR_TRAVERSAL_STEPS {
+        let popped = match command.take() {
+            None => enter_ancestor_node(data, &mut stack, &mut marked, &mut multi_depth),
+            Some(pop) => Some(pop),
+        };
+        let Some(pop) = popped else { continue };
+        // `uponPop`.
+        let Some(state) = stack.last() else {
+            return matches!(pop, Pop::Success | Pop::Solid);
+        };
+        if data.op(state.op).opcode != op::MULTIEQUAL {
+            stack.pop();
+            if stack.is_empty() {
+                return matches!(pop, Pop::Success | Pop::Solid);
+            }
+            command = Some(pop);
+            continue;
+        }
+        let arity = data.op(state.op).inputs.len();
+        if pop == Pop::Fail {
+            multi_depth = multi_depth.saturating_sub(1);
+            stack.pop();
+            if stack.is_empty() {
+                return false;
+            }
+            command = Some(Pop::Fail);
+            continue;
+        }
+        // Ghidra records the "solid" and "failkill" observations on the frame
+        // *below* the merge, which is where they are read once every sibling has
+        // been traversed.
+        let below = stack.len().checked_sub(2);
+        if pop == Pop::Solid && multi_depth == 1 && arity == 2 {
+            if let Some(below) = below {
+                stack[below].seen_solid = true;
+            }
+        } else if pop == Pop::FailKill {
+            if let Some(below) = below {
+                stack[below].seen_kill = true;
+            }
+        }
+        let state = stack.last_mut().expect("a frame");
+        state.slot += 1;
+        if state.slot < arity {
+            continue;
+        }
+        let (solid, kill) = below
+            .map(|below| (stack[below].seen_solid, stack[below].seen_kill))
+            .unwrap_or((false, false));
+        // With `allowFailingPath` set, solid movement makes the merge a success
+        // even where one path arrived from a killed location: Ghidra slates the
+        // trial for the extra conditional-execution test rather than failing it.
+        // This graph has no cond-exe test, so the solid path stands.
+        let outcome = if solid {
+            if kill && !allow_failing_path {
+                Pop::Fail
+            } else {
+                Pop::Success
+            }
+        } else if kill {
+            Pop::FailKill
+        } else {
+            Pop::Success
+        };
+        multi_depth = multi_depth.saturating_sub(1);
+        stack.pop();
+        if stack.is_empty() {
+            return matches!(outcome, Pop::Success | Pop::Solid);
+        }
+        command = Some(outcome);
+    }
+    false
+}
+
+/// How many traversal steps `ancestor_realistic_at` may take.
+///
+/// Ghidra bounds the equivalent walk with `Architecture::trim_recurse_max`; this
+/// graph has no such knob, so the bound is fixed.
+const ANCESTOR_TRAVERSAL_STEPS: usize = 4096;
+
+/// `AncestorRealistic::enterNode`, returning `None` to push a new frame.
+fn enter_ancestor_node(
+    data: &Funcdata,
+    stack: &mut Vec<AncestorState>,
+    marked: &mut BTreeSet<VarnodeId>,
+    multi_depth: &mut usize,
+) -> Option<Pop> {
+    let state = stack.last().expect("a frame");
+    let value = data.op(state.op).inputs.get(state.slot).copied()?;
+    // A value already visited truncates the traversal; the proper result comes
+    // back along the first path.
+    if marked.contains(&value) {
+        return Some(Pop::Success);
+    }
+    let varnode = data.varnode(value);
+    if !varnode.flags.written {
+        if varnode.flags.input {
+            if data.is_unaffected(value) {
+                return Some(Pop::Fail);
+            }
+            // A global input is not active movement, but it is a possibility.
+            if varnode.space == ventris_lifter::RAM_SPACE {
+                return Some(Pop::Success);
+            }
+            if !varnode.flags.direct_write {
+                return Some(Pop::Fail);
+            }
+        }
+        // "Probably a normal parameter, not active movement, but valid".
+        return Some(Pop::Success);
+    }
+    marked.insert(value);
+    let definition = varnode.def?;
+    let opcode = data.op(definition).opcode;
+    match opcode {
+        op::INDIRECT => {
+            if data.is_indirect_creation(definition) {
+                // Backtracking stops at a call. A creation whose placeholder is
+                // the indirect zero is killedbycall outright.
+                let zero = data
+                    .op(definition)
+                    .inputs
+                    .first()
+                    .copied()
+                    .is_some_and(|input| data.varnode(input).flags.indirect_creation);
+                return Some(if zero { Pop::FailKill } else { Pop::Success });
+            }
+            // Flow goes *through* a call: follow the value operand.
+            stack.push(AncestorState {
+                op: definition,
+                slot: 0,
+                seen_solid: false,
+                seen_kill: false,
+            });
+            None
+        }
+        op::COPY | op::SUBPIECE => {
+            let output = data.op(definition).output;
+            let source = data.op(definition).inputs.first().copied()?;
+            let incidental = match output {
+                Some(output) => {
+                    let out = data.varnode(output);
+                    let inp = data.varnode(source);
+                    out.flags.unique || (out.space == inp.space && out.offset == inp.offset)
+                }
+                None => false,
+            };
+            if incidental {
+                stack.push(AncestorState {
+                    op: definition,
+                    slot: 0,
+                    seen_solid: false,
+                    seen_kill: false,
+                });
+                return None;
+            }
+            // "For other COPIES, do a minimal traversal to rule out unaffected
+            // or other invalid inputs, but otherwise treat it as valid, active,
+            // movement into the parameter."
+            let mut cursor = source;
+            for _ in 0..ANCESTOR_TRAVERSAL_STEPS {
+                let held = data.varnode(cursor);
+                if !marked.contains(&cursor) && held.flags.input {
+                    if data.is_unaffected(cursor) || !held.flags.direct_write {
+                        return Some(Pop::Fail);
+                    }
+                }
+                let Some(next) = held.def else { break };
+                cursor = match data.op(next).opcode {
+                    op::COPY | op::SUBPIECE => match data.op(next).inputs.first().copied() {
+                        Some(operand) => operand,
+                        None => break,
+                    },
+                    // Follow the least significant piece.
+                    op::PIECE => match data.op(next).inputs.get(1).copied() {
+                        Some(operand) => operand,
+                        None => break,
+                    },
+                    _ => break,
+                };
+            }
+            Some(Pop::Solid)
+        }
+        op::MULTIEQUAL => {
+            *multi_depth += 1;
+            stack.push(AncestorState {
+                op: definition,
+                slot: 0,
+                seen_solid: false,
+                seen_kill: false,
+            });
+            None
+        }
+        // "Any other LOAD or arithmetic/logical operation is viewed as solid
+        // movement." A `PIECE` reaching a location wider than the trial is
+        // artificial data flow, but the trial's width is the operand's here, so
+        // that arm cannot be distinguished and the solid answer stands.
+        _ => Some(Pop::Solid),
+    }
+}
+
 fn entry_value(data: &Funcdata, location: Location) -> Option<VarnodeId> {
     let values = data.at_location(location.space, location.offset, location.size);
     values

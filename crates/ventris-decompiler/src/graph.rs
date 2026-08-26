@@ -270,6 +270,14 @@ pub struct Funcdata {
     /// carried explicitly because the graph has no architecture: it is what lets
     /// type recovery tell the frame apart from an ordinary object.
     pub spacebase: Option<guard::Location>,
+    /// Locations a call leaves alone, by space and offset.
+    ///
+    /// Ghidra records this per varnode: `setInputVarnode` consults
+    /// `FuncProto::hasEffect` and sets `Varnode::unaffected` on an input at an
+    /// `unaffected` location. `AncestorRealistic` then fails outright on such an
+    /// input, because a register the callee preserves cannot be how this call's
+    /// argument arrived.
+    pub unaffected: BTreeSet<(u32, u64)>,
     /// Whether raw p-code processing has started.
     ///
     /// This is Ghidra's `processing_started` flag. Front-end lifecycle checks
@@ -626,6 +634,14 @@ impl Funcdata {
     /// Ghidra's `Funcdata::opMarkNonPrinting`.
     pub fn op_mark_non_printing(&mut self, op: OpId) {
         self.ops[op.0 as usize].non_printing = true;
+    }
+
+    /// Whether an input value sits at a location every callee preserves.
+    ///
+    /// Ghidra's `Varnode::isUnaffected`.
+    pub fn is_unaffected(&self, value: VarnodeId) -> bool {
+        let varnode = &self.varnodes[value.0 as usize];
+        varnode.flags.input && self.unaffected.contains(&(varnode.space, varnode.offset))
     }
 
     /// Whether the operation's assignment is printed.

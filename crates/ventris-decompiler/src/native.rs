@@ -2058,6 +2058,10 @@ impl NativeDecompiler {
         // compared `memcmp`'s result against `0x150000`, the address left in
         // `$v0` by the `lui` before the first call, and three of its five
         // conditionals folded away.
+        // `setInputVarnode` marks an input at an `unaffected` location, and
+        // `AncestorRealistic` fails outright on such an input: a register every
+        // callee preserves cannot be how this call's argument arrived.
+        data.unaffected = effects.preserved.clone();
         let call_locations = locations.clone();
         let to_location = |vnode: &Varnode| graph::guard::Location {
             space: vnode.space,

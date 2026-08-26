@@ -90,18 +90,6 @@ pub fn recover_call_arguments(
         if trials.is_empty() {
             continue;
         }
-        if std::env::var("VENTRIS_PROBE_TRIALS").is_ok() {
-            eprintln!(
-                "trials @{:#x} arity={:?} {:?}",
-                data.op(call).seq.address,
-                target.and_then(arity_of),
-                trials
-                    .iter()
-                    .map(|trial| (trial.location.offset, trial.used))
-                    .collect::<Vec<_>>()
-            );
-        }
-        decide_trials(&mut trials, argument_sections);
         // A known callee's arity may only *extend* the list. Ghidra constrains a
         // call site by the callee's parameters exactly when the callee's input
         // prototype is locked, where `ActionFuncLink::funcLinkInput` marks every
@@ -111,6 +99,7 @@ pub fn recover_call_arguments(
         // the trials had already justified - `getFirstFile__10JKRArchiveCFPCc`
         // lost two of `FUN_8006909c`'s three, and the values feeding them then
         // died as unread, emptying the `if` arm that computed them.
+        decide_trials(&mut trials, argument_sections);
         if let Some(arity) = target.and_then(arity_of) {
             for trial in trials.iter_mut().take(arity) {
                 trial.used = true;
@@ -231,11 +220,12 @@ fn register_trials(data: &Funcdata, call: OpId, argument_sections: &[Vec<Locatio
             // Slot zero is the callee, so the candidates start at one - Ghidra's
             // `ParamTrial::slotbase`.
             let value = operands.get(index + 1).copied()?;
-            // `checkInputTrialUse`: active when the ancestry is realistic *and*
-            // `ancestorOpUse` agrees that this call is its only reader; inactive
-            // when the value is an unwritten function input - "not likely a
-            // parameter but maybe"; definitely not used otherwise.
-            let state = if is_used(data, value)
+            // `checkInputTrialUse`: active when `AncestorRealistic` accepts the
+            // way the value arrived *and* `ancestorOpUse` agrees that this call
+            // is its only reader; inactive when the value is an unwritten
+            // function input - "not likely a parameter but maybe"; definitely not
+            // used otherwise.
+            let state = if super::callproto::ancestor_realistic_at(data, call, index + 1)
                 && super::callproto::only_call_use(data, value, call, &mut BTreeSet::new())
             {
                 TrialState::Active
@@ -252,54 +242,6 @@ fn register_trials(data: &Funcdata, call: OpId, argument_sections: &[Vec<Locatio
             })
         })
         .collect()
-}
-
-/// Whether a value is real enough to be an argument.
-///
-/// Ghidra asks whether the value has a realistic ancestry. A value this
-/// function computed does; a register nobody ever wrote does not, and treating
-/// it as an argument invents one.
-fn is_used(data: &Funcdata, value: VarnodeId) -> bool {
-    is_used_guarded(data, value, &mut BTreeSet::new())
-}
-
-fn is_used_guarded(data: &Funcdata, value: VarnodeId, seen: &mut BTreeSet<VarnodeId>) -> bool {
-    // Two merges can name each other: that is what a loop-carried value looks
-    // like, and excluding only the value itself was not enough to stop the
-    // walk. `decompSZS_subroutine__FPUcPUc` recursed until the stack overflowed.
-    if !seen.insert(value) {
-        return false;
-    }
-    let varnode = data.varnode(value);
-    if varnode.flags.constant {
-        return true;
-    }
-    match varnode.def {
-        // A merge or a guard is only as real as what flows into it, so look
-        // through them rather than accepting them outright.
-        Some(def) => match data.op(def).opcode {
-            // An indirect *creation* is where backtracking stops:
-            // `AncestorRealistic::execute` returns `pop_failkill` for it, which
-            // is "killedbycall". The value is whatever a previous callee left in
-            // the register, so this call did not prepare it and it is not an
-            // argument. Looking through would reach the placeholder constant and
-            // report every convention register as a parameter.
-            op::INDIRECT if data.is_indirect_creation(def) => false,
-            op::MULTIEQUAL | op::INDIRECT => data
-                .op(def)
-                .inputs
-                .clone()
-                .into_iter()
-                .filter(|operand| *operand != value)
-                .any(|operand| is_used_guarded(data, operand, seen)),
-            _ => true,
-        },
-        // A value with no definition was never computed here. It can still be
-        // an argument the function forwards, but only the callee's prototype
-        // can say how many, so that case is decided by the arity bound rather
-        // than by claiming every convention register.
-        None => false,
-    }
 }
 
 #[cfg(test)]
@@ -460,6 +402,14 @@ mod tests {
         data.op_set_output(right, Some(second));
         data.op_insert_end(right, block);
 
-        assert!(!is_used(&data, first), "a cycle of merges carries no value");
+        // The traversal marks each value as it visits it, so a cycle of merges
+        // terminates instead of recursing: `AncestorRealistic::enterNode` treats
+        // a marked node as `pop_success`.
+        let call_target = data.new_varnode(ventris_lifter::RAM_SPACE, 0x3000, 4);
+        let call = data.new_op(op::CALL, seq(0x1008), vec![call_target, first]);
+        data.op_insert_end(call, block);
+        assert!(super::super::callproto::ancestor_realistic_at(
+            &data, call, 1
+        ));
     }
 }

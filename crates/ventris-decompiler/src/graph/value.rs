@@ -572,6 +572,13 @@ impl<'a> Resolver<'a> {
             // the operation it names. That is also what a call's own argument
             // reads, which is why collapsing it here restores parameters at
             // call sites.
+            //
+            // An indirect *creation* relays nothing: its first operand is the
+            // placeholder standing for "no previous value", so resolving through
+            // it printed the constant zero where a call's result belongs -
+            // `getBuiltInTexture` compared `0 == 0` instead of the value
+            // `memcmp` returned.
+            op::INDIRECT if self.data.is_indirect_creation(def) => None,
             op::COPY | op::CAST | op::INDIRECT => input(0),
             // A zero displacement is not an addition. `PTRSUB(p, 0)` is
             // Ghidra's way of saying "the first component of what p points at",
