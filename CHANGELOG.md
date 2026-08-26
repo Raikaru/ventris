@@ -6,6 +6,25 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- Deleted the edge-scoring fallback in `rule_goto`. It had no counterpart in
+  `blockaction.cc`: `selectGoto` offers only what `TraceDAG` produced, and when
+  that list is exhausted with no loop left it calls `clipExtraRoots` and otherwise
+  gives up. A score that ranks one edge at a time cannot tell a switch's
+  converging case exits - which are perfectly structured - from a cross edge.
+  `clipExtraRoots` is now ported in its place: the region only an extra root
+  reaches gets an exit edge surrendered. Census unchanged, all gates green, so the
+  invention was load-bearing for nothing.
+- Root the whole-DAG trace at *every* block with no incoming edges, as
+  `updateLoopBody` does in its no-loop branch, instead of only the entry. A join
+  opens only once all of its incoming DAG edges have been traced into it, so a
+  predecessor left unreached by a missing root keeps that join shut and the traces
+  waiting on it are declared stuck.
+- Measured but not the cause of `dl_G_MOVEWORD`'s six gotos: neither the
+  interior-goto nor the back-edge guard added to `ruleBlockOr` this session
+  affects it - removing each in turn leaves 5 cases / 3 ifs / 6 gotos unchanged.
+  The chain of four blocks that each branch to the function's exit is a
+  short-circuit `||` that `collapseConditions` is not merging, and that is where
+  the next measurement goes.
 - Process loop bodies innermost-first, which moved the census for the first time
   in this session: `unstructured-control-flow` 4 -> 3 and `missing-loop-or-switch`
   2 -> 1. `orderLoopBodies` ends with `loopbody.sort()` - "Sort based on nesting

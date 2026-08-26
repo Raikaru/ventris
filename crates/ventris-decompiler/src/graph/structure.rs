@@ -1289,11 +1289,24 @@ impl<'a> Graph<'a> {
                 .filter(|(from, index, to)| *to == node && !back_edge(*from, *index))
                 .count()
         };
-        let roots: Vec<NodeId> = self
-            .entry
-            .filter(|entry| !self.nodes[*entry].collapsed)
-            .map(|entry| vec![entry])
-            .unwrap_or_else(|| live.first().copied().into_iter().collect());
+        // `updateLoopBody`, in the no-loop case: `for(i..) if (bl->sizeIn() == 0)
+        // tracer.addRoot(bl);` - *every* block nothing reaches is a root, not just
+        // the function's entry. A node opens only once all of its incoming DAG
+        // edges have been traced into it, so a predecessor left unreached by a
+        // missing root keeps a join closed forever and the traces that wanted it
+        // are declared stuck.
+        let mut roots: Vec<NodeId> = live
+            .iter()
+            .copied()
+            .filter(|node| !self.nodes[*node].collapsed && dag_in_count(*node) == 0)
+            .collect();
+        if roots.is_empty() {
+            roots.extend(
+                self.entry
+                    .filter(|entry| !self.nodes[*entry].collapsed)
+                    .or_else(|| live.first().copied()),
+            );
+        }
         let edges = tracedag::TraceDag::new(tracedag::Dag {
             successors: &successors,
             dag_out: &dag_out,
@@ -1496,39 +1509,16 @@ impl<'a> Graph<'a> {
     /// The edge chosen is a back edge if there is one, because a loop that no
     /// loop rule matched is what blocks progress most often.
     fn rule_goto(&mut self, live: &[NodeId]) -> bool {
-        // Prefer the edge whose removal unblocks the other rules while
-        // destroying the least structure. Every rule requires its clause to
-        // have exactly one predecessor, so an edge into a block several paths
-        // reach is what stalls the collapse.
-        //
-        // A back edge is the last thing to give up. Ghidra never surrenders
-        // one: `markExitsAsGotos` marks the edges *leaving* a loop, because the
-        // back edge is the loop. Scoring it highest — as this did — hands the
-        // loop to a goto and no later rule can recover it.
-        // Ask the trace first. It only answers when it found an edge it can
-        // justify; the scoring heuristic below remains the fallback.
-        let mut choice: Option<(NodeId, usize, u32)> = None;
-        if let Some((node, index)) = self.traced_goto_edge(live) {
-            choice = Some((node, index, u32::MAX));
-        }
-        for node in live.iter().copied() {
-            if choice.is_some_and(|(_, _, best)| best == u32::MAX) {
-                break;
-            }
-            for (index, successor) in self.nodes[node].successors.iter().copied().enumerate() {
-                if self.nodes[node].successors.len() == 1 && successor == node {
-                    continue;
-                }
-                let joins = self.nodes[successor].predecessors.len() > 1;
-                let back = self.is_back_edge(node, successor);
-                let score = u32::from(!back) * 4 + u32::from(joins) * 2;
-                if choice.is_none_or(|(_, _, best)| score > best) {
-                    choice = Some((node, index, score));
-                }
-            }
-        }
-        let choice = choice.map(|(node, index, _)| (node, index));
-        let Some((node, index)) = choice else {
+        // Ghidra's `selectGoto` offers *only* what the trace produced. There is
+        // no scoring fallback in `blockaction.cc`: when the likely-goto list is
+        // exhausted and no loop remains it calls `clipExtraRoots`, and failing
+        // that it gives up. A score that ranks one edge at a time cannot tell a
+        // switch's converging case exits - perfectly structured - from a cross
+        // edge, and ranked them equally.
+        let Some((node, index)) = self
+            .traced_goto_edge(live)
+            .or_else(|| self.clip_extra_roots(live))
+        else {
             return false;
         };
         let branching = self.nodes[node].successors.len() == 2;
@@ -1550,6 +1540,51 @@ impl<'a> Graph<'a> {
         };
         self.nodes[node].body = Structured::List(vec![self.nodes[node].body.clone(), jump]);
         true
+    }
+
+    /// Ghidra's `clipExtraRoots`, the terminal step of `selectGoto`.
+    ///
+    /// When the trace has nothing left to offer, a region only an *extra* root
+    /// reaches - a block with no predecessors that is not the function's entry -
+    /// still has to be detached, so an edge leaving that region is surrendered.
+    /// This replaces a scoring heuristic that had no counterpart in Ghidra.
+    fn clip_extra_roots(&self, live: &[NodeId]) -> Option<(NodeId, usize)> {
+        for root in live.iter().copied() {
+            if Some(root) == self.entry || !self.nodes[root].predecessors.is_empty() {
+                continue;
+            }
+            // `onlyReachableFromRoot`: everything this root reaches without
+            // passing through a block that some path from outside also reaches.
+            let mut body = vec![root];
+            let mut index = 0;
+            while index < body.len() {
+                let node = body[index];
+                index += 1;
+                for successor in self.nodes[node].successors.clone() {
+                    if body.contains(&successor) {
+                        continue;
+                    }
+                    if self.nodes[successor]
+                        .predecessors
+                        .iter()
+                        .all(|predecessor| body.contains(predecessor))
+                    {
+                        body.push(successor);
+                    }
+                }
+            }
+            // `markExitsAsGotos`: the edges that leave the region.
+            for node in body.iter().copied() {
+                if let Some(edge) = self.nodes[node]
+                    .successors
+                    .iter()
+                    .position(|successor| !body.contains(successor))
+                {
+                    return Some((node, edge));
+                }
+            }
+        }
+        None
     }
 
     /// Replaces `node` and `absorbed` with one node carrying `body`.
