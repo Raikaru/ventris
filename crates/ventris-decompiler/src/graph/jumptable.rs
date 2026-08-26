@@ -430,6 +430,9 @@ pub fn recover_jump_tables(
                 // phi, then the trivial one-edge model.
                 recover_basic(data, branch, read_memory)
                     .or_else(|| super::jumpmodel::recover_jump_basic2(data, branch, read_memory))
+                    .or_else(|| {
+                        super::tablebase::recover_jump_table_base(data, branch, read_memory)
+                    })
             } else {
                 recover_trivial(data, branch)
             }

@@ -509,6 +509,13 @@ All notable Ventris changes are documented here.
   `ActionSegmentize` needs a `SegmentOp` registry and segmented address-space
   metadata that no supported architecture defines here. `ActionLaneDivide` needs
   a laned-register registry and lane-description machinery.
+- Reverted a parameter-trial classification that traded a hard gate for a soft
+  one. Marking a pure input inactive when every use reaches only a CALL argument
+  made `osContGetReadData` render one parameter, matching the oracle exactly - but
+  it broke `corpus-smoke` on `TRK_memset` with `globals=diverged`. Semantic
+  divergence is worse than a parameter count, so the reader test stands. Bisected
+  across five commits to isolate it; the two jump-model modules were innocent and
+  are chained.
 - `graph/tablebase.rs` recovers a jump table whose base is register-rooted -
   PPC materializes one with `lis` then `addi`, and `parse_address` accepts only a
   literal constant varnode, so those tables were lost entirely. Chained after

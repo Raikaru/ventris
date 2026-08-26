@@ -48,9 +48,27 @@
 //! error into a zero-versus-one error, and only the latter trips the
 //! `missing-parameters` family.
 //!
-//! The real defect is therefore in the trial decision, which claims a second
-//! parameter the convention does not pass. Fix that first; this pass is correct
-//! and will register cleanly once the parameter count is right.
+//! The trial decision was then fixed - a pure input whose every use reaches only
+//! a CALL argument is now marked inactive - and `osContGetReadData` renders one
+//! parameter, matching the oracle exactly. Registering this pass STILL costs it:
+//!
+//! ```text
+//! oracle            void FUN_80060668(uint param_1)
+//! pass skipped      void sub_80060668(uint32_t arg0)   <- agrees
+//! pass registered   void sub_80060668(void)            <- loses it
+//! ```
+//!
+//! So the fourth and actual cause is ORDERING. This project decides parameter
+//! trials after the whole action pipeline has run, so any pass that removes a
+//! value's last non-call use changes the parameter decision retroactively. Ghidra
+//! decides trials mid-loop with `ActionActiveParam`, fixes the prototype in
+//! `fixateproto`, and locks it - after which no later pass can reverse it.
+//!
+//! Registering this pass therefore needs the trial decision and promotion moved
+//! ahead of the pipeline with the prototype locked, not another guard here. That
+//! is a sequencing change with a real tradeoff - parameter types come from
+//! recovered types the pipeline produces - so it is recorded rather than
+//! attempted blind.
 //!
 //! Note the distinction, because conflating the two is wrong: a nonzero mask
 //! says which bits *can* be set, consume says which bits anyone *reads*. Neither
