@@ -847,11 +847,14 @@ mod tests {
         let final_value = data.new_unique(4);
         data.op_set_output(offset, Some(final_value));
         data.op_insert_end(offset, block);
-        let ret = data.new_op(op::RETURN, seq(0x100c), vec![final_value]);
+        // A `RETURN`'s first operand is the return address, which consume
+        // propagation skips; a one-operand `RETURN` therefore consumes nothing
+        // and the chain reads as dead. Real returns carry both.
+        let ret = data.new_op(op::RETURN, seq(0x100c), vec![final_value, final_value]);
         data.op_insert_end(ret, block);
 
         assert!(default_pipeline().apply(&mut data) > 0);
-        let returned = data.op(ret).inputs[0];
+        let returned = data.op(ret).inputs[1];
         let value = data.varnode(returned);
         assert!(value.flags.constant, "the chain folded to a constant");
         assert_eq!(value.offset, 5);
