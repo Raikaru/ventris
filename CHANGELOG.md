@@ -6,6 +6,17 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- Ported `isInteriorGotoTarget` too, the second of the three guards
+  `CollapseStructure::ruleBlockOr` has and ours lacked. A block an unstructured
+  jump enters is not the tail of one condition: control can arrive there without
+  evaluating the first test, so folding the two into `||` would claim an
+  evaluation order that does not hold. Ghidra keeps the surrendered edge and
+  marks it; this graph removes the edge, so the jump is found by walking the
+  bodies already built. Inert on the present corpus, with a regression test that
+  asserts the same shape merges *without* a jump into the second test and
+  refuses with one. That leaves only `isGotoOut` on the head's own edges, which
+  has no analogue here for the same reason - a surrendered edge is gone from
+  `successors` rather than flagged - and is recorded as such rather than faked.
 - Ported the back-edge guard `ruleBlockOr` has and ours did not. Ghidra refuses
   to reach the second test of a short-circuit through a back edge - the comment
   in `blockaction.cc` reads "Don't use loop branch to get to orblock" - because a

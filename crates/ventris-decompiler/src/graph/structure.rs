@@ -1016,6 +1016,23 @@ impl<'a> Graph<'a> {
     /// test takes its edge there, or else when the second does; because the
     /// second is only evaluated when the first did not, the disjunction is
     /// exactly C's `||` including its evaluation order.
+    /// Whether an unstructured jump already targets this node's entry.
+    ///
+    /// Ghidra's `FlowBlock::isInteriorGotoTarget`, checked by `ruleBlockOr` as
+    /// `if (orblock->isInteriorGotoTarget()) continue;`. A block a `goto` enters
+    /// is not the tail of one condition: control can arrive there without
+    /// evaluating the first test, so folding the two into `||` would claim an
+    /// order of evaluation that does not hold. Ghidra keeps the surrendered edge
+    /// and marks it; this graph removes it, so the jump is found in the bodies
+    /// that were already built.
+    fn is_interior_goto_target(&self, node: NodeId) -> bool {
+        let entry = self.nodes[node].entry;
+        self.nodes
+            .iter()
+            .filter(|candidate| !candidate.collapsed)
+            .any(|candidate| body_jumps_to(&candidate.body, entry))
+    }
+
     fn rule_block_or(&mut self, node: NodeId) -> bool {
         if self.nodes[node].successors.len() != 2 {
             return false;
@@ -1037,6 +1054,12 @@ impl<'a> Graph<'a> {
             // in one pass through the code, so reaching the second test by
             // looping back is not that shape at all.
             if self.nodes[second].entry <= self.nodes[node].entry {
+                continue;
+            }
+            // Ghidra's `if (orblock->isInteriorGotoTarget()) continue;`.
+
+            // Ghidra's `if (orblock->isInteriorGotoTarget()) continue;`.
+            if self.is_interior_goto_target(second) {
                 continue;
             }
             // Nothing else may reach the second test, or it is a join rather
@@ -1560,6 +1583,39 @@ impl<'a> Graph<'a> {
 /// A surrendered back edge and a recovered loop say the same thing. Keeping both
 /// leaves a jump in the middle of the body that contradicts the construct
 /// wrapped around it.
+/// Whether a recovered construct contains a jump to the given block.
+fn body_jumps_to(node: &Structured, target: GraphBlockId) -> bool {
+    match node {
+        Structured::Goto { target: named, .. } | Structured::IfGoto { target: named, .. } => {
+            *named == target
+        }
+        Structured::List(members) => members.iter().any(|member| body_jumps_to(member, target)),
+        Structured::IfElse {
+            header,
+            then_body,
+            else_body,
+            ..
+        } => {
+            body_jumps_to(header, target)
+                || body_jumps_to(then_body, target)
+                || else_body
+                    .as_ref()
+                    .is_some_and(|body| body_jumps_to(body, target))
+        }
+        Structured::WhileDo { header, body, .. } => {
+            body_jumps_to(header, target) || body_jumps_to(body, target)
+        }
+        Structured::DoWhile { body, .. } | Structured::InfLoop { body } => {
+            body_jumps_to(body, target)
+        }
+        Structured::Switch { header, cases, .. } => {
+            body_jumps_to(header, target)
+                || cases.iter().any(|(_, case)| body_jumps_to(case, target))
+        }
+        Structured::Basic(_) | Structured::Break | Structured::IfBreak { .. } => false,
+    }
+}
+
 fn drop_jumps_to(node: &mut Structured, head: GraphBlockId) {
     match node {
         Structured::List(members) => {
@@ -2331,6 +2387,55 @@ mod tests {
         assert!(
             !graph.is_complex(simple, 2),
             "one comparison plus the branch is exactly the ceiling"
+        );
+    }
+
+    /// A block an unstructured jump enters is not the tail of one condition:
+    /// control can arrive there without evaluating the first test, so folding the
+    /// two into `||` would claim an evaluation order that does not hold. This is
+    /// Ghidra's `if (orblock->isInteriorGotoTarget()) continue;`.
+    #[test]
+    fn a_short_circuit_refuses_a_second_test_a_goto_enters() {
+        let mut data = Funcdata::default();
+        data.entry = 0x1000;
+        let head = data.new_block(0x1000);
+        let second = data.new_block(0x1010);
+        let clause = data.new_block(0x1020);
+        let other = data.new_block(0x1030);
+        let elsewhere = data.new_block(0x1040);
+        conditional(&mut data, head, 0x1010);
+        data.add_edge(head, second);
+        data.add_edge(head, clause);
+        conditional(&mut data, second, 0x1020);
+        data.add_edge(second, clause);
+        data.add_edge(second, other);
+
+        let mut graph = Graph::of(&data, &[]);
+        let node = |entry: GraphBlockId| {
+            graph
+                .nodes
+                .iter()
+                .position(|candidate| candidate.entry == entry)
+                .expect("the block is a node")
+        };
+        let head_node = node(head);
+        let second_node = node(second);
+        // Without a jump into it the merge is available.
+        let mut permissive = Graph::of(&data, &[]);
+        assert!(
+            permissive.rule_block_or(head_node),
+            "the shape itself is mergeable"
+        );
+
+        // Now a live body jumps straight into the second test.
+        let jumped = node(elsewhere);
+        graph.nodes[jumped].body = Structured::Goto {
+            from: graph.nodes[jumped].entry,
+            target: graph.nodes[second_node].entry,
+        };
+        assert!(
+            !graph.rule_block_or(head_node),
+            "a jump enters the second test, so no condition is built"
         );
     }
 
