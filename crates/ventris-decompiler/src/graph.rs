@@ -18,6 +18,7 @@
 
 pub mod action;
 pub mod actiondb;
+pub mod alias;
 pub mod bitfield;
 pub mod blockaction;
 pub mod branchaction;
@@ -41,6 +42,7 @@ pub mod expr_ptr;
 pub mod expr_rules;
 pub mod expr_rules2;
 pub mod forloop;
+pub mod funcproto;
 pub mod guard;
 pub mod heritage;
 pub mod jumptable;
@@ -54,6 +56,7 @@ pub mod proto;
 pub mod protoaction;
 pub mod refine;
 pub mod rules;
+pub mod scope;
 pub mod splitdatatype;
 pub mod splitvarnode;
 pub mod stackframe;
@@ -247,6 +250,16 @@ pub struct Funcdata {
     /// This is Ghidra's `highlevel_on` flag. The printer and prototype recovery
     /// read it to select high-level variables instead of raw SSA values.
     pub high_level_on: bool,
+    /// Diagnostics a pass wants the reader to see, standing in for Ghidra's
+    /// `Funcdata::warning` and `warningHeader`.
+    ///
+    /// Ghidra's actions report recovery they could not complete - an
+    /// unjustified parameter, a prototype it had to guess - and the printer
+    /// emits them as comments. Without a sink an action has nowhere to put that,
+    /// so the choice is between staying silent and not porting the action at
+    /// all. Duplicates are dropped: a pass that runs to a fixed point would
+    /// otherwise repeat itself once per round.
+    warnings: Vec<String>,
 }
 
 /// A derived value held beside the graph it was computed from.
@@ -458,6 +471,20 @@ impl Funcdata {
     /// Ghidra's `Funcdata::markIndirectOnly` follows `MULTIEQUAL` outputs and
     /// accepts `INDIRECT` terminals. The graph has no indirect-store marker, so
     /// every `INDIRECT` is the representable terminal form.
+    /// Records a diagnostic, ignoring one already present.
+    pub fn warning(&mut self, message: impl Into<String>) -> bool {
+        let message = message.into();
+        if self.warnings.contains(&message) {
+            return false;
+        }
+        self.warnings.push(message);
+        true
+    }
+
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
     pub fn mark_indirect_only(&mut self) -> usize {
         let candidates: Vec<VarnodeId> = self
             .varnodes

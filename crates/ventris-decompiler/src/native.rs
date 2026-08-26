@@ -2250,7 +2250,7 @@ impl NativeDecompiler {
             statements,
             ssa: SsaFunction::default(),
             types: Vec::new(),
-            warnings: Vec::new(),
+            warnings: data.warnings().to_vec(),
         }
     }
 

@@ -509,6 +509,26 @@ All notable Ventris changes are documented here.
   `ActionSegmentize` needs a `SegmentOp` registry and segmented address-space
   metadata that no supported architecture defines here. `ActionLaneDivide` needs
   a laned-register registry and lane-description machinery.
+- Built the layer the remaining Ghidra passes read, which was blocking them
+  rather than any missing pass:
+  - `Funcdata::warning`/`warnings` - a deduplicating diagnostic sink, surfaced
+    into `NativeDocument.warnings` on the graph path, which previously hardcoded
+    an empty list so a graph-path pass had nowhere to report.
+  - `graph/funcproto.rs` - `FuncProto` and `ProtoParameter`, built over
+    `ventris_target::Abi`. Parameters carry storage `Location`, type and name;
+    the existing `NativeCallPrototype` carried types only, which is why the
+    twelve prototype passes had nothing to read. `Abi` does not carry Ghidra's
+    `killedbycall`, `likelytrash` or `resolveModel`; those three are the object's
+    boundary and are recorded rather than faked.
+  - `graph/scope.rs` - `Scope`/`ScopeLocal`, `Symbol` and `SymbolEntry`, keyed by
+    storage *and* use point, so one recycled stack slot can hold distinct
+    symbols at distinct points. Includes the multi-entry name tree that
+    `Merge::mergeMultiEntry` needs.
+  - `graph/alias.rs` - `AliasChecker`, porting `gatherInternal`,
+    `gatherAdditiveBase`, `gatherOffset` and `hasLocalAlias` with Ghidra's exact
+    terminal-use semantics and no escape filtering. A local pass object, not
+    cached state: an alias verdict goes stale as soon as a rule rewrites a
+    pointer computation.
 - A short-circuit collapse now refuses a complex second arm, porting Ghidra's
   `BlockBasic::isComplex` guard from `ruleBlockOr`. The collapse concatenates
   both bodies, so without the guard the second arm's statements ran
