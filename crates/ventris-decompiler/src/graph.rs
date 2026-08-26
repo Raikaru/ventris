@@ -191,6 +191,15 @@ pub struct GraphBlock {
     pub ops: Vec<OpId>,
     pub predecessors: Vec<GraphBlockId>,
     pub successors: Vec<GraphBlockId>,
+    /// Positions of blocks this one has absorbed, in absorption order.
+    ///
+    /// Ghidra's `BlockBasic::mergeRange`, which extends a block's address cover
+    /// when `spliceBlockBasic` folds its successor into it. Ghidra needs the
+    /// cover only for reporting, because its branch destinations are block
+    /// references. Here they are addresses, so the cover is load-bearing: a
+    /// branch naming an absorbed block has to resolve to the block that
+    /// absorbed it, or the destination silently disappears.
+    pub absorbed: Vec<(u64, u32)>,
     /// Set when the block is unreachable from the entry. Its slot is retained
     /// so existing identifiers stay valid.
     pub dead: bool,
@@ -904,6 +913,29 @@ impl Funcdata {
         }
     }
 
+    /// Appends one operand at a chosen slot, keeping operand links current.
+    ///
+    /// Ghidra's `opInsertInput`. A merge gains an input when a new edge stands
+    /// for a path that did not exist before.
+    pub fn op_insert_input(&mut self, op: OpId, value: VarnodeId, slot: usize) {
+        self.invalidate_masks();
+        let slot = slot.min(self.ops[op.0 as usize].inputs.len());
+        self.ops[op.0 as usize].inputs.insert(slot, value);
+        self.varnodes[value.0 as usize].descendants.insert(op);
+    }
+
+    /// Whether a value's storage can be named from outside its own definition.
+    ///
+    /// Ghidra's `Varnode::isAddrTied`, whose flag is written by
+    /// `syncVarnodesWithSymbols` from the local symbol scope. This graph decides
+    /// it from the storage instead: a temporary is private to the expression
+    /// that produced it and a constant has no storage, while every other
+    /// location is one the rest of the function can read.
+    pub fn is_addr_tied(&self, value: VarnodeId) -> bool {
+        let flags = self.varnodes[value.0 as usize].flags;
+        !flags.unique && !flags.constant
+    }
+
     /// Gives one edge a different source, keeping its position.
     ///
     /// Ghidra's `BlockGraph::moveOutEdge`, which reaches the target through
@@ -1015,14 +1047,29 @@ impl Funcdata {
         true
     }
 
-    /// The block beginning at an instruction boundary.
+    /// Whether the block covers a position, directly or by absorption.
+    pub fn block_covers(&self, block: GraphBlockId, address: u64, order: u32) -> bool {
+        let candidate = &self.blocks[block.0 as usize];
+        (candidate.start == address && candidate.start_order == order)
+            || candidate.absorbed.contains(&(address, order))
+    }
+
+    /// The live block covering a p-code position.
     ///
     /// One instruction can hold several blocks, so an address alone is not a
-    /// block identity: only the one at p-code index zero begins at the address.
-    pub fn block_starting_at(&self, address: u64) -> Option<GraphBlockId> {
+    /// block identity: the position is an address *and* a p-code index. A block
+    /// that has absorbed another covers the absorbed block's position too, which
+    /// is what keeps an address-valued branch destination resolvable after a
+    /// splice.
+    pub fn block_at_position(&self, address: u64, order: u32) -> Option<GraphBlockId> {
         self.blocks()
-            .find(|(_, block)| block.start == address && block.start_order == 0)
             .map(|(id, _)| id)
+            .find(|id| self.block_covers(*id, address, order))
+    }
+
+    /// The block beginning at an instruction boundary.
+    pub fn block_starting_at(&self, address: u64) -> Option<GraphBlockId> {
+        self.block_at_position(address, 0)
     }
 
     /// The block a branch transfers to when taken.
@@ -1039,86 +1086,9 @@ impl Funcdata {
             let seq = operation.seq;
             let relative = varnode.offset as i64;
             let order = u32::try_from(i64::from(seq.order).checked_add(relative)?).ok()?;
-            return self
-                .blocks()
-                .find(|(_, block)| block.start == seq.address && block.start_order == order)
-                .map(|(id, _)| id);
+            return self.block_at_position(seq.address, order);
         }
         self.block_starting_at(varnode.offset)
-    }
-
-    /// Removes a block that only transfers control, connecting its predecessors
-    /// straight to its successor.
-    ///
-    /// Ported from `Funcdata::spliceBlockBasic`. A block holding nothing but a
-    /// jump is an artefact of instruction-level block splitting; keeping it
-    /// forces structuring to account for a region that computes nothing.
-    /// Refuses when the block merges values, has other than one successor, or
-    /// is the entry, since each of those makes the removal observable.
-    pub fn splice_block(&mut self, block: GraphBlockId) -> bool {
-        self.invalidate_masks();
-        let candidate = &self.blocks[block.0 as usize];
-        if candidate.dead
-            || candidate.successors.len() != 1
-            || (candidate.start == self.entry && candidate.start_order == 0)
-        {
-            return false;
-        }
-        let successor = candidate.successors[0];
-        if successor == block {
-            return false;
-        }
-        // `Funcdata::spliceBlockBasic` refuses unless the successor has exactly one
-        // way in - it throws otherwise - because splicing moves the successor's
-        // operations into this block, and any other predecessor of the successor
-        // would then reach code that has moved.
-        if self.blocks[successor.0 as usize].predecessors.len() != 1 {
-            return false;
-        }
-        let carries_work = candidate
-            .ops
-            .iter()
-            .any(|op| !matches!(self.ops[op.0 as usize].opcode, ventris_pcode::op::BRANCH));
-        if carries_work {
-            return false;
-        }
-        // A merge at the successor reads one operand per predecessor. Splicing
-        // would change how many arrive, so leave it alone.
-        let merges = self.blocks[successor.0 as usize]
-            .ops
-            .iter()
-            .any(|op| self.ops[op.0 as usize].opcode == ventris_pcode::op::MULTIEQUAL);
-        if merges {
-            return false;
-        }
-        for predecessor in self.blocks[block.0 as usize].predecessors.clone() {
-            let successors = &mut self.blocks[predecessor.0 as usize].successors;
-            for entry in successors.iter_mut() {
-                if *entry == block {
-                    *entry = successor;
-                }
-            }
-            if !self.blocks[successor.0 as usize]
-                .predecessors
-                .contains(&predecessor)
-            {
-                self.blocks[successor.0 as usize]
-                    .predecessors
-                    .push(predecessor);
-            }
-        }
-        self.blocks[successor.0 as usize]
-            .predecessors
-            .retain(|predecessor| *predecessor != block);
-        for op in self.blocks[block.0 as usize].ops.clone() {
-            self.op_destroy(op);
-        }
-        let removed = &mut self.blocks[block.0 as usize];
-        removed.ops.clear();
-        removed.predecessors.clear();
-        removed.successors.clear();
-        removed.dead = true;
-        true
     }
 
     /// Removes blocks the entry cannot reach.
@@ -1126,15 +1096,19 @@ impl Funcdata {
     /// Ported from `Funcdata::removeUnreachableBlocks`. Branch folding and
     /// constant conditions leave whole blocks with no path from the entry;
     /// emitting them produces statements after an unconditional transfer.
-    /// Removing a predecessor also removes the operand it contributed to each
-    /// merge at its successors, which keeps operand slots aligned with the
-    /// predecessor list renaming relies on.
+    ///
+    /// The order is Ghidra's, and it is not incidental. Every block is marked
+    /// dead *first*, then every out edge is severed - which drops the operand
+    /// each removed edge contributed to a merge in a live successor - and only
+    /// then are the blocks themselves removed. Doing it block by block would
+    /// let one removal strand a value another removal was still going to
+    /// repair. A reader left behind in a live block reads
+    /// `Funcdata::descend2Undef`'s marker constant rather than a definition
+    /// that no longer exists.
     pub fn remove_unreachable_blocks(&mut self) -> usize {
         self.invalidate_masks();
         let entry = self
-            .blocks()
-            .find(|(_, block)| block.start == self.entry && block.start_order == 0)
-            .map(|(id, _)| id)
+            .entry_block()
             .or_else(|| self.blocks().next().map(|(id, _)| id));
         let Some(entry) = entry else { return 0 };
 
@@ -1154,27 +1128,24 @@ impl Funcdata {
             .filter(|id| !reachable.contains(id))
             .collect();
         for id in unreachable.iter().copied() {
+            self.blocks[id.0 as usize].dead = true;
+        }
+        for id in unreachable.iter().copied() {
             for successor in self.blocks[id.0 as usize].successors.clone() {
-                self.detach_predecessor(successor, id);
+                self.remove_edge(id, successor);
             }
-            for predecessor in self.blocks[id.0 as usize].predecessors.clone() {
-                self.blocks[predecessor.0 as usize]
-                    .successors
-                    .retain(|candidate| *candidate != id);
-            }
-            for op in self.blocks[id.0 as usize].ops.clone() {
-                self.op_destroy(op);
-            }
-            let block = &mut self.blocks[id.0 as usize];
-            block.ops.clear();
-            block.predecessors.clear();
-            block.successors.clear();
-            block.dead = true;
+        }
+        for id in unreachable.iter().copied() {
+            self.block_remove_internal(id, true);
         }
         unreachable.len()
     }
 
     /// Drops one incoming edge, along with the merge operand it fed.
+    ///
+    /// Ghidra's `Funcdata::branchRemoveInternal` follows the operand removal
+    /// with `opZeroMulti`, so a merge left holding a single operand becomes the
+    /// copy it now is instead of staying a marker.
     fn detach_predecessor(&mut self, block: GraphBlockId, predecessor: GraphBlockId) {
         let Some(slot) = self.blocks[block.0 as usize]
             .predecessors
@@ -1191,12 +1162,606 @@ impl Funcdata {
             .take_while(|op| self.ops[op.0 as usize].opcode == ventris_pcode::op::MULTIEQUAL)
             .collect();
         for phi in phis {
-            let mut inputs = self.ops[phi.0 as usize].inputs.clone();
-            if slot < inputs.len() {
-                inputs.remove(slot);
-                self.op_set_inputs(phi, inputs);
+            if slot < self.ops[phi.0 as usize].inputs.len() {
+                self.op_remove_input(phi, slot);
+                self.op_zero_multi(phi);
             }
         }
+    }
+
+    /// Turns a merge that no longer merges into the copy it has become.
+    ///
+    /// Ghidra's `Funcdata::opZeroMulti`. With no operands left the block is
+    /// unreachable, so the value becomes a function input; with one operand the
+    /// marker is simply a `COPY`. The difference is load-bearing rather than
+    /// cosmetic: a marker is exactly what `has_only_markers` counts as "does
+    /// nothing", so leaving a one-operand `MULTIEQUAL` behind decides whether a
+    /// later pass may remove the block at all.
+    pub fn op_zero_multi(&mut self, op: OpId) {
+        let count = self.ops[op.0 as usize].inputs.len();
+        if count == 1 {
+            self.op_set_opcode(op, ventris_pcode::op::COPY);
+            return;
+        }
+        if count != 0 {
+            return;
+        }
+        let Some(output) = self.ops[op.0 as usize].output else {
+            return;
+        };
+        let varnode = &self.varnodes[output.0 as usize];
+        let (space, offset, size) = (varnode.space, varnode.offset, varnode.size);
+        let replacement = self.new_varnode(space, offset, size);
+        self.mark_input(replacement);
+        self.op_set_inputs(op, vec![replacement]);
+        self.op_set_opcode(op, ventris_pcode::op::COPY);
+    }
+
+    /// Whether the block holds nothing but SSA markers and a branch.
+    ///
+    /// Ghidra's `BlockBasic::hasOnlyMarkers`: `MULTIEQUAL` and `INDIRECT` are
+    /// placeholders for data flowing *through* the block, and a branch is how
+    /// every block ends, so neither counts as work.
+    pub fn has_only_markers(&self, block: GraphBlockId) -> bool {
+        self.blocks[block.0 as usize].ops.iter().all(|op| {
+            matches!(
+                self.ops[op.0 as usize].opcode,
+                ventris_pcode::op::MULTIEQUAL
+                    | ventris_pcode::op::INDIRECT
+                    | ventris_pcode::op::BRANCH
+                    | ventris_pcode::op::CBRANCH
+                    | ventris_pcode::op::BRANCHIND
+            )
+        })
+    }
+
+    /// The block's last live operation.
+    fn last_opcode(&self, block: GraphBlockId) -> Option<i32> {
+        self.blocks[block.0 as usize].ops.iter().rev().find_map(|op| {
+            let operation = &self.ops[op.0 as usize];
+            (!operation.dead).then_some(operation.opcode)
+        })
+    }
+
+    /// Whether the block ends in a computed jump.
+    ///
+    /// Ghidra's `FlowBlock::isSwitchOut`, which flow analysis sets on the block
+    /// holding a `BRANCHIND`.
+    pub fn is_switch_out(&self, block: GraphBlockId) -> bool {
+        self.last_opcode(block) == Some(ventris_pcode::op::BRANCHIND)
+    }
+
+    /// Whether the block begins the function.
+    pub fn is_entry_block(&self, block: GraphBlockId) -> bool {
+        self.block_covers(block, self.entry, 0)
+    }
+
+    /// The live block the function enters through.
+    pub fn entry_block(&self) -> Option<GraphBlockId> {
+        self.block_starting_at(self.entry)
+    }
+
+    /// Whether the block does nothing and should be removed.
+    ///
+    /// Ghidra's `BlockBasic::isDoNothing`. The test is *not* "holds a single
+    /// `BRANCH`": a block holding only merges, or holding nothing at all, does
+    /// nothing just as much, and Ghidra removes all three. The guards carry the
+    /// rest - a switch target whose successor several blocks reach may still be
+    /// propagating the value its own switch edge selected, and a single-out
+    /// computed jump is a jump-table stage rather than a transfer.
+    pub fn is_do_nothing(&self, block: GraphBlockId) -> bool {
+        let candidate = &self.blocks[block.0 as usize];
+        if candidate.dead || candidate.successors.len() != 1 {
+            return false;
+        }
+        // A block with no way in may be the placeholder holding persistent
+        // values, so Ghidra keeps it.
+        if candidate.predecessors.is_empty() {
+            return false;
+        }
+        let successor = candidate.successors[0];
+        for predecessor in candidate.predecessors.clone() {
+            if !self.is_switch_out(predecessor) {
+                continue;
+            }
+            if self.blocks[predecessor.0 as usize].successors.len() > 1
+                && self.blocks[successor.0 as usize].predecessors.len() > 1
+            {
+                return false;
+            }
+        }
+        if self.last_opcode(block) == Some(ventris_pcode::op::BRANCHIND) {
+            return false;
+        }
+        self.has_only_markers(block)
+    }
+
+    /// Whether removing this block would leave two edges into its successor
+    /// disagreeing about a merged value.
+    ///
+    /// Ghidra's `BlockBasic::unblockedMulti`. Removing the block makes each of
+    /// its predecessors a direct predecessor of the successor, so a predecessor
+    /// that *already* reaches the successor would then reach it twice - and a
+    /// merge there reads one operand per edge. The removal is only sound when
+    /// both edges deliver the same value.
+    pub fn unblocked_multi(&self, block: GraphBlockId, out_slot: usize) -> bool {
+        let Some(&successor) = self.blocks[block.0 as usize].successors.get(out_slot) else {
+            return true;
+        };
+        let redundant: Vec<GraphBlockId> = self.blocks[block.0 as usize]
+            .predecessors
+            .iter()
+            .copied()
+            .filter(|predecessor| {
+                self.blocks[predecessor.0 as usize]
+                    .successors
+                    .contains(&successor)
+            })
+            .collect();
+        if redundant.is_empty() {
+            return true;
+        }
+        let slot_of = |candidate: GraphBlockId| {
+            self.blocks[successor.0 as usize]
+                .predecessors
+                .iter()
+                .position(|held| *held == candidate)
+        };
+        let Some(removed_slot) = slot_of(block) else {
+            return true;
+        };
+        for op in self.blocks[successor.0 as usize].ops.clone() {
+            if self.ops[op.0 as usize].opcode != ventris_pcode::op::MULTIEQUAL {
+                continue;
+            }
+            let Some(&through_removed) = self.ops[op.0 as usize].inputs.get(removed_slot) else {
+                continue;
+            };
+            for predecessor in redundant.iter().copied() {
+                let Some(slot) = slot_of(predecessor) else {
+                    continue;
+                };
+                let Some(&competing) = self.ops[op.0 as usize].inputs.get(slot) else {
+                    continue;
+                };
+                // A merge *in the removed block* stands for whatever each of
+                // its own predecessors delivers, so the comparison is against
+                // the operand this predecessor contributes to that merge.
+                let mut arriving = through_removed;
+                if let Some(definition) = self.varnodes[through_removed.0 as usize].def
+                    && self.ops[definition.0 as usize].opcode == ventris_pcode::op::MULTIEQUAL
+                    && self.ops[definition.0 as usize].parent == Some(block)
+                    && let Some(inner) = self.blocks[block.0 as usize]
+                        .predecessors
+                        .iter()
+                        .position(|held| *held == predecessor)
+                    && let Some(&operand) = self.ops[definition.0 as usize].inputs.get(inner)
+                {
+                    arriving = operand;
+                }
+                if arriving != competing {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Rehomes the merges *defined in* a block about to be removed.
+    ///
+    /// Ghidra's `Funcdata::pushMultiequals`. A merge in the removed block can
+    /// still have readers beyond its successor, and those readers cannot be left
+    /// naming a definition that no longer exists. The replacement is an
+    /// artificial merge at the head of the successor: on the edge from the
+    /// removed block it delivers the original value, and on every other edge it
+    /// delivers itself, because the removed block dominates those edges and so
+    /// nothing else can arrive along them.
+    fn push_multiequals(&mut self, block: GraphBlockId) {
+        let successors = self.blocks[block.0 as usize].successors.clone();
+        let Some(&successor) = successors.first() else {
+            return;
+        };
+        let Some(removed_slot) = self.blocks[successor.0 as usize]
+            .predecessors
+            .iter()
+            .position(|held| *held == block)
+        else {
+            return;
+        };
+        let phis: Vec<OpId> = self.blocks[block.0 as usize]
+            .ops
+            .iter()
+            .copied()
+            .filter(|op| self.ops[op.0 as usize].opcode == ventris_pcode::op::MULTIEQUAL)
+            .collect();
+        for phi in phis {
+            let Some(original) = self.ops[phi.0 as usize].output else {
+                continue;
+            };
+            if self.varnodes[original.0 as usize].descendants.is_empty() {
+                continue;
+            }
+            let mut needs_replacement = false;
+            let mut needs_unique = false;
+            let readers: Vec<OpId> = self.varnodes[original.0 as usize]
+                .descendants
+                .iter()
+                .copied()
+                .collect();
+            for reader in readers {
+                let operation = &self.ops[reader.0 as usize];
+                if operation.opcode == ventris_pcode::op::MULTIEQUAL
+                    && operation.parent == Some(successor)
+                {
+                    let dead_edge = !operation
+                        .inputs
+                        .iter()
+                        .enumerate()
+                        .any(|(slot, input)| slot != removed_slot && *input == original);
+                    if dead_edge {
+                        // An address-tied value feeding a merge at its own
+                        // address means every use beyond the successor reached
+                        // that use through some other register, so the
+                        // artificial merge must not claim the address.
+                        if let Some(output) = operation.output
+                            && self.varnodes[output.0 as usize].space
+                                == self.varnodes[original.0 as usize].space
+                            && self.varnodes[output.0 as usize].offset
+                                == self.varnodes[original.0 as usize].offset
+                            && self.is_addr_tied(original)
+                        {
+                            needs_unique = true;
+                        }
+                        continue;
+                    }
+                }
+                needs_replacement = true;
+                break;
+            }
+            if !needs_replacement {
+                continue;
+            }
+            let varnode = &self.varnodes[original.0 as usize];
+            let (space, offset, size) = (varnode.space, varnode.offset, varnode.size);
+            let replacement = if needs_unique {
+                self.new_unique(size)
+            } else {
+                self.new_varnode(space, offset, size)
+            };
+            let branches: Vec<VarnodeId> = self.blocks[successor.0 as usize]
+                .predecessors
+                .clone()
+                .into_iter()
+                .map(|predecessor| {
+                    if predecessor == block {
+                        original
+                    } else {
+                        replacement
+                    }
+                })
+                .collect();
+            let seq = SeqNum {
+                address: self.blocks[successor.0 as usize].start,
+                order: self.blocks[successor.0 as usize].start_order,
+            };
+            let artificial = self.new_op(ventris_pcode::op::MULTIEQUAL, seq, branches);
+            self.op_set_output(artificial, Some(replacement));
+            self.op_insert_begin(artificial, successor);
+            let readers: Vec<OpId> = self.varnodes[original.0 as usize]
+                .descendants
+                .iter()
+                .copied()
+                .collect();
+            for reader in readers {
+                if reader == artificial {
+                    continue;
+                }
+                let slots: Vec<usize> = self.ops[reader.0 as usize]
+                    .inputs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, input)| **input == original)
+                    .map(|(slot, _)| slot)
+                    .collect();
+                for slot in slots {
+                    if slot == removed_slot
+                        && self.ops[reader.0 as usize].parent == Some(successor)
+                        && self.ops[reader.0 as usize].opcode == ventris_pcode::op::MULTIEQUAL
+                    {
+                        continue;
+                    }
+                    self.op_set_input(reader, replacement, slot);
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Removes a block, patching the data flow that ran through it.
+    ///
+    /// Ghidra's `Funcdata::blockRemoveInternal`. Two repairs make this more than
+    /// an edge rewrite. A merge in the successor loses the operand this block
+    /// delivered and gains one per predecessor of this block - and where the
+    /// lost operand was itself a merge *here*, each predecessor contributes that
+    /// merge's own operand rather than a copy of the whole. Then
+    /// `push_multiequals` rehomes the merges defined here whose readers are
+    /// elsewhere. Dropping either repair loses the phi structure a loop's shape
+    /// depends on, which is why widening the removal test without them cost
+    /// three corpus functions.
+    ///
+    /// Both the new operands and the new predecessor edges are *appended*, and
+    /// they have to be: `BlockGraph::removeFromFlow` severs this block's own
+    /// edge to the successor before retargeting anything, so the retargeted
+    /// edges land at the end of the successor's in-edge list, which is exactly
+    /// where `opInsertInput(op,...,op->numInput())` puts the operands.
+    ///
+    /// One divergence is forced by this graph interning duplicate edges where
+    /// Ghidra keeps them: a predecessor that already reaches the successor gains
+    /// no second edge here, so it contributes no operand either. That case is
+    /// only reached with `unblocked_multi`'s agreement, which is precisely the
+    /// guarantee that the operand it would have contributed is the one already
+    /// present.
+    fn block_remove_internal(&mut self, block: GraphBlockId, unreachable: bool) {
+        if !unreachable {
+            self.push_multiequals(block);
+            let predecessors = self.blocks[block.0 as usize].predecessors.clone();
+            for successor in self.blocks[block.0 as usize].successors.clone() {
+                if self.blocks[successor.0 as usize].dead {
+                    continue;
+                }
+                let Some(slot) = self.blocks[successor.0 as usize]
+                    .predecessors
+                    .iter()
+                    .position(|held| *held == block)
+                else {
+                    continue;
+                };
+                // The edges that will actually be appended, in order, skipping
+                // the predecessors this graph has already interned.
+                let arriving: Vec<usize> = predecessors
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, predecessor)| {
+                        !self.blocks[successor.0 as usize]
+                            .predecessors
+                            .contains(predecessor)
+                    })
+                    .map(|(index, _)| index)
+                    .collect();
+                let phis: Vec<OpId> = self.blocks[successor.0 as usize]
+                    .ops
+                    .iter()
+                    .copied()
+                    .filter(|op| self.ops[op.0 as usize].opcode == ventris_pcode::op::MULTIEQUAL)
+                    .collect();
+                for phi in phis {
+                    let Some(&dead_value) = self.ops[phi.0 as usize].inputs.get(slot) else {
+                        continue;
+                    };
+                    self.op_remove_input(phi, slot);
+                    let inner = self.varnodes[dead_value.0 as usize].def.filter(|definition| {
+                        self.ops[definition.0 as usize].opcode == ventris_pcode::op::MULTIEQUAL
+                            && self.ops[definition.0 as usize].parent == Some(block)
+                    });
+                    for index in arriving.iter().copied() {
+                        let operand = match inner {
+                            Some(definition) => self.ops[definition.0 as usize]
+                                .inputs
+                                .get(index)
+                                .copied()
+                                .unwrap_or(dead_value),
+                            None => dead_value,
+                        };
+                        let end = self.ops[phi.0 as usize].inputs.len();
+                        self.op_insert_input(phi, operand, end);
+                    }
+                    self.op_zero_multi(phi);
+                }
+            }
+        }
+        // `BlockGraph::removeFromFlow`: sever this block's out edge first, then
+        // retarget every in edge at the successor, appending as it goes.
+        //
+        // Ghidra's branch destinations are block references, so retargeting an
+        // edge is all it has to do. Here a destination is an address, and the
+        // removed block's address is about to name nothing - a predecessor's
+        // `BRANCH` would be left pointing at a label that is never emitted.
+        // The successor therefore inherits this block's position: control that
+        // arrived here now arrives there, which is exactly what the retargeted
+        // edge says.
+        for successor in self.blocks[block.0 as usize].successors.clone() {
+            self.blocks[block.0 as usize]
+                .successors
+                .retain(|held| *held != successor);
+            self.blocks[successor.0 as usize]
+                .predecessors
+                .retain(|held| *held != block);
+            if !unreachable {
+                let inherited = {
+                    let removed = &self.blocks[block.0 as usize];
+                    let mut inherited = vec![(removed.start, removed.start_order)];
+                    inherited.extend(removed.absorbed.iter().copied());
+                    inherited
+                };
+                self.blocks[successor.0 as usize].absorbed.extend(inherited);
+            }
+            for predecessor in self.blocks[block.0 as usize].predecessors.clone() {
+                self.blocks[predecessor.0 as usize]
+                    .successors
+                    .retain(|held| *held != block);
+                if predecessor == block {
+                    continue;
+                }
+                self.add_edge(predecessor, successor);
+            }
+        }
+        for predecessor in self.blocks[block.0 as usize].predecessors.clone() {
+            self.blocks[predecessor.0 as usize]
+                .successors
+                .retain(|held| *held != block);
+        }
+        for op in self.blocks[block.0 as usize].ops.clone() {
+            if unreachable
+                && let Some(output) = self.ops[op.0 as usize].output
+            {
+                self.descend_to_undef(output);
+            }
+            self.op_destroy(op);
+        }
+        let removed = &mut self.blocks[block.0 as usize];
+        removed.ops.clear();
+        removed.predecessors.clear();
+        removed.successors.clear();
+        removed.dead = true;
+    }
+
+    /// Replaces every live read of a stranded value with a marker constant.
+    ///
+    /// Ghidra's `Funcdata::descend2Undef`, reached when unreachable-block
+    /// removal leaves a reader behind. A merge cannot take a constant operand
+    /// directly, so the constant arrives through a `COPY` placed in the
+    /// predecessor whose edge the operand stands for.
+    fn descend_to_undef(&mut self, value: VarnodeId) -> bool {
+        let mut modified = false;
+        let size = self.varnodes[value.0 as usize].size;
+        let readers: Vec<OpId> = self.varnodes[value.0 as usize]
+            .descendants
+            .iter()
+            .copied()
+            .collect();
+        for reader in readers {
+            let Some(parent) = self.ops[reader.0 as usize].parent else {
+                continue;
+            };
+            if self.blocks[parent.0 as usize].dead {
+                continue;
+            }
+            if !self.blocks[parent.0 as usize].predecessors.is_empty() {
+                modified = true;
+            }
+            let Some(slot) = self.ops[reader.0 as usize]
+                .inputs
+                .iter()
+                .position(|input| *input == value)
+            else {
+                continue;
+            };
+            let marker = self.new_constant(0x00BA_DDEF, size);
+            if self.ops[reader.0 as usize].opcode == ventris_pcode::op::MULTIEQUAL {
+                let Some(&source) = self.blocks[parent.0 as usize].predecessors.get(slot) else {
+                    continue;
+                };
+                let seq = SeqNum {
+                    address: self.blocks[source.0 as usize].start,
+                    order: self.blocks[source.0 as usize].start_order,
+                };
+                let copy = self.new_op(ventris_pcode::op::COPY, seq, vec![marker]);
+                let carried = self.new_unique(size);
+                self.op_set_output(copy, Some(carried));
+                self.op_insert_end(copy, source);
+                self.op_set_input(reader, carried, slot);
+            } else if self.ops[reader.0 as usize].opcode == ventris_pcode::op::INDIRECT {
+                let seq = self.ops[reader.0 as usize].seq;
+                let copy = self.new_op(ventris_pcode::op::COPY, seq, vec![marker]);
+                let carried = self.new_unique(size);
+                self.op_set_output(copy, Some(carried));
+                self.op_insert_begin(copy, parent);
+                self.op_set_input(reader, carried, slot);
+            } else {
+                self.op_set_input(reader, marker, slot);
+            }
+        }
+        modified
+    }
+
+    /// Removes a block that performs no operations.
+    ///
+    /// Ghidra's `Funcdata::removeDoNothingBlock`, which is `blockRemoveInternal`
+    /// on a *live* block: the phi repairs run, so every value that flowed
+    /// through the block still reaches its readers afterwards.
+    pub fn remove_do_nothing_block(&mut self, block: GraphBlockId) -> bool {
+        self.invalidate_masks();
+        if self.blocks[block.0 as usize].dead || self.blocks[block.0 as usize].successors.len() > 1
+        {
+            return false;
+        }
+        self.block_remove_internal(block, false);
+        true
+    }
+
+    /// Merges a block with the single block it flows into.
+    ///
+    /// Ghidra's `Funcdata::spliceBlockBasic`: the *successor's* operations move
+    /// into this block, and this block inherits the successor's out edges. Which
+    /// block survives is observable - the survivor keeps this block's start
+    /// address, so emitted order and labels follow the earlier address, as
+    /// Ghidra's do.
+    pub fn splice_block_basic(&mut self, block: GraphBlockId) -> bool {
+        self.invalidate_masks();
+        let candidate = &self.blocks[block.0 as usize];
+        if candidate.dead || candidate.successors.len() != 1 {
+            return false;
+        }
+        let successor = candidate.successors[0];
+        if successor == block
+            || self.blocks[successor.0 as usize].dead
+            || self.blocks[successor.0 as usize].predecessors.len() != 1
+        {
+            return false;
+        }
+        // Ghidra throws here: a merge at the head of the successor reads one
+        // operand per edge, and the successor is about to have no edges at all.
+        if self.blocks[successor.0 as usize]
+            .ops
+            .first()
+            .is_some_and(|op| self.ops[op.0 as usize].opcode == ventris_pcode::op::MULTIEQUAL)
+        {
+            return false;
+        }
+        if let Some(&last) = self.blocks[block.0 as usize].ops.last()
+            && matches!(
+                self.ops[last.0 as usize].opcode,
+                ventris_pcode::op::BRANCH
+                    | ventris_pcode::op::CBRANCH
+                    | ventris_pcode::op::BRANCHIND
+            )
+        {
+            self.op_destroy(last);
+        }
+        for op in self.blocks[successor.0 as usize].ops.clone() {
+            self.ops[op.0 as usize].parent = Some(block);
+            self.blocks[block.0 as usize].ops.push(op);
+        }
+        self.blocks[successor.0 as usize].ops.clear();
+        self.blocks[block.0 as usize]
+            .successors
+            .retain(|held| *held != successor);
+        self.blocks[successor.0 as usize].predecessors.clear();
+        for target in self.blocks[successor.0 as usize].successors.clone() {
+            if target == successor {
+                // A self-loop on the removed block becomes a self-loop here.
+                self.blocks[successor.0 as usize]
+                    .successors
+                    .retain(|held| *held != target);
+                self.add_edge(block, block);
+                continue;
+            }
+            self.move_out_edge(successor, target, block);
+        }
+        // `BlockBasic::mergeRange`: the survivor covers the absorbed block's
+        // position, and everything that block had itself absorbed.
+        let merged = {
+            let removed = &self.blocks[successor.0 as usize];
+            let mut merged = vec![(removed.start, removed.start_order)];
+            merged.extend(removed.absorbed.iter().copied());
+            merged
+        };
+        self.blocks[block.0 as usize].absorbed.extend(merged);
+        self.blocks[successor.0 as usize].absorbed.clear();
+        self.blocks[successor.0 as usize].predecessors.clear();
+        self.blocks[successor.0 as usize].successors.clear();
+        self.blocks[successor.0 as usize].dead = true;
+        true
     }
 
     /// Builds the graph from immutable lifter output.
@@ -1599,13 +2164,18 @@ mod tests {
         data.op_insert_end(branch, transfer);
 
         assert!(
-            !data.splice_block(transfer),
+            !data.splice_block_basic(transfer),
             "the shared successor is reached from two blocks"
         );
 
         // With the other edge gone the splice is safe again.
         assert!(data.remove_edge(entry, shared));
-        assert!(data.splice_block(transfer));
+        assert!(data.splice_block_basic(transfer));
+        // Ghidra keeps the *earlier* block: the successor's operations move into
+        // it, so labels and emitted order follow the lower address.
+        assert!(data.block(shared).dead);
+        assert!(!data.block(transfer).dead);
+        assert_eq!(data.block(transfer).start, 0x1010);
     }
 
     #[test]

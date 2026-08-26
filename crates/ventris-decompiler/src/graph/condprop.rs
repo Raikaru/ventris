@@ -58,7 +58,7 @@ fn branch_edges(
     let target = successors
         .iter()
         .copied()
-        .find(|successor| data.block(*successor).start == target_address)?;
+        .find(|successor| data.block_covers(*successor, target_address, 0))?;
     let fallthrough = successors
         .iter()
         .copied()

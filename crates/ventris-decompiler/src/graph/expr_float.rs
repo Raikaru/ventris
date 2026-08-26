@@ -511,7 +511,7 @@ fn branch_taken_slot(data: &Funcdata, condition: GraphBlockId, branch: OpId) -> 
     data.block(condition)
         .successors
         .iter()
-        .position(|successor| data.block(*successor).start == target_address)
+        .position(|successor| data.block_covers(*successor, target_address, 0))
 }
 
 /// Port of `RuleInt2FloatCollapse`.

@@ -277,11 +277,13 @@ pub fn propagate(data: &Funcdata) -> BTreeMap<VarnodeId, u64> {
         if !all {
             continue;
         }
-        // A `RETURN`'s first operand is the return address. It is consumed by
-        // the machine, not by the program, and marking it live keeps the
-        // epilogue's register restore alive with it.
-        let skip = usize::from(operation.opcode == op::RETURN);
-        for input in operation.inputs.iter().skip(skip).copied() {
+        // Every operand of a `RETURN` is fully consumed, its first included.
+        // `ActionDeadCode::propagateConsumed` pushes `~0` on `getIn(0)` - the
+        // return address - before pushing the convention's mask on the rest.
+        // Skipping it kills the epilogue's register restore, which empties the
+        // epilogue block; `ActionDoNothing` then removes the empty block and the
+        // function's exit arms collapse into gotos.
+        for input in operation.inputs.iter().copied() {
             let mask = calc_mask(data.varnode(input).size);
             push(input, mask, &mut consumed, &mut worklist);
         }

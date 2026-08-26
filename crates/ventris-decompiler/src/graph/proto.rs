@@ -60,6 +60,20 @@ pub fn recover_call_arguments(
     let mut recovered = 0;
     for (call, target) in calls {
         let trials = register_trials(data, call, argument_locations);
+        if std::env::var("VENTRIS_PROBE_TRIALS").is_ok() {
+            eprintln!(
+                "call {call:?} target={target:?}: trials={:?}",
+                trials
+                    .iter()
+                    .map(|trial| (
+                        trial.location.offset,
+                        trial.used,
+                        data.varnode(trial.value).offset,
+                        data.varnode(trial.value).flags.constant,
+                    ))
+                    .collect::<Vec<_>>()
+            );
+        }
         // A known callee states its own arity. Ghidra's `FuncCallSpecs` uses
         // the callee prototype when it has one, which is the only way to see
         // an argument this function forwards without touching.

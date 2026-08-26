@@ -622,7 +622,25 @@ pub fn call_arguments(
         .collect()
 }
 
+/// The candidate parameter locations for a call site.
+///
+/// Ghidra asks the call's own `FuncCallSpecs` for `getInputLocations`, so the
+/// candidates are the *convention's* input storage in the order the convention
+/// assigns it. Deriving them from whichever locations happen to be guarded is
+/// not the same set: `guardCalls` guards every location a callee may change,
+/// including the link register, and a guarded link register carrying the call's
+/// own return address is a perfectly "used" value that would then be offered as
+/// this call's first argument.
+///
+/// The guard-derived set remains the fallback for a graph with no recovered
+/// prototype, where nothing else names the convention.
 fn locations_before_call(data: &Funcdata, call: OpId) -> Vec<Location> {
+    if let Some(proto) = data.func_proto() {
+        let storage = proto.model_input_storage();
+        if !storage.is_empty() {
+            return storage.to_vec();
+        }
+    }
     let Some(block) = data.op(call).parent else {
         return Vec::new();
     };

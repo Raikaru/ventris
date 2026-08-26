@@ -121,7 +121,19 @@ impl Action for ActionDeterminedBranch {
     }
 }
 
-/// Turns a conditional transfer with one effective destination into BRANCH.
+/// Removes a branch that decides nothing, and merges the blocks it joined.
+///
+/// `ActionRedundBranch::apply` has two arms, and only the second is about
+/// conditionals. A block with a *single* way out whose successor has a single
+/// way in is spliced into that successor outright - the pass is Ghidra's main
+/// straight-line block merger, and skipping it leaves every instruction-level
+/// split in the graph for structuring to account for. The exclusions are exact:
+/// not the entry block, because it anchors the function, and not a switch-out
+/// block, because "this prevents possible second stage recovery" of the jump
+/// table.
+///
+/// The second arm is the conditional one: when every edge out of a block goes
+/// to the same place, the test is dead and Ghidra removes the branch.
 pub struct ActionRedundBranch;
 
 impl Action for ActionRedundBranch {
@@ -130,6 +142,35 @@ impl Action for ActionRedundBranch {
     }
 
     fn apply(&self, data: &mut Funcdata) -> usize {
+        let mut changed = 0;
+        // Splicing removes a block, so the walk restarts - as Ghidra's `i = -1`
+        // does - rather than continuing over identifiers it has just retired.
+        loop {
+            let spliceable = data.blocks().find(|(block, graph_block)| {
+                if graph_block.successors.len() != 1 {
+                    return false;
+                }
+                // This graph interns duplicate edges, so a block still holding
+                // a `CBRANCH` with one successor is Ghidra's two-identical-edges
+                // block, where `sizeOut()` is 2 and the splice arm is not
+                // reached. It belongs to the conditional arm below.
+                if last_live_op(data, *block)
+                    .is_some_and(|operation| data.op(operation).opcode == op::CBRANCH)
+                {
+                    return false;
+                }
+                let successor = graph_block.successors[0];
+                successor != *block
+                    && data.block(successor).predecessors.len() == 1
+                    && !data.is_entry_block(successor)
+                    && !data.is_switch_out(*block)
+            });
+            let Some((block, _)) = spliceable else { break };
+            if !data.splice_block_basic(block) {
+                break;
+            }
+            changed += 1;
+        }
         let candidates: Vec<(GraphBlockId, OpId)> = data
             .blocks()
             .filter_map(|(block, _)| {
@@ -137,7 +178,6 @@ impl Action for ActionRedundBranch {
                 (data.op(operation).opcode == op::CBRANCH).then_some((block, operation))
             })
             .collect();
-        let mut changed = 0;
         for (block, branch) in candidates {
             let successors = data.block(block).successors.clone();
             if successors.is_empty() || successors.windows(2).any(|pair| pair[0] != pair[1]) {
@@ -180,10 +220,16 @@ impl Action for ActionPruneDeadTargets {
     }
 
     fn apply(&self, data: &mut Funcdata) -> usize {
+        // A block that has absorbed another still covers the absorbed block's
+        // address, so a branch naming it is not stale.
         let starts: std::collections::BTreeSet<u64> = data
             .blocks()
-            .filter(|(_, block)| block.start_order == 0)
-            .map(|(_, block)| block.start)
+            .flat_map(|(_, block)| {
+                std::iter::once((block.start, block.start_order))
+                    .chain(block.absorbed.iter().copied())
+            })
+            .filter(|(_, order)| *order == 0)
+            .map(|(start, _)| start)
             .collect();
         let stale: Vec<(OpId, GraphBlockId)> = data
             .blocks()
@@ -278,7 +324,18 @@ impl Action for ActionUnreachable {
     }
 }
 
-/// Splices a transfer-only block into its successor.
+/// Removes a block that performs no operations.
+///
+/// `ActionDoNothing::apply`. The candidate test is `BlockBasic::isDoNothing`,
+/// which accepts any block with one way out, at least one way in, and nothing
+/// but markers and a branch inside - a block holding only merges, or nothing at
+/// all, qualifies just as much as one holding a lone `BRANCH`. Removal goes
+/// through `Funcdata::removeDoNothingBlock`, which relocates the merges the
+/// block carried; the wider test is only correct together with that relocation,
+/// and Ghidra pairs them for exactly that reason.
+///
+/// A self-loop that does nothing is an infinite loop, and Ghidra warns rather
+/// than removing it, because removing it would delete the loop.
 pub struct ActionDoNothing;
 
 impl Action for ActionDoNothing {
@@ -287,17 +344,49 @@ impl Action for ActionDoNothing {
     }
 
     fn apply(&self, data: &mut Funcdata) -> usize {
-        let candidates: Vec<GraphBlockId> = data
-            .blocks()
-            .filter_map(|(block, graph_block)| {
-                (graph_block.ops.len() == 1
-                    && graph_block.ops.first().and_then(|id| data.opcode_of(*id))
-                        == Some(op::BRANCH))
-                .then_some(block)
-            })
-            .collect();
+        let candidates: Vec<GraphBlockId> = data.blocks().map(|(block, _)| block).collect();
         for block in candidates {
-            if data.splice_block(block) {
+            if !data.is_do_nothing(block) {
+                continue;
+            }
+            let successors = data.block(block).successors.clone();
+            if successors.first() == Some(&block) {
+                continue;
+            }
+            if !data.unblocked_multi(block, 0) {
+                continue;
+            }
+            if std::env::var("VENTRIS_PROBE_DONOTHING").is_ok() {
+                eprintln!(
+                    "do-nothing: removing {:#x}/{} ops={} in={:?} out={:#x}",
+                    data.block(block).start,
+                    data.block(block).start_order,
+                    data.block(block).ops.len(),
+                    data.block(block)
+                        .predecessors
+                        .iter()
+                        .map(|id| data.block(*id).start)
+                        .collect::<Vec<_>>(),
+                    data.block(successors[0]).start,
+                );
+            }
+            if data.remove_do_nothing_block(block) {
+                if std::env::var("VENTRIS_PROBE_DONOTHING").is_ok() {
+                    let dead_defs: Vec<String> = data
+                        .blocks()
+                        .flat_map(|(_, graph_block)| graph_block.ops.clone())
+                        .flat_map(|op| data.op(op).inputs.clone())
+                        .filter(|value| {
+                            data.varnode(*value)
+                                .def
+                                .is_some_and(|definition| data.op(definition).dead)
+                        })
+                        .map(|value| format!("{value:?}"))
+                        .collect();
+                    if !dead_defs.is_empty() {
+                        eprintln!("  stranded reads: {dead_defs:?}");
+                    }
+                }
                 return 1;
             }
         }

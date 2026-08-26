@@ -319,7 +319,7 @@ impl<'a> Graph<'a> {
         }
         let entry = data
             .blocks()
-            .find(|(_, block)| block.start == data.entry && block.start_order == 0)
+            .find(|(id, _)| data.is_entry_block(*id))
             .map(|(id, _)| id)
             .or_else(|| data.blocks().next().map(|(id, _)| id))
             .and_then(|id| of_block.get(&id).copied());
@@ -1970,17 +1970,12 @@ fn taken_successor(data: &Funcdata, block: GraphBlockId) -> Option<GraphBlockId>
         let seq = data.op(terminator).seq;
         let relative = data.varnode(target).offset as i64;
         let order = u32::try_from(i64::from(seq.order).checked_add(relative)?).ok()?;
-        return data
-            .blocks()
-            .find(|(_, candidate)| candidate.start == seq.address && candidate.start_order == order)
-            .map(|(id, _)| id);
+        return data.block_at_position(seq.address, order);
     }
     let address = data.varnode(target).offset;
-    data.blocks()
-        // An instruction split into several blocks has one at order zero; a
-        // machine branch always arrives there.
-        .find(|(_, candidate)| candidate.start == address && candidate.start_order == 0)
-        .map(|(id, _)| id)
+    // An instruction split into several blocks has one at order zero; a machine
+    // branch always arrives there, and a block that absorbed that one covers it.
+    data.block_starting_at(address)
 }
 
 impl Graph<'_> {

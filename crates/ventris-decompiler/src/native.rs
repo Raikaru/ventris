@@ -2120,6 +2120,33 @@ impl NativeDecompiler {
                 size: vnode.size,
             });
         }
+        // `ActionFuncLink` gives every call site its `FuncCallSpecs` before
+        // `ActionActiveParam` ever runs, so the convention's input storage is
+        // known from the first round. Attaching it only at the end of a round
+        // left the first round's `ActionActiveParam` with no model, and its
+        // fallback - the locations that happen to be guarded - includes the link
+        // register. A guarded link register holds the call's own return address,
+        // a perfectly real value, so it was offered as that call's first
+        // argument and overwrote the argument recovery had already found.
+        if let Some(abi) = abi {
+            let to_location = |vnode: &Varnode| graph::guard::Location {
+                space: vnode.space,
+                offset: vnode.offset,
+                size: vnode.size,
+            };
+            let mut proto = graph::funcproto::FuncProto::new(*abi);
+            proto.set_model_storage(
+                abi_argument_vnodes(architecture, abi)
+                    .iter()
+                    .map(to_location)
+                    .collect(),
+                abi_primary_return_vnodes(architecture, abi)
+                    .iter()
+                    .map(to_location)
+                    .collect(),
+            );
+            data.set_func_proto(proto);
+        }
 
         for _ in 0..GRAPH_PIPELINE_ROUNDS {
             // `ActionInferTypes` is a pass in Ghidra's pool, not a query the
@@ -2298,6 +2325,29 @@ impl NativeDecompiler {
         // and emission reads types to spell a field access. Ghidra recovers types
         // once more before it prints for the same reason.
         data.invalidate_types();
+        if std::env::var("VENTRIS_PROBE_CALLS").is_ok() {
+            for (id, operation) in data.live_ops() {
+                if matches!(operation.opcode, op::CALL | op::CALLIND) {
+                    eprintln!(
+                        "final call {id:?}: {:?}",
+                        operation
+                            .inputs
+                            .iter()
+                            .map(|value| {
+                                let varnode = data.varnode(*value);
+                                (
+                                    *value,
+                                    varnode.space,
+                                    varnode.offset,
+                                    varnode.flags.constant,
+                                    varnode.def,
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    );
+                }
+            }
+        }
         // `ActionDominantCopy` belongs to Ghidra's merge phase, which runs after
         // simplification. Running it before the rounds meant computing the whole
         // variable merge over the largest version of the graph — 11,500 varnodes
