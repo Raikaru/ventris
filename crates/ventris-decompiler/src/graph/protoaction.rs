@@ -263,6 +263,136 @@ impl Action for ActionActiveReturn {
     }
 }
 
+/// Marks every value that is written in a way the source could have written.
+///
+/// Ghidra's `ActionDirectWrite`, registered twice - once with indirect
+/// propagation and once without (`coreaction.cc:5553-5554` and `5739-5740`).
+/// The flag answers "could a variable in the source have held this value": a
+/// legal function input, a constant, and anything written by an operation that
+/// is not a plain copy all qualify, and the property then taints forward along
+/// assignments. `Funcdata::markIndirectOnly` reads the result, and so does
+/// parameter promotion, which is why an unmarked abnormal input must not be
+/// claimed as a parameter.
+///
+/// One sub-branch is not represented: Ghidra treats a `COPY` as a direct write
+/// when the original operation was really a `STORE` (`Varnode::isStackStore`),
+/// which needs a flag recording that provenance through `RuleStoreVarnode`.
+/// Without it the branch cannot fire, and inventing it would mark ordinary
+/// copies.
+pub struct ActionDirectWrite {
+    /// Whether the property propagates through a call's `INDIRECT`.
+    ///
+    /// Ghidra's `propagateIndirect` constructor flag.
+    pub propagate_indirect: bool,
+}
+
+impl Action for ActionDirectWrite {
+    fn name(&self) -> &'static str {
+        if self.propagate_indirect {
+            "directwrite-propagate"
+        } else {
+            "directwrite"
+        }
+    }
+
+    fn apply(&self, data: &mut Funcdata) -> usize {
+        let inputs: Vec<super::guard::Location> = data
+            .func_proto()
+            .map(|proto| proto.model_input_storage().to_vec())
+            .unwrap_or_default();
+        let spacebase = data.spacebase;
+        let mut worklist: Vec<VarnodeId> = Vec::new();
+        for index in 0..data.varnode_count() {
+            let value = VarnodeId(index as u32);
+            data.clear_direct_write(value);
+            let varnode = data.varnode(value);
+            let (space, offset, size) = (varnode.space, varnode.offset, varnode.size);
+            let persist = space == ventris_lifter::RAM_SPACE;
+            let is_spacebase =
+                spacebase.is_some_and(|base| base.space == space && base.offset == offset);
+            if varnode.flags.input {
+                let legal = persist
+                    || is_spacebase
+                    || inputs.iter().any(|location| {
+                        location.space == space
+                            && location.offset == offset
+                            && location.size == size
+                    });
+                if legal {
+                    data.mark_direct_write(value);
+                    worklist.push(value);
+                }
+                continue;
+            }
+            if varnode.flags.constant {
+                // `isIndirectZero`: the placeholder standing for "no previous
+                // value" at an indirect creation is not a written value.
+                if !varnode.flags.indirect_creation {
+                    data.mark_direct_write(value);
+                    worklist.push(value);
+                }
+                continue;
+            }
+            let Some(definition) = varnode.def else {
+                continue;
+            };
+            let opcode = data.op(definition).opcode;
+            let marker = matches!(opcode, op::MULTIEQUAL | op::INDIRECT);
+            if !marker {
+                if persist {
+                    data.mark_direct_write(value);
+                    worklist.push(value);
+                } else if !matches!(opcode, op::COPY | op::PIECE | op::SUBPIECE) {
+                    data.mark_direct_write(value);
+                    worklist.push(value);
+                }
+                continue;
+            }
+            if !self.propagate_indirect && opcode == op::INDIRECT {
+                let changes_storage =
+                    data.op(definition)
+                        .inputs
+                        .first()
+                        .copied()
+                        .is_some_and(|source| {
+                            let from = data.varnode(source);
+                            from.space != space || from.offset != offset
+                        });
+                // An `INDIRECT` whose storage changes is an active copy, and a
+                // persistent output must hold its value where the call sees it.
+                // Neither joins the worklist: an `INDIRECT` does not propagate
+                // here.
+                if changes_storage || persist {
+                    data.mark_direct_write(value);
+                }
+            }
+        }
+        // "Let legalness taint".
+        while let Some(value) = worklist.pop() {
+            let readers: Vec<OpId> = data
+                .varnode(value)
+                .descendants
+                .iter()
+                .copied()
+                .filter(|op| data.opcode_of(*op).is_some())
+                .collect();
+            for reader in readers {
+                let Some(output) = data.op(reader).output else {
+                    continue;
+                };
+                if data.varnode(output).flags.direct_write {
+                    continue;
+                }
+                data.mark_direct_write(output);
+                if self.propagate_indirect || data.op(reader).opcode != op::INDIRECT {
+                    worklist.push(output);
+                }
+            }
+        }
+        0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2154,7 +2154,18 @@ impl NativeDecompiler {
             graph::action::Action::apply(action.as_ref(), &mut data);
         }
         let pipeline = graph::action::default_pipeline();
-        let control_flow: [&dyn graph::action::Action; 13] = [
+        // `ActionDirectWrite` is registered twice in Ghidra's main loop, once
+        // propagating through a call's `INDIRECT` and once not
+        // (`coreaction.cc:5553-5554`), and again on the full loop
+        // (`5739-5740`). The property gates which abnormal inputs parameter
+        // promotion may claim, so it has to be recomputed as the graph changes.
+        let control_flow: [&dyn graph::action::Action; 15] = [
+            &graph::protoaction::ActionDirectWrite {
+                propagate_indirect: true,
+            },
+            &graph::protoaction::ActionDirectWrite {
+                propagate_indirect: false,
+            },
             &graph::branchaction::ActionDeterminedBranch,
             // Unreachable removal drops an edge without touching the branch
             // operand, so a terminator can outlive the block it names.

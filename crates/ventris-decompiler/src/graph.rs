@@ -643,6 +643,13 @@ impl Funcdata {
         self.varnodes[id.0 as usize].flags.direct_write = true;
     }
 
+    /// Clears the direct-write mark, as `ActionDirectWrite` does before it
+    /// recomputes the property from scratch.
+    pub fn clear_direct_write(&mut self, id: VarnodeId) {
+        self.invalidate_masks();
+        self.varnodes[id.0 as usize].flags.direct_write = false;
+    }
+
     /// Marks abnormal inputs whose complete use chain reaches `INDIRECT`.
     ///
     /// Ghidra's `Funcdata::markIndirectOnly` follows `MULTIEQUAL` outputs and
