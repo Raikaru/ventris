@@ -645,3 +645,32 @@ mod tests {
         let _ = (CONST_SPACE, RAM_SPACE);
     }
 }
+
+/// Turn an indirect jump with no recovered table into an indirect call.
+///
+/// Port of `FlowInfo::truncateIndirectJump`, the `fail_normal` arm. A `BRANCHIND`
+/// whose table could not be recovered has no known destinations, so leaving it
+/// as a branch says control goes somewhere the graph cannot name and the printer
+/// spells that as a computed `goto`. Ghidra reads the same situation as a call:
+/// control leaves through a value and comes back, which is what a tail call
+/// through a register is. The alternative arm, `fail_return`, turns it into a
+/// `RETURN` instead, and is reached only when the analysis proves control does
+/// not come back - the graph here has no such proof, so it takes the call arm.
+///
+/// Returns the number of jumps converted.
+pub fn truncate_indirect_jumps(data: &mut Funcdata, tables: &[JumpTable]) -> usize {
+    let recovered: BTreeSet<OpId> = tables.iter().map(|table| table.branch).collect();
+    let unrecovered: Vec<OpId> = data
+        .live_ops()
+        .filter(|(id, operation)| operation.opcode == op::BRANCHIND && !recovered.contains(id))
+        .map(|(id, _)| id)
+        .collect();
+    let mut changed = 0;
+    for branch in unrecovered {
+        // The destination becomes the callee, which is where a CALLIND keeps it
+        // too, so the operands need no rearranging.
+        data.op_set_opcode(branch, op::CALLIND);
+        changed += 1;
+    }
+    changed
+}

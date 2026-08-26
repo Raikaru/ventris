@@ -17,6 +17,7 @@
 //! `funcdata_op.cc` at commit `8b4c91d4d5bd1549622bfbade0df199585b98365`.
 
 pub mod action;
+pub mod actiondb;
 pub mod blockaction;
 pub mod branchaction;
 pub mod callproto;
@@ -26,6 +27,7 @@ pub mod coreaction;
 pub mod cover;
 pub mod deadcode;
 pub mod dominantcopy;
+pub mod dynamic;
 pub mod emit;
 pub mod equality;
 pub mod expr_arith;
@@ -97,6 +99,16 @@ pub struct VarnodeFlags {
     pub unique: bool,
     /// Reads and writes of this location may not be reordered or removed.
     pub volatile: bool,
+    /// The value may be directly affected by a legal function input.
+    ///
+    /// Ghidra's `Varnode::directwrite` bit excludes an input from the abnormal
+    /// inputs that `Funcdata::markIndirectOnly` examines.
+    pub direct_write: bool,
+    /// Every use of an abnormal input reaches an `INDIRECT` marker.
+    ///
+    /// Ghidra's `Varnode::indirectonly` bit lets merge and variable naming
+    /// retain an otherwise illegal input when it has no ordinary data-flow use.
+    pub indirect_only: bool,
 }
 
 /// One value in the data-flow graph.
@@ -197,6 +209,42 @@ pub struct Funcdata {
     /// carried explicitly because the graph has no architecture: it is what lets
     /// type recovery tell the frame apart from an ordinary object.
     pub spacebase: Option<guard::Location>,
+    /// Whether raw p-code processing has started.
+    ///
+    /// This is Ghidra's `processing_started` flag. Front-end lifecycle checks
+    /// and the printer read it before treating the graph as decompiled.
+    pub processing_started: bool,
+    /// Whether post-processing has completed.
+    ///
+    /// This is Ghidra's `processing_complete` flag. Signature and output
+    /// clients read it before accepting the graph as fully analyzed.
+    pub processing_complete: bool,
+    /// Whether type recovery is enabled for this function.
+    ///
+    /// This is Ghidra's `typerecovery_on` flag. Type-sensitive rules and
+    /// prototype recovery read it when deciding whether recovered types are
+    /// authoritative.
+    pub type_recovery_on: bool,
+    /// Whether type recovery has begun its propagation passes.
+    ///
+    /// This is Ghidra's `typerecovery_start` flag. The type-recovery action,
+    /// pointer rules, and spacebase recovery use it as their start gate.
+    pub type_recovery_started: bool,
+    /// Varnode creation index at the beginning of cleanup.
+    ///
+    /// This is Ghidra's `clean_up_index`. Cleanup rules read it to distinguish
+    /// values made before cleanup from values introduced during cleanup.
+    pub clean_up_index: usize,
+    /// Varnode creation index at the beginning of high-level assignment.
+    ///
+    /// This is Ghidra's `high_level_index`. Merge, cast, and variable-naming
+    /// passes use the boundary when they reason about high-level values.
+    pub high_level_index: usize,
+    /// Whether high-level variable assignment is enabled.
+    ///
+    /// This is Ghidra's `highlevel_on` flag. The printer and prototype recovery
+    /// read it to select high-level variables instead of raw SSA values.
+    pub high_level_on: bool,
 }
 
 /// A derived value held beside the graph it was computed from.
@@ -392,6 +440,169 @@ impl Funcdata {
     pub fn mark_input(&mut self, id: VarnodeId) {
         self.invalidate_masks();
         self.varnodes[id.0 as usize].flags.input = true;
+    }
+    /// Marks an input as directly affected by a legal function input.
+    ///
+    /// Ghidra's `Varnode::directwrite` bit makes the value a legal input for
+    /// `Funcdata::markIndirectOnly`, so it must not receive the
+    /// `indirectonly` mark.
+    pub fn mark_direct_write(&mut self, id: VarnodeId) {
+        self.invalidate_masks();
+        self.varnodes[id.0 as usize].flags.direct_write = true;
+    }
+
+    /// Marks abnormal inputs whose complete use chain reaches `INDIRECT`.
+    ///
+    /// Ghidra's `Funcdata::markIndirectOnly` follows `MULTIEQUAL` outputs and
+    /// accepts `INDIRECT` terminals. The graph has no indirect-store marker, so
+    /// every `INDIRECT` is the representable terminal form.
+    pub fn mark_indirect_only(&mut self) -> usize {
+        let candidates: Vec<VarnodeId> = self
+            .varnodes
+            .iter()
+            .enumerate()
+            .filter(|(_, value)| value.flags.input && !value.flags.direct_write)
+            .map(|(index, _)| VarnodeId(index as u32))
+            .collect();
+        let mut marked = 0;
+        for id in candidates {
+            if !self.uses_only_indirect(id) {
+                continue;
+            }
+            let value = &mut self.varnodes[id.0 as usize];
+            if !value.flags.indirect_only {
+                value.flags.indirect_only = true;
+                marked += 1;
+            }
+        }
+        marked
+    }
+
+    fn uses_only_indirect(&self, root: VarnodeId) -> bool {
+        let mut pending = vec![root];
+        let mut seen = BTreeSet::new();
+        while let Some(value) = pending.pop() {
+            if !seen.insert(value) {
+                continue;
+            }
+            let descendants: Vec<OpId> = self.varnode(value).descendants.iter().copied().collect();
+            for operation in descendants {
+                let operation = self.op(operation);
+                if operation.dead {
+                    continue;
+                }
+                match operation.opcode {
+                    ventris_pcode::op::INDIRECT => {}
+                    ventris_pcode::op::MULTIEQUAL => {
+                        let Some(output) = operation.output else {
+                            return false;
+                        };
+                        pending.push(output);
+                    }
+                    _ => return false,
+                }
+            }
+        }
+        true
+    }
+
+    /// Starts raw p-code processing for this graph.
+    ///
+    /// Ghidra's `Funcdata::startProcessing` sets `processing_started`; the
+    /// graph is already built by `from_lifted`, so flow tracing and warnings
+    /// belong to the lifter rather than this lifecycle marker.
+    pub fn start_processing(&mut self) {
+        self.processing_started = true;
+    }
+
+    /// Marks this graph as fully processed.
+    ///
+    /// Ghidra's `Funcdata::stopProcessing` sets `processing_complete`; dead-op
+    /// reclamation and warning emission are not represented by this graph.
+    pub fn stop_processing(&mut self) {
+        self.processing_complete = true;
+    }
+
+    /// Enables or disables type recovery for this graph.
+    ///
+    /// This is Ghidra's `Funcdata::setTypeRecovery`. The type-sensitive rules
+    /// read `type_recovery_on` to decide whether recovered types may guide a
+    /// rewrite.
+    pub fn set_type_recovery(&mut self, enabled: bool) {
+        self.type_recovery_on = enabled;
+    }
+
+    /// Starts type-recovery propagation once.
+    ///
+    /// This is Ghidra's `Funcdata::startTypeRecovery`, whose boolean result
+    /// distinguishes the first start from repeated action-loop visits.
+    pub fn start_type_recovery(&mut self) -> bool {
+        if self.type_recovery_started {
+            return false;
+        }
+        self.type_recovery_started = true;
+        true
+    }
+
+    /// Records the beginning of cleanup at the current varnode creation index.
+    ///
+    /// This is Ghidra's `Funcdata::startCleanUp`; cleanup rules use the saved
+    /// boundary when applying transformations to newly created values.
+    pub fn start_clean_up(&mut self) {
+        self.clean_up_index = self.varnodes.len();
+    }
+
+    /// Enables high-level variable assignment at the current creation index.
+    ///
+    /// This is Ghidra's `Funcdata::setHighLevel`. The graph has no
+    /// `HighVariable` arena, so the flag and boundary are retained for merge,
+    /// naming, casting, and printing passes without fabricating high objects.
+    pub fn set_high_level(&mut self) {
+        if self.high_level_on {
+            return;
+        }
+        self.high_level_on = true;
+        self.high_level_index = self.varnodes.len();
+    }
+
+    /// Whether raw p-code processing has begun.
+    ///
+    /// This mirrors Ghidra's `Funcdata::isProcStarted` query for front-end and
+    /// printer lifecycle checks.
+    pub fn is_proc_started(&self) -> bool {
+        self.processing_started
+    }
+
+    /// Whether processing has completed.
+    ///
+    /// This mirrors Ghidra's `Funcdata::isProcComplete` query for signature and
+    /// output clients.
+    pub fn is_proc_complete(&self) -> bool {
+        self.processing_complete
+    }
+
+    /// Whether type recovery is enabled.
+    ///
+    /// This mirrors Ghidra's `Funcdata::isTypeRecoveryOn` query used by
+    /// type-sensitive rules and prototype recovery.
+    pub fn is_type_recovery_on(&self) -> bool {
+        self.type_recovery_on
+    }
+
+    /// Whether type recovery has started.
+    ///
+    /// This mirrors Ghidra's `Funcdata::hasTypeRecoveryStarted` query used by
+    /// propagation and pointer-recovery rules.
+    pub fn has_type_recovery_started(&self) -> bool {
+        self.type_recovery_started
+    }
+
+    /// Whether high-level variables are enabled.
+    ///
+    /// This mirrors Ghidra's `Funcdata::isHighOn` query used by printers and
+    /// prototype recovery.
+    pub fn is_high_on(&self) -> bool {
+        self.high_level_on
     }
 
     /// Every varnode recorded at one exact location, oldest first.

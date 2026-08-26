@@ -423,20 +423,10 @@ fn writes_name(statement: &NativeStatement, name: &str) -> bool {
     if assigned_name_and_value(statement).is_some_and(|(written, _)| written == name) {
         return true;
     }
-    match statement {
-        NativeStatement::IfElse {
-            then_body,
-            else_body,
-            ..
-        } => then_body
-            .iter()
-            .chain(else_body)
-            .any(|nested| writes_name(nested, name)),
-        NativeStatement::While { body, .. } | NativeStatement::DoWhile { body, .. } => {
-            body.iter().any(|nested| writes_name(nested, name))
-        }
-        _ => false,
-    }
+    nested_bodies_ref(statement)
+        .into_iter()
+        .flatten()
+        .any(|nested| writes_name(nested, name))
 }
 
 fn assigned_name_and_value(statement: &NativeStatement) -> Option<(String, Expr)> {
@@ -680,19 +670,8 @@ fn drop_assignments_nothing_reads(statements: &mut Vec<NativeStatement>) {
 /// field access that replaced its only reader left the name in use further down.
 fn drop_overwritten_assignments(statements: &mut Vec<NativeStatement>) {
     for statement in statements.iter_mut() {
-        match statement {
-            NativeStatement::IfElse {
-                then_body,
-                else_body,
-                ..
-            } => {
-                drop_overwritten_assignments(then_body);
-                drop_overwritten_assignments(else_body);
-            }
-            NativeStatement::While { body, .. } | NativeStatement::DoWhile { body, .. } => {
-                drop_overwritten_assignments(body);
-            }
-            _ => {}
+        for body in nested_bodies(statement) {
+            drop_overwritten_assignments(body);
         }
     }
     let mut index = 0;
@@ -747,16 +726,11 @@ fn overwritten_before_read(statements: &[NativeStatement], from: usize, name: &s
 fn count_statements(statements: &[NativeStatement]) -> usize {
     statements
         .iter()
-        .map(|statement| match statement {
-            NativeStatement::IfElse {
-                then_body,
-                else_body,
-                ..
-            } => 1 + count_statements(then_body) + count_statements(else_body),
-            NativeStatement::While { body, .. } | NativeStatement::DoWhile { body, .. } => {
-                1 + count_statements(body)
-            }
-            _ => 1,
+        .map(|statement| {
+            1 + nested_bodies_ref(statement)
+                .into_iter()
+                .map(|body| count_statements(body))
+                .sum::<usize>()
         })
         .sum()
 }
@@ -803,21 +777,39 @@ fn collect_read_names(statements: &[NativeStatement], read: &mut BTreeSet<String
                 }
             }
             NativeStatement::IndirectGoto(target) => collect_expr_names(target, read),
-            NativeStatement::IfElse {
-                condition,
-                then_body,
-                else_body,
-            } => {
-                collect_expr_names(condition, read);
-                collect_read_names(then_body, read, false);
-                collect_read_names(else_body, read, false);
+            // A construct's own test is a read, and so is everything its
+            // bodies read. The bodies go through the accessor so no construct
+            // can be forgotten here - liveness is consulted before deleting an
+            // assignment, so a missed read deletes live code.
+            other => {
+                match other {
+                    NativeStatement::IfElse { condition, .. }
+                    | NativeStatement::While { condition, .. }
+                    | NativeStatement::DoWhile { condition, .. } => {
+                        collect_expr_names(condition, read);
+                    }
+                    NativeStatement::For {
+                        initializer,
+                        condition,
+                        step,
+                        ..
+                    } => {
+                        if let Some(condition) = condition {
+                            collect_expr_names(condition, read);
+                        }
+                        for held in [initializer, step].into_iter().flatten() {
+                            collect_read_names(std::slice::from_ref(held.as_ref()), read, false);
+                        }
+                    }
+                    NativeStatement::Switch { expression, .. } => {
+                        collect_expr_names(expression, read);
+                    }
+                    _ => {}
+                }
+                for body in nested_bodies_ref(other) {
+                    collect_read_names(body, read, false);
+                }
             }
-            NativeStatement::While { condition, body }
-            | NativeStatement::DoWhile { body, condition } => {
-                collect_expr_names(condition, read);
-                collect_read_names(body, read, false);
-            }
-            _ => {}
         }
     }
 }
@@ -845,18 +837,11 @@ fn retain_live_assignments(statements: &mut Vec<NativeStatement>, read: &BTreeSe
                     return false;
                 }
             }
-            NativeStatement::IfElse {
-                then_body,
-                else_body,
-                ..
-            } => {
-                retain_live_assignments(then_body, read);
-                retain_live_assignments(else_body, read);
+            other => {
+                for body in nested_bodies(other) {
+                    retain_live_assignments(body, read);
+                }
             }
-            NativeStatement::While { body, .. } | NativeStatement::DoWhile { body, .. } => {
-                retain_live_assignments(body, read);
-            }
-            _ => {}
         }
         true
     });
@@ -942,19 +927,8 @@ fn collect_expr_names(value: &Expr, read: &mut BTreeSet<String>) {
 /// a label instead.
 fn drop_transfers_after_a_transfer(statements: &mut Vec<NativeStatement>) {
     for statement in statements.iter_mut() {
-        match statement {
-            NativeStatement::IfElse {
-                then_body,
-                else_body,
-                ..
-            } => {
-                drop_transfers_after_a_transfer(then_body);
-                drop_transfers_after_a_transfer(else_body);
-            }
-            NativeStatement::While { body, .. } | NativeStatement::DoWhile { body, .. } => {
-                drop_transfers_after_a_transfer(body);
-            }
-            _ => {}
+        for body in nested_bodies(statement) {
+            drop_transfers_after_a_transfer(body);
         }
     }
     let mut index = 1;
@@ -998,18 +972,11 @@ fn collect_jump_targets(statements: &[NativeStatement], named: &mut BTreeSet<u64
             NativeStatement::Goto(target) | NativeStatement::IfGoto { target, .. } => {
                 named.insert(*target);
             }
-            NativeStatement::IfElse {
-                then_body,
-                else_body,
-                ..
-            } => {
-                collect_jump_targets(then_body, named);
-                collect_jump_targets(else_body, named);
+            other => {
+                for body in nested_bodies_ref(other) {
+                    collect_jump_targets(body, named);
+                }
             }
-            NativeStatement::While { body, .. } | NativeStatement::DoWhile { body, .. } => {
-                collect_jump_targets(body, named);
-            }
-            _ => {}
         }
     }
 }
@@ -1034,21 +1001,15 @@ fn retain_needed_labels(
         }
         after_transfer = match &mut statements[index] {
             NativeStatement::Goto(_) | NativeStatement::Return(_) => true,
-            NativeStatement::IfElse {
-                then_body,
-                else_body,
-                ..
-            } => {
-                retain_needed_labels(then_body, named, false);
-                retain_needed_labels(else_body, named, false);
-                false
-            }
-            NativeStatement::While { body, .. } | NativeStatement::DoWhile { body, .. } => {
-                retain_needed_labels(body, named, false);
-                false
-            }
             NativeStatement::Label(_) => after_transfer,
-            _ => false,
+            // A construct's body starts reachable, so its labels are judged on
+            // their own.
+            other => {
+                for body in nested_bodies(other) {
+                    retain_needed_labels(body, named, false);
+                }
+                false
+            }
         };
         index += 1;
     }
@@ -1079,10 +1040,11 @@ fn drop_trailing_gotos_to_following_label(statements: &mut Vec<NativeStatement>)
                 drop_trailing_gotos_to_following_label(then_body);
                 drop_trailing_gotos_to_following_label(else_body);
             }
-            NativeStatement::While { body, .. } | NativeStatement::DoWhile { body, .. } => {
-                drop_trailing_gotos_to_following_label(body);
+            other => {
+                for body in nested_bodies(other) {
+                    drop_trailing_gotos_to_following_label(body);
+                }
             }
-            _ => {}
         }
     }
 }
@@ -1176,19 +1138,8 @@ fn is_self_assignment(statement: &NativeStatement) -> bool {
 fn drop_self_assignments(statements: &mut Vec<NativeStatement>) {
     statements.retain(|statement| !is_self_assignment(statement));
     for statement in statements.iter_mut() {
-        match statement {
-            NativeStatement::IfElse {
-                then_body,
-                else_body,
-                ..
-            } => {
-                drop_self_assignments(then_body);
-                drop_self_assignments(else_body);
-            }
-            NativeStatement::While { body, .. } | NativeStatement::DoWhile { body, .. } => {
-                drop_self_assignments(body);
-            }
-            _ => {}
+        for body in nested_bodies(statement) {
+            drop_self_assignments(body);
         }
     }
 }
@@ -1199,6 +1150,69 @@ fn drop_self_assignments(statements: &mut Vec<NativeStatement>) {
 /// will be emitted. When it lands next, the jump says nothing, and it is the
 /// difference between output that reads as a `goto` ladder and output that
 /// reads as straight-line code.
+
+/// Every statement list nested inside a statement.
+///
+/// Each walker below has to visit these, and teaching them one construct at a
+/// time is how they fall behind: `For` was added after most of them were
+/// written and thirteen skipped its body, `Switch` was never taught at all. So a
+/// no-op `goto` survived inside a `for`, and - worse - `collect_read_names` did
+/// not see reads inside either construct, which is what `retain_live_assignments`
+/// consults before deleting an assignment. Routing every walker through one
+/// accessor makes a new construct a compile error here instead of a silent gap
+/// in thirteen places.
+fn nested_bodies(statement: &mut NativeStatement) -> Vec<&mut Vec<NativeStatement>> {
+    match statement {
+        NativeStatement::IfElse {
+            then_body,
+            else_body,
+            ..
+        } => vec![then_body, else_body],
+        NativeStatement::While { body, .. }
+        | NativeStatement::DoWhile { body, .. }
+        | NativeStatement::For { body, .. } => vec![body],
+        NativeStatement::Switch { cases, default, .. } => cases
+            .iter_mut()
+            .map(|(_, body)| body)
+            .chain(std::iter::once(default))
+            .collect(),
+        NativeStatement::Declare { .. }
+        | NativeStatement::DeclareLocal { .. }
+        | NativeStatement::Assign { .. }
+        | NativeStatement::Copy { .. }
+        | NativeStatement::Store { .. }
+        | NativeStatement::Call(_)
+        | NativeStatement::IfGoto { .. }
+        | NativeStatement::IfReturn { .. }
+        | NativeStatement::Break
+        | NativeStatement::Continue
+        | NativeStatement::Goto(_)
+        | NativeStatement::IndirectGoto(_)
+        | NativeStatement::Return(_)
+        | NativeStatement::Expression(_)
+        | NativeStatement::Label(_) => Vec::new(),
+    }
+}
+
+/// As [`nested_bodies`], without needing a mutable borrow.
+fn nested_bodies_ref(statement: &NativeStatement) -> Vec<&Vec<NativeStatement>> {
+    match statement {
+        NativeStatement::IfElse {
+            then_body,
+            else_body,
+            ..
+        } => vec![then_body, else_body],
+        NativeStatement::While { body, .. }
+        | NativeStatement::DoWhile { body, .. }
+        | NativeStatement::For { body, .. } => vec![body],
+        NativeStatement::Switch { cases, default, .. } => cases
+            .iter()
+            .map(|(_, body)| body)
+            .chain(std::iter::once(default))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
 
 fn drop_gotos_to_next_statement(statements: &mut Vec<NativeStatement>) {
     let mut index = 0;
@@ -1212,35 +1226,16 @@ fn drop_gotos_to_next_statement(statements: &mut Vec<NativeStatement>) {
             continue;
         }
         // Recurse into nested bodies, where the same shape occurs.
-        match &mut statements[index] {
-            NativeStatement::IfElse {
-                then_body,
-                else_body,
-                ..
-            } => {
-                drop_gotos_to_next_statement(then_body);
-                drop_gotos_to_next_statement(else_body);
-            }
-            NativeStatement::While { body, .. } | NativeStatement::DoWhile { body, .. } => {
-                drop_gotos_to_next_statement(body);
-            }
-            _ => {}
+        for body in nested_bodies(&mut statements[index]) {
+            drop_gotos_to_next_statement(body);
         }
         index += 1;
     }
     if let Some(last) = statements.last_mut() {
+        for body in nested_bodies(last) {
+            drop_gotos_to_next_statement(body);
+        }
         match last {
-            NativeStatement::IfElse {
-                then_body,
-                else_body,
-                ..
-            } => {
-                drop_gotos_to_next_statement(then_body);
-                drop_gotos_to_next_statement(else_body);
-            }
-            NativeStatement::While { body, .. } | NativeStatement::DoWhile { body, .. } => {
-                drop_gotos_to_next_statement(body);
-            }
             _ => {}
         }
     }

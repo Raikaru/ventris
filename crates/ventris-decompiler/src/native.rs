@@ -2149,6 +2149,10 @@ impl NativeDecompiler {
                 })
             })
             .unwrap_or_default();
+        // An indirect jump whose table could not be read is a call, not a
+        // branch to nowhere. Ghidra converts it before anything structures the
+        // graph, so the constructs are built over the call.
+        graph::jumptable::truncate_indirect_jumps(&mut data, &tables);
         let recovered = graph::types::infer_types(&data, &BTreeMap::new());
         // The rich table keeps the structures and arrays that `Type` cannot
         // represent, which is what lets a field read render as `p->field_40`

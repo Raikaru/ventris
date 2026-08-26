@@ -493,6 +493,14 @@ All notable Ventris changes are documented here.
   `unstructured-control-flow` at 9. One defect remains, recorded rather than
   papered over: `TRK_fill_mem`'s first `for` is missing its initializer, and the
   statement that computes it appears after both loops instead of before them.
+- Statement walkers no longer skip `for` and `switch` bodies. Thirteen of the
+  seventeen walkers in `graph/emit.rs` recursed into `if`, `while` and `do-while`
+  bodies only: `for` was added after most were written, and `switch` was never
+  taught. Cleanups left no-op `goto`s inside those bodies, and - the real bug -
+  `collect_read_names` missed reads there, which is what `retain_live_assignments`
+  consults before deleting an assignment. All thirteen now route through a single
+  `nested_bodies` accessor, so a new construct is a compile error rather than a
+  silent gap.
 - Basic blocks are now maximal, as Ghidra's are. `block_leaders` treated every
   edge's target as a leader, and a fall-through is an edge, so the graph had one
   block per instruction: 45 blocks for `TRK_fill_mem` where Ghidra has 17. The
