@@ -6,6 +6,18 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- Process loop bodies innermost-first, which moved the census for the first time
+  in this session: `unstructured-control-flow` 4 -> 3 and `missing-loop-or-switch`
+  2 -> 1. `orderLoopBodies` ends with `loopbody.sort()` - "Sort based on nesting
+  depth (deepest come first) (sorting is stable)" - and we walked the loop heads in
+  block order instead, so an outer loop got to surrender an edge that belonged to
+  an inner one. Depth is the count of other loop bodies whose base contains this
+  head. `queryMapAddress_single` left `unstructured-control-flow` entirely and
+  recovered a loop (`do` 4 -> 5 of the oracle's 6); `decompSZS_subroutine` closed
+  its missing `do`.
+- `mark_loop_exits` no longer recomputes dominance on every pass - `Graph` has
+  carried it since the back-edge fix and the block graph it reads does not change
+  while the collapse runs.
 - Routed the two pre-existing address-order back-edge tests - the DAG filter in
   `traced_goto_edge` and the fallback edge score beside it - through the same
   `is_back_edge`, so no copy of the approximation is left in the file. Inert on

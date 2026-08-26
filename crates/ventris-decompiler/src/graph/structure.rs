@@ -415,10 +415,36 @@ impl<'a> Graph<'a> {
     /// Ported from `CollapseStructure::labelLoops`, `LoopBody::findBase`,
     /// `LoopBody::findExit`, and `CollapseStructure::markExitsAsGotos`.
     fn mark_loop_exits(&mut self) {
-        let dominance = compute_dominance(self.data);
-        for (head, tails) in self.natural_loops(&dominance) {
+        // `self.dominance` was computed once at construction; the block graph the
+        // loop finder reads does not change while the collapse runs.
+        let mut found: Vec<(NodeId, Vec<NodeId>, Vec<NodeId>, usize)> = self
+            .natural_loops(&self.dominance)
+            .into_iter()
+            .map(|(head, tails)| {
+                let (body, unique_count) = self.loop_body(head, &tails);
+                (head, tails, body, unique_count)
+            })
+            .collect();
+        // `orderLoopBodies`: "Sort based on nesting depth (deepest come first)
+        // (sorting is stable)". A loop is contained in another when its head lies
+        // inside that one's body. Taking the outer loop first lets it surrender an
+        // edge that belongs to the inner one, which is the whole reason Ghidra
+        // insists on the order; ours walked the heads in block order instead.
+        let depth: Vec<usize> = found
+            .iter()
+            .map(|(head, ..)| {
+                found
+                    .iter()
+                    .filter(|(other, _, body, _)| other != head && body.contains(head))
+                    .count()
+            })
+            .collect();
+        let mut order: Vec<usize> = (0..found.len()).collect();
+        order.sort_by_key(|index| core::cmp::Reverse(depth[*index]));
+        for index in order {
+            let (head, tails, body, unique_count) = core::mem::take(&mut found[index]);
             let mut tails = tails;
-            let (mut body, unique_count) = self.loop_body(head, &tails);
+            let mut body = body;
             let exit = self.loop_exit(&body, &tails);
             self.extend_loop_body(&mut body, exit);
             // The exit may only be recomputed after extension, because a block
