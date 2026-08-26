@@ -6,6 +6,16 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- `__FrameCallback__Fl` traced to the lifter, not the decompiler. Both renderers
+  agree the function reads `GQR0` as an unaffected input and decodes it, but Ghidra's
+  paired-single semantics emit only the scale test and its `ldexpf`:
+  `if ((unaff_GQR0 & 0x3f00) != 0) { ldexpf(bVar2 & 0x3f); }`. Ours emits that *and*
+  two quantisation-type dispatch conditionals per load, whose bodies are empty - six
+  of them in the function. Those six are why our `if` count sits at 13 against the
+  oracle's 12 while five real conditionals are still missing. Deleting an empty
+  `if` would move the count the wrong way and hide the cause, so it is recorded
+  instead: the fix belongs in the paired-single expansion, which should not produce
+  the dispatch at all.
 - `ksNesDrawBG` measured the same way, and the answer is the same shape as
   `queryMapAddress_single`'s. The function contains two near-identical copies of a
   three-test conjunction; Ghidra merges all three in the first copy and only two in
