@@ -1068,6 +1068,13 @@ impl Funcdata {
         if successor == block {
             return false;
         }
+        // `Funcdata::spliceBlockBasic` refuses unless the successor has exactly one
+        // way in - it throws otherwise - because splicing moves the successor's
+        // operations into this block, and any other predecessor of the successor
+        // would then reach code that has moved.
+        if self.blocks[successor.0 as usize].predecessors.len() != 1 {
+            return false;
+        }
         let carries_work = candidate
             .ops
             .iter()
@@ -1565,6 +1572,42 @@ mod tests {
     /// the listing. Building the graph straight from the listing ran it a second
     /// time, after the transfer instead of before it, and the second copy read
     /// registers the call had meanwhile killed.
+    /// `Funcdata::spliceBlockBasic` refuses unless the successor has exactly one
+    /// way in - it throws otherwise - because splicing moves the successor's
+    /// operations into this block, and any other predecessor of the successor
+    /// would then reach code that has moved.
+    #[test]
+    fn a_splice_refuses_a_successor_several_blocks_reach() {
+        use ventris_lifter::RAM_SPACE;
+        let mut data = Funcdata::default();
+        data.entry = 0x1000;
+        let entry = data.new_block(0x1000);
+        let transfer = data.new_block(0x1010);
+        let shared = data.new_block(0x1020);
+        data.add_edge(entry, transfer);
+        data.add_edge(entry, shared);
+        data.add_edge(transfer, shared);
+        let destination = data.new_varnode(RAM_SPACE, 0x1020, 4);
+        let branch = data.new_op(
+            op::BRANCH,
+            SeqNum {
+                address: 0x1010,
+                order: 0,
+            },
+            vec![destination],
+        );
+        data.op_insert_end(branch, transfer);
+
+        assert!(
+            !data.splice_block(transfer),
+            "the shared successor is reached from two blocks"
+        );
+
+        // With the other edge gone the splice is safe again.
+        assert!(data.remove_edge(entry, shared));
+        assert!(data.splice_block(transfer));
+    }
+
     #[test]
     fn an_embedded_delay_slot_is_not_executed_a_second_time() {
         use std::collections::BTreeMap as Map;

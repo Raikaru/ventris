@@ -6,6 +6,22 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- `splice_block` now refuses a successor that several blocks reach, as
+  `Funcdata::spliceBlockBasic` does - it throws in that case. Splicing moves the
+  successor's operations into this block, so any other predecessor of the successor
+  would afterwards reach code that has moved. Ours checked only for a self-loop and
+  for phis in the successor. Inert on the present corpus, with a regression test
+  that fails without the guard and shows the same splice becoming safe once the
+  competing edge is gone.
+- `__FrameCallback__Fl`'s `void` is traced but not closed. The lifter does emit the
+  function's `RETURN` at `0x8000b6a0`; a backtrace from `op_destroy` shows
+  `remove_unreachable_blocks` destroying it. The blocks our analysis finds
+  unreachable are exactly the two Ghidra reports removing - `0x8000b680` and
+  `0x8000b688` - so reachability agrees, yet Ghidra still prints
+  `return &DAT_800eaff8;`. Reordering `ActionUnreachable` before `ActionDoNothing`
+  to match Ghidra (which pairs unreachable removal with `ActionDeterminedBranch`
+  and runs `ActionDoNothing` last) changed nothing and was reverted as unexercised;
+  the splice guard above covers the hazard that reordering was aimed at.
 - Refuted and reverted, with the measurement: widening `ActionDoNothing` to
   Ghidra's actual test. `BlockBasic::isDoNothing` accepts any block with one way
   out, at least one way in, and `hasOnlyMarkers()` - "(and a branch)" - so a block
