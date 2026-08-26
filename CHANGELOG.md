@@ -509,6 +509,11 @@ All notable Ventris changes are documented here.
   `ActionSegmentize` needs a `SegmentOp` registry and segmented address-space
   metadata that no supported architecture defines here. `ActionLaneDivide` needs
   a laned-register registry and lane-description machinery.
+- `graph/orconsume.rs` ports `RuleOrConsume` (`ruleaction.cc`), which was
+  previously recorded as unportable for needing `Varnode::getConsume`. The
+  consume sink removed that gate, so the rule is now real: an `INT_OR` or
+  `INT_XOR` whose operand can only set bits nobody reads collapses to a `COPY`
+  of the other operand. Registered; census unchanged on this corpus.
 - `graph/consume.rs` gives consume propagation the convention sink Ghidra has and
   this project lacked. `ActionDeadCode` seeds every varnode in a deadcode space
   before removal is allowed (`coreaction.cc:3999-4010`); `deadcode::propagate`

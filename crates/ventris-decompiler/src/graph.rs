@@ -55,6 +55,7 @@ pub mod mergeaction;
 pub mod namevars;
 pub mod nodejoin;
 pub mod nonzero;
+pub mod orconsume;
 pub mod parampromote;
 pub mod proto;
 pub mod protoaction;

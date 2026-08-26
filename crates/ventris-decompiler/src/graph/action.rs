@@ -538,6 +538,7 @@ pub fn default_pipeline() -> Box<dyn Action> {
     // operations the other rules match on, so running them earlier hides work.
     expression = expression
         .add_rule(Box::new(super::protoconstraints::RulePiecePathology))
+        .add_rule(Box::new(super::orconsume::RuleOrConsume))
         .add_rule(Box::new(super::scopeconsumers::RulePtrsubCharConstant))
         .add_rule(Box::new(super::scopeconsumers::RuleStringCopy))
         .add_rule(Box::new(RulePropagateCopy))
