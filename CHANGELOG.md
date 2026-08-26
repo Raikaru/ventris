@@ -6,6 +6,13 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- **`agrees` is 27 of 37 (73%)**, up from 26, and `unstructured-control-flow` is
+  down to 2. `dl_G_MOVEWORD` now matches the oracle's structure exactly - 6 cases,
+  2 ifs, 0 gotos - after the break-equivalent jump pruner was taught to look at
+  trailing position *at any depth* rather than only the end of the case body. Two
+  of its jumps sat inside a trailing `if`, and falling out of that `if` lands on
+  the case's own `break`, so they said nothing either. `drop_trailing_goto`
+  already recursed that way for loop and case labels; the switch exit now uses it.
 - Ported `JumpBasic::foldInOneGuard`, which we had never had. A `switch` compiled
   with a range check reaches its default block twice - once from the guard that
   rejects an out-of-range selector, once from the table's own default entry - so

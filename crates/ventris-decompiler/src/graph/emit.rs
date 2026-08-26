@@ -2252,9 +2252,10 @@ enum Emission {
 /// it - the edge belongs to the switch, not to the case. Emitting both put a
 /// `goto` in front of every `break` in `dl_G_MOVEWORD`.
 fn drop_break_equivalent_goto(body: &mut Vec<NativeStatement>, after: u64) {
-    if body.last() == Some(&NativeStatement::Goto(after)) {
-        body.pop();
-    }
+    // Trailing position at any depth: falling out of a trailing `if` lands on the
+    // case's own `break`, so the jump inside it says nothing either. `dl_G_MOVEWORD`
+    // kept two of these after the top-level ones went.
+    drop_trailing_goto(body, after);
 }
 
 #[cfg(test)]
@@ -3171,6 +3172,29 @@ mod tests {
         let mut empty: Vec<NativeStatement> = Vec::new();
         drop_break_equivalent_goto(&mut empty, 0x1020);
         assert!(empty.is_empty());
+
+        // Trailing inside an `if`: falling out of it reaches the same `break`.
+        let mut nested = vec![NativeStatement::IfElse {
+            condition: Expr::Constant { value: 1, width: 1 },
+            then_body: vec![
+                NativeStatement::Expression(Expr::Constant { value: 2, width: 4 }),
+                NativeStatement::Goto(0x1020),
+            ],
+            else_body: Vec::new(),
+        }];
+        drop_break_equivalent_goto(&mut nested, 0x1020);
+        assert_eq!(
+            nested,
+            vec![NativeStatement::IfElse {
+                condition: Expr::Constant { value: 1, width: 1 },
+                then_body: vec![NativeStatement::Expression(Expr::Constant {
+                    value: 2,
+                    width: 4
+                })],
+                else_body: Vec::new(),
+            }],
+            "a jump in trailing position inside the case is the break too"
+        );
     }
 
     /// `__osRealloc` reached its shared epilogue with five jumps where the
