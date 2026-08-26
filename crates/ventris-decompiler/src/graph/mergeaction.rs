@@ -131,7 +131,7 @@ fn required_union(data: &Funcdata, variables: &mut Variables) {
             0
         };
         for input in operation.inputs.iter().take(limit).copied() {
-            if can_merge(data, input) {
+            if can_merge(data, input) && merge_test_required(data, output, input) {
                 // MULTIEQUAL and INDIRECT merges are required by SSA's
                 // control-flow meaning; unlike speculative merges they do not
                 // get vetoed by an already-overlapping cover.
@@ -139,6 +139,35 @@ fn required_union(data: &Funcdata, variables: &mut Variables) {
             }
         }
     }
+}
+/// Ghidra's `Merge::mergeTestRequired`, for the predicates this graph can
+/// express.
+///
+/// A required merge is not unconditional. Ghidra refuses one and inserts a copy
+/// instead, and refusing here has the same effect: the phi's operand stays its
+/// own variable and the emitter's phi copies spell the assignment.
+///
+/// Two rules are representable and both are correctness rules, not heuristics:
+/// two address-tied values at *different* addresses are different storage and
+/// must not share a variable, and a function input must not be folded into
+/// address-tied storage that is not itself an input - Ghidra's comment is that
+/// inputs otherwise get merged with the internal parts of stack structures.
+fn merge_test_required(data: &Funcdata, output: VarnodeId, input: VarnodeId) -> bool {
+    let tied = |value: VarnodeId| is_address_tied(data, value);
+    let address = |value: VarnodeId| {
+        let varnode = data.varnode(value);
+        (varnode.space, varnode.offset)
+    };
+    if tied(output) && tied(input) && address(output) != address(input) {
+        return false;
+    }
+    if data.varnode(input).flags.input && tied(output) && !tied(input) {
+        return false;
+    }
+    if data.varnode(output).flags.input && tied(input) && !tied(output) {
+        return false;
+    }
+    true
 }
 
 fn groups_intersect(

@@ -509,6 +509,13 @@ All notable Ventris changes are documented here.
   `ActionSegmentize` needs a `SegmentOp` registry and segmented address-space
   metadata that no supported architecture defines here. `ActionLaneDivide` needs
   a laned-register registry and lane-description machinery.
+- Ported the representable half of `Merge::mergeTestRequired`. A required merge
+  is not unconditional in Ghidra: two address-tied values at different addresses
+  are different storage and must not share a variable, and a function input must
+  not be folded into address-tied storage that is not itself an input. Refusing
+  is safe because the emitter's phi copies spell the assignment, which is what
+  Ghidra does when it refuses and inserts a copy. Census unchanged - a faithful
+  guard this corpus does not exercise.
 - Ported the passes that consume the new layer, and registered the ones that can
   fire: `ActionInputPrototype`, `ActionOutputPrototype`, `ActionPrototypeTypes`,
   `ActionUnjustifiedParams` and `ActionPrototypeWarnings` in a `protorecovery`
