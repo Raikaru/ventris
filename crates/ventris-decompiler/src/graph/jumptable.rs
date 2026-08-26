@@ -111,9 +111,12 @@ pub(crate) fn same_value(data: &Funcdata, left: VarnodeId, right: VarnodeId) -> 
 ///
 /// The accepted forms are the reversible operations used by Ghidra's basic
 /// model: `INT_MULT(index, constant)`, `INT_LEFT(index, constant)`, and the
-/// quasi-copy operations handled by `strip_alias`.  A value defined by any
-/// other operation is not treated as an index; accepting it would turn an
-/// arbitrary pointer expression into a switch.
+/// quasi-copy operations handled by `strip_alias`.  A LOAD result is also a
+/// valid determining varnode: Ghidra's `JumpBasic::isprune` walks through a
+/// LOAD, but `findSmallestNormal` can select the loaded value itself (and
+/// explicitly permits a one-byte value when a LOAD occurs in the path).
+/// Defined values from other operations are not treated as an index; accepting
+/// them would turn an arbitrary pointer expression into a switch.
 pub(crate) fn parse_scaled(data: &Funcdata, value: VarnodeId) -> Option<Scale> {
     let value = strip_alias(data, value);
     if data.varnode(value).flags.constant {
@@ -123,6 +126,9 @@ pub(crate) fn parse_scaled(data: &Funcdata, value: VarnodeId) -> Option<Scale> {
         return Some(Scale { value, stride: 1 });
     };
     let operation = data.op(def);
+    if operation.opcode == op::LOAD {
+        return Some(Scale { value, stride: 1 });
+    }
     match operation.opcode {
         op::INT_MULT if operation.inputs.len() >= 2 => {
             let (index, scale) = if let Some(scale) = constant_value(data, operation.inputs[1]) {
@@ -296,17 +302,60 @@ fn guard_relation(
     block_reaches(data, guard_block, branch_block).then_some(None)
 }
 
+/// Return whether the condition-true edge reaches the indirect branch.
+///
+/// The reverse comparison form (`constant < switch`) is an upper-bound guard
+/// only when its false edge reaches the table.  The edge list is not enough to
+/// infer that polarity: a CBRANCH's target is carried by its first input, so
+/// resolve that target against the CFG explicitly.
+fn condition_to_switch(
+    data: &Funcdata,
+    guard_block: GraphBlockId,
+    branch_block: GraphBlockId,
+    cbranch: OpId,
+) -> Option<bool> {
+    let target_value = *data.op(cbranch).inputs.first()?;
+    let target = data
+        .blocks()
+        .find(|(_, block)| block.start == data.varnode(target_value).offset)
+        .map(|(block, _)| block)?;
+    let successors = &data.block(guard_block).successors;
+    if successors.len() != 2 {
+        return None;
+    }
+    let first = block_reaches(data, successors[0], branch_block);
+    let second = block_reaches(data, successors[1], branch_block);
+    let switch_successor = match (first, second) {
+        (true, false) => successors[0],
+        (false, true) => successors[1],
+        _ => return None,
+    };
+    Some(switch_successor == target)
+}
+
 fn guard_bound(data: &Funcdata, compare: OpId, switch_value: VarnodeId) -> Option<u64> {
     let operation = data.op(compare);
     let left = *operation.inputs.first()?;
     let right = *operation.inputs.get(1)?;
-    if !same_value(data, left, switch_value) {
+    if same_value(data, left, switch_value) {
+        let limit = constant_value(data, right)?;
+        return match operation.opcode {
+            op::INT_LESS => Some(limit),
+            op::INT_LESSEQUAL => limit.checked_add(1),
+            _ => None,
+        };
+    }
+    // `limit < switch` reaching the table through the false edge means
+    // `switch <= limit`; `limit <= switch` through false means `switch <
+    // limit`.  The caller checks that this is the edge actually reaching the
+    // BRANCHIND before accepting the reversed form.
+    if !same_value(data, right, switch_value) {
         return None;
     }
-    let limit = constant_value(data, right)?;
+    let limit = constant_value(data, left)?;
     match operation.opcode {
-        op::INT_LESS => Some(limit),
-        op::INT_LESSEQUAL => limit.checked_add(1),
+        op::INT_LESS => limit.checked_add(1),
+        op::INT_LESSEQUAL => Some(limit),
         _ => None,
     }
 }
@@ -342,15 +391,25 @@ pub(crate) fn find_guard(
         {
             continue;
         }
-        let Some(bound) = guard_bound(data, compare_def, switch_value) else {
-            continue;
-        };
-        if bound == 0 || bound > MAX_TABLE_ENTRIES {
-            continue;
-        }
         let Some(guard_block) = operation.parent else {
             continue;
         };
+        let reversed = {
+            let inputs = &data.op(compare_def).inputs;
+            inputs.len() >= 2
+                && same_value(data, inputs[1], switch_value)
+                && !same_value(data, inputs[0], switch_value)
+        };
+        let Some(bound) = guard_bound(data, compare_def, switch_value) else {
+            continue;
+        };
+        if reversed && condition_to_switch(data, guard_block, branch_block, cbranch) != Some(false)
+        {
+            continue;
+        }
+        if bound == 0 || bound > MAX_TABLE_ENTRIES {
+            continue;
+        }
         let Some(default_target) = guard_relation(data, guard_block, branch_block, cbranch, branch)
         else {
             continue;
@@ -564,6 +623,51 @@ mod tests {
         assert_eq!(table.switch_value, fixture.index);
         assert_eq!(table.cases, vec![(0, 0x3000), (1, 0x3010), (2, 0x3020)]);
         assert_eq!(table.default_target, Some(0x2000));
+    }
+
+    #[test]
+    fn byte_load_inside_scaled_index_is_recovered() {
+        let mut fixture = bounded_fixture();
+        let switch_block = fixture
+            .data
+            .op(fixture.branch)
+            .parent
+            .expect("switch block");
+        let space = fixture.data.new_constant(RAM_SPACE as u64, 4);
+        let address = fixture.data.new_constant(0x4000, 4);
+        let loaded = fixture.data.new_unique(1);
+        let load = fixture.data.new_op(op::LOAD, seq(6), vec![space, address]);
+        fixture.data.op_set_output(load, Some(loaded));
+        let shift = fixture
+            .data
+            .live_ops()
+            .find(|(_, operation)| operation.opcode == op::INT_LEFT)
+            .map(|(id, _)| id)
+            .expect("scaled index");
+        fixture.data.op_insert_before(load, shift);
+        fixture.data.op_set_input(shift, loaded, 0);
+        let compare = fixture
+            .data
+            .live_ops()
+            .find(|(_, operation)| operation.opcode == op::INT_LESS)
+            .map(|(id, _)| id)
+            .expect("guard compare");
+        fixture.data.op_set_input(compare, loaded, 0);
+
+        let entries = fixture.entries.clone();
+        let base = fixture.table_base;
+        let recovered = recover_jump_tables(&fixture.data, &move |table_address, width| {
+            assert_eq!(width, 8);
+            let index = usize::try_from((table_address - base) / 4).ok()?;
+            entries.get(index).copied()
+        });
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].switch_value, loaded);
+        assert_eq!(
+            recovered[0].cases,
+            vec![(0, 0x3000), (1, 0x3010), (2, 0x3020)]
+        );
+        assert_eq!(fixture.data.op(load).parent, Some(switch_block));
     }
 
     #[test]
