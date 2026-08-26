@@ -6,6 +6,30 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- **`agrees` is 28 of 37 (76%)** and `missing-conditional` is down to 2, from
+  three fixes that all came out of one function, `getBuiltInTexture`, whose five
+  nested `if`s had collapsed to two.
+- A delay-slot instruction was executing twice. The lifter folds the slot into the
+  transfer that owns it and reports the bytes it absorbed, but the absorbed
+  instruction is still in the listing, so `Funcdata::from_lifted` ran it again
+  *after* the transfer. On MIPS that is simply wrong, and it was reading registers
+  the call had meanwhile killed. `from_lifted` now skips an instruction a
+  preceding transfer already carries.
+- `guardCalls` was guarding only the argument registers. Ghidra decides what to
+  guard from the callee's `EffectRecord`, which has nothing to do with argument
+  passing - the *trials* are a separate list built from the prototype model. The
+  return register therefore went unguarded and a constant in it survived the call:
+  `getBuiltInTexture` compared `memcmp`'s result against `0x150000`, the value a
+  `lui` had left in `$v0`. Every heritaged register is now guarded.
+- Widening the guard exposed the complement: `CallEffects::preserved` held only the
+  stack and frame pointers, so the callee-saved registers were being killed too -
+  throwing away exactly the values a compiler parks across a call. Ghidra's default
+  prototype model marks them `unaffected`; ours now takes them from `abi.callee_saved`.
+- Two integration tests in `graph_pipeline.rs` keyed their *vacuity guards* on a
+  cast-spelled memory access that this function no longer emits, because the
+  duplicated delay slot was what produced it. The guards now also accept a
+  recovered field access, which is the same fact in a better form; both tests'
+  actual prohibitions are untouched.
 - **`agrees` is 27 of 37 (73%)**, up from 26, and `unstructured-control-flow` is
   down to 2. `dl_G_MOVEWORD` now matches the oracle's structure exactly - 6 cases,
   2 ifs, 0 gotos - after the break-equivalent jump pruner was taught to look at

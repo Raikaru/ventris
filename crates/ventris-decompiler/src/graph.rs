@@ -1215,7 +1215,18 @@ impl Funcdata {
         // Branches taken within one instruction, recorded while the operations
         // are walked and wired once every block exists.
         let mut internal: Vec<((u64, u32), (u64, u32), (u64, u32))> = Vec::new();
+        // A transfer whose delay slot the lifter already folded into it has that
+        // instruction's operations twice: once in the right place, before the
+        // transfer, and once as an instruction of its own after it. Executing the
+        // second copy is wrong on any delay-slot architecture, and it reads
+        // registers the call has meanwhile killed - `getBuiltInTexture` compared
+        // `memcmp`'s result against the address a `lui` had left in `$v0`,
+        // because the `addiu` that consumed it ran again after the call.
+        let embedded_delay_slots = embedded_delay_slot_addresses(function);
         for (address, instruction) in &function.instructions {
+            if embedded_delay_slots.contains(address) {
+                continue;
+            }
             for (index, operation) in instruction.pcode.ops.iter().enumerate() {
                 let order = index as u32;
                 if let Some(id) = block_of_position.get(&(*address, order)) {
@@ -1348,6 +1359,34 @@ impl Funcdata {
 /// operation in the block", which decides a for-loop's iterator, a condition
 /// block's complexity and where a statement may be moved to, means nothing when
 /// the block holds one instruction.
+/// Delay-slot instructions whose operations a preceding transfer already carries.
+///
+/// The lifter folds a delay slot into the transfer that owns it and reports how
+/// many bytes it absorbed. The absorbed instruction is still present in the
+/// listing, so a graph built straight from the listing runs it a second time,
+/// after the transfer instead of before it.
+///
+/// A delay slot that begins a block is left alone: something branches to it, so
+/// it has to keep its own identity.
+fn embedded_delay_slot_addresses(function: &NativeFunction) -> BTreeSet<u64> {
+    let mut embedded = BTreeSet::new();
+    for (address, instruction) in &function.instructions {
+        if instruction.embedded_delay_slot_bytes == 0 {
+            continue;
+        }
+        // `pcode.len` is the transfer's own length; the folded bytes are
+        // reported separately, so the slot begins just past it - the same
+        // arithmetic the address-ordered emitter uses.
+        let Some(delay) = address.checked_add(u64::from(instruction.pcode.len)) else {
+            continue;
+        };
+        if function.instructions.contains_key(&delay) {
+            embedded.insert(delay);
+        }
+    }
+    embedded
+}
+
 fn block_leaders(function: &NativeFunction) -> BTreeSet<(u64, u32)> {
     let mut leaders = BTreeSet::from([(function.entry, 0u32)]);
     let mut arrivals: BTreeMap<u64, usize> = BTreeMap::new();

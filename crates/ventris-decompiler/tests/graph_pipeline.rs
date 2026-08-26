@@ -153,8 +153,12 @@ fn a_dereferenced_stack_value_is_declared_as_a_pointer() {
     // Type recovery runs on the graph, so a value used as an address is
     // declared as a pointer rather than as its storage width.
     let source = render_via_graph(GET_BUILT_IN_TEXTURE, 0x124fa8);
+    // A recovered field access is the same fact in a better form: reaching a
+    // member through `->` says the value is a pointer just as `uintptr_t` does.
+    // The cast spelling stopped appearing here once the delay-slot instruction
+    // stopped executing a second time after its call.
     assert!(
-        source.contains("uintptr_t"),
+        source.contains("uintptr_t") || source.contains("->"),
         "no pointer type was recovered\n{source}"
     );
 }
@@ -215,10 +219,13 @@ fn a_pointer_valued_address_carries_no_integer_conversion() {
     // Every memory access used to render as `*(T *)(uintptr_t)(x)` even when
     // `x` was already recovered as a pointer.
     let source = render_via_graph(GET_BUILT_IN_TEXTURE, 0x124fa8);
+    // Only a guard against the test going vacuous: a recovered field access
+    // counts, since it is a memory access whose address needed no conversion.
     assert!(
-        source.contains(" *)("),
+        source.contains(" *)(") || source.contains("->"),
         "no memory access was emitted\n{source}"
     );
+    // The contract itself, unchanged.
     assert!(
         !source.contains("*)(uintptr_t)("),
         "a pointer-valued address still carries an integer conversion\n{source}"

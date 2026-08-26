@@ -1972,30 +1972,31 @@ impl NativeDecompiler {
                     effects.preserved.insert((vnode.space, vnode.offset));
                 }
             }
+            // Ghidra's default prototype model marks the callee-saved registers
+            // `unaffected`, and `guardCalls` guards nothing it is unaffected by.
+            // Killing them instead throws away the value a compiler deliberately
+            // parked across a call, which is exactly what those registers are
+            // for: `getBuiltInTexture` lost the addresses its `lui`s had loaded
+            // and printed bare register names in their place.
+            for vnode in abi_register_group_vnodes(architecture, abi, abi.callee_saved) {
+                effects.preserved.insert((vnode.space, vnode.offset));
+            }
         }
         // A hardwired-zero register reads as the constant zero. The lifter
         // emits it as an ordinary register, so without this `addiu v1,zero,1`
         // stays an addition of an undefined register and the constant is never
         // folded: every store of it rendered as the bare register name.
         replace_hardwired_zero_reads(&mut data, architecture);
-        // A call reads only the storage its convention passes arguments in.
-        // Guarding every heritaged register instead made an argument out of
-        // whatever the call instruction itself happened to read - PowerPC's `bl`
-        // touches `r2`, so a forwarding function called `f(r2)` and lost its own
-        // parameter. Ghidra's trials come from the prototype model for the same
-        // reason. With no convention there is no model, so every location stands.
-        let call_locations = match abi {
-            Some(abi) => abi_argument_vnodes(architecture, abi)
-                .into_iter()
-                .map(|vnode| graph::guard::Location {
-                    space: vnode.space,
-                    offset: vnode.offset,
-                    size: vnode.size,
-                })
-                .filter(|location| locations.contains(location))
-                .collect(),
-            None => locations.clone(),
-        };
+        // Ghidra guards a location at a call whenever the callee's effect on it
+        // is not `unaffected`, which has nothing to do with whether the location
+        // carries an argument: `guardCalls` consults `EffectRecord`, and the
+        // argument *trials* are a separate list built from the prototype model.
+        // Restricting the guard to argument registers left the return register
+        // unguarded, so a constant in it survived the call - `getBuiltInTexture`
+        // compared `memcmp`'s result against `0x150000`, the address left in
+        // `$v0` by the `lui` before the first call, and three of its five
+        // conditionals folded away.
+        let call_locations = locations.clone();
         graph::guard::guard_calls(&mut data, &call_locations, &effects);
         // A return reads the convention's result storage. Without this the
         // returned value has no reader, dead code removes the computation, and
