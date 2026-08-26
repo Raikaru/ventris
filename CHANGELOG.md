@@ -6,6 +6,19 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- `ksNesDrawBG` measured the same way, and the answer is the same shape as
+  `queryMapAddress_single`'s. The function contains two near-identical copies of a
+  three-test conjunction; Ghidra merges all three in the first copy and only two in
+  the second, leaving `if (uVar8 < 0xec)` nested. Instrumenting every merge shows
+  ours performing *two* merges in each copy, and in all four the or-block is a
+  single simple block - `isComplex` returns false for its entry and its exit alike.
+  So no complexity ceiling, no clause mismatch and no looping guard explains
+  Ghidra's asymmetry: its second copy's graph differs from its first, and ours does
+  not. `max_implied_ref` is 2 in `architecture.cc` for every processor, matching
+  ours, so that is not the lever either.
+- Both remaining structural residuals are therefore upstream of the structuring
+  rules, and both are now measured rather than suspected. The rules agree with
+  Ghidra's; the graphs they run on do not.
 - `RuleMultiCollapse` now gives a non-matching branch the "one last chance" Ghidra
   gives it: when the branch is itself a `MULTIEQUAL`, mark it, add it to the
   collapse list, and append *its* inputs to the values still to match. A value
