@@ -6,6 +6,20 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- Refuted and reverted, with its cost: making the next instruction a block leader
+  after *any* internal p-code split, not only after a branch that targets past the
+  instruction's last operation. The motivation was real and is worth keeping on
+  record - the operations of the instructions that follow are appended to the
+  previous instruction's *last* sub-block, so when nothing reaches that sub-block
+  everything after it goes unreachable too, which is how `__FrameCallback__Fl`'s
+  two `psq_l`s swallowed its epilogue and its only `RETURN`. But the wider leader
+  rule costs `agrees` 31 -> 30 and takes `missing-conditional` from 2 to 4, and it
+  breaks the PPC `beqlr` shape that `a_conditional_return_inside_one_instruction_splits_it`
+  pins: a conditional return lives inside one instruction and depends on the next
+  instruction *not* starting a block of its own. The sound fix is to model an
+  instruction's operations as their own small graph whose exit is the fall-through,
+  rather than appending the next instruction to whichever sub-block happened to be
+  last; that is a change to `from_lifted`'s block assignment, not to the leader set.
 - `splice_block` now refuses a successor that several blocks reach, as
   `Funcdata::spliceBlockBasic` does - it throws in that case. Splicing moves the
   successor's operations into this block, so any other predecessor of the successor
