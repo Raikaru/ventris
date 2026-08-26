@@ -525,15 +525,48 @@ def _source_declarations(source: str, function_name: str) -> list[str]:
             declarations.append(match.group(1))
     return declarations
 
+
+def _memory_snapshots(body: str) -> set[str]:
+    """Locals holding a memory value across a write to the same location.
+
+    This is the construct the filter below describes, recognised by what it does
+    rather than by what it is called. The address-ordered renderer names these
+    `mem_<address>_<n>`, which the name pattern catches; the graph emitter names
+    them like any other temporary, and so does Ghidra, which calls the one in
+    `allocEnemyEntity` `uVar1`. Naming is therefore not the distinguishing
+    feature, and matching on it exempted one emitter's artifacts and not the
+    other's.
+    """
+    member = r"[A-Za-z_]\w*(?:->|\.)[A-Za-z_]\w+"
+    snapshot_of: dict[str, str] = {}
+    for line in body.splitlines():
+        match = re.match(
+            rf"\s*(?:[\w ]+\s)?([A-Za-z_]\w*)\s*=\s*\(?({member})\)?\s*;\s*$", line
+        )
+        if match:
+            snapshot_of.setdefault(match.group(1), match.group(2))
+    written = {
+        match.group(1)
+        for match in (
+            re.match(rf"\s*\(?({member})\)?\s*=[^=]", line)
+            for line in body.splitlines()
+        )
+        if match
+    }
+    return {name for name, read in snapshot_of.items() if read in written}
+
+
 def _source_declaration_order(source: str, function_name: str) -> list[str]:
     # Materialized call results and memory snapshots preserve evaluation order
     # but are renderer implementation details, not recovered source declaration
     # evidence. A snapshot exists because a store would otherwise change what a
     # later read observes; the original source names no such variable.
+    snapshots = _memory_snapshots(_source_body(source, function_name) or "")
     return [
         name
         for name in _source_declarations(source, function_name)
         if re.fullmatch(r"(?:call|mem)_[0-9a-f]+(?:_\d+)?", name) is None
+        and name not in snapshots
     ]
 
 

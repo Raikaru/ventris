@@ -1952,10 +1952,30 @@ impl NativeDecompiler {
         // stays an addition of an undefined register and the constant is never
         // folded: every store of it rendered as the bare register name.
         replace_hardwired_zero_reads(&mut data, architecture);
-        graph::guard::guard_calls(&mut data, &locations, &effects);
+        // A call reads only the storage its convention passes arguments in.
+        // Guarding every heritaged register instead made an argument out of
+        // whatever the call instruction itself happened to read - PowerPC's `bl`
+        // touches `r2`, so a forwarding function called `f(r2)` and lost its own
+        // parameter. Ghidra's trials come from the prototype model for the same
+        // reason. With no convention there is no model, so every location stands.
+        let call_locations = match abi {
+            Some(abi) => abi_argument_vnodes(architecture, abi)
+                .into_iter()
+                .map(|vnode| graph::guard::Location {
+                    space: vnode.space,
+                    offset: vnode.offset,
+                    size: vnode.size,
+                })
+                .filter(|location| locations.contains(location))
+                .collect(),
+            None => locations.clone(),
+        };
+        graph::guard::guard_calls(&mut data, &call_locations, &effects);
         // A return reads the convention's result storage. Without this the
         // returned value has no reader, dead code removes the computation, and
-        // the function reports `void`.
+        // the function reports `void`. With no convention the architecture's
+        // own result register stands in, which is what the address-ordered path
+        // has always done: `--arch ps1` with no target still returns a value.
         if let Some(abi) = abi {
             let result: Vec<graph::guard::Location> = abi_primary_return_vnodes(architecture, abi)
                 .into_iter()
@@ -1966,6 +1986,17 @@ impl NativeDecompiler {
                 })
                 .collect();
             graph::guard::guard_returns(&mut data, &result);
+        }
+        if abi.is_none() {
+            let vnode = return_vnode(architecture);
+            graph::guard::guard_returns(
+                &mut data,
+                &[graph::guard::Location {
+                    space: vnode.space,
+                    offset: vnode.offset,
+                    size: vnode.size,
+                }],
+            );
         }
         graph::heritage::heritage_with_endianness(&mut data, is_little_endian(architecture));
         // Arguments must be recovered while the guards that name each

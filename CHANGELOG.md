@@ -282,6 +282,43 @@ All notable Ventris changes are documented here.
   table-backed switch the rule can claim, and `dl_G_MOVEWORD`'s `switch 0 vs 1`
   is a `BRANCHIND` whose table this pipeline does not recover. The rule is
   correct and tested; it has no corpus function to improve yet.
+- The graph path passes `corpus-smoke` on every entry. That gate has been the one
+  thing keeping it behind an environment variable since it was written.
+  The last dimension was `declaration_order`, and the filter's own comment
+  described the construct exactly: "a snapshot exists because a store would
+  otherwise change what a later read observes; the original source names no such
+  variable." Its pattern matched only `mem_<address>_<n>` and `call_<address>`,
+  the address-ordered renderer's spelling. The graph emitter names such a local
+  like any other temporary - and so does Ghidra, which calls the one in
+  `allocEnemyEntity` `uVar1`, so naming is not the distinguishing feature.
+  `_memory_snapshots` now recognises one structurally: a local assigned a
+  member's value where a later statement assigns to that same member. This is a
+  defect fix in the instrument, not a change of baseline - the filter now
+  exempts the artifact it was written to exempt, whichever emitter produced it.
+- A call's arguments come from the convention, not from every heritaged register.
+  Guarding all of them made an argument out of whatever the call instruction
+  itself read: PowerPC's `bl` touches `r2`, so a forwarding function rendered
+  `sub_80003120(r2)` and lost its own parameter, where the address-ordered path
+  recovered `sub_80003120(arg0)`. Ghidra's trials come from the prototype model
+  for the same reason. With no convention every location still stands.
+  Census `missing-parameters` 1 function -> 0.
+- With no convention, the graph path guards the architecture's own result
+  register, which is what the address-ordered path has always done. Without it
+  `--arch ps1` with no target returned `void` where a value was returned.
+- `decompile_native_supports_common_processor_raw_images` asserted a per-
+  architecture default return type. The width is the architecture fact it exists
+  to check; signedness is now recovered rather than defaulted, and on PS2 the
+  inference reads MIPS64's sign-extending immediate as signed. The assertion
+  accepts either spelling of the width.
+- Tried making the graph path the default and reverted it, on evidence. Three
+  no-convention gaps surfaced and were fixed - the forwarding parameter, the
+  return register, and `decompile-native`'s signedness - but one remains: on a
+  raw image with no symbols the graph path renders a convention register's base
+  as `gp->field_ffffb81a`, which is closer to the truth than the address-ordered
+  path's invented `local_47e6`, and leaves `gp` undeclared with the 2-byte
+  members typed as byte arrays. Both paths already emit undeclared registers, so
+  this is not new; what is new is that it would be the default. Reverted rather
+  than shipped, with the reason recorded in `graph_pipeline_requested`.
 - Closed `casts` on the graph path. `graph::types::infer_types` propagated a
   pointer type to *every* non-constant operand of an addition, so a scaled index
   became a pointer and the emitter dutifully spelled the conversion:

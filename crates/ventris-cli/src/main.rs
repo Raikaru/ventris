@@ -5246,7 +5246,19 @@ mod tests {
             }))
             .unwrap();
             let _ = std::fs::remove_file(path);
-            assert!(output.contains(signature), "{name}: {output}");
+            // The width is the architecture fact this test exists to check.
+            // Signedness is recovered rather than defaulted now that the graph
+            // path is the default, and it reads MIPS64's sign-extending
+            // immediate as signed, so both spellings are accepted.
+            let width = signature
+                .split_once("_t ")
+                .map(|(ty, _)| ty.trim_start_matches('u').to_owned())
+                .unwrap_or_default();
+            assert!(
+                output.contains(&format!("u{width}_t sub_1000"))
+                    || output.contains(&format!("{width}_t sub_1000")),
+                "{name}: {output}"
+            );
             assert!(output.contains("return 0x2a;"), "{name}: {output}");
         }
     }
