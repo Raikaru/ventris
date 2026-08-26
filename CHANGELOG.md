@@ -509,6 +509,31 @@ All notable Ventris changes are documented here.
   `ActionSegmentize` needs a `SegmentOp` registry and segmented address-space
   metadata that no supported architecture defines here. `ActionLaneDivide` needs
   a laned-register registry and lane-description machinery.
+- `graph/tablebase.rs` recovers a jump table whose base is register-rooted -
+  PPC materializes one with `lis` then `addi`, and `parse_address` accepts only a
+  literal constant varnode, so those tables were lost entirely. Chained after
+  `recover_basic` and `JumpBasic2`. `constant_value` is deliberately left
+  literal-only: folding inside it made a computed scaled index look like a
+  constant table base and broke `JumpBasic2`'s recovery test.
+  Measured limit, recorded in the module: on the motivating function
+  `dl_G_MOVEWORD__5emu64Fv` this still declines, because instrumenting the chain
+  showed `parse_destination` itself returns `None` there while `contains_load` is
+  true - the destination never becomes a `DestinationModel`, so no base model is
+  ever given a scale and index. The register-rooted base was a real defect and is
+  fixed for the shape it covers; that function needs `parse_destination` looked at.
+- Three further absences confirmed negative with their Ghidra readers named, to
+  the standard of counting operation templates across all 21 packed SLA payloads:
+  - `ActionInternalStorage` - `store_unmapped`'s readers are
+    `funcdata_varnode.cc:2127-2128` (AncestorRealistic rejecting a COPY path) and
+    `ruleaction.cc:4355-4357`; `GraphOp` has no flag field and
+    `FuncProto::internal_storage` has no production setter, so the flag alone
+    would be inert.
+  - `ActionSegmentize` - a census found raw `segment` CALLOTHER templates only in
+    x86 (129) and x86-64 (131) of 203029 total, but those are CALLOTHERs, not
+    `SegmentOp` registry entries, and no bundled spec declares `<segmentop>`.
+  - `ActionLaneDivide` - the local `pspec.xml` has 96 `vector_lane_sizes`
+    attributes but no XML parser reads them, and the action needs the whole
+    `TransformManager`/`LaneDivide` rewrite, so a parser alone is not bounded work.
 - `graph/orconsume.rs` ports `RuleOrConsume` (`ruleaction.cc`), which was
   previously recorded as unportable for needing `Varnode::getConsume`. The
   consume sink removed that gate, so the rule is now real: an `INT_OR` or

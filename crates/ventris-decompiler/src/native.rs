@@ -2270,6 +2270,61 @@ impl NativeDecompiler {
             for location in proto.model_input_storage() {
                 inputs.register(*location);
             }
+            // `ActionInputPrototype` sees an entry input as active when it has
+            // a descendant, but only after `ActionActiveParam` has removed
+            // call-only pass-through operands from each call. The graph action
+            // deliberately refuses to shorten an existing call, so those
+            // operands can still be visible here through transparent
+            // `INDIRECT`/`COPY`/`SUBPIECE`/`PIECE`/`MULTIEQUAL` nodes.
+            //
+            // Reconstruct that distinction by treating a chain whose only
+            // terminal use is a CALL argument as inactive. Do not call
+            // `ancestor_realistic` directly: its `ancestor_verdict` maps an
+            // undefined input (`def = None`) to `UntouchedInput`, and the
+            // public boolean collapses that to false. Ghidra records the same
+            // case as inactive (`fspec.cc:5645-5646`), not definitely absent;
+            // rejecting every undefined input loses the PS1 `a2` parameter.
+            let has_non_call_use = |value: graph::VarnodeId| {
+                let mut pending = data
+                    .varnode(value)
+                    .descendants
+                    .iter()
+                    .copied()
+                    .map(|descendant| (descendant, value))
+                    .collect::<Vec<_>>();
+                let mut seen = BTreeSet::new();
+                while let Some((descendant, source)) = pending.pop() {
+                    if !seen.insert((descendant, source)) {
+                        continue;
+                    }
+                    let operation = data.op(descendant);
+                    if matches!(operation.opcode, op::CALL | op::CALLIND)
+                        && operation
+                            .inputs
+                            .iter()
+                            .skip(1)
+                            .any(|input| *input == source)
+                    {
+                        continue;
+                    }
+                    if matches!(
+                        operation.opcode,
+                        op::COPY | op::INDIRECT | op::MULTIEQUAL | op::PIECE | op::SUBPIECE
+                    ) && let Some(output) = operation.output
+                    {
+                        pending.extend(
+                            data.varnode(output)
+                                .descendants
+                                .iter()
+                                .copied()
+                                .map(|next| (next, output)),
+                        );
+                        continue;
+                    }
+                    return true;
+                }
+                false
+            };
             for trial in inputs.trials_mut() {
                 let held = (0..data.varnode_count())
                     .map(|index| graph::VarnodeId(index as u32))
@@ -2281,16 +2336,66 @@ impl NativeDecompiler {
                             && varnode.size == trial.location.size
                     });
                 match held {
-                    // Ghidra decides a trial with `ancestorRealistic`. That is
-                    // stricter than this: measured, it rejects a pure input with
-                    // no definition and drops parameters the convention does
-                    // pass, so the reader test stands until the ancestor walk
-                    // handles an undefined input the way Ghidra's does.
                     Some(value) if !data.varnode(value).descendants.is_empty() => {
                         trial.value = Some(value);
-                        trial.mark_active();
+                        if has_non_call_use(value) {
+                            trial.mark_active();
+                        } else {
+                            trial.mark_inactive();
+                        }
                     }
                     _ => trial.mark_no_use(),
+                }
+            }
+            if std::env::var_os("VENTRIS_DEBUG_PARAMS").is_some() {
+                for (index, trial) in inputs.trials().iter().enumerate() {
+                    let values = (0..data.varnode_count())
+                        .map(|value| graph::VarnodeId(value as u32))
+                        .filter(|value| {
+                            let vnode = data.varnode(*value);
+                            vnode.flags.input
+                                && vnode.space == trial.location.space
+                                && vnode.offset == trial.location.offset
+                                && vnode.size == trial.location.size
+                        })
+                        .map(|value| {
+                            let vnode = data.varnode(value);
+                            (value, vnode.def, vnode.descendants.len(), vnode.flags.input)
+                        })
+                        .collect::<Vec<_>>();
+                    if std::env::var_os("VENTRIS_DEBUG_PARAMS").is_some() {
+                        for (value, _, _, _) in &values {
+                            for descendant in data.varnode(*value).descendants.iter().copied() {
+                                let operation = data.op(descendant);
+                                eprintln!(
+                                    "  {value:?} descendant {descendant:?}: opcode={} inputs={:?}",
+                                    operation.opcode, operation.inputs
+                                );
+                                if let Some(output) = operation.output {
+                                    eprintln!(
+                                        "    output {output:?}: descendants={:?}",
+                                        data.varnode(output).descendants
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    eprintln!(
+                        "param trial {index}: loc=({}, {}, {}) state={:?} value={:?} matches={values:?}",
+                        trial.location.space,
+                        trial.location.offset,
+                        trial.location.size,
+                        trial.state,
+                        trial.value
+                    );
+                }
+                for (id, operation) in data.live_ops() {
+                    if matches!(
+                        operation.opcode,
+                        ventris_pcode::op::CALL | ventris_pcode::op::CALLIND
+                    ) {
+                        eprintln!("call {id:?}: inputs={:?}", operation.inputs);
+                    }
                 }
             }
             // Ghidra's `ParamListStandard::buildTrialMap` keeps an unreferenced

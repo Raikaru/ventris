@@ -74,6 +74,7 @@ pub mod structure;
 pub mod structuretransform;
 pub mod subfloat;
 pub mod subflow;
+pub mod tablebase;
 pub mod tracedag;
 pub mod typefactory;
 pub mod types;
