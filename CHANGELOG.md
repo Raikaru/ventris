@@ -6,6 +6,19 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- `TRK_fill_mem`'s two families trace to one cause, now located exactly. Its
+  input trials are right - r3, r4 and r5 all `Active` with values - and
+  `promote_input_trials` puts all three into the prototype, verified by probe
+  (`proto_params=[(12,..),(16,..),(20,..)]`). The signature still renders two
+  parameters because `recover_parameters` derives them from the *names in the
+  emitted statements*, and r5's value prints as `uVar8` rather than `arg2`: r5 is
+  reassigned inside the function, so its value passes through a phi, and our
+  naming is per-SSA-version while Ghidra's is per-`HighVariable`. Ghidra merges
+  the parameter and its phi into one variable and prints `param_3` throughout,
+  which is why its signature keeps all three. Closing this needs the parameter
+  and its phi to share a name - `merge.rs`/`namevars.rs` territory - not more
+  work in trial promotion, and the spurious return value is the same shape of
+  defect one location further along.
 - A terminator that outlives the block it names is now repaired in the graph.
   Ghidra's branch operands are block references, so removing a block cannot leave
   a predecessor pointing at it; ours are addresses, and unreachable removal drops
