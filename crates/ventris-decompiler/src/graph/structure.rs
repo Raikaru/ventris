@@ -1252,7 +1252,7 @@ impl<'a> Graph<'a> {
             self.nodes[node]
                 .successors
                 .get(index)
-                .is_some_and(|successor| self.nodes[*successor].entry <= self.nodes[node].entry)
+                .is_some_and(|successor| self.is_back_edge(node, *successor))
         };
         let successors: Vec<Vec<NodeId>> = (0..self.nodes.len())
             .map(|node| {
@@ -1509,7 +1509,7 @@ impl<'a> Graph<'a> {
                     continue;
                 }
                 let joins = self.nodes[successor].predecessors.len() > 1;
-                let back = self.nodes[successor].entry <= self.nodes[node].entry;
+                let back = self.is_back_edge(node, successor);
                 let score = u32::from(!back) * 4 + u32::from(joins) * 2;
                 if choice.is_none_or(|(_, _, best)| score > best) {
                     choice = Some((node, index, score));

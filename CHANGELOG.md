@@ -6,6 +6,12 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- Routed the two pre-existing address-order back-edge tests - the DAG filter in
+  `traced_goto_edge` and the fallback edge score beside it - through the same
+  `is_back_edge`, so no copy of the approximation is left in the file. Inert on
+  the present corpus, but these decide which edge is surrendered as a `goto`, and
+  leaving them disagreeing with the rules about what a back edge is would make any
+  future measurement there untrustworthy.
 - Replaced the address-order stand-in for `f_back_edge` with the real thing.
   `isDecisionOut` excludes back edges, and I had been approximating "back edge" as
   "the target's block identifier does not follow the source's". Porting the same
