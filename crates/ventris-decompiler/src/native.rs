@@ -2070,6 +2070,10 @@ impl NativeDecompiler {
             if skipped_passes.iter().any(|skip| skip == action.name()) {
                 continue;
             }
+            // The `apply` call was missing, so every action in these three
+            // modules was iterated, name-checked, and then dropped - none of
+            // them had ever run.
+            graph::action::Action::apply(action.as_ref(), &mut data);
         }
         let pipeline = graph::action::default_pipeline();
         let control_flow: [&dyn graph::action::Action; 12] = [
