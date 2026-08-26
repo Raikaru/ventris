@@ -524,7 +524,18 @@ fn sleigh_flow(address: u64, length: u32, operations: &[PcodeOp]) -> Flow {
     for operation in operations.iter().rev() {
         let target = operation.inputs.first().copied();
         match operation.opcode {
-            op::RETURN | op::BRANCHIND => return Flow::Return,
+            op::RETURN | op::BRANCHIND => {
+                // A conditional return - PPC `beqlr`, ARM `bxeq` - is emitted as
+                // `if (!cond) goto next` followed by the return, exactly like a
+                // likely-branch guarding its delay slot. Scanning in reverse
+                // reaches the return first, and reporting it as an unconditional
+                // return deletes the not-taken successor, so discovery stops
+                // there and every instruction after it is lost.
+                if skips_to_fallthrough(operations, fallthrough) {
+                    return Flow::FallThrough(fallthrough);
+                }
+                return Flow::Return;
+            }
             op::CALLIND => return Flow::FallThrough(fallthrough),
             op::CALL => {
                 if let Some(target) = target {
@@ -565,6 +576,42 @@ fn sleigh_flow(address: u64, length: u32, operations: &[PcodeOp]) -> Flow {
         }
     }
     Flow::FallThrough(fallthrough)
+}
+
+#[cfg(test)]
+mod flow_tests {
+    use super::*;
+
+    fn varnode(offset: u64) -> ventris_pcode::Varnode {
+        ventris_pcode::Varnode {
+            space: RAM_SPACE,
+            offset,
+            size: 4,
+        }
+    }
+
+    /// A conditional return is `if (!cond) goto next` followed by the return.
+    /// Reporting it as an unconditional return deletes the not-taken successor
+    /// and `discover` stops there - `TRK_fill_mem` lost ten instructions and its
+    /// final `do` loop that way.
+    #[test]
+    fn a_conditional_return_keeps_its_fallthrough() {
+        let guard = PcodeOp {
+            opcode: op::CBRANCH,
+            inputs: vec![varnode(0x1004)],
+            output: None,
+        };
+        let ret = PcodeOp {
+            opcode: op::RETURN,
+            inputs: Vec::new(),
+            output: None,
+        };
+        assert_eq!(
+            sleigh_flow(0x1000, 4, &[guard, ret.clone()]),
+            Flow::FallThrough(0x1004)
+        );
+        assert_eq!(sleigh_flow(0x1000, 4, &[ret]), Flow::Return);
+    }
 }
 
 #[derive(Copy, Clone, Debug)]

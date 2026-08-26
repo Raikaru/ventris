@@ -771,7 +771,7 @@ fn expression_type(value: &Expr, architecture: Architecture) -> Type {
 /// here has one byte order for memory, so the architecture answers it. SuperH is
 /// switchable in hardware; both profiles are the big-endian configurations the
 /// pinned languages describe.
-fn architecture_is_big_endian(architecture: Architecture) -> bool {
+pub fn architecture_is_big_endian(architecture: Architecture) -> bool {
     match architecture {
         Architecture::Mips32Be
         | Architecture::N64

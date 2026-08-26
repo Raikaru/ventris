@@ -552,7 +552,10 @@ impl Pipeline {
     }
 
     fn target_memory_value(&self, address: u64, width: u32) -> Option<u64> {
-        if self.target != Some(TargetProfile::Gba) || !matches!(width, 1 | 2 | 4 | 8) {
+        // Ghidra reads any mapped address through `LoadImage::loadFill`, and a
+        // jump table lives in the image rather than the graph - so refusing every
+        // target but one meant no switch could ever be recovered outside it.
+        if !matches!(width, 1 | 2 | 4 | 8) {
             return None;
         }
         let width = usize::try_from(width).ok()?;
@@ -560,9 +563,17 @@ impl Pipeline {
             .loaded
             .image
             .bytes_at(&self.loaded.bytes, address, width)?;
+        // The byte order is the architecture's. Folding little-endian
+        // unconditionally is why this was scoped to one target: a big-endian
+        // table read that way yields a byte-swapped address.
+        let big_endian = self
+            .architecture
+            .map(ventris_decompiler::native::architecture_is_big_endian)
+            .unwrap_or(false);
         (bytes.len() == width).then(|| {
             bytes.iter().enumerate().fold(0u64, |value, (index, byte)| {
-                value | (u64::from(*byte) << (index * 8))
+                let shift = if big_endian { width - 1 - index } else { index };
+                value | (u64::from(*byte) << (shift * 8))
             })
         })
     }
