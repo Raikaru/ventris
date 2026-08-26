@@ -6,6 +6,16 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- Found the fourth if-rule by enumerating `CollapseStructure::rule*` against ours
+  rather than trusting the names: our `rule_if_no_exit` is Ghidra's
+  `ruleBlockProperIf`, and Ghidra's `ruleBlockIfNoExit` - a clause with no
+  successor at all - was ours under the name `rule_block_if_return`. That
+  mismatch hid the fact that it carried *none* of the three guards its siblings
+  have, so it has gained all three: the head must not end in a computed jump,
+  neither must the clause, and the edge into the clause must be a decision edge.
+  Both functions are now named after the Ghidra rule they implement, with a
+  regression test that a returning clause ahead of the test is absorbed and one
+  reached by a back edge is not.
 - Ported `isDecisionOut` after all, closing the last portable gap from the
   collapse-rule audit. My earlier note said it needed loop-exit marking at rule
   time; reading `block.hh` corrected that - `isDecisionOut` excludes irreducible,

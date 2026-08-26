@@ -337,7 +337,7 @@ impl<'a> Graph<'a> {
                     // switch absorbs its cases and running it early takes
                     // blocks a loop or an `if` would have claimed.
                     if self.rule_cat(node)
-                        || self.rule_if_no_exit(node)
+                        || self.rule_proper_if(node)
                         || self.rule_if_else(node)
                         || self.rule_while_do(node)
                         || self.rule_do_while(node)
@@ -364,7 +364,7 @@ impl<'a> Graph<'a> {
                 if self.nodes[node].collapsed {
                     continue;
                 }
-                if self.rule_block_if_return(node) || self.rule_case_fallthru(node) {
+                if self.rule_if_no_exit(node) || self.rule_case_fallthru(node) {
                     outer_changed = true;
                     break;
                 }
@@ -825,7 +825,11 @@ impl<'a> Graph<'a> {
     }
 
     /// A two-way branch where one side is a clause that rejoins the other.
-    fn rule_if_no_exit(&mut self, node: NodeId) -> bool {
+    ///
+    /// Ghidra's `ruleBlockProperIf`. This was called `rule_if_no_exit`, which is
+    /// the name of a *different* Ghidra rule - the one below, for a clause with
+    /// no successor at all - and the mismatch hid three missing guards there.
+    fn rule_proper_if(&mut self, node: NodeId) -> bool {
         if self.is_switch_out(node) {
             return false;
         }
@@ -1147,7 +1151,10 @@ impl<'a> Graph<'a> {
     /// Ghidra's `ruleBlockIfNoExit`. A guard clause that returns has no
     /// successor at all, so the rule that requires both arms to rejoin cannot
     /// see it, and the region stays a `goto`.
-    fn rule_block_if_return(&mut self, node: NodeId) -> bool {
+    fn rule_if_no_exit(&mut self, node: NodeId) -> bool {
+        if self.is_switch_out(node) {
+            return false;
+        }
         if self.nodes[node].successors.len() != 2 {
             return false;
         }
@@ -1158,6 +1165,15 @@ impl<'a> Graph<'a> {
                 continue;
             }
             if self.nodes[clause].predecessors.len() != 1 {
+                continue;
+            }
+            // Ghidra guards this rule the same way as the other two if-rules:
+            // the clause must not itself end in a computed jump, and the edge
+            // into it must be a decision edge rather than a back edge.
+            if self.is_switch_out(clause) {
+                continue;
+            }
+            if self.nodes[clause].entry <= self.nodes[node].entry {
                 continue;
             }
             if !self.nodes[clause].successors.is_empty() {
@@ -1526,7 +1542,7 @@ impl<'a> Graph<'a> {
 
     /// As [`Self::absorb`], keeping the composite's own edges out.
     ///
-    /// `rule_block_if_return` absorbs a clause that returns, so that clause
+    /// `rule_if_no_exit` absorbs a clause that returns, so that clause
     /// contributes no external successor and the union of the members' exits is
     /// empty. Replacing the composite's successors with it dropped the head's
     /// other path, turning a live edge into a dead end that no later loop rule
@@ -2418,6 +2434,63 @@ mod tests {
         );
     }
 
+    /// The if-rule for a clause with no way out carried none of the three guards
+    /// its siblings do, because our name for it - `rule_if_no_exit` - hid
+    /// that it is Ghidra's `ruleBlockIfNoExit`. It guards that rule identically.
+    #[test]
+    fn a_returning_clause_must_still_be_reached_by_a_decision_edge() {
+        let build = |backwards: bool| {
+            let mut data = Funcdata::default();
+            let (clause_at, head_at) = if backwards {
+                (0x1000, 0x1010)
+            } else {
+                (0x1010, 0x1000)
+            };
+            data.entry = head_at;
+            // Blocks in address order, as `from_lifted` creates them.
+            let first = data.new_block(clause_at.min(head_at));
+            let second = data.new_block(clause_at.max(head_at));
+            let (head, clause) = if backwards {
+                (second, first)
+            } else {
+                (first, second)
+            };
+            let join = data.new_block(0x1020);
+            // The join needs a way out of its own, or it qualifies as the
+            // returning clause too and the rule fires on it instead.
+            let tail = data.new_block(0x1030);
+            conditional(&mut data, head, clause_at);
+            data.add_edge(head, clause);
+            data.add_edge(head, join);
+            data.add_edge(join, tail);
+            data
+        };
+
+        let forwards = build(false);
+        let mut graph = Graph::of(&forwards, &[]);
+        let node = graph
+            .nodes
+            .iter()
+            .position(|candidate| candidate.entry == GraphBlockId(0))
+            .expect("the head is a node");
+        assert!(
+            graph.rule_if_no_exit(node),
+            "a returning clause ahead of the test is absorbed"
+        );
+
+        let backwards = build(true);
+        let mut graph = Graph::of(&backwards, &[]);
+        let node = graph
+            .nodes
+            .iter()
+            .position(|candidate| candidate.entry == GraphBlockId(1))
+            .expect("the head is a node");
+        assert!(
+            !graph.rule_if_no_exit(node),
+            "a returning clause reached by a back edge is not an `if`"
+        );
+    }
+
     /// Ghidra requires the edges an `if` is built from to be *decision* edges -
     /// neither back edges, goto edges nor irreducible. Surrendered edges are
     /// already gone from `successors` here, so the test that remains is the back
@@ -2443,7 +2516,7 @@ mod tests {
             .position(|candidate| candidate.entry == head)
             .expect("the head is a node");
         assert!(
-            !graph.rule_if_no_exit(node),
+            !graph.rule_proper_if(node),
             "the clause is reached by a back edge, so no `if` is built"
         );
     }
@@ -2480,7 +2553,7 @@ mod tests {
             .position(|candidate| candidate.entry == GraphBlockId(0))
             .expect("the head is a node");
         assert!(
-            graph.rule_if_no_exit(node),
+            graph.rule_proper_if(node),
             "an ordinary clause is absorbed as an if body"
         );
 
@@ -2492,7 +2565,7 @@ mod tests {
             .position(|candidate| candidate.entry == GraphBlockId(0))
             .expect("the head is a node");
         assert!(
-            !graph.rule_if_no_exit(node),
+            !graph.rule_proper_if(node),
             "a clause ending in a computed jump is left for the switch rule"
         );
     }
@@ -2611,7 +2684,7 @@ mod tests {
             .copied()
             .expect("the head reaches the block past the clause");
 
-        assert!(graph.rule_block_if_return(node), "the clause is absorbed");
+        assert!(graph.rule_if_no_exit(node), "the clause is absorbed");
 
         assert!(
             graph.nodes[node].successors.contains(&reached),
