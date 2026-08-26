@@ -105,9 +105,11 @@ fn output_ancestry_allows(
         // A top-level MULTIEQUAL is traversed by AncestorRealistic. Its
         // siblings must all have plausible ancestry, but a COPY to result
         // storage is already solid movement and must not recurse into them.
-        op::MULTIEQUAL => operation.inputs.iter().copied().all(|input| {
-            output_ancestry_step(data, input, &mut BTreeSet::new())
-        }),
+        op::MULTIEQUAL => operation
+            .inputs
+            .iter()
+            .copied()
+            .all(|input| output_ancestry_step(data, input, &mut BTreeSet::new())),
         // A COPY/SUBPIECE with a non-input source is solid movement in
         // AncestorRealistic. Only inspect a linear pass-through source when
         // doing so can expose a call/guard result.
@@ -131,11 +133,7 @@ fn output_ancestry_allows(
 
 /// Walk one source in the minimal COPY/PIECE ancestry traversal used by
 /// `AncestorRealistic::enterNode` (`funcdata_varnode.cc:2109-2139`).
-fn output_ancestry_step(
-    data: &Funcdata,
-    value: VarnodeId,
-    seen: &mut BTreeSet<VarnodeId>,
-) -> bool {
+fn output_ancestry_step(data: &Funcdata, value: VarnodeId, seen: &mut BTreeSet<VarnodeId>) -> bool {
     if !seen.insert(value) {
         return true;
     }
@@ -163,11 +161,7 @@ fn output_ancestry_step(
 /// Follow one returned value's descendants and reject uses other than a
 /// RETURN. This is the graph equivalent of `Funcdata::onlyOpUse`
 /// (`funcdata_varnode.cc:1836-1934`) for the output trial.
-fn only_return_use(
-    data: &Funcdata,
-    value: VarnodeId,
-    seen: &mut BTreeSet<VarnodeId>,
-) -> bool {
+fn only_return_use(data: &Funcdata, value: VarnodeId, seen: &mut BTreeSet<VarnodeId>) -> bool {
     if !seen.insert(value) {
         return true;
     }
@@ -176,9 +170,7 @@ fn only_return_use(
         let Some(operation) = data.opcode_of(descendant).map(|_| data.op(descendant)) else {
             continue;
         };
-        if operation.opcode == op::RETURN
-            && operation.inputs.get(1).copied() == Some(value)
-        {
+        if operation.opcode == op::RETURN && operation.inputs.get(1).copied() == Some(value) {
             // Multiple RETURNs carrying the same value are one output trial.
             continue;
         }
@@ -206,8 +198,19 @@ fn only_return_use(
 
 /// Return whether an output value satisfies both Ghidra output-trial checks.
 pub(crate) fn return_value_is_active(data: &Funcdata, value: VarnodeId) -> bool {
-    output_ancestry_allows(data, value, &mut BTreeSet::new())
-        && only_return_use(data, value, &mut BTreeSet::new())
+    let ancestry = output_ancestry_allows(data, value, &mut BTreeSet::new());
+    let only_use = only_return_use(data, value, &mut BTreeSet::new());
+    if std::env::var_os("VENTRIS_DEBUG_OUTPUT").is_some() {
+        eprintln!(
+            "output candidate {:?} ancestry={} only_use={} def={:?} desc={:?}",
+            value,
+            ancestry,
+            only_use,
+            data.varnode(value).def,
+            data.varnode(value).descendants
+        );
+    }
+    ancestry && only_use
 }
 
 /// Return the first non-dead basic block, if the graph has one.
