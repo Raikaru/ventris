@@ -6,6 +6,20 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- **`agrees` is 30 of 37 (81%)** after repairing the census itself, which had been
+  measuring a call spelling rather than a call. `call_site_count` required an
+  identifier before the argument list, so neither renderer's indirect call was
+  counted: Ghidra writes `(**(code **)(*param_1 + 0x40))()` and we write the folded
+  constant `(0x700016cc & 0xfffffffffffffffe)()`. That scored `changeGroupID` as a
+  spurious call against an oracle making exactly the same one - the item had even
+  been abandoned as unexplained - and recognising only Ghidra's dereference form
+  then scored `vm_boot` and `preamble` as a lost call each. A `)(` group is a callee
+  when the argument list is empty, since a cast is never followed by `()`, or when
+  its contents begin with a dereference. Five unit tests in
+  `python/tests/test_quality_census.py` pin both spellings, and that a cast and a
+  compound `if` are not calls.
+- Three families are now down to a single function each: `call-census`,
+  `unstructured-control-flow` and `missing-loop-or-switch`.
 - A short-circuit condition no longer disqualifies a `for` loop, and
   `queryMapAddress_single`'s **`for` count now matches the oracle exactly (2)**,
   as do its `if` (15) and `goto` (4). The recognizer had refused any condition that

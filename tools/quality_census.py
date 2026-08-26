@@ -283,11 +283,47 @@ def call_site_count(source: str) -> int:
     five lost calls on a function where both emit exactly five.
     """
     body = function_body(source)
-    return sum(
+    named = sum(
         1
         for name in re.findall(r"\b([A-Za-z_][A-Za-z0-9_:]*)\s*\(", body)
         if name not in NOT_A_CALL
     )
+    return named + indirect_call_count(body)
+
+
+def indirect_call_count(body: str) -> int:
+    """Counts calls through a parenthesised expression, which name no identifier.
+
+    Ghidra spells a call through a function pointer field as
+    `(**(code **)(*param_1 + 0x40))()`. There is no identifier before the
+    argument list, so an identifier-only scan counted zero and `changeGroupID`
+    scored as a spurious call against an oracle that makes exactly the same one.
+    A cast is the same `)(` shape, so the group is only a callee when either the
+    argument list is empty - a cast is never followed by `()` - or its contents
+    begin with a dereference. Both spellings occur: Ghidra writes the callee as
+    `*(code *)&DAT_700016cc`, we write the folded constant, and counting only the
+    dereference form scored `vm_boot` and `preamble` as a lost call each on
+    functions where both call exactly the same number of times.
+    """
+    found = 0
+    for match in re.finditer(r"\)\s*\(", body):
+        close = match.start()
+        empty = body[match.end() :].lstrip().startswith(")")
+        depth = 0
+        opening = None
+        for index in range(close, -1, -1):
+            if body[index] == ")":
+                depth += 1
+            elif body[index] == "(":
+                depth -= 1
+                if depth == 0:
+                    opening = index
+                    break
+        if opening is None:
+            continue
+        if empty or body[opening + 1 : close].lstrip().startswith("*"):
+            found += 1
+    return found
 
 
 def function_signature(source: str) -> str | None:
