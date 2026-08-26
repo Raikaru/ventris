@@ -6,6 +6,20 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- Located `__FrameCallback__Fl`'s remaining two families precisely. Three jump
+  targets - `0x8000b594`, `0x8000b59c` and `0x8000b684` - are named by surviving
+  jumps but never labelled, because the structurer leaves an edge to a block it
+  does not place in the tree. `0x8000b684` is where the oracle's
+  `return &DAT_800eaff8;` lives, which is why the function reads as void against
+  the oracle's `undefined2 *`, and why its call count is 5 against 8. The
+  dangling-jump pass makes the output valid C but cannot recover the block: the
+  fix is to place every block a surviving edge reaches, in the structurer, not to
+  print a label for statements that were never emitted.
+- Re-measured the three archived output-ancestry commits (`7066912`, `4212d8d`,
+  `f38a689`) against the current tree, since the resolver, terminator and
+  emission fixes changed everything around them. All three still take
+  `return-presence` 2 -> 3 for no gain elsewhere, so the working tree remains the
+  best measured state and `TRK_fill_mem`'s void-versus-value stands open.
 - The remaining loop residual is located precisely, and it is a structurer
   capability gap rather than emitter cleanup. `decompSZS_subroutine__FPUcPUc`
   recovers the oracle's two inner `do`/`while` loops but renders the outer one as
