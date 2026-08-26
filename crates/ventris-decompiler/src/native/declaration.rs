@@ -155,31 +155,6 @@ pub(super) fn render_var_decl(symbol: &Symbol) -> String {
     format!("{ty} {}", escape_identifier(symbol.display_name()))
 }
 
-/// Render one declaration statement as emitted by
-/// `PrintC::emitVarDeclStatement` (printc.cc:2642).  The returned fragment has
-/// no line terminator; callers decide where it belongs in their output stream.
-pub(super) fn render_var_decl_statement(symbol: &Symbol) -> String {
-    format!("{};", render_var_decl(symbol))
-}
-
-/// Render the namespace prefix selected by `PrintC::emitSymbolScope`
-/// (printc.cc:233).
-///
-/// Ghidra computes the minimal/all namespace path from `Symbol` and the
-/// current scope.  `ScopeLocal` intentionally stores no parent namespace tree,
-/// so the graph boundary cannot recompute that depth.  The caller supplies the
-/// already-selected path in outermost-to-innermost order; this function ports
-/// the actual rendering (`name::name::`) and keeps the empty-path result
-/// explicit rather than inventing a namespace.
-pub(super) fn render_symbol_scope(namespaces: &[&str]) -> String {
-    let mut rendered = String::new();
-    for namespace in namespaces {
-        rendered.push_str(&escape_identifier(namespace));
-        rendered.push_str("::");
-    }
-    rendered
-}
-
 fn render_parameter(parameter: &ProtoParameter, scope: Option<&ScopeLocal>) -> String {
     if let Some(symbol) = backing_symbol(parameter, scope) {
         return render_var_decl(symbol);
@@ -414,23 +389,6 @@ mod tests {
             render_prototype_inputs(&proto, Some(&scope), true),
             "uint32_t value"
         );
-    }
-
-    #[test]
-    fn declaration_helpers_preserve_identifier_escaping_and_statement_shape() {
-        let storage = location(0x20, 4);
-        let mut scope = ScopeLocal::new(REGISTER_SPACE);
-        let symbol = scope.add_symbol("switch", Type::Unsigned(32));
-        scope.add_map_point(symbol, storage).unwrap();
-        let symbol = scope.symbol(symbol).unwrap();
-
-        assert_eq!(render_var_decl(symbol), "uint32_t _switch");
-        assert_eq!(render_var_decl_statement(symbol), "uint32_t _switch;");
-        assert_eq!(
-            render_symbol_scope(&["outer", "switch"]),
-            "outer::_switch::"
-        );
-        assert_eq!(render_symbol_scope(&[]), "");
     }
 
     #[test]

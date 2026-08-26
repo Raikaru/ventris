@@ -2287,7 +2287,6 @@ impl NativeDecompiler {
             // public boolean collapses that to false. Ghidra records the same
             // case as inactive (`fspec.cc:5645-5646`), not definitely absent;
             // rejecting every undefined input loses the PS1 `a2` parameter.
-            const MAX_DESCENDANT_USE_DEPTH: usize = 64;
             for trial in inputs.trials_mut() {
                 let held = (0..data.varnode_count())
                     .map(|index| graph::VarnodeId(index as u32))
