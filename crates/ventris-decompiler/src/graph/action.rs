@@ -601,6 +601,9 @@ pub fn default_pipeline() -> Box<dyn Action> {
             .unwrap_or(false)
     };
     let mut pipeline = ActionGroup::new("source-pipeline");
+    if !skip("varnodeprops") {
+        pipeline = pipeline.add(Box::new(super::varnodeprops::ActionVarnodeProps));
+    }
     if !skip("prototypes") {
         pipeline = pipeline.add(Box::new(prototypes));
     }
