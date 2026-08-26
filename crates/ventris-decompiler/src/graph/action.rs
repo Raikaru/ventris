@@ -212,21 +212,67 @@ impl Rule for RuleMultiCollapse {
         let Some(output) = data.op(id).output else {
             return 0;
         };
-        let mut single: Option<VarnodeId> = None;
-        for operand in data.op(id).inputs.clone() {
-            if operand == output {
+        // Ghidra gives a non-matching branch "one last chance" when it is itself
+        // a `MULTIEQUAL`: it marks that phi, adds it to the collapse list, and
+        // appends *its* inputs to the things still to match. A value already
+        // marked "indicates a loop construct, where the value is recurring in the
+        // loop without change, so we treat this as equal to all other branches".
+        // Without that expansion a phi whose loop-carried input is another phi
+        // never collapses, and the definition left in the loop's tail is a marker
+        // - which is why `queryMapAddress_single`'s second `for` was rejected for
+        // having "no iteration in tail".
+        let is_phi = |data: &Funcdata, value: VarnodeId| {
+            data.varnode(value)
+                .def
+                .is_some_and(|def| data.op(def).opcode == op::MULTIEQUAL)
+        };
+        let mut matchlist: Vec<VarnodeId> = data.op(id).inputs.clone();
+        // The base branch every other must match: the first that is not itself a
+        // phi, so the comparison is against a real value where one exists.
+        let mut base = matchlist
+            .iter()
+            .copied()
+            .find(|value| !is_phi(data, *value));
+        let mut marked: std::collections::BTreeSet<VarnodeId> =
+            std::collections::BTreeSet::from([output]);
+        let mut collapse: Vec<VarnodeId> = vec![output];
+        let mut index = 0;
+        while index < matchlist.len() {
+            let candidate = matchlist[index];
+            index += 1;
+            if marked.contains(&candidate) {
                 continue;
             }
-            match single {
-                None => single = Some(operand),
-                Some(existing) if existing == operand => {}
+            match base {
+                None => base = Some(candidate),
+                Some(chosen) if chosen == candidate => {}
+                Some(_) if is_phi(data, candidate) => {
+                    marked.insert(candidate);
+                    collapse.push(candidate);
+                    let definition = data.varnode(candidate).def.expect("a phi has a definition");
+                    matchlist.extend(data.op(definition).inputs.clone());
+                }
                 Some(_) => return 0,
             }
         }
-        let Some(single) = single else { return 0 };
-        data.op_set_opcode(id, op::COPY);
-        data.op_set_inputs(id, vec![single]);
-        1
+        let Some(base) = base else { return 0 };
+        // Absolute equality: every branch is the same value, so each phi in the
+        // list becomes a copy of it. Ghidra's functional-equality path, which
+        // matches two different values computed alike, needs the block-local CSE
+        // it shares with `cseFindInBlock` and is not ported here.
+        let mut changed = 0;
+        for value in collapse {
+            let Some(definition) = data.varnode(value).def else {
+                continue;
+            };
+            if value == base {
+                continue;
+            }
+            data.op_set_opcode(definition, op::COPY);
+            data.op_set_inputs(definition, vec![base]);
+            changed += 1;
+        }
+        changed
     }
 }
 
@@ -787,6 +833,45 @@ mod tests {
 
         assert_eq!(RuleMultiCollapse.apply_op(phi, &mut data), 1);
         assert_eq!(data.op(phi).inputs, vec![value]);
+    }
+
+    /// Ghidra gives a non-matching branch "one last chance" when it is itself a
+    /// `MULTIEQUAL`: it marks that phi, adds it to the collapse list, and appends
+    /// its inputs to the things still to match. Two phis carrying one value round
+    /// a loop therefore both collapse. Without the expansion the phi in the tail
+    /// survives, and a loop whose carried value is defined by a marker is refused
+    /// a `for` - "no iteration in tail".
+    #[test]
+    fn two_phis_carrying_one_value_round_a_loop_both_collapse() {
+        let mut data = Funcdata::default();
+        let head = data.new_block(0x1000);
+        let tail = data.new_block(0x1010);
+        let value = data.new_varnode(REGISTER_SPACE, 8, 4);
+
+        let head_phi = data.new_op(op::MULTIEQUAL, seq(0x1000), vec![value]);
+        let head_out = data.new_varnode(REGISTER_SPACE, 8, 4);
+        data.op_set_output(head_phi, Some(head_out));
+        data.op_insert_end(head_phi, head);
+
+        let tail_phi = data.new_op(op::MULTIEQUAL, seq(0x1010), vec![value]);
+        let tail_out = data.new_varnode(REGISTER_SPACE, 8, 4);
+        data.op_set_output(tail_phi, Some(tail_out));
+        data.op_insert_end(tail_phi, tail);
+
+        // The head merges the entry value with the tail's, and the tail merges the
+        // same entry value with the head's: one value, going round unchanged.
+        data.op_set_inputs(head_phi, vec![value, tail_out]);
+        data.op_set_inputs(tail_phi, vec![value, head_out]);
+
+        assert_eq!(RuleMultiCollapse.apply_op(head_phi, &mut data), 2);
+        assert_eq!(data.op(head_phi).opcode, op::COPY);
+        assert_eq!(data.op(head_phi).inputs, vec![value]);
+        assert_eq!(
+            data.op(tail_phi).opcode,
+            op::COPY,
+            "the tail's phi is no longer a marker, so a loop can iterate through it"
+        );
+        assert_eq!(data.op(tail_phi).inputs, vec![value]);
     }
 
     #[test]

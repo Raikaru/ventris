@@ -6,6 +6,18 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- `RuleMultiCollapse` now gives a non-matching branch the "one last chance" Ghidra
+  gives it: when the branch is itself a `MULTIEQUAL`, mark it, add it to the
+  collapse list, and append *its* inputs to the values still to match. A value
+  already marked "indicates a loop construct, where the value is recurring in the
+  loop without change, so we treat this as equal to all other branches". Ours had
+  compared operands for literal equality only, so two phis carrying one value round
+  a loop never collapsed and the definition left in the tail stayed a marker - the
+  exact reason `queryMapAddress_single`'s second `for` was refused. It is still
+  refused, so that function's phi is not this shape, but the rule is now the one in
+  `ruleaction.cc`. Ghidra's functional-equality path, which matches two *different*
+  values computed alike, needs the block-local CSE of `cseFindInBlock` and is
+  deliberately not ported; the absolute-equality path is.
 - `queryMapAddress_single`'s remaining `for` is now diagnosed rather than guessed
   at, and the cause is upstream of the recogniser. Instrumenting every rejection
   showed both candidate loops failing at one point: the loop variable's
