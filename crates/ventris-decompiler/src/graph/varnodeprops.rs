@@ -1,10 +1,20 @@
 //! Ghidra's `ActionVarnodeProps` from `coreaction.cc`, for the branch this
 //! graph can express.
 //!
-//! The pass has three arms. Two of them read state the graph does not carry:
-//! `isAutoLiveHold`, and `hasActionProperty` with its read-only load-image
-//! lookup and volatile replacement. Those are recorded as gaps rather than
-//! guessed at.
+//! The pass has three arms, and two of them are inert - not merely unported.
+//!
+//! * The read-only load-image lookup is gated on `glb->readonlypropagate`,
+//!   which `Architecture::resetDefaults` sets to `false` (`architecture.cc:1426`)
+//!   and only the explicit `readonly` option turns on (`options.cc:256`). The
+//!   oracle runs the defaults, so `fillinReadOnly` never fires there either.
+//!   Porting it would make this decompiler propagate constants out of `.rodata`
+//!   where Ghidra does not.
+//! * `replaceVolatile` needs a volatile location, and `isAutoLiveHold` needs the
+//!   hold that `RuleLoadVarnode` places on a load whose address is not yet
+//!   resolved. Nothing marks either in this graph, so both arms would iterate
+//!   over an empty set. They become live only once a volatile-range source and
+//!   the load hold exist, and each is recorded where it would be set rather than
+//!   approximated here.
 //!
 //! The third arm is portable and is the semantically load-bearing one:
 //!

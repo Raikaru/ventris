@@ -1982,7 +1982,10 @@ impl Emitter<'_> {
     }
 
     fn classify(&self, op: OpId, scoped: &BTreeSet<String>) -> Emission {
-        if self.nonprinting.contains(&op) {
+        // The emitter's own set, plus the graph's `PcodeOp::nonprinting` mark -
+        // `Merge::markRedundantCopies` sets it on a `COPY` a dominating `COPY`
+        // from the same source already performed.
+        if self.nonprinting.contains(&op) || self.data.is_non_printing(op) {
             return Emission::Skip;
         }
         // A copy whose two ends print as one name says nothing. These are what a

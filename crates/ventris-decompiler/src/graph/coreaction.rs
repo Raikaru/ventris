@@ -29,20 +29,28 @@ impl Action for ActionDeadCode {
 
 /// Every core action whose graph mutation is representable is registered here.
 ///
-/// Omitted from this registry:
+/// Accounted for outside this registry:
 ///
-/// * `ActionDirectWrite`: `GraphVarnode` has no direct-write flag or equivalent
-///   storage.
-/// * `ActionConstbase`: `Funcdata` has no architecture tracked-context set,
-///   entry-injection payload lookup, or live-injection operation.
-/// * `ActionVarnodeProps`: the graph has no auto-live-hold/action-property,
-///   read-only, consumed-mask, or no-descend state required by its `apply`.
-/// * `ActionForceGoto`: `Funcdata` has no override object or forced-goto
-///   application API.
-/// * `ActionSetCasts`: `graph::casts` exposes only the pure `needs_cast` and
-///   `address_needs_cast` predicates; no graph operation stores the required
-///   high-level type/union-resolution attachments, and the module exposes no
-///   graph mutation or change-count entrypoint for an action to call.
+/// * `ActionDirectWrite` is ported, in `graph::protoaction`, and registered in
+///   both of Ghidra's positions by the pipeline rather than here.
+/// * `ActionVarnodeProps` is ported, in `graph::varnodeprops`, for the arm that
+///   is not inert; the module proves the other two are.
+/// * `ActionConstbase` needs the architecture's tracked-context set and the
+///   entry-injection payload. Both are inputs, not analysis: a tracked set says
+///   "this register holds this constant on entry", which is how a GameCube
+///   binary's small-data base gets its value. Nothing in `LoadOptions` or
+///   `Hints` supplies either, so the action would iterate an empty set. Ghidra
+///   run on this corpus is in the same position - its output names `unaff_r13`
+///   rather than a constant - so the omission is not a divergence.
+/// * `ActionForceGoto` applies `Override::applyForceGoto`. All of Ghidra's
+///   override sources are user input, and nothing here can populate an
+///   `Override`; this is the same reasoning that leaves `ActionRestartGroup`
+///   out, recorded in `graph::action`.
+/// * `ActionSetCasts` is ported as a decision rather than a pass: `graph::casts`
+///   holds `castStandard`'s rule and the emitter consults it per operand, which
+///   is where a cast is observable. What a graph pass would add is the
+///   union-resolution attachment `tryResolutionAdjustment` makes, and
+///   `DataType` has no union variant for it to resolve.
 pub fn all() -> Vec<Box<dyn Action>> {
     vec![Box::new(ActionDeadCode)]
 }

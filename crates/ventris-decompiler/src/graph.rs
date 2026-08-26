@@ -181,6 +181,14 @@ pub struct GraphOp {
     /// location a call destroys carries it, and no rule may collapse such an
     /// `INDIRECT` into its first operand.
     pub indirect_creation: bool,
+    /// The operation's assignment is not printed.
+    ///
+    /// Ghidra's `PcodeOp::nonprinting`, set by `Merge::markRedundantCopies` for
+    /// a `COPY` that a dominating `COPY` from the same source already performed.
+    /// The operation stays in the graph - the value is still defined, and other
+    /// passes still read it - but the emitter says nothing about it, because
+    /// saying it twice invents an assignment the source never wrote.
+    pub non_printing: bool,
     /// The call's parameter trials have not been decided yet.
     ///
     /// Ghidra's `FuncCallSpecs::isInputActive`. `ActionActiveParam` decides the
@@ -613,6 +621,18 @@ impl Funcdata {
         self.ops[op.0 as usize].indirect_creation
     }
 
+    /// Marks the operation's assignment as one the emitter must not print.
+    ///
+    /// Ghidra's `Funcdata::opMarkNonPrinting`.
+    pub fn op_mark_non_printing(&mut self, op: OpId) {
+        self.ops[op.0 as usize].non_printing = true;
+    }
+
+    /// Whether the operation's assignment is printed.
+    pub fn is_non_printing(&self, op: OpId) -> bool {
+        self.ops[op.0 as usize].non_printing
+    }
+
     /// Whether a call's parameter trials are still open.
     ///
     /// Ghidra's `FuncCallSpecs::isInputActive`.
@@ -901,6 +921,7 @@ impl Funcdata {
             inputs: Vec::new(),
             parent: None,
             indirect_creation: false,
+            non_printing: false,
             input_active: true,
             dead: false,
         });

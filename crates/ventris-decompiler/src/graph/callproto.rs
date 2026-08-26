@@ -792,6 +792,18 @@ impl Action for ActionFuncLink {
         "funclink"
     }
 
+    /// `ActionFuncLink::funcLinkInput`'s observable half already ran.
+    ///
+    /// Its job is to put the convention's candidate parameter operands on each
+    /// call before renaming and to open the call's trials. Both happen earlier
+    /// and unconditionally here: `guard::guard_calls` appends the operands - the
+    /// same thing `Heritage::guardCalls` does for an unlocked callee - and
+    /// `proto::recover_call_arguments` decides and closes the trials.
+    ///
+    /// What remains unrepresented is `funcLinkOutput`'s stack placeholder, which
+    /// needs a stack-space model with `opStackLoad`; this graph reaches stack
+    /// arguments through ordinary loads instead, so there is no placeholder to
+    /// insert.
     fn apply(&self, _data: &mut Funcdata) -> usize {
         0
     }

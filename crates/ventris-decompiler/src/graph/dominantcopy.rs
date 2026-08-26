@@ -38,10 +38,110 @@ impl Action for ActionDominantCopy {
     fn apply(&self, data: &mut Funcdata) -> usize {
         let mut changed = 0;
         for group in copy_groups(data) {
+            // `processCopyTrims` drives both halves. The redundant-copy half
+            // runs first, because a `COPY` a dominating one already performed is
+            // not a trim to rebuild - it is an assignment to stop printing.
+            changed += mark_redundant_copies(data, &group);
             changed += build_dominant_copy(data, &group);
         }
         changed
     }
+}
+
+/// Silences each `COPY` a dominating `COPY` from the same source already made.
+///
+/// Ghidra's `Merge::processHighRedundantCopy` and `markRedundantCopies`. Two
+/// `COPY`s of one value into one variable are one assignment in the source; the
+/// later one is marked non-printing rather than removed, because the value it
+/// defines is still read. Removing it instead would delete an assignment, which
+/// is why this pass was previously left out entirely.
+///
+/// `checkCopyPair` is the guard: the earlier `COPY` must dominate the later one,
+/// and no other write of the same variable may intervene between them - such a
+/// write means the later `COPY` is restoring a value that changed, so it says
+/// something.
+fn mark_redundant_copies(data: &mut Funcdata, group: &CopyGroup) -> usize {
+    if group.copies.len() < 2 {
+        return 0;
+    }
+    let dominance = compute_dominance(data);
+    let variables = merge_all(data);
+    let mut changed = 0;
+    for (position, subordinate) in group.copies.iter().copied().enumerate().skip(1).rev() {
+        if data.opcode_of(subordinate).is_none() || data.is_non_printing(subordinate) {
+            continue;
+        }
+        for dominant in group.copies[..position].iter().copied().rev() {
+            if data.opcode_of(dominant).is_none() {
+                continue;
+            }
+            if check_copy_pair(data, &dominance, &variables, dominant, subordinate) {
+                data.op_mark_non_printing(subordinate);
+                changed += 1;
+                break;
+            }
+        }
+    }
+    changed
+}
+
+/// Whether the later `COPY` says nothing the earlier one did not.
+///
+/// Ghidra's `Merge::checkCopyPair`.
+fn check_copy_pair(
+    data: &Funcdata,
+    dominance: &super::heritage::Dominance,
+    variables: &super::mergeaction::Variables,
+    dominant: OpId,
+    subordinate: OpId,
+) -> bool {
+    let (Some(dominant_block), Some(subordinate_block)) =
+        (data.op(dominant).parent, data.op(subordinate).parent)
+    else {
+        return false;
+    };
+    if !dominators(dominance, subordinate_block).contains(&dominant_block) {
+        return false;
+    }
+    let (Some(output), Some(source)) = (
+        data.op(dominant).output,
+        data.op(dominant).inputs.first().copied(),
+    ) else {
+        return false;
+    };
+    let variable = variables.high_of(output);
+    // The range between the two copies: from the dominating copy's definition
+    // to the subordinate's read of the same source.
+    let range = Cover::of(data, output, dominance);
+    for index in 0..data.varnode_count() {
+        let candidate = VarnodeId(index as u32);
+        if variables.high_of(candidate) != variable {
+            continue;
+        }
+        let Some(definition) = data.varnode(candidate).def else {
+            continue;
+        };
+        // A write that is itself a copy of the same value is not intervening.
+        if data.op(definition).opcode == op::COPY
+            && data.op(definition).inputs.first().copied() == Some(source)
+        {
+            continue;
+        }
+        let Some(block) = data.op(definition).parent else {
+            continue;
+        };
+        let position = data
+            .block(block)
+            .ops
+            .iter()
+            .position(|held| *held == definition);
+        if let Some(position) = position
+            && range.contains(block, position)
+        {
+            return false;
+        }
+    }
+    true
 }
 
 /// A set of COPY operations writing one variable from one source value.

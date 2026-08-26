@@ -542,13 +542,21 @@ mod tests {
 /// methods, none of which exists on `Funcdata`.
 /// The actions from this module that the pipeline runs.
 ///
-/// `ActionReturnSplit` is deliberately excluded. Ghidra's version splits a
-/// shared return block so each predecessor gets its own epilogue, and it is the
-/// right pass for `decompSZS_subroutine`'s jump to a shared `return` - but ours
-/// diverges control flow on `_ZN9GameWorld12beginFadeOutEv` and
-/// `beginFadeInEv`, failing `corpus-smoke` with `control_flow=diverged`.
-/// Bisected: skipping it alone restores the gate, and the other three actions in
-/// this set are clean. It needs Ghidra's guards before it can be enabled.
+/// `ActionReturnSplit` is excluded, and the reason is now precise rather than
+/// "needs Ghidra's guards". Ghidra selects the edges to split with
+/// `gatherReturnGotos`, which asks the *structured* tree whether a predecessor
+/// is a `goto` block whose goto actually prints, or an if-goto whose target is
+/// this return block (`blockaction.cc`). That set only exists because
+/// `ActionBlockStructure` runs inside the main loop and `ActionReturnSplit` runs
+/// on the full loop afterwards, so it sees a structured graph.
+///
+/// This pipeline structures once, at the end. The available proxy - "a
+/// predecessor whose last operation is a branch naming this block" - accepts
+/// edges the structurer will render as ordinary structure, an `if` arm or a loop
+/// edge among them, and splitting one of those diverges control flow: it failed
+/// `corpus-smoke` on `_ZN9GameWorld12beginFadeOutEv` and `beginFadeInEv` with
+/// `control_flow=diverged`, and bisection showed this pass alone was
+/// responsible. The prerequisite is structuring inside the loop, not a guard.
 pub fn all() -> Vec<Box<dyn Action>> {
     vec![Box::new(ActionNodeJoin)]
 }
