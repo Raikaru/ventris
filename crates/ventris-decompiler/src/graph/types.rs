@@ -213,9 +213,25 @@ fn propagate_op(
                 });
             if let Some(pointer) = pointer {
                 changed |= set(output, pointer.clone(), types);
-                for operand in operation.inputs.iter().copied() {
-                    if !data.varnode(operand).flags.constant {
-                        changed |= set(operand, pointer.clone(), types);
+                // Only the base of the addition is that pointer. The other
+                // operand is the offset, and an offset added to a pointer is an
+                // integer - Ghidra's `TypeOpIntAdd::propagateType` carries the
+                // type between the output and one operand, never both. Typing
+                // every operand put a pointer type on a scaled index, so the
+                // emitter spelled the conversion: `(uintptr_t)(i * 0x70)`.
+                //
+                // Which operand is the base is only knowable when the other is a
+                // constant displacement. That is the field-access shape this
+                // backward step exists for; where both operands are computed,
+                // the base gets its type from its own definition instead.
+                if operation.inputs.len() == 2 {
+                    for (slot, operand) in operation.inputs.iter().copied().enumerate() {
+                        let other = operation.inputs[1 - slot];
+                        if !data.varnode(operand).flags.constant
+                            && data.varnode(other).flags.constant
+                        {
+                            changed |= set(operand, pointer.clone(), types);
+                        }
                     }
                 }
             }
@@ -365,6 +381,44 @@ mod tests {
         assert!(
             matches!(types.get(base), Some(Type::Pointer(_))),
             "the base of a field access is a pointer too"
+        );
+    }
+
+    /// An offset added to a pointer is an integer. Typing it as a pointer made
+    /// the emitter spell the conversion, and `element * stride` came out as
+    /// `(uintptr_t)(element * stride)`.
+    #[test]
+    fn a_scaled_index_added_to_a_pointer_stays_an_integer() {
+        let mut data = Funcdata::default();
+        let block = data.new_block(0x1000);
+        let base = data.new_varnode(REGISTER_SPACE, 8, 4);
+        let index = data.new_varnode(REGISTER_SPACE, 16, 4);
+        let stride = data.new_constant(0x70, 4);
+        let scaled = data.new_op(op::INT_MULT, seq(0x1000), vec![index, stride]);
+        let product = data.new_unique(4);
+        data.op_set_output(scaled, Some(product));
+        data.op_insert_end(scaled, block);
+        let add = data.new_op(op::INT_ADD, seq(0x1004), vec![base, product]);
+        let element = data.new_unique(4);
+        data.op_set_output(add, Some(element));
+        data.op_insert_end(add, block);
+        let space = data.new_constant(0, 4);
+        let load = data.new_op(op::LOAD, seq(0x1008), vec![space, element]);
+        let loaded = data.new_unique(4);
+        data.op_set_output(load, Some(loaded));
+        data.op_insert_end(load, block);
+        let ret = data.new_op(op::RETURN, seq(0x100c), vec![loaded]);
+        data.op_insert_end(ret, block);
+
+        let types = infer_types(&data, &BTreeMap::new());
+        assert!(
+            matches!(types.get(element), Some(Type::Pointer(_))),
+            "the sum addresses memory, so it is a pointer"
+        );
+        assert!(
+            !matches!(types.get(product), Some(Type::Pointer(_))),
+            "the scaled index is an offset, got {:?}",
+            types.get(product)
         );
     }
 

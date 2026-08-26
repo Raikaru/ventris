@@ -282,6 +282,21 @@ All notable Ventris changes are documented here.
   table-backed switch the rule can claim, and `dl_G_MOVEWORD`'s `switch 0 vs 1`
   is a `BRANCHIND` whose table this pipeline does not recover. The rule is
   correct and tested; it has no corpus function to improve yet.
+- Closed `casts` on the graph path. `graph::types::infer_types` propagated a
+  pointer type to *every* non-constant operand of an addition, so a scaled index
+  became a pointer and the emitter dutifully spelled the conversion:
+  `(uintptr_t)(uVar2 * 0x70)`. Ghidra's `TypeOpIntAdd::propagateType` carries the
+  type between the output and one operand, never both - an offset added to a
+  pointer is an integer.
+  Which operand is the base is only knowable when the other is a constant
+  displacement, which is the field-access shape this backward step exists for;
+  where both operands are computed, the base gets its type from its own
+  definition. `allocEnemyEntity` now returns
+  `(uintptr_t)this_ + (uVar2 * 0x70 + 0x4d0)` - one cast, as the address-ordered
+  path has.
+  `casts` on all five PS2 functions went from `diverged` to `applied`.
+  `declaration_order` is the only dimension left between the graph path and the
+  default.
 - The graph path no longer builds the address-ordered SSA or runs its type
   solver. It recovered types with `graph::types::infer_types` all along, and that
   is what emission reads; the linear pass ran alongside only to fill
