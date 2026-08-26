@@ -15,6 +15,19 @@ const PREC_PRIMARY: u8 = 13;
 pub(super) fn render_document(document: &NativeDocument) -> String {
     let mut out = String::from("#include <stdint.h>\n#include <stdbool.h>\n\n");
 
+    // Ghidra prints what recovery could not finish as a comment above the
+    // function, through `PrintC::emitFunctionHeader` reading the warning list.
+    // Storing a warning nobody prints is the same as not reporting it, so the
+    // sink is rendered here rather than only carried on the document.
+    for warning in &document.warnings {
+        out.push_str("// WARNING: ");
+        out.push_str(warning);
+        out.push('\n');
+    }
+    if !document.warnings.is_empty() {
+        out.push('\n');
+    }
+
     let parameters = if document.parameters.is_empty() {
         "void".to_owned()
     } else {
@@ -826,5 +839,28 @@ mod tests {
             render_expr(&field, 0)
         );
         assert!(render_expr(&field, 0).starts_with('('));
+    }
+    /// A stored warning nobody prints is the same as no warning, so the
+    /// rendering half is asserted rather than assumed.
+    #[test]
+    fn a_warning_is_printed_above_the_function() {
+        let document = NativeDocument {
+            name: "sub_1000".into(),
+            return_type: Type::Void,
+            parameters: Vec::new(),
+            statements: Vec::new(),
+            ssa: Default::default(),
+            types: Vec::new(),
+            warnings: vec!["prototype could not be recovered".into()],
+        };
+        let rendered = render_document(&document);
+        assert!(
+            rendered.contains("// WARNING: prototype could not be recovered"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.find("// WARNING").unwrap() < rendered.find("sub_1000").unwrap(),
+            "the warning must precede the function it describes"
+        );
     }
 }

@@ -260,6 +260,14 @@ pub struct Funcdata {
     /// all. Duplicates are dropped: a pass that runs to a fixed point would
     /// otherwise repeat itself once per round.
     warnings: Vec<String>,
+    /// The function's recovered prototype, once a calling convention is known.
+    ///
+    /// `None` is a real state rather than a missing value: a bare architecture
+    /// with no target supplies no convention, so there is nothing to recover
+    /// parameter storage against.
+    func_proto: Option<funcproto::FuncProto>,
+    /// The function's local symbol table, once something builds one.
+    scope_local: Option<scope::ScopeLocal>,
 }
 
 /// A derived value held beside the graph it was computed from.
@@ -471,6 +479,30 @@ impl Funcdata {
     /// Ghidra's `Funcdata::markIndirectOnly` follows `MULTIEQUAL` outputs and
     /// accepts `INDIRECT` terminals. The graph has no indirect-store marker, so
     /// every `INDIRECT` is the representable terminal form.
+    pub fn func_proto(&self) -> Option<&funcproto::FuncProto> {
+        self.func_proto.as_ref()
+    }
+
+    pub fn func_proto_mut(&mut self) -> Option<&mut funcproto::FuncProto> {
+        self.func_proto.as_mut()
+    }
+
+    pub fn set_func_proto(&mut self, proto: funcproto::FuncProto) {
+        self.func_proto = Some(proto);
+    }
+
+    pub fn scope_local(&self) -> Option<&scope::ScopeLocal> {
+        self.scope_local.as_ref()
+    }
+
+    pub fn scope_local_mut(&mut self) -> Option<&mut scope::ScopeLocal> {
+        self.scope_local.as_mut()
+    }
+
+    pub fn set_scope_local(&mut self, scope: scope::ScopeLocal) {
+        self.scope_local = Some(scope);
+    }
+
     /// Records a diagnostic, ignoring one already present.
     pub fn warning(&mut self, message: impl Into<String>) -> bool {
         let message = message.into();

@@ -180,6 +180,17 @@ fn group_holds_input(data: &Funcdata, variables: &Variables, value: VarnodeId) -
         variables.high_of(candidate) == group && data.varnode(candidate).flags.input
     })
 }
+/// Ghidra's `Varnode::isAddrTied`: the value's address maps into a scope, so a
+/// symbol names that storage.
+///
+/// Ghidra sets the flag in `Scope::queryProperties` when the address falls in a
+/// scope's range - stack slots and globals. A register carrying no symbol is not
+/// tied, so registers are still eligible for a speculative merge.
+fn is_address_tied(data: &Funcdata, value: VarnodeId) -> bool {
+    let varnode = data.varnode(value);
+    varnode.flags.volatile || varnode.space == ventris_lifter::RAM_SPACE
+}
+
 
 fn speculative_union(
     data: &Funcdata,
@@ -205,6 +216,17 @@ fn speculative_union(
     // and a cast no reader needs, and the name then spreads to every other
     // member. This is refused for speculative merges only: `required_union`
     // must still put a phi's operands in the phi's variable, whatever they hold.
+    // `Merge::mergeTestSpeculative` refuses an address-tied value. A machine
+    // location has an identity the reader can name, so folding two of them into
+    // one variable claims they are the same storage across their whole live
+    // range when they are only the same register at different times.
+    //
+    // Skipping this cost real accuracy: two distinct branch conditions in one
+    // register became one variable, and `decompSZS_subroutine` rendered four
+    // different tests as `!b || !b || !b || !b`.
+    if is_address_tied(data, left) || is_address_tied(data, right) {
+        return false;
+    }
     if respells_a_constant(data, left) || respells_a_constant(data, right) {
         return false;
     }

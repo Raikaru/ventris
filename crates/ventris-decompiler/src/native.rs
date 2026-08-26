@@ -2211,6 +2211,12 @@ impl NativeDecompiler {
                 }
             })
         });
+        // A recovered prototype is what the prototype passes read. Attaching it
+        // where the convention is already in hand keeps the passes working on
+        // real storage instead of a permanent `None`.
+        if let Some(abi) = abi {
+            data.set_func_proto(graph::funcproto::FuncProto::new(*abi));
+        }
         let statements = graph::emit::emit_structured(
             &tables,
             &data,
