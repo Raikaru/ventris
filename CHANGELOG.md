@@ -6,6 +6,20 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- Located the source of those unresolved temporaries by bisecting the pipeline
+  with `VENTRIS_SKIP_GROUP` and `VENTRIS_SKIP_RULE`: the `cleanup` pool, and
+  within it `bitfield_load`. Skipping that one rule takes
+  `ksNesDrawBG__FP18ksNesCommonWorkObjP13ksNesStateObj` from five undeclared
+  temporaries to none, with the same eleven conditionals and one line fewer;
+  skipping `pull_absorb` leaves four. `RuleBitFieldLoad` rewrites an extraction
+  tree into `ZPULL`/`SPULL` and then calls `destroy_dead_value` on the old input.
+  That helper does guard on remaining descendants, so the orphan comes from the
+  interaction between rewriting one branch of a shared tree and destroying
+  another, not from a missing check at the call site. No control-flow action is
+  involved - all fourteen were skipped individually with no effect. The output is
+  valid C because every temporary is now declared, and the census is unaffected,
+  so this is a latent defect rather than a visible one, recorded with the exact
+  bisect that finds it.
 - Every temporary the body names is now declared. A value with no definition and
   no register name renders as `Expr::Temporary`, which prints as a bare
   identifier; Ghidra declares such a value instead - it prints `int unaff_r2;`
