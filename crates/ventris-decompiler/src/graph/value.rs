@@ -644,6 +644,61 @@ impl<'a> Resolver<'a> {
                     value: Box::new(value),
                 })
             }
+            op::ZPULL | op::SPULL => {
+                // `RuleBitFieldLoad` rewrites a shift-and-mask extraction into
+                // one of these, and without a spelling the extracted value
+                // printed as a bare placeholder - which is how
+                // `ksNesDrawBG__FP18ksNesCommonWorkObjP13ksNesStateObj` lost the
+                // comparisons its conditionals test. Ghidra prints a bitfield
+                // member here; with no field metadata the faithful C is the
+                // shift and mask the rule collapsed.
+                let constant_at = |slot: usize| {
+                    op.inputs
+                        .get(slot)
+                        .copied()
+                        .filter(|value| self.data.varnode(*value).flags.constant)
+                        .map(|value| self.data.varnode(value).offset)
+                };
+                let position = constant_at(1)?;
+                let bits = constant_at(2)?;
+                if bits == 0 || bits > 64 {
+                    return None;
+                }
+                let mut value = input(0)?;
+                if position != 0 {
+                    value = binary(
+                        BinaryOp::Right,
+                        value,
+                        Expr::Constant {
+                            value: position,
+                            width: 4,
+                        },
+                    );
+                }
+                let mask = if bits >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << bits) - 1
+                };
+                let extracted = binary(
+                    BinaryOp::And,
+                    value,
+                    Expr::Constant {
+                        value: mask,
+                        width: 8,
+                    },
+                );
+                // A signed pull keeps the field's top bit as the sign, which the
+                // mask has just cleared, so it is spelled as the cast the
+                // recovered type asks for.
+                if op.opcode == op::SPULL {
+                    return Some(Expr::Cast {
+                        ty: self.type_of(op.output?),
+                        value: Box::new(extracted),
+                    });
+                }
+                return Some(extracted);
+            }
             op::SUBPIECE => {
                 // Taking the low bytes of a value is a cast; taking bytes
                 // further up is a shift and then a cast. Without this arm the
@@ -1005,5 +1060,53 @@ mod tests {
             resolver.resolve(defined),
             Expr::Constant { value: 5, width: 4 }
         );
+    }
+
+    /// `RuleBitFieldLoad` rewrites a shift-and-mask extraction into `ZPULL`, so
+    /// the printer must spell it. Without an arm the extracted value resolved to
+    /// storage and printed as a bare placeholder, which is how
+    /// `ksNesDrawBG__FP18ksNesCommonWorkObjP13ksNesStateObj` lost the
+    /// comparisons its conditionals test.
+    #[test]
+    fn a_bitfield_pull_spells_the_shift_and_mask_it_replaced() {
+        let mut data = Funcdata::default();
+        let block = data.new_block(0x1000);
+        let root = data.new_varnode(ventris_lifter::REGISTER_SPACE, 12, 4);
+        data.mark_input(root);
+        let position = data.new_constant(3, 4);
+        let width = data.new_constant(1, 4);
+        let pull = data.new_op(op::ZPULL, seq(0x1000), vec![root, position, width]);
+        let extracted = data.new_unique(1);
+        data.op_set_output(pull, Some(extracted));
+        data.op_insert_end(pull, block);
+        let ret = data.new_op(op::RETURN, seq(0x1004), vec![extracted]);
+        data.op_insert_end(ret, block);
+
+        let naming = mark_explicit(&data);
+        let resolver = Resolver::new(&data, &naming, &names);
+        let rendered = resolver.resolve(extracted);
+        assert!(
+            !matches!(rendered, Expr::Temporary { .. }),
+            "a pull must not fall back to a bare placeholder: {rendered:?}"
+        );
+        // One bit at position three: `(root >> 3) & 1`.
+        let Expr::Binary {
+            op: BinaryOp::And,
+            left,
+            right,
+        } = rendered
+        else {
+            panic!("expected a mask, got {rendered:?}");
+        };
+        assert_eq!(*right, Expr::Constant { value: 1, width: 8 });
+        let Expr::Binary {
+            op: BinaryOp::Right,
+            right: shift,
+            ..
+        } = *left
+        else {
+            panic!("expected a shift under the mask");
+        };
+        assert_eq!(*shift, Expr::Constant { value: 3, width: 4 });
     }
 }

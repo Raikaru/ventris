@@ -6,6 +6,25 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- `ZPULL` and `SPULL` are now spelled by the printer. `RuleBitFieldLoad` rewrites
+  a shift-and-mask extraction into one of them, and nothing in `value.rs`,
+  `emit.rs` or `native.rs` handled either opcode - so `translate` returned
+  nothing, the extracted value fell back to storage, and a UNIQUE-space varnode
+  printed as a bare `loc_2_*` placeholder. That is why
+  `ksNesDrawBG__FP18ksNesCommonWorkObjP13ksNesStateObj` tested `if (loc_2_55)`
+  where the oracle tests `if ((*(byte *)(iVar3 + 0xbb9) & 8) != 0)`: the
+  comparison was not lost in analysis, it was unprintable. With no field metadata
+  the faithful C is the shift and mask the rule collapsed, so a pull renders as
+  `(root >> pos) & mask`, and a signed pull carries the recovered type as a cast.
+  All five placeholders in that function are gone and its conditionals now read
+  as real bit tests - `if (uVar36 >> 3 & 1)` against the oracle's masked
+  comparison. Nine lines shorter, gates clean, and the regression test resolves
+  to `Temporary { name: "loc_2_0" }` without the arm.
+- Corrected the earlier diagnosis this replaces: the bisect to `bitfield_load`
+  was right about the rule but wrong about the mechanism. A probe over every
+  UNIQUE varnode with readers and no definition found that the rule creates no
+  orphans at all - `destroy_dead_value` is correct. The values always had
+  definitions; the printer simply could not express them.
 - Located the source of those unresolved temporaries by bisecting the pipeline
   with `VENTRIS_SKIP_GROUP` and `VENTRIS_SKIP_RULE`: the `cleanup` pool, and
   within it `bitfield_load`. Skipping that one rule takes
