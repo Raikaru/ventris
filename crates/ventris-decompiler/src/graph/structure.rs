@@ -662,6 +662,12 @@ impl<'a> Graph<'a> {
         else {
             return;
         };
+        // `collapse` compares this count before and after `mark_loop_exits` to
+        // tell whether re-marking made progress. It was never incremented, so
+        // the comparison always said no and the collapse fell straight through
+        // to `rule_goto` - surrendering an edge as a `goto` instead of retrying
+        // with the exits that had just been marked.
+        self.surrendered += 1;
         let branching = self.nodes[node].successors.len() == 2;
         self.nodes[node].successors.remove(index);
         self.nodes[successor]

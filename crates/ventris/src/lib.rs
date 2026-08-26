@@ -210,6 +210,10 @@ pub struct Pipeline {
     target: Option<TargetProfile>,
 }
 
+/// Rounds of jump-table discovery. Ghidra restarts until nothing new is
+/// reached; a table found inside a case body needs a second pass.
+const MULTISTAGE_ROUNDS: usize = 3;
+
 impl Pipeline {
     pub fn load(source: impl Into<Vec<u8>>, options: LoadOptions) -> Result<Self, PipelineError> {
         let source = source.into();
@@ -298,6 +302,94 @@ impl Pipeline {
             .map_err(PipelineError::Lift)
     }
 
+    /// Discovers the code a jump table reaches and merges it into the function.
+    ///
+    /// Ghidra reaches a switch's case bodies through its restart mechanism:
+    /// `JumpTable::matchModel` records a multistage jump and sets
+    /// `setRestartPending`, and the next pass over the function follows the
+    /// recovered targets. Discovery here stops at the `BRANCHIND` because
+    /// `sleigh_flow` reports `Flow::Return` for it and `discover` only follows
+    /// `Jump`/`Conditional`, so the case bodies were never lifted and
+    /// `rule_block_switch` never saw more than one successor.
+    ///
+    /// This is that restart, at the layer where re-lifting is possible: recover
+    /// the table from the first lift, discover from every case and default
+    /// target, merge the instructions, and add the branch-to-case edges the
+    /// structurer needs.
+    fn discover_through_jump_tables(
+        &self,
+        mut function: ventris_lifter::NativeFunction,
+        instruction_limit: usize,
+    ) -> ventris_lifter::NativeFunction {
+        let Some(architecture) = self.architecture else {
+            return function;
+        };
+        let read = |address, width| self.target_memory_value(address, width);
+        for _ in 0..MULTISTAGE_ROUNDS {
+            let mut data = ventris_decompiler::graph::Funcdata::from_lifted(&function);
+            // `from_lifted` makes every read a free varnode, so nothing has a
+            // definition and the table's address chain cannot be walked. Heritage
+            // is what links reads to their definitions.
+            ventris_decompiler::graph::heritage::heritage_with_endianness(
+                &mut data,
+                !ventris_decompiler::native::architecture_is_big_endian(architecture),
+            );
+            // The address chain is only walkable after the expression rules have
+            // folded it, which is why Ghidra's restart re-runs the whole
+            // analysis rather than re-reading the raw graph.
+            let pipeline = ventris_decompiler::graph::action::default_pipeline();
+            for _ in 0..2 {
+                data.invalidate_types();
+                if ventris_decompiler::graph::action::Action::apply(pipeline.as_ref(), &mut data)
+                    == 0
+                {
+                    break;
+                }
+            }
+            let tables = ventris_decompiler::graph::jumptable::recover_jump_tables(&data, &read);
+            if tables.is_empty() {
+                break;
+            }
+            let mut added = false;
+            for table in &tables {
+                let Some(branch) = data.op(table.branch).seq.address.into() else {
+                    continue;
+                };
+                let targets = table
+                    .cases
+                    .iter()
+                    .map(|(_, target)| *target)
+                    .chain(table.default_target)
+                    .collect::<std::collections::BTreeSet<_>>();
+                for target in targets {
+                    if function.edges.insert((branch, target)) {
+                        added = true;
+                    }
+                    if function.instructions.contains_key(&target) {
+                        continue;
+                    }
+                    if let Ok(reached) = ventris_lifter::lifter_for(architecture).discover(
+                        &self.loaded.image,
+                        &self.loaded.bytes,
+                        target,
+                        instruction_limit,
+                    ) {
+                        for (address, instruction) in reached.instructions {
+                            function.instructions.entry(address).or_insert(instruction);
+                        }
+                        function.edges.extend(reached.edges);
+                        function.calls.extend(reached.calls);
+                        added = true;
+                    }
+                }
+            }
+            if !added {
+                break;
+            }
+        }
+        function
+    }
+
     pub fn inventory(
         &self,
         hints: &Hints,
@@ -325,6 +417,7 @@ impl Pipeline {
         hints: &Hints,
     ) -> Result<AnalysisResult, PipelineError> {
         let function = self.lift(address, instruction_limit)?;
+        let function = self.discover_through_jump_tables(function, instruction_limit);
         let (symbols, relocations) = self.recovery_facts(hints)?;
         let symbol_names = symbols
             .iter()
