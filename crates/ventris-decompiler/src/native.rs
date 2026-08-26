@@ -2076,8 +2076,11 @@ impl NativeDecompiler {
             graph::action::Action::apply(action.as_ref(), &mut data);
         }
         let pipeline = graph::action::default_pipeline();
-        let control_flow: [&dyn graph::action::Action; 12] = [
+        let control_flow: [&dyn graph::action::Action; 13] = [
             &graph::branchaction::ActionDeterminedBranch,
+            // A computed jump whose destination folded to a constant is an
+            // ordinary branch; leaving it indirect renders `goto *(...)`.
+            &graph::jumptable::ActionResolvedIndirect,
             &graph::branchaction::ActionRedundBranch,
             &graph::branchaction::ActionDoNothing,
             &graph::branchaction::ActionUnreachable,

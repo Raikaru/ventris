@@ -6,6 +6,21 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- `preamble`'s six missing calls are closed. Two pieces were needed. The trivial
+  jump model now evaluates a destination built out of constants: MIPS `jr` clears
+  the target's low bits, so a folded address arrives as
+  `INT_AND(INT_2COMP(2), target)` through a COPY rather than as a bare constant,
+  and a destination that evaluates to one address is routed to the trivial model
+  before the table models - which all fail on a target already known. Multistage
+  discovery then reaches `0x80001050` and emits exactly the oracle's five
+  `setCopReg` and `TLB_write_indexed_entry`. Second, `ActionResolvedIndirect`
+  turns a `BRANCHIND` whose destination folded to a constant into an ordinary
+  `BRANCH` when the block already reaches exactly that target, so the jump stops
+  rendering as `goto *(...)`. `call-census` 3 -> 2 with `agrees` holding at 26
+  and `unstructured-control-flow` unchanged; `preamble` emits no gotos at all.
+  This is the same fix that cost `agrees` earlier in the session - it pays for
+  itself now that the resolver and the emitter no longer leave a dangling jump
+  behind it.
 - A jump whose label was never emitted is now removed, so the output is valid C.
   It arises when structuring surrenders an edge into a region later analysis
   proved unreachable and therefore never printed: `drop_labels_nothing_needs`

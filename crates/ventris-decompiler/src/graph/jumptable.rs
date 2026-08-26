@@ -446,11 +446,47 @@ fn recover_basic(
 
 /// `JumpModelTrivial` uses the outgoing edges themselves as the address table.
 /// A literal BRANCHIND target is also unambiguous in a graph with no edges.
+/// A destination whose whole computation is over constants.
+///
+/// MIPS `jr` clears the target's low bits before branching, so a computed
+/// address that folded to a constant arrives as `INT_AND(INT_2COMP(2), target)`
+/// rather than as a bare constant. Evaluating that is arithmetic, not a guess,
+/// but it is kept local to the trivial model: making a value known that the
+/// shared helpers report as unknown changes which operand the address parser
+/// reads as a table base, and that misclassification broke a real switch when
+/// tried globally.
+fn folded_constant(data: &Funcdata, value: VarnodeId, depth: u32) -> Option<u64> {
+    let value = strip_alias(data, value);
+    if let Some(target) = constant_value(data, value) {
+        return Some(target);
+    }
+    let definition = data.varnode(value).def.filter(|_| depth > 0)?;
+    let operation = data.op(definition);
+    let input = |slot: usize| {
+        operation
+            .inputs
+            .get(slot)
+            .copied()
+            .and_then(|operand| folded_constant(data, operand, depth - 1))
+    };
+    let left = input(0)?;
+    match operation.opcode {
+        op::COPY | op::INT_ZEXT | op::INT_SEXT => Some(left),
+        op::INT_2COMP => Some(left.wrapping_neg()),
+        op::INT_NEGATE => Some(!left),
+        op::INT_AND => Some(left & input(1)?),
+        op::INT_OR => Some(left | input(1)?),
+        op::INT_XOR => Some(left ^ input(1)?),
+        op::INT_ADD => Some(left.wrapping_add(input(1)?)),
+        _ => None,
+    }
+}
+
 fn recover_trivial(data: &Funcdata, branch: OpId) -> Option<JumpTable> {
     let operation = data.op(branch);
     let destination = *operation.inputs.first()?;
     let parent = operation.parent?;
-    let target = if let Some(target) = constant_value(data, destination) {
+    let target = if let Some(target) = folded_constant(data, destination, 8) {
         target
     } else {
         let successors = &data.block(parent).successors;
@@ -477,6 +513,13 @@ pub fn recover_jump_tables(
         .filter(|(_, operation)| operation.opcode == op::BRANCHIND)
         .filter_map(|(branch, _)| {
             let destination = data.op(branch).inputs.first().copied()?;
+            // A destination that evaluates to one constant is unambiguous,
+            // whatever shape it evaluated from. The alignment mask on a MIPS
+            // `jr` gives the address parser a table-shaped computation to read,
+            // and every table model then fails on a target already known.
+            if folded_constant(data, destination, 8).is_some() {
+                return recover_trivial(data, branch);
+            }
             // Once the destination has the shape of a table load, a missing or
             // unbounded guard must not fall through to the one-edge model.
             if parse_destination(data, destination).is_some() || contains_load(data, destination) {
@@ -493,6 +536,59 @@ pub fn recover_jump_tables(
             }
         })
         .collect()
+}
+/// Turns a computed jump with one known destination into an ordinary branch.
+///
+/// Once the destination folds to a constant the jump is not computed any more,
+/// and Ghidra's flow analysis records it as a normal edge. Left as a
+/// `BRANCHIND` it renders as `goto *(...)`, which is how `preamble` and
+/// `vm_boot` still read as unstructured after their targets were recovered.
+///
+/// Deliberately narrow: it acts only when the block already reaches exactly the
+/// folded target, so no edge is invented and no multi-way construct is touched.
+pub struct ActionResolvedIndirect;
+
+impl Action for ActionResolvedIndirect {
+    fn name(&self) -> &'static str {
+        "resolved-indirect"
+    }
+
+    fn apply(&self, data: &mut Funcdata) -> usize {
+        let candidates: Vec<(OpId, GraphBlockId)> = data
+            .live_ops()
+            .filter(|(_, operation)| operation.opcode == op::BRANCHIND)
+            .filter_map(|(branch, operation)| {
+                let destination = operation.inputs.first().copied()?;
+                let target = folded_constant(data, destination, 8)?;
+                let parent = operation.parent?;
+                let successors = &data.block(parent).successors;
+                if successors.len() != 1 {
+                    return None;
+                }
+                let reached = successors[0];
+                (data.block(reached).start == target && data.block(reached).start_order == 0)
+                    .then_some((branch, reached))
+            })
+            .collect();
+        let mut changed = 0;
+        for (branch, target) in candidates {
+            let size = data
+                .op(branch)
+                .inputs
+                .first()
+                .map(|value| data.varnode(*value).size)
+                .unwrap_or(4);
+            let address = data.new_varnode(
+                ventris_lifter::RAM_SPACE,
+                data.block(target).start,
+                size.max(1),
+            );
+            data.op_set_opcode(branch, op::BRANCH);
+            data.op_set_inputs(branch, vec![address]);
+            changed += 1;
+        }
+        changed
+    }
 }
 
 /// Normalizes a recovered switch before structure recovery.
@@ -749,6 +845,61 @@ mod tests {
         let destination = fixture.data.op(fixture.branch).inputs[0];
         assert_eq!(ActionSwitchNorm.apply(&mut fixture.data), 0);
         assert_eq!(fixture.data.op(fixture.branch).inputs[0], destination);
+    }
+
+    /// A computed jump whose destination folds to a constant is an ordinary
+    /// branch. Left indirect it renders as `goto *(...)`, which is how
+    /// `preamble` read as unstructured after its target was recovered. The mask
+    /// a MIPS `jr` applies is why the fold has to look through arithmetic.
+    #[test]
+    fn a_computed_jump_with_one_known_destination_becomes_a_branch() {
+        let mut data = Funcdata {
+            entry: 0x1000,
+            ..Funcdata::default()
+        };
+        let from = data.new_block(0x1000);
+        let to = data.new_block(0x1050);
+        data.add_edge(from, to);
+
+        // `0x1051 & -2` is `0x1050`: the low-bit clear a `jr` performs.
+        let raw = data.new_constant(0x1051, 8);
+        let two = data.new_constant(2, 8);
+        let negated = data.new_unique(8);
+        let negate = data.new_op(op::INT_2COMP, seq(0), vec![two]);
+        data.op_set_output(negate, Some(negated));
+        data.op_insert_end(negate, from);
+        let masked = data.new_unique(8);
+        let and = data.new_op(op::INT_AND, seq(1), vec![raw, negated]);
+        data.op_set_output(and, Some(masked));
+        data.op_insert_end(and, from);
+        let branch = data.new_op(op::BRANCHIND, seq(2), vec![masked]);
+        data.op_insert_end(branch, from);
+
+        assert_eq!(
+            folded_constant(&data, masked, 8),
+            Some(0x1050),
+            "the mask folds through INT_2COMP and INT_AND"
+        );
+        assert_eq!(ActionResolvedIndirect.apply(&mut data), 1);
+        assert_eq!(
+            data.op(branch).opcode,
+            op::BRANCH,
+            "the jump is no longer computed"
+        );
+        assert_eq!(
+            data.branch_target(branch),
+            Some(to),
+            "and its single destination resolves as an address"
+        );
+    }
+
+    /// Nothing is normalized when the block reaches more than one place: that is
+    /// a switch, and its edges belong to the table models.
+    #[test]
+    fn a_computed_jump_with_several_successors_is_left_alone() {
+        let mut fixture = bounded_fixture();
+        assert_eq!(ActionResolvedIndirect.apply(&mut fixture.data), 0);
+        assert_eq!(fixture.data.op(fixture.branch).opcode, op::BRANCHIND);
     }
 
     #[allow(dead_code)]
