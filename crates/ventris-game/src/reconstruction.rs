@@ -396,6 +396,26 @@ fn global_base(structure: &SourceStruct, body: &str) -> Option<String> {
     (bases.len() == 1).then(|| bases.into_iter().next().expect("one base"))
 }
 
+/// The body's own declaration of an identifier, if it declares one.
+///
+/// A declaration is a statement whose last token is the identifier and which
+/// assigns nothing. Matching on the trailing `<name>;` alone would also catch a
+/// bare expression statement, so the line must carry a type before it.
+fn local_declaration_of(body: &str, name: &str) -> Option<String> {
+    let tail = format!(" {name};");
+    let pointer_tail = format!("*{name};");
+    body.lines()
+        .map(str::trim_end)
+        .find(|line| {
+            let trimmed = line.trim_start();
+            (trimmed.ends_with(&tail) || trimmed.ends_with(&pointer_tail))
+                && !trimmed.contains('=')
+                && !trimmed.starts_with("return")
+                && trimmed.split_whitespace().count() >= 2
+        })
+        .map(|line| line.trim_start().to_owned())
+}
+
 /// The identifiers immediately before each occurrence of `needle` in `text`.
 fn regex_lite_find(text: &str, needle: &str) -> Vec<String> {
     let mut found = Vec::new();
@@ -473,9 +493,19 @@ fn rewrite_recovered_field_accesses(
                 // can both be reached through the same global-pointer register,
                 // and pushing a declaration per structure emitted two globals
                 // with the same name - `DBGEXIImm` declared `pVar18` twice,
-                // which is not valid C. The first declaration stands and the
-                // first declaration stands; a second would only rename the same
-                // storage.
+                // which is not valid C. The first declaration stands; a second
+                // would only rename the same storage.
+                //
+                // A base the body already declares as a local is not a global at
+                // all. That happens whenever the base is a value a call left
+                // behind: the graph declares it as a local, and adding a global
+                // of the same name shadowed it, so the structure's type never
+                // reached the variable the body actually reads.
+                if let Some(local) = local_declaration_of(body, &base) {
+                    let retyped = format!("{} *{base};", structure.name);
+                    *body = body.replace(&local, &retyped);
+                    continue;
+                }
                 let declaration = format!("{} *{base};", structure.name);
                 let already = globals
                     .iter()
