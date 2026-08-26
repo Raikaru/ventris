@@ -6,6 +6,15 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- A relative p-code destination past an instruction's last operation is a branch
+  to the next address, and is now spelled as one. `__FrameCallback__Fl` has four
+  such branches (target 16 in a thirteen-operation instruction). Their taken edge
+  was dropped, so the block kept a `CBRANCH` with a single successor - a test
+  deciding nothing - and `Funcdata::branch_target` returned `None`, which is the
+  condition that silently disables every pass asking where a branch goes. The
+  next instruction is now a leader, the edge is drawn, and the destination
+  operand becomes an ordinary address. Inert on the present corpus; the
+  regression test fails without it, resolving to `None`.
 - A rendered condition now comes from the block's terminator. `condition_expr`
   took the *first* `CBRANCH` found anywhere in the block, while every pass that
   reasons about a branch uses the last operation. With one instruction split into

@@ -1223,7 +1223,16 @@ impl Funcdata {
                 }
                 let Some(block) = block else { continue };
                 if let Some(target) = internal_branch_target(operation, index) {
-                    internal.push(((*address, order), (*address, target), (*address, order + 1)));
+                    // A relative destination past the last operation leaves the
+                    // instruction, so it transfers to the next one - dropping it
+                    // instead left the branch with a single successor and a test
+                    // that decided nothing.
+                    let taken = if (target as usize) < instruction.pcode.ops.len() {
+                        (*address, target)
+                    } else {
+                        (address.wrapping_add(u64::from(instruction.pcode.len)), 0)
+                    };
+                    internal.push(((*address, order), taken, (*address, order + 1)));
                 }
                 let inputs = operation
                     .inputs
@@ -1239,6 +1248,20 @@ impl Funcdata {
                 if let Some(output) = operation.output {
                     let value = data.new_varnode(output.space, output.offset, output.size);
                     data.op_set_output(op, Some(value));
+                }
+                // A relative destination that lands outside the instruction is
+                // an ordinary branch to the next address, so spell it as one.
+                // Left as a p-code index, every pass that resolves a branch
+                // target found nothing and skipped the block.
+                if let Some(target) = internal_branch_target(operation, index)
+                    && (target as usize) >= instruction.pcode.ops.len()
+                {
+                    let next = data.new_varnode(
+                        ventris_lifter::RAM_SPACE,
+                        address.wrapping_add(u64::from(instruction.pcode.len)),
+                        4,
+                    );
+                    data.op_set_input(op, next, 0);
                 }
             }
         }
@@ -1347,8 +1370,12 @@ fn block_leaders(function: &NativeFunction) -> BTreeSet<(u64, u32)> {
             let Some(target) = internal_branch_target(operation, index) else {
                 continue;
             };
-            if (target as usize) <= instruction.pcode.ops.len() {
+            if (target as usize) < instruction.pcode.ops.len() {
                 leaders.insert((*address, target));
+            } else {
+                // Past the last operation is out of the instruction: the branch
+                // transfers to the next one, which therefore begins a block.
+                leaders.insert((address.wrapping_add(u64::from(instruction.pcode.len)), 0));
             }
             leaders.insert((*address, index as u32 + 1));
         }
@@ -1724,6 +1751,85 @@ mod tests {
             data.block_starting_at(0x1000),
             Some(at(0)),
             "only the block at p-code index zero begins at the address"
+        );
+    }
+
+    /// A relative destination past an instruction's last operation leaves the
+    /// instruction, so it is a branch to the next address. Dropping it left the
+    /// branch with one successor and a test that decided nothing, and every pass
+    /// that resolves a branch target skipped the block.
+    #[test]
+    fn a_relative_branch_past_the_last_operation_reaches_the_next_instruction() {
+        use ventris_lifter::{CONST_SPACE, Flow, LiftedInstruction, RAM_SPACE, REGISTER_SPACE};
+        use ventris_pcode::{InstPcode, PcodeOp, Varnode};
+        let condition = Varnode::new(REGISTER_SPACE, 8, 1);
+        let body = |address: u64, ops: Vec<PcodeOp>, flow: Flow| LiftedInstruction {
+            address,
+            bytes: vec![0, 0, 0, 0],
+            pcode: InstPcode {
+                len: 4,
+                space: RAM_SPACE,
+                offset: address,
+                ops,
+            },
+            flow,
+            embedded_delay_slot_bytes: 0,
+        };
+        let mut instructions = BTreeMap::new();
+        // Two operations, and the branch at index 1 targets index 4 - past the
+        // end, so it leaves for 0x1004.
+        instructions.insert(
+            0x1000u64,
+            body(
+                0x1000,
+                vec![
+                    PcodeOp::new(op::COPY, Some(condition), vec![condition]),
+                    PcodeOp::new(
+                        op::CBRANCH,
+                        None,
+                        vec![Varnode::new(CONST_SPACE, 3, 4), condition],
+                    ),
+                ],
+                Flow::FallThrough(0x1004),
+            ),
+        );
+        instructions.insert(
+            0x1004u64,
+            body(
+                0x1004,
+                vec![PcodeOp::new(op::RETURN, None, vec![condition])],
+                Flow::Return,
+            ),
+        );
+        let function = NativeFunction {
+            entry: 0x1000,
+            instructions,
+            edges: BTreeSet::from([(0x1000u64, 0x1004u64)]),
+            calls: BTreeSet::new(),
+        };
+
+        let data = Funcdata::from_lifted(&function);
+        let first = data
+            .block_starting_at(0x1000)
+            .expect("the first instruction begins a block");
+        let next = data
+            .block_starting_at(0x1004)
+            .expect("the second instruction begins a block");
+        assert!(
+            data.block(first).successors.contains(&next),
+            "the branch out of the instruction reaches the next one: {:?}",
+            data.block(first).successors
+        );
+        let branch = data
+            .block(first)
+            .ops
+            .last()
+            .copied()
+            .expect("the block ends in the branch");
+        assert_eq!(
+            data.branch_target(branch),
+            Some(next),
+            "and its destination resolves as an ordinary address"
         );
     }
 }
