@@ -6,6 +6,28 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- One root cause now accounts for three separate residuals, and it is block
+  placement in structuring rather than anything downstream. When a rule leaves an
+  edge to a block no construct claims, `finish()` appends that block as its own
+  region - deliberately, so the output stays complete rather than silently losing
+  code - and the guard that should have wrapped it is gone. The three shapes it
+  produces: `TRK_fill_mem` emits `return arg0;` immediately followed by a live
+  `do { ... } while (arg2 != 0);` where the oracle has
+  `if (param_3 != 0) { do { ... } while (...); return; }`, which is its whole
+  `if 3 vs 4` gap; `__FrameCallback__Fl` never places the block holding the
+  oracle's `return &DAT_800eaff8;`, which is its void-versus-value and its call
+  count; and `decompSZS_subroutine__FPUcPUc` plus `queryMapAddress_single` keep
+  gotos to blocks placed out of construct order. Verified that this is not the
+  single-live-node completeness guard added this session - removing it changes
+  neither the conditional count nor the unreachable tail.
+- `TRK_fill_mem` now matches the oracle on `for`, `while`, `do` and `goto` counts
+  exactly (2/2/2/0) after the parameter-name fix, leaving only the conditional
+  above and its return. Its `return arg0;` against the oracle's void is r3 being
+  both the first argument and the return register on this ABI: the value is the
+  unmodified incoming pointer. The two functions that legitimately `return
+  param_1;` - `Sou_BgmTenkiConv__FUc` and `convert_partial_address` - have the
+  same shape, so no local rule separates them, which is why all three archived
+  ancestry attempts traded one for the others.
 - A variable group holding a function input at an argument location now takes
   that parameter's own name. This closes the chain traced earlier: the trials
   were right, the prototype held all three parameters, and the group even
