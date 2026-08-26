@@ -1417,15 +1417,17 @@ fn block_leaders(function: &NativeFunction) -> BTreeSet<(u64, u32)> {
             }
         }
     }
-    // A machine-level leader stands whatever its instruction holds; an
-    // intra-instruction one must land on an operation that exists, or it would
-    // create a block nothing can be assigned to.
+    // Every leader must name a lifted instruction, and an intra-instruction one
+    // must land on an operation that exists - otherwise the block gets no
+    // operations at all while still carrying the edges that named it, which is a
+    // block with two successors and no branch to choose between them.
     leaders.retain(|(address, order)| {
-        *order == 0
-            || function
-                .instructions
-                .get(address)
-                .is_some_and(|instruction| (*order as usize) < instruction.pcode.ops.len())
+        function
+            .instructions
+            .get(address)
+            .is_some_and(|instruction| {
+                *order == 0 || (*order as usize) < instruction.pcode.ops.len()
+            })
     });
     leaders
 }

@@ -6,6 +6,12 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- Every block leader must name a lifted instruction. The p-code split added an
+  exemption for machine-level leaders, keeping one whose address had no lifted
+  instruction: the block then received no operations while still carrying the
+  edges that named it, which is a block with two successors and no branch to
+  choose between them. Census-neutral and gate-clean, but the invariant now holds
+  by construction rather than by luck.
 - Refuted: suppressing a conditional whose test is fabricated. `condition_expr`
   falls back on a constant when a `Condition::Branch` names a block whose
   terminator is not a `CBRANCH`, and `DBGEXIImm` printed `if (!1)` around its
