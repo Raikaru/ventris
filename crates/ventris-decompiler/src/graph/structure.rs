@@ -900,9 +900,20 @@ impl<'a> Graph<'a> {
         if self.nodes[node].successors.len() != 2 {
             return false;
         }
+        // Ghidra's `if (bl->isInteriorGotoTarget()) return false;`. A header an
+        // unstructured jump enters is not a loop header: entering it that way
+        // skips the test, so the body it appears to guard is not guarded.
+        if self.is_interior_goto_target(node) {
+            return false;
+        }
         let successors = self.nodes[node].successors.clone();
         for (index, body) in successors.iter().copied().enumerate() {
             if body == node {
+                continue;
+            }
+            // Ghidra's `if (clauseblock->isSwitchOut()) continue;` - a body that
+            // itself ends in a computed jump belongs to the switch rule.
+            if self.is_switch_out(body) {
                 continue;
             }
             if self.nodes[body].predecessors.len() != 1 {
@@ -2431,6 +2442,72 @@ mod tests {
         assert!(
             !graph.is_complex(simple, 2),
             "one comparison plus the branch is exactly the ceiling"
+        );
+    }
+
+    /// Ghidra's `ruleBlockWhileDo` refuses a header an unstructured jump enters,
+    /// and refuses a body that itself ends in a computed jump. Neither guard was
+    /// ported. Entering the header by a jump skips the test, so the body a
+    /// `while` appears to guard is not guarded at all.
+    #[test]
+    fn a_while_refuses_a_header_a_jump_enters_and_a_computed_body() {
+        let build = |computed: bool| {
+            let mut data = Funcdata::default();
+            data.entry = 0x1000;
+            let head = data.new_block(0x1000);
+            let body = data.new_block(0x1010);
+            let exit = data.new_block(0x1020);
+            let jumper = data.new_block(0x1030);
+            conditional(&mut data, head, 0x1010);
+            data.add_edge(head, body);
+            data.add_edge(head, exit);
+            data.add_edge(body, head);
+            data.add_edge(exit, jumper);
+            if computed {
+                let target = data.new_varnode(ventris_lifter::REGISTER_SPACE, 12, 4);
+                let branch = data.new_op(op::BRANCHIND, seq(0x1010), vec![target]);
+                data.op_insert_end(branch, body);
+            }
+            data
+        };
+        let head = GraphBlockId(0);
+        let jumper = GraphBlockId(3);
+        let locate = |graph: &Graph<'_>, block: GraphBlockId| {
+            graph
+                .nodes
+                .iter()
+                .position(|candidate| candidate.entry == block)
+                .expect("the block is a node")
+        };
+
+        let plain = build(false);
+        let mut graph = Graph::of(&plain, &[]);
+        let node = locate(&graph, head);
+        assert!(
+            graph.rule_while_do(node),
+            "an ordinary test-at-the-top loop is recovered"
+        );
+
+        let entered = build(false);
+        let mut graph = Graph::of(&entered, &[]);
+        // A surrendered edge from elsewhere into the loop header.
+        let from = locate(&graph, jumper);
+        graph.nodes[from].body = Structured::Goto {
+            from: jumper,
+            target: head,
+        };
+        let node = locate(&graph, head);
+        assert!(
+            !graph.rule_while_do(node),
+            "a header an unstructured jump enters is not a loop header"
+        );
+
+        let switched = build(true);
+        let mut graph = Graph::of(&switched, &[]);
+        let node = locate(&graph, head);
+        assert!(
+            !graph.rule_while_do(node),
+            "a body ending in a computed jump belongs to the switch rule"
         );
     }
 

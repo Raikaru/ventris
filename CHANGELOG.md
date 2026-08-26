@@ -6,6 +6,16 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- Continued the same audit into the loop rules. `ruleBlockWhileDo` carries two
+  guards we lacked: `isInteriorGotoTarget` on the header, and `isSwitchOut` on the
+  body. A header an unstructured jump enters is not a loop header, because
+  arriving that way skips the test and the body a `while` appears to guard is not
+  guarded; a body ending in a computed jump belongs to the switch rule. Both are
+  inert on the present corpus and each is proven by one arm of a regression test
+  that also asserts an ordinary test-at-the-top loop is still recovered.
+  `ruleBlockDoWhile` and `ruleBlockInfLoop` were already equivalent - Ghidra's
+  `isSwitchOut` check in the latter is commented out in its own source, and ours
+  matches that.
 - Found the fourth if-rule by enumerating `CollapseStructure::rule*` against ours
   rather than trusting the names: our `rule_if_no_exit` is Ghidra's
   `ruleBlockProperIf`, and Ghidra's `ruleBlockIfNoExit` - a clause with no
