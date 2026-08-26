@@ -112,11 +112,23 @@ impl SourceReconstruction {
         out.push_str("#include <stdbool.h>\n#include <stdint.h>\n\n");
         for structure in &self.structs {
             writeln!(out, "typedef struct {} {{", structure.name).unwrap();
-            let mut cursor = 0_i64;
+            // The layout starts where the first field does, not at zero. A
+            // structure reached through a global-pointer register has negative
+            // offsets, and measuring padding from zero reported every one of its
+            // fields as overlapping a predecessor it does not have.
+            let mut cursor = structure
+                .fields
+                .first()
+                .map(|field| field.offset)
+                .unwrap_or(0);
             for field in &structure.fields {
                 if field.offset > cursor {
                     let padding = field.offset - cursor;
-                    writeln!(out, "    uint8_t _pad_{cursor:x}[{padding}];").unwrap();
+                    // Named the way the fields are, so a negative offset reads
+                    // as one rather than as its 64-bit two's complement.
+                    let label = field_name_for_offset(cursor);
+                    let label = label.strip_prefix("field_").unwrap_or(&label);
+                    writeln!(out, "    uint8_t _pad_{label}[{padding}];").unwrap();
                     cursor = field.offset;
                 }
                 if field.offset < cursor {

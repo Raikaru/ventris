@@ -282,6 +282,14 @@ All notable Ventris changes are documented here.
   table-backed switch the rule can claim, and `dl_G_MOVEWORD`'s `switch 0 vs 1`
   is a `BRANCHIND` whose table this pipeline does not recover. The rule is
   correct and tested; it has no corpus function to improve yet.
+- A structure's layout starts where its first field does, not at zero. One
+  reached through a global-pointer register has negative offsets, and measuring
+  padding from zero reported every field as overlapping a predecessor it does not
+  have: three fields at `-0x47e8`, `-0x47e6` and `-0x47e4` each carried an
+  "overlapping field ... retained as observed" comment. Padding is also named the
+  way the fields are, so a gap at a negative offset reads as `_pad_neg_47e7`
+  rather than as its 64-bit two's complement. Both paths render these structures,
+  so both improved.
 - The graph path passes `corpus-smoke` on every entry. That gate has been the one
   thing keeping it behind an environment variable since it was written.
   The last dimension was `declaration_order`, and the filter's own comment
