@@ -6,6 +6,17 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- Keep the composite's own edges out when absorbing a clause that returns.
+  `rule_block_if_return` collapses an `if` whose clause returns, so that clause
+  contributes no external successor and the union of the members' exits is empty.
+  Replacing the composite's successors with it dropped the head's other path
+  outright, leaving a dead end no later loop rule could recognise.
+  `decompSZS_subroutine__FPUcPUc` goes from seven gotos to six. Census-neutral,
+  with a regression test that proves the dead end (`successors: []`) without the
+  fix. The wider variant - keeping the head's own edges in *every* absorption -
+  is wrong and was measured as such: `agrees` 26 -> 25, `missing-loop-or-switch`
+  2 -> 4, gotos 7 -> 13, because a loop head's edges into its own body are
+  internal once absorbed.
 - Measured, not landed: `preamble`'s six missing calls are recoverable and the
   fix does not pay for itself yet. MIPS `jr` masks its target, so the resolved
   destination reaches `recover_trivial` as `INT_AND(INT_2COMP(2), target)`

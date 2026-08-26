@@ -1107,7 +1107,7 @@ impl<'a> Graph<'a> {
                 then_body: Box::new(self.nodes[clause].body.clone()),
                 else_body: None,
             };
-            self.absorb(node, &[clause], body);
+            self.absorb_keeping_exits(node, &[clause], body);
             return true;
         }
         false
@@ -1459,6 +1459,31 @@ impl<'a> Graph<'a> {
         }
         self.nodes[node].successors = successors;
         self.nodes[node].body = body;
+    }
+
+    /// As [`Self::absorb`], keeping the composite's own edges out.
+    ///
+    /// `rule_block_if_return` absorbs a clause that returns, so that clause
+    /// contributes no external successor and the union of the members' exits is
+    /// empty. Replacing the composite's successors with it dropped the head's
+    /// other path, turning a live edge into a dead end that no later loop rule
+    /// could recognise.
+    fn absorb_keeping_exits(&mut self, node: NodeId, absorbed: &[NodeId], body: Structured) {
+        let own: Vec<NodeId> = self.nodes[node].successors.clone();
+        self.absorb(node, absorbed, body);
+        for successor in own {
+            if successor == node
+                || absorbed.contains(&successor)
+                || self.nodes[node].successors.contains(&successor)
+            {
+                continue;
+            }
+            self.nodes[node].successors.push(successor);
+            let entry = &mut self.nodes[successor].predecessors;
+            if !entry.contains(&node) {
+                entry.push(node);
+            }
+        }
     }
 
     fn finish(self) -> Structured {
@@ -2270,6 +2295,48 @@ mod tests {
         assert!(
             !graph.is_complex(simple, 2),
             "one comparison plus the branch is exactly the ceiling"
+        );
+    }
+
+    /// Absorbing a clause that returns must not drop the head's other path.
+    ///
+    /// The clause contributes no external successor, so replacing the
+    /// composite's successors with the members' exits left a dead end and the
+    /// loop around it became unrecognisable.
+    #[test]
+    fn absorbing_a_returning_clause_keeps_the_other_path() {
+        let mut data = Funcdata::default();
+        data.entry = 0x1000;
+        let head = data.new_block(0x1000);
+        let returns = data.new_block(0x1010);
+        let after = data.new_block(0x1020);
+        conditional(&mut data, head, 0x1010);
+        data.add_edge(head, returns);
+        data.add_edge(head, after);
+
+        let mut graph = Graph::of(&data, &[]);
+        let node = graph
+            .nodes
+            .iter()
+            .position(|candidate| candidate.entry == head)
+            .expect("the head is a node");
+        let reached = graph.nodes[node]
+            .successors
+            .iter()
+            .find(|successor| graph.nodes[**successor].entry == after)
+            .copied()
+            .expect("the head reaches the block past the clause");
+
+        assert!(graph.rule_block_if_return(node), "the clause is absorbed");
+
+        assert!(
+            graph.nodes[node].successors.contains(&reached),
+            "the path past the absorbed clause survives: {:?}",
+            graph.nodes[node].successors
+        );
+        assert!(
+            graph.nodes[reached].predecessors.contains(&node),
+            "and the composite is named as its predecessor"
         );
     }
 }
