@@ -6,6 +6,132 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- `Heritage::guardCalls`'s *second* arm is ported, and it is the one that makes
+  argument recovery possible at all. A call instruction names no arguments, so
+  Ghidra appends a free varnode per candidate parameter location *before*
+  renaming (`heritage.cc:1495-1507`) and lets renaming bind each one to the value
+  live at the call; only then can `checkInputTrialUse` decide a trial, because it
+  reads `op->getIn(slot)`. Ours had derived the values afterwards from the
+  `INDIRECT` guards, which sees only the locations that still had a guard, so
+  calls came out short: `FUN_8006909c(param_1,pcVar4,0)` was reduced to one
+  argument, the values feeding the dropped operands died as unread, and the `if`
+  arm that computed them became empty.
+- Renaming now implements the rule that makes those operands usable: "INDIRECTs
+  and their op really happen AT SAME TIME" (`Heritage::renameRecurse`). A guard
+  inserted before a call defines the location's value *after* it, so a read
+  belonging to the call itself must see the definition below the guard. The
+  annotation identifying which operation a guard stands for is now a varnode in
+  Ghidra's `IPTR_IOP` space (`Funcdata::newVarnodeIop`), not the operation's
+  address: two calls can share an address on a delay-slot architecture, and an
+  address cannot answer "does this guard annotate the op I am looking at".
+- `killedbycall` is now distinct from `unknown_effect`. Ghidra's `guardCalls` has
+  three outcomes, not two: no guard for `unaffected`, `newIndirectCreation` for
+  `killedbycall`, and `newIndirectOp` for `unknown_effect`. The shipped cspecs say
+  what belongs in the killed list - PowerPC `r3`, `r4`, `f1`; MIPS `v0`, `v1`,
+  `f0`, `f1`, `at` - and it is the convention's *result* storage, not every
+  register a callee may clobber. Threading the old value through a result register
+  is what let a constant a `lui` had left there survive the call and fold the
+  conditional that tested the call's result.
+- `ParamListStandard::fillinMap` is ported over Ghidra's three trial states
+  rather than a boolean. `Active`, `Inactive` ("not likely a parameter but
+  maybe") and `NoUse` ("an ancestor is unaffected, an unusual input, or killed by
+  a call") are what `forceNoUse` and `forceInactiveChain` act on: up to two
+  consecutive *inactive* slots are holes the convention had to pass through and
+  are filled in, while a `NoUse` slot ends the list and nothing past it may
+  anchor a fill. With a boolean the fill reached a leftover value and gave
+  `osContGetReadData`'s three-argument call eight.
+- A recovered callee arity may only *extend* a call's argument list, never
+  shorten it. Ghidra constrains a call site by the callee's parameters exactly
+  when the callee's input prototype is *locked*, where
+  `ActionFuncLink::funcLinkInput` marks every parameter's trial active outright.
+  An unlocked, recovered prototype is a guess made from the callee's own body;
+  truncating to it threw away arguments the trials had already justified.
+- Convention seeding is bounded by what a callee actually needs. Ghidra calls
+  `Heritage::guard` once per address range *under heritage*, so a call only gets a
+  parameter trial for a location the function mentions. Seeding the whole
+  convention put registers the function never names under heritage, and inside a
+  loop the guard for one of those becomes a merge of its own previous guard -
+  indistinguishable from a real argument. The seed is now the widest arity any
+  call target claims.
+- `Funcdata::setInputVarnode` interns. Minting a fresh input varnode per read
+  gave one location several "entry values", and parameter promotion and naming
+  then disagreed about which was the parameter: a recovered pointer parameter came
+  out as a file-scope global.
+- `ActionDoNothing` is Ghidra's, and it sits where Ghidra puts it. The candidate
+  test is `BlockBasic::isDoNothing` - one way out, at least one way in, nothing but
+  markers and a branch inside, plus the switch-target and computed-jump guards -
+  and removal goes through `Funcdata::removeDoNothingBlock`, which is
+  `blockRemoveInternal` on a live block: `pushMultiequals` rehomes the merges
+  defined in the block, and a merge in the successor loses the operand the block
+  delivered and gains one per predecessor of it. The wider test is only correct
+  together with that relocation, which is why the earlier attempt without it cost
+  three functions. It is registered on the *full* loop (`coreaction.cc:5734`), not
+  the main loop, so it only ever sees a settled graph; running it per round
+  removed the empty arms of conditionals that later rounds were still going to
+  fill.
+- `ActionRedundBranch`'s first arm is ported: a block with a single way out whose
+  successor has a single way in is spliced into that successor outright. This is
+  Ghidra's main straight-line block merger, and skipping it left every
+  instruction-level split in the graph for structuring to account for. The
+  exclusions are exact - not the entry block, and not a switch-out block, because
+  "this prevents possible second stage recovery". `Funcdata::spliceBlockBasic` is
+  ported properly too: the *successor's* operations move into this block, so the
+  survivor keeps the earlier address and emitted order follows it, as Ghidra's
+  does.
+- Blocks now carry the address range they absorb (`BlockBasic::mergeRange`).
+  Ghidra needs that cover only for reporting, because its branch destinations are
+  block references; here they are addresses, so a branch naming a merged-away
+  block has to resolve to the block that absorbed it or the destination silently
+  disappears.
+- Unreachable removal follows Ghidra's order: mark every block dead, sever every
+  out edge - which drops the operand each removed edge contributed to a live
+  successor's merge - and only then remove the blocks. A reader left behind in a
+  live block reads `Funcdata::descend2Undef`'s marker constant rather than a
+  definition that no longer exists.
+- `Funcdata::opZeroMulti` is ported and reached from every edge removal. A merge
+  left holding one operand becomes the `COPY` it now is; leaving it a marker
+  matters because a marker is exactly what `hasOnlyMarkers` counts as "does
+  nothing".
+- `ActionDeadCode` consumes a `RETURN`'s first operand. `propagateConsumed` pushes
+  `~0` on `getIn(0)` - the return address - before pushing the convention's mask on
+  the rest. Skipping it killed the epilogue's register restore, which emptied the
+  epilogue block; `ActionDoNothing` then removed the empty block and the
+  function's exit arms collapsed into `goto`s.
+- A nonzero mask no longer propagates through an `INDIRECT`.
+  `PcodeOp::getNZMaskLocal` has no `CPUI_INDIRECT` case, so Ghidra reports the
+  full mask. Looking through to the first operand claimed a location a call
+  destroyed was provably zero, and `ActionVarnodeProps` replaced it with the
+  constant zero.
+- `RuleIndirectCollapse` refuses an indirect *creation*, resolves its annotation
+  through the IOP space, and finishes with `totalReplace` plus `opDestroy` as the
+  C++ does instead of leaving a `COPY` behind.
+- `ActionActiveParam` reads the convention's input storage, and only while the
+  call's trials are open. `FuncCallSpecs::clearActiveInput` runs once
+  `buildInputFromTrials` has rebuilt the operand list, because from then on the
+  slots hold arguments rather than candidate locations. Deriving candidates from
+  "whichever locations happen to be guarded" also included the link register,
+  whose guarded value is the call's own return address - a perfectly real value
+  that was then offered as the call's first argument.
+- A short-circuit merge refuses a second test whose observable work the emitter
+  would have to hoist. Concatenating the bodies puts that work *before* the
+  combined condition, so it runs whether or not the first test reached it. Ghidra
+  prints it inside the condition instead, inlining a single-reader result and
+  falling back to a comma expression when the result is explicit; until the
+  emitter can spell that, folding a call out of a short circuit calls it
+  unconditionally, which is a different program.
+- A recovered structure's base that the body declares as a local is no longer
+  *also* declared as a global. That happens whenever the base is a value a call
+  left behind, and the global shadowed the local so the structure's type never
+  reached the variable the body reads.
+- Measured on the three-image census, 37 functions: `agrees` 31 -> 30. One
+  function is traded and it is traded knowingly. `__osRealloc` gains a single
+  `goto` and loses a duplicated-test line - the old output condition read
+  `!(a) || a || a`, three copies of one test, which the new expression shape no
+  longer produces; Ghidra has neither the `goto` nor the duplication, so one
+  structuring gap remains there. `DBGEXIImm` (7 -> 6 `if`s against the oracle's 8)
+  and `ksNesDrawBG` (11 -> 10 against 12) were already non-agreeing and moved one
+  step further; `queryMapAddress_single` went from `for` 1 to 0 against 2.
+  `corpus-smoke` passes and the full test suite is green.
 - Refuted and reverted, with its cost: making the next instruction a block leader
   after *any* internal p-code split, not only after a branch that targets past the
   instruction's last operation. The motivation was real and is worth keeping on

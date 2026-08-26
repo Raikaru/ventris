@@ -785,9 +785,114 @@ mod tests {
         let copy = data.new_op(op::COPY, seq(0x2000, 0), vec![value]);
         let output = data.new_unique(4);
         data.op_set_output(copy, Some(output));
+
         data.op_insert_end(copy, dead);
         assert_eq!(ActionUnreachable.apply(&mut data), 1);
         assert!(data.block(dead).dead);
+    }
+
+    /// A block holding only merges does nothing just as much as one holding a
+    /// lone `BRANCH`, and `BlockBasic::isDoNothing` accepts it. The removal has
+    /// to relocate the merge it carried, which is the half that makes the wider
+    /// test safe: the successor's merge loses the operand this block delivered
+    /// and gains that merge's own operand per predecessor.
+    #[test]
+    fn do_nothing_removes_a_block_holding_only_a_merge_and_relocates_it() {
+        let mut data = Funcdata::default();
+        data.entry = 0x1000;
+        let entry = data.new_block(0x1000);
+        let left = data.new_block(0x1010);
+        let right = data.new_block(0x1020);
+        let middle = data.new_block(0x1030);
+        let exit = data.new_block(0x1040);
+        data.add_edge(entry, left);
+        data.add_edge(entry, right);
+        data.add_edge(left, middle);
+        data.add_edge(right, middle);
+        data.add_edge(middle, exit);
+
+        // Each arm computes the value it delivers, so the arms are not
+        // themselves do-nothing blocks.
+        let from_left = data.new_varnode(ventris_lifter::REGISTER_SPACE, 8, 4);
+        let left_value = data.new_constant(1, 4);
+        let left_write = data.new_op(op::COPY, seq(0x1010, 0), vec![left_value]);
+        data.op_set_output(left_write, Some(from_left));
+        data.op_insert_end(left_write, left);
+        let from_right = data.new_varnode(ventris_lifter::REGISTER_SPACE, 8, 4);
+        let right_value = data.new_constant(2, 4);
+        let right_write = data.new_op(op::COPY, seq(0x1020, 0), vec![right_value]);
+        data.op_set_output(right_write, Some(from_right));
+        data.op_insert_end(right_write, right);
+        let inner = data.new_op(op::MULTIEQUAL, seq(0x1030, 0), vec![from_left, from_right]);
+        let merged = data.new_varnode(ventris_lifter::REGISTER_SPACE, 8, 4);
+        data.op_set_output(inner, Some(merged));
+        data.op_insert_end(inner, middle);
+
+        // The successor merges the value the removed block produced with one
+        // arriving on an edge of its own.
+        let other = data.new_varnode(ventris_lifter::REGISTER_SPACE, 8, 4);
+        data.add_edge(entry, exit);
+        let outer = data.new_op(op::MULTIEQUAL, seq(0x1040, 0), vec![merged, other]);
+        let result = data.new_varnode(ventris_lifter::REGISTER_SPACE, 8, 4);
+        data.op_set_output(outer, Some(result));
+        data.op_insert_end(outer, exit);
+
+        assert!(data.is_do_nothing(middle), "only a marker inside");
+        assert_eq!(ActionDoNothing.apply(&mut data), 1);
+        assert!(data.block(middle).dead);
+        // Both arms now reach the exit directly, and the merge there reads one
+        // operand per edge - the inner merge's own operands, not a copy of it.
+        assert_eq!(
+            data.block(exit).predecessors.len(),
+            data.op(outer).inputs.len(),
+            "one operand per edge"
+        );
+        assert!(
+            data.op(outer).inputs.contains(&from_left)
+                && data.op(outer).inputs.contains(&from_right),
+            "each predecessor contributes the merge's own operand"
+        );
+    }
+
+    /// `BlockBasic::isDoNothing` refuses a single-out computed jump: that is a
+    /// jump-table stage, not a transfer.
+    #[test]
+    fn do_nothing_refuses_a_single_out_computed_jump() {
+        let mut data = Funcdata::default();
+        data.entry = 0x1000;
+        let entry = data.new_block(0x1000);
+        let middle = data.new_block(0x1010);
+        let exit = data.new_block(0x1020);
+        data.add_edge(entry, middle);
+        data.add_edge(middle, exit);
+        let target = data.new_varnode(ventris_lifter::REGISTER_SPACE, 8, 4);
+        let jump = data.new_op(op::BRANCHIND, seq(0x1010, 0), vec![target]);
+        data.op_insert_end(jump, middle);
+        assert!(!data.is_do_nothing(middle));
+        assert_eq!(ActionDoNothing.apply(&mut data), 0);
+    }
+
+    /// `ActionRedundBranch`'s first arm: a single-out block whose successor has a
+    /// single way in is spliced, and the survivor keeps the earlier address.
+    #[test]
+    fn redundant_branch_splices_a_straight_line_pair() {
+        let mut data = Funcdata::default();
+        data.entry = 0x1000;
+        let entry = data.new_block(0x1000);
+        let tail = data.new_block(0x1010);
+        data.add_edge(entry, tail);
+        let value = data.new_constant(1, 4);
+        let work = data.new_op(op::COPY, seq(0x1010, 0), vec![value]);
+        let out = data.new_unique(4);
+        data.op_set_output(work, Some(out));
+        data.op_insert_end(work, tail);
+
+        assert!(ActionRedundBranch.apply(&mut data) > 0);
+        assert!(data.block(tail).dead);
+        assert!(data.block(entry).ops.contains(&work));
+        // The absorbed block's position still resolves, so a branch naming it is
+        // not left pointing at a label nothing emits.
+        assert_eq!(data.block_starting_at(0x1010), Some(entry));
     }
 
     #[test]
