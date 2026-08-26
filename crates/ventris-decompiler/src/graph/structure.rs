@@ -1160,7 +1160,12 @@ impl<'a> Graph<'a> {
             }
             // Ghidra's `if (orblock->isComplex()) continue;`. The second arm's
             // body would run unconditionally once the two are concatenated.
-            if self.is_complex(self.nodes[second].exit, 2) {
+            //
+            // A composite answers for its *first* member - `BlockList::isComplex`
+            // is `getBlock(0)->isComplex()` - and we were asking the last. For a
+            // concatenation the two are different blocks, and the head is the one
+            // whose statements would start running unconditionally.
+            if self.is_complex(self.nodes[second].entry, 2) {
                 continue;
             }
             if !self.nodes[second].successors.contains(&clause) {
@@ -2546,6 +2551,64 @@ mod tests {
         assert!(
             !graph.is_complex(simple, 2),
             "one comparison plus the branch is exactly the ceiling"
+        );
+    }
+
+    /// `BlockList::isComplex` is `getBlock(0)->isComplex()`: a concatenation
+    /// answers for its *first* member, because that is the block whose statements
+    /// would start running unconditionally once the two conditions are merged. We
+    /// were asking the last member, which for a concatenation is a different block.
+    #[test]
+    fn a_concatenation_reports_the_complexity_of_its_first_block() {
+        let mut data = Funcdata::default();
+        data.entry = 0x1000;
+        let head = data.new_block(0x1000);
+        let first = data.new_block(0x1010);
+        let second = data.new_block(0x1020);
+        let clause = data.new_block(0x1030);
+        let other = data.new_block(0x1040);
+        conditional(&mut data, head, 0x1010);
+        data.add_edge(head, first);
+        data.add_edge(head, clause);
+        data.add_edge(first, second);
+        conditional(&mut data, second, 0x1030);
+        data.add_edge(second, clause);
+        data.add_edge(second, other);
+        // Three statements in the *first* block: each output is read nowhere, so
+        // each counts, which is one past Ghidra's limit of two.
+        for slot in 0..3u64 {
+            let value = data.new_varnode(ventris_lifter::REGISTER_SPACE, 16 + slot * 8, 4);
+            let store = data.new_op(op::STORE, seq(0x1010 + slot), vec![value]);
+            data.op_insert_end(store, first);
+        }
+
+        let mut graph = Graph::of(&data, &[]);
+        let locate = |graph: &Graph<'_>, block: GraphBlockId| {
+            graph
+                .nodes
+                .iter()
+                .position(|candidate| candidate.entry == block)
+                .expect("the block is a node")
+        };
+        // Concatenate first+second, so the or-block is a composite whose entry is
+        // the complex block and whose exit is the simple one.
+        let chain = locate(&graph, first);
+        assert!(graph.rule_cat(chain), "the two blocks concatenate");
+        assert_eq!(graph.nodes[chain].entry, first);
+        assert_eq!(graph.nodes[chain].exit, second);
+        assert!(
+            graph.is_complex(first, 1),
+            "the first block is past the statement limit"
+        );
+        assert!(
+            !graph.is_complex(second, 2),
+            "the last block is not, which is why the choice matters"
+        );
+
+        let node = locate(&graph, head);
+        assert!(
+            !graph.rule_block_or(node),
+            "a short-circuit refuses a composite whose head is complex"
         );
     }
 

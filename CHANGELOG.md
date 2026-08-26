@@ -6,6 +6,19 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- `ruleBlockOr` asks the wrong member of a concatenation about complexity.
+  `BlockList::isComplex` is `getBlock(0)->isComplex()` - a composite answers for its
+  *first* block, because that is the one whose statements would start running
+  unconditionally once two conditions are merged - and we were asking the last,
+  which for a concatenation is a different block entirely. Inert on the present
+  corpus, with a regression test that builds a composite whose head is past the
+  two-statement limit and whose tail is not, asserts the two disagree, and asserts
+  the merge is refused.
+- `ksNesDrawBG` is *not* explained by that: measured at the point of decision, the
+  or-block's head carries two statements, one short of Ghidra's limit, so both
+  implementations would allow the merge. The count differs because the graphs do -
+  what Ghidra weighs is an original basic block and ours is already a composite -
+  so the remaining `if` there is upstream of this rule, not in it.
 - Refuted this pass, and reverted rather than left as unexercised code: gating the
   output trial on `ancestor_realistic` before marking it active, which is a step
   Ghidra really runs (`AncestorRealistic::execute` in `ActionReturnRecovery`). It
