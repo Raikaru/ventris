@@ -6,6 +6,26 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- Replaced the address-order stand-in for `f_back_edge` with the real thing.
+  `isDecisionOut` excludes back edges, and I had been approximating "back edge" as
+  "the target's block identifier does not follow the source's". Porting the same
+  guard into `ruleBlockCat` exposed the flaw immediately: `output_check` failed
+  with a local declared twice in `queryMapAddress_single`, because a *forward*
+  edge running to a lower address - ordinary inside a rotated loop - was refused,
+  the concatenation never happened and the region stayed unstructured. The target
+  of a back edge dominates its source, so `Graph` now carries the dominance it
+  already computes for loop finding and all five guards ask `is_back_edge`.
+  `output_check` is back to 36/36 and the direct test of `is_back_edge` pins both
+  directions.
+- Three fixtures written against the old approximation were deleted rather than
+  adjusted: with the faithful test their edges are not back edges at all, and with
+  the surrounding single-predecessor guards the if-rules cannot reach the case.
+  Ghidra's own guards there are defensive against irreducible graphs; the honest
+  record is the test of the primitive, not a fixture that only passed because the
+  primitive was wrong.
+- `ruleBlockCat` also gained `isSwitchOut` on the block being concatenated, with a
+  test: we refused a multi-way branch at the head of a chain but not at its
+  successor, which buries the branch in a list where the switch rule cannot see it.
 - Continued the same audit into the loop rules. `ruleBlockWhileDo` carries two
   guards we lacked: `isInteriorGotoTarget` on the header, and `isSwitchOut` on the
   body. A header an unstructured jump enters is not a loop header, because

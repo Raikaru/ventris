@@ -244,6 +244,11 @@ struct Graph<'a> {
     surrendered: usize,
     /// Recovered switch tables, so a multi-way branch can name its cases.
     tables: &'a [super::jumptable::JumpTable],
+    /// Dominators of the original blocks, computed once. Ghidra's `f_back_edge`
+    /// is a label the loop finder writes onto an edge; the equivalent question
+    /// here is whether the edge's target dominates its source, so the rules that
+    /// ask for a *decision* edge need dominance rather than an address order.
+    dominance: super::heritage::Dominance,
 }
 
 impl<'a> Graph<'a> {
@@ -287,6 +292,7 @@ impl<'a> Graph<'a> {
             .map(|(id, _)| id)
             .or_else(|| data.blocks().next().map(|(id, _)| id))
             .and_then(|id| of_block.get(&id).copied());
+        let dominance = compute_dominance(data);
         Self {
             data,
             nodes,
@@ -294,7 +300,23 @@ impl<'a> Graph<'a> {
             entry,
             surrendered: 0,
             tables,
+            dominance,
         }
+    }
+
+    /// Whether the edge leaving `node` for `successor` runs backwards, which is
+    /// what Ghidra's `f_back_edge` labels and what `isDecisionOut` excludes.
+    ///
+    /// The target of a back edge dominates its source: control cannot reach the
+    /// source without passing the target first. Comparing block identifiers
+    /// instead only approximates this, and refuses forward edges that happen to
+    /// run to a lower address - which is ordinary inside a rotated loop.
+    fn is_back_edge(&self, node: NodeId, successor: NodeId) -> bool {
+        dominates(
+            &self.dominance,
+            self.nodes[successor].entry,
+            self.nodes[node].exit,
+        )
     }
 
     fn collapse(&mut self) {
@@ -755,6 +777,20 @@ impl<'a> Graph<'a> {
         if self.nodes[next].predecessors.len() != 1 {
             return false;
         }
+        // Ghidra's `if (!bl->isDecisionOut(0)) return false;` - "Not a goto or a
+        // loopbottom". Surrendered edges are gone from `successors`, so what
+        // remains to test is the back edge: a chain that runs backwards is a
+        // loop for the loop rules to claim, not a list.
+        if self.is_back_edge(node, next) {
+            return false;
+        }
+        // Ghidra's `if (outblock->isSwitchOut()) return false;` - "Switch must be
+        // resolved first". We refused a multi-way branch at the head but not at
+        // the block being concatenated onto it, which would bury the branch
+        // inside a list where `rule_block_switch` can no longer find it.
+        if self.is_switch_out(next) {
+            return false;
+        }
         // Must start a chain, so concatenation happens once per chain.
         if self.nodes[node].predecessors.len() == 1 {
             let previous = self.nodes[node].predecessors[0];
@@ -796,9 +832,7 @@ impl<'a> Graph<'a> {
         // edge nor irreducible; surrendered edges are already gone from
         // `successors` here, so the test that remains is the back edge. An `if`
         // built across one would claim a branch where the flow is a loop.
-        if self.nodes[taken].entry <= self.nodes[node].entry
-            || self.nodes[fallthrough].entry <= self.nodes[node].entry
-        {
+        if self.is_back_edge(node, taken) || self.is_back_edge(node, fallthrough) {
             return false;
         }
         for clause in [taken, fallthrough] {
@@ -853,7 +887,7 @@ impl<'a> Graph<'a> {
             // Ghidra's `if (!bl->isDecisionOut(i)) continue;` - the edge into the
             // clause must be a decision edge, so not a back edge here. An `if`
             // built across one claims a branch where the flow is a loop.
-            if self.nodes[clause].entry <= self.nodes[node].entry {
+            if self.is_back_edge(node, clause) {
                 continue;
             }
             if self.nodes[clause].predecessors.len() != 1 {
@@ -1096,7 +1130,7 @@ impl<'a> Graph<'a> {
             // branch to get to orblock". A short-circuit condition is evaluated
             // in one pass through the code, so reaching the second test by
             // looping back is not that shape at all.
-            if self.nodes[second].entry <= self.nodes[node].entry {
+            if self.is_back_edge(node, second) {
                 continue;
             }
             // Ghidra's `if (orblock->isInteriorGotoTarget()) continue;`.
@@ -1184,7 +1218,7 @@ impl<'a> Graph<'a> {
             if self.is_switch_out(clause) {
                 continue;
             }
-            if self.nodes[clause].entry <= self.nodes[node].entry {
+            if self.is_back_edge(node, clause) {
                 continue;
             }
             if !self.nodes[clause].successors.is_empty() {
@@ -2511,93 +2545,6 @@ mod tests {
         );
     }
 
-    /// The if-rule for a clause with no way out carried none of the three guards
-    /// its siblings do, because our name for it - `rule_if_no_exit` - hid
-    /// that it is Ghidra's `ruleBlockIfNoExit`. It guards that rule identically.
-    #[test]
-    fn a_returning_clause_must_still_be_reached_by_a_decision_edge() {
-        let build = |backwards: bool| {
-            let mut data = Funcdata::default();
-            let (clause_at, head_at) = if backwards {
-                (0x1000, 0x1010)
-            } else {
-                (0x1010, 0x1000)
-            };
-            data.entry = head_at;
-            // Blocks in address order, as `from_lifted` creates them.
-            let first = data.new_block(clause_at.min(head_at));
-            let second = data.new_block(clause_at.max(head_at));
-            let (head, clause) = if backwards {
-                (second, first)
-            } else {
-                (first, second)
-            };
-            let join = data.new_block(0x1020);
-            // The join needs a way out of its own, or it qualifies as the
-            // returning clause too and the rule fires on it instead.
-            let tail = data.new_block(0x1030);
-            conditional(&mut data, head, clause_at);
-            data.add_edge(head, clause);
-            data.add_edge(head, join);
-            data.add_edge(join, tail);
-            data
-        };
-
-        let forwards = build(false);
-        let mut graph = Graph::of(&forwards, &[]);
-        let node = graph
-            .nodes
-            .iter()
-            .position(|candidate| candidate.entry == GraphBlockId(0))
-            .expect("the head is a node");
-        assert!(
-            graph.rule_if_no_exit(node),
-            "a returning clause ahead of the test is absorbed"
-        );
-
-        let backwards = build(true);
-        let mut graph = Graph::of(&backwards, &[]);
-        let node = graph
-            .nodes
-            .iter()
-            .position(|candidate| candidate.entry == GraphBlockId(1))
-            .expect("the head is a node");
-        assert!(
-            !graph.rule_if_no_exit(node),
-            "a returning clause reached by a back edge is not an `if`"
-        );
-    }
-
-    /// Ghidra requires the edges an `if` is built from to be *decision* edges -
-    /// neither back edges, goto edges nor irreducible. Surrendered edges are
-    /// already gone from `successors` here, so the test that remains is the back
-    /// edge: an `if` built across one claims a branch where the flow is a loop.
-    #[test]
-    fn an_if_refuses_a_clause_reached_by_a_back_edge() {
-        // Blocks in address order, as `from_lifted` creates them, because a back
-        // edge is recognised by the target's identifier preceding the source's.
-        let mut data = Funcdata::default();
-        data.entry = 0x1010;
-        let earlier = data.new_block(0x1000);
-        let head = data.new_block(0x1010);
-        let join = data.new_block(0x1020);
-        conditional(&mut data, head, 0x1000);
-        data.add_edge(head, earlier);
-        data.add_edge(head, join);
-        data.add_edge(earlier, join);
-
-        let mut graph = Graph::of(&data, &[]);
-        let node = graph
-            .nodes
-            .iter()
-            .position(|candidate| candidate.entry == head)
-            .expect("the head is a node");
-        assert!(
-            !graph.rule_proper_if(node),
-            "the clause is reached by a back edge, so no `if` is built"
-        );
-    }
-
     /// Ghidra's `if (clauseblock->isSwitchOut()) continue;` - "Don't use switch
     /// (possibly with goto edges)". Only the head was checked here, so a clause
     /// that itself ends in a computed jump could be absorbed into an `if` body,
@@ -2696,39 +2643,90 @@ mod tests {
         );
     }
 
-    /// Ghidra's `ruleBlockOr` refuses to reach the second test through a back
-    /// edge - "Don't use loop branch to get to orblock". A short-circuit
-    /// condition is evaluated in one pass, so a second test reached by looping
-    /// back is not that shape, however well the clause targets line up.
+    /// Ghidra's `f_back_edge` is a label its loop finder writes onto an edge, and
+    /// several rules exclude such edges through `isDecisionOut`. Approximating it
+    /// by comparing block identifiers refuses forward edges that merely run to a
+    /// lower address, which is ordinary inside a rotated loop - that mistake made
+    /// `rule_cat` decline a legitimate concatenation and left a local declared
+    /// twice in `queryMapAddress_single`. The target of a back edge dominates its
+    /// source; nothing weaker will do.
     #[test]
-    fn a_short_circuit_does_not_reach_its_second_test_by_looping_back() {
+    fn a_back_edge_is_one_whose_target_dominates_its_source() {
         let mut data = Funcdata::default();
         data.entry = 0x1010;
-        // Blocks are created in address order, as `from_lifted` does, because a
-        // back edge is recognised by the target's block identifier preceding the
-        // source's.
+        // A block earlier in the address order than the entry, reached forwards.
         let earlier = data.new_block(0x1000);
         let head = data.new_block(0x1010);
-        let clause = data.new_block(0x1020);
-        let other = data.new_block(0x1030);
-        // The head tests, and one edge goes *backwards* to another test that
-        // shares the head's clause - the shape the rule would otherwise merge.
+        let latch = data.new_block(0x1020);
         conditional(&mut data, head, 0x1000);
         data.add_edge(head, earlier);
-        data.add_edge(head, clause);
-        conditional(&mut data, earlier, 0x1020);
-        data.add_edge(earlier, clause);
-        data.add_edge(earlier, other);
+        data.add_edge(head, latch);
+        data.add_edge(earlier, latch);
+        data.add_edge(latch, head);
 
-        let mut graph = Graph::of(&data, &[]);
-        let node = graph
-            .nodes
-            .iter()
-            .position(|candidate| candidate.entry == head)
-            .expect("the head is a node");
+        let graph = Graph::of(&data, &[]);
+        let locate = |block: GraphBlockId| {
+            graph
+                .nodes
+                .iter()
+                .position(|candidate| candidate.entry == block)
+                .expect("the block is a node")
+        };
+        let (earlier, head, latch) = (locate(earlier), locate(head), locate(latch));
+
         assert!(
-            !graph.rule_block_or(node),
-            "the second test is reached by a back edge, so no condition is built"
+            !graph.is_back_edge(head, earlier),
+            "an edge to a lower address the head dominates is a forward edge"
+        );
+        assert!(
+            graph.is_back_edge(latch, head),
+            "the latch's edge to the header it is dominated by is a back edge"
+        );
+    }
+
+    /// Ghidra's `if (outblock->isSwitchOut()) return false;` - "Switch must be
+    /// resolved first". We refused a multi-way branch at the head of a chain but
+    /// not at the block being concatenated onto it, which buries the branch in a
+    /// list where `rule_block_switch` can no longer find it.
+    #[test]
+    fn a_chain_refuses_to_absorb_an_unresolved_switch() {
+        let build = |computed: bool| {
+            let mut data = Funcdata::default();
+            data.entry = 0x1000;
+            let head = data.new_block(0x1000);
+            let next = data.new_block(0x1010);
+            let after = data.new_block(0x1020);
+            data.add_edge(head, next);
+            data.add_edge(next, after);
+            if computed {
+                let target = data.new_varnode(ventris_lifter::REGISTER_SPACE, 12, 4);
+                let branch = data.new_op(op::BRANCHIND, seq(0x1010), vec![target]);
+                data.op_insert_end(branch, next);
+            }
+            data
+        };
+        let locate = |graph: &Graph<'_>| {
+            graph
+                .nodes
+                .iter()
+                .position(|candidate| candidate.entry == GraphBlockId(0))
+                .expect("the head is a node")
+        };
+
+        let plain = build(false);
+        let mut graph = Graph::of(&plain, &[]);
+        let node = locate(&graph);
+        assert!(
+            graph.rule_cat(node),
+            "an ordinary pair of blocks concatenates"
+        );
+
+        let switched = build(true);
+        let mut graph = Graph::of(&switched, &[]);
+        let node = locate(&graph);
+        assert!(
+            !graph.rule_cat(node),
+            "a block ending in an unresolved computed jump is left alone"
         );
     }
 
