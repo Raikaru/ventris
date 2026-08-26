@@ -6,6 +6,16 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- Refuted: suppressing a conditional whose test is fabricated. `condition_expr`
+  falls back on a constant when a `Condition::Branch` names a block whose
+  terminator is not a `CBRANCH`, and `DBGEXIImm` printed `if (!1)` around its
+  whole main loop - a body our output therefore never executes. Emitting that
+  body unconditionally when the test is not carried by the graph does remove the
+  fabrication, but it also suppresses `TRK_fill_mem`'s real conditional return,
+  taking `missing-conditional` 3 -> 4 and `return-presence` back with it. The
+  predicate cannot distinguish the two cases as written, so the fix belongs in
+  the structurer - not building an `IfElse` with no test - rather than in the
+  emitter deciding not to print one.
 - A `CBRANCH` to an address that is not its instruction's last operation now
   splits that instruction, which recovers PPC's conditional return. `beqlr`
   lifts to `if (!cond) goto <next>; return;` - the whole conditional return
