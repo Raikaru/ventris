@@ -2115,6 +2115,17 @@ impl NativeDecompiler {
                 }],
             );
         }
+        // `Heritage::guardStores` prepopulates data flow across a store that may
+        // alias a range under heritage. It only became safe to run once the
+        // pointer classification was ported: a store through a constant or a
+        // frame-relative pointer aliases exactly what it names, so the guard no
+        // longer invents a merge for every address the function mentions.
+        let memory_locations: std::collections::BTreeSet<graph::guard::Location> =
+            graph::guard::heritaged_locations(&data)
+                .into_iter()
+                .filter(|location| location.space == ventris_lifter::RAM_SPACE)
+                .collect();
+        graph::guard::guard_stores(&mut data, &memory_locations);
         graph::heritage::heritage_with_endianness(&mut data, is_little_endian(architecture));
         // Arguments must be recovered while the guards that name each
         // location's value at the call still exist: simplification collapses

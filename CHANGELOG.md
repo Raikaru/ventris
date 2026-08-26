@@ -6,6 +6,26 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- `CircleRange` is ported from `rangeutil.cc`, and with it `RuleRangeMeld`
+  (registered at `coreaction.cc:5663`). The class is the modular value-set the
+  range rules need: constructors and normalisation, scalar and range
+  containment, `intersect` and `circleUnion`, strides, non-zero-mask ranges, the
+  unary and binary `pullBack` arms for every opcode this port's `op` module
+  defines, and `translate2Op`. `RuleRangeMeld` then folds a `BOOL_AND` or
+  `BOOL_OR` of two comparisons on the same value into the single comparison the
+  intersection or union describes. `isBoolOutput` is derived from the opcode
+  class rather than a fabricated flag; `constMarkup` propagation is absent
+  because the graph has no `SymbolEntry` to mark up.
+- `Heritage::guardStores` is ported properly and, for the first time, *wired
+  into the pipeline*. It used to guard every location in a space whenever any
+  `STORE` wrote through that space, which is why memory was excluded from
+  heritage altogether - the note said guarding it "invents a merge for every
+  address the function mentions", and with that breadth it did. Ghidra instead
+  consults the store's pointer, so a store through a constant address or a
+  frame-relative pointer aliases exactly the range it names; only a genuinely
+  unknown pointer falls back to the whole space. `AddrSpace::getContain` for
+  overlay spaces and the `LoadGuard` value-set narrowing are named as the two
+  arms that still need facilities this graph lacks.
 - `AncestorRealistic` is ported as the state machine it is, replacing a walk that
   answered a different question. `enterNode`/`uponPop` classify each path as
   success, fail, failkill or *solid*, and the interesting rule is what happens at

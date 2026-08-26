@@ -1,9 +1,9 @@
 //! Expression rewrites from Ghidra 12.1.3's `ruleaction.cc`.
 //!
 //! The rules below preserve the machine-level idioms recognised by the C++
-//! `applyOp` methods named in each section.  The graph deliberately has no
-//! `TypeFactory`, symbol table, or range algebra, so rules whose correctness
-//! depends on those facilities are listed as intentionally omitted below.
+//! `applyOp` methods named in each section.  Range conditions are handled by
+//! the local `CircleRange` port; rules whose correctness depends on other
+//! absent Ghidra subsystems remain listed as intentionally omitted below.
 //!
 //! Source authority: `RuleAddMultCollapse::applyOp`, `RuleIdentityEl::applyOp`,
 //! `RuleShiftBitops::applyOp`, `RuleDoubleShift::applyOp`,
@@ -14,21 +14,22 @@
 //! `RuleShiftSub::applyOp`, `RuleLess2Zero::applyOp`,
 //! `RuleLessEqual2Zero::applyOp`, `RuleSLess2Zero::applyOp`,
 //! `RuleLessNotEqual::applyOp`, `RuleLessOne::applyOp`,
-//! `RuleEqual2Constant::applyOp`, `RuleNotDistribute::applyOp`,
-//! `RuleZextEliminate::applyOp`, `RuleZextSless::applyOp`,
+//! `RuleRangeMeld::applyOp`, `RuleEqual2Constant::applyOp`,
+//! `RuleNotDistribute::applyOp`,
 //! `RuleZextCommute::applyOp`, `RuleSubZext::applyOp`,
 //! `RuleSubCancel::applyOp`, `RulePiece2Zext::applyOp`, and
 //! `RuleConcatShift::applyOp` in
 //! `Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc` at commit
 //! `8b4c91d4d5bd1549622bfbade0df199585b98365`.
 //!
-//! `RuleRangeMeld` is not ported: its real implementation is built on
-//! `CircleRange::pullBack`, `CircleRange::intersect`/`circleUnion`, and
-//! `translate2Op`, none of which the graph models.  `RuleShiftCast` and
-//! `RuleSextSext` are not present in this pinned `ruleaction.cc`/`.hh`; the
-//! two nearby real rules `RulePiece2Zext` and `RuleConcatShift` are ported as
-//! replacements so the requested batch remains substantial.
+//! `RuleRangeMeld` is backed by the `CircleRange` port in `rangeutil.rs`.
+//! `RuleShiftCast` and `RuleSextSext` are not present in this pinned
+//! `ruleaction.cc`/`.hh`; the two nearby real rules `RulePiece2Zext` and
+//! `RuleConcatShift` are ported as replacements so the requested batch remains
+//! substantial.
 
+use super::equality::{Equality, functional_equality};
+use super::rangeutil::CircleRange;
 use ventris_pcode::op;
 
 use super::action::Rule;
@@ -1508,6 +1509,161 @@ impl Rule for RuleLessOne {
     }
 }
 
+/// Return whether a value is produced by an opcode whose result is boolean.
+///
+/// `PcodeOp::isBoolOutput` is represented by the opcode's result class here:
+/// comparisons, boolean operators, and `BOOL_NEGATE` are the boolean-producing
+/// operations in the graph.  This follows `PcodeOp::isBoolOutput` as consumed
+/// by `RuleRangeMeld::applyOp` in `ruleaction.cc:1369-1374`; the graph has no
+/// separate boolean-output flag to invent.
+fn range_meld_bool_output(data: &Funcdata, value: VarnodeId) -> bool {
+    let Some(definition) = data.varnode(value).def else {
+        return false;
+    };
+    matches!(
+        data.op(definition).opcode,
+        op::INT_EQUAL
+            | op::INT_NOTEQUAL
+            | op::INT_SLESS
+            | op::INT_SLESSEQUAL
+            | op::INT_LESS
+            | op::INT_LESSEQUAL
+            | op::INT_CARRY
+            | op::INT_SCARRY
+            | op::INT_SBORROW
+            | op::FLOAT_EQUAL
+            | op::FLOAT_NOTEQUAL
+            | op::FLOAT_LESS
+            | op::FLOAT_LESSEQUAL
+            | op::FLOAT_NAN
+            | op::BOOL_NEGATE
+            | op::BOOL_XOR
+            | op::BOOL_AND
+            | op::BOOL_OR
+    )
+}
+
+/// Meld two integer comparison conditions into one range comparison.
+///
+/// This is `RuleRangeMeld` from `ruleaction.hh:340-349` and
+/// `RuleRangeMeld::applyOp` from `ruleaction.cc:1341-1437`; Ghidra registers it
+/// in the analysis rule pool at `coreaction.cc:5663`.
+pub struct RuleRangeMeld;
+
+impl Rule for RuleRangeMeld {
+    fn name(&self) -> &'static str {
+        "rangemeld"
+    }
+
+    fn op_list(&self) -> Vec<i32> {
+        vec![op::BOOL_OR, op::BOOL_AND]
+    }
+
+    fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
+        let Some((first, second)) = inputs2(data, id) else {
+            return 0;
+        };
+        if !range_meld_bool_output(data, first) || !range_meld_bool_output(data, second) {
+            return 0;
+        }
+        let Some(first_def) = data.varnode(first).def else {
+            return 0;
+        };
+        let Some(second_def) = data.varnode(second).def else {
+            return 0;
+        };
+
+        let mut first_range = CircleRange::from_bool(true);
+        let Some(mut first_value) = first_range.pull_back(data, first_def, false) else {
+            return 0;
+        };
+        let mut second_range = CircleRange::from_bool(true);
+        let Some(mut second_value) = second_range.pull_back(data, second_def, false) else {
+            return 0;
+        };
+
+        if data.op(first_def).opcode == op::BOOL_NEGATE {
+            let Some(definition) = data.varnode(first_value).def else {
+                return 0;
+            };
+            let Some(value) = first_range.pull_back(data, definition, false) else {
+                return 0;
+            };
+            first_value = value;
+        }
+        if data.op(second_def).opcode == op::BOOL_NEGATE {
+            let Some(definition) = data.varnode(second_value).def else {
+                return 0;
+            };
+            let Some(value) = second_range.pull_back(data, definition, false) else {
+                return 0;
+            };
+            second_value = value;
+        }
+
+        if functional_equality(data, first_value, second_value) != Equality::Same {
+            let first_size = data.varnode(first_value).size;
+            let second_size = data.varnode(second_value).size;
+            if first_size == second_size {
+                return 0;
+            }
+            if first_size < second_size {
+                if let Some(definition) = data.varnode(second_value).def {
+                    let Some(value) = second_range.pull_back(data, definition, false) else {
+                        return 0;
+                    };
+                    second_value = value;
+                }
+            } else if let Some(definition) = data.varnode(first_value).def {
+                let Some(value) = first_range.pull_back(data, definition, false) else {
+                    return 0;
+                };
+                first_value = value;
+            }
+            if first_value != second_value {
+                return 0;
+            }
+        }
+        if !heritage_known(data, first_value) {
+            return 0;
+        }
+
+        let result = if data.op(id).opcode == op::BOOL_AND {
+            first_range.intersect(&second_range)
+        } else {
+            first_range.circle_union(&second_range)
+        };
+        if result != 0 {
+            return 0;
+        }
+
+        if let Some((opcode, constant, constant_slot)) = first_range.translate2_op() {
+            let new_constant = data.new_constant(constant, data.varnode(first_value).size);
+            let inputs = if constant_slot == 0 {
+                vec![new_constant, first_value]
+            } else {
+                vec![first_value, new_constant]
+            };
+            data.op_set_opcode(id, opcode);
+            data.op_set_inputs(id, inputs);
+            return 1;
+        }
+        if first_range.is_full() {
+            let value = data.new_constant(1, 1);
+            data.op_set_opcode(id, op::COPY);
+            data.op_set_inputs(id, vec![value]);
+            return 1;
+        }
+        if first_range.is_empty() {
+            let value = data.new_constant(0, 1);
+            data.op_set_opcode(id, op::COPY);
+            data.op_set_inputs(id, vec![value]);
+            return 1;
+        }
+        0
+    }
+}
+
 /// Re-express equality against a constant after add, negate, or multiply-by-minus-one.
 pub struct RuleEqual2Constant;
 
@@ -1985,10 +2141,11 @@ impl Rule for RuleSubCancel {
     }
 }
 
-// Every requested pass that needed CircleRange, type metadata, or a source
-// class absent from the pinned tree is deliberately omitted above.
+// Range conditions use CircleRange; type-sensitive rules whose source
+// facilities are absent from the graph remain omitted.
 
-/// Every rule this module ports, for registration.
+/// Every rule this module ports, including `RuleRangeMeld` registered at
+/// `coreaction.cc:5663`, for registration.
 pub fn all() -> Vec<Box<dyn Rule>> {
     vec![
         Box::new(RuleAddMultCollapse),
@@ -2011,6 +2168,7 @@ pub fn all() -> Vec<Box<dyn Rule>> {
         Box::new(RuleSLess2Zero),
         Box::new(RuleLessNotEqual),
         Box::new(RuleLessOne),
+        Box::new(RuleRangeMeld),
         Box::new(RuleEqual2Constant),
         Box::new(RuleNotDistribute),
         Box::new(RuleZextEliminate),
@@ -2512,5 +2670,31 @@ mod tests {
         data.mark_input(argument);
         assert!(!is_free(&data, argument));
         assert!(heritage_known(&data, argument));
+    }
+    #[test]
+    fn range_meld_collapses_and_refuses_different_values() {
+        let mut data = Funcdata::default();
+        let block = data.new_block(0x1000);
+        let value = input(&mut data, 4);
+        let three = data.new_constant(3, 4);
+        let (_, less) = binary(&mut data, block, op::INT_LESS, value, three, 1);
+        let one = data.new_constant(1, 4);
+        let (_, equal) = binary(&mut data, block, op::INT_EQUAL, value, one, 1);
+        let (outer, _) = binary(&mut data, block, op::BOOL_AND, less, equal, 1);
+        assert_eq!(RuleRangeMeld.apply_op(outer, &mut data), 1);
+        assert_eq!(data.op(outer).opcode, op::INT_EQUAL);
+        assert!(data.op(outer).inputs.contains(&value));
+        assert!(data.op(outer).inputs.iter().any(|input| {
+            data.varnode(*input).flags.constant && data.varnode(*input).offset == 1
+        }));
+
+        let other = input(&mut data, 4);
+        let seven = data.new_constant(7, 4);
+        let (_, other_less) = binary(&mut data, block, op::INT_LESS, other, seven, 1);
+        let bad = data.new_constant(1, 4);
+        let (_, other_equal) = binary(&mut data, block, op::INT_EQUAL, value, bad, 1);
+        let (different, _) = binary(&mut data, block, op::BOOL_AND, other_less, other_equal, 1);
+        assert_eq!(RuleRangeMeld.apply_op(different, &mut data), 0);
+        assert_eq!(data.op(different).opcode, op::BOOL_AND);
     }
 }

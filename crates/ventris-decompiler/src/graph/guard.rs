@@ -11,14 +11,35 @@
 //! list, which loses the fact that a preserved register survives and cannot
 //! express "changed by this operation, in a way we cannot describe".
 //!
+//! `guard_stores` keeps the two `Heritage::guardStores` space cases from
+//! `heritage.cc:1541-1558`: a direct store-space match and a known
+//! spacebase-relative store into the containing space. The graph has no
+//! `AddrSpace` manager, so its stack locations use the canonical containing
+//! space ID directly; `stackframe::frame_offset` supplies the fixed range that
+//! this representation can prove. It deliberately cannot reproduce arbitrary
+//! virtual/overlay containment, which needs `AddrSpace::getContain` and the
+//! address-space objects from `space.hh:161-188`. A dynamic frame-derived
+//! pointer also has no single offset here; narrowing that case needs Ghidra's
+//! `LoadGuard` records from `Heritage::generateStoreGuard` and
+//! `Heritage::analyzeNewLoadGuards` (`heritage.cc:827-933`), plus
+//! `getStoreGuard`/`LoadGuard::isGuarded` (`merge.cc:78-86`), so it takes the
+//! same whole-space fallback as an unknown pointer.
+//!
+//! That narrowing is what let memory join heritage at all. While `guard_stores`
+//! guarded a whole space per store it had no production caller - the pipeline
+//! guarded registers only, because the broad version really did invent a merge
+//! for every address the function mentions. The pipeline now runs it over the
+//! memory locations the function touches.
+//!
 //! Source authority: `Heritage::guard`, `guardCalls`, `guardStores`,
 //! `guardReturns`, and `Funcdata::newIndirectOp` in `heritage.cc` and
 //! `funcdata_op.cc` at commit `8b4c91d4d5bd1549622bfbade0df199585b98365`.
 
 use std::collections::BTreeSet;
 
-use ventris_pcode::op;
+use ventris_pcode::{CONST_SPACE, op};
 
+use super::stackframe::frame_offset;
 use super::{Funcdata, OpId, VarnodeId};
 
 /// A storage location considered during heritage.
@@ -155,31 +176,97 @@ pub fn guard_calls(
 
 /// Inserts `INDIRECT` definitions for locations a store may alias.
 ///
-/// Ghidra's `guardStores` consults the space a store writes through. A store
-/// whose destination space matches the location's space may change it, and the
-/// pointer is not known here, so the guard is unconditional within a space.
+/// `Heritage::guardStores` first compares the requested range's address space
+/// with the store's space, and separately accepts a spacebase-marked store
+/// whose physical space is the requested range's containing space
+/// (`heritage.cc:1541-1558`). Stack locations in this graph are keyed by that
+/// physical space ID, so the one representable containing-space test is the
+/// same `location.space == store_space` check used for direct stores.
+///
+/// A fixed frame-relative pointer and a literal pointer are narrowed to their
+/// actual byte ranges. A pointer with no recoverable address remains
+/// conservative and guards every location in the matching space, as Ghidra
+/// does before a `LoadGuard` range can be established.
 pub fn guard_stores(data: &mut Funcdata, locations: &BTreeSet<Location>) -> usize {
-    let stores: Vec<(OpId, u32)> = data
+    let stores: Vec<(OpId, u32, Option<VarnodeId>, u32)> = data
         .live_ops()
         .filter(|(_, candidate)| candidate.opcode == op::STORE)
         .filter_map(|(id, candidate)| {
-            let space = candidate
+            let store_space = candidate.inputs.first().and_then(|input| {
+                let value = data.varnode(*input);
+                if !value.flags.constant || value.space != CONST_SPACE {
+                    return None;
+                }
+                u32::try_from(value.offset).ok()
+            })?;
+            let pointer = candidate.inputs.get(1).copied();
+            let access_size = candidate
                 .inputs
-                .first()
-                .map(|input| data.varnode(*input))
-                .filter(|space| space.flags.constant)
-                .map(|space| space.offset as u32)?;
-            Some((id, space))
+                .get(2)
+                .map(|value| data.varnode(*value).size)
+                .unwrap_or(1)
+                .max(1);
+            Some((id, store_space, pointer, access_size))
         })
         .collect();
+
     let mut inserted = 0;
-    for (store, space) in stores {
-        for location in locations.iter().filter(|location| location.space == space) {
+    for (store, store_space, pointer, access_size) in stores {
+        let pointer = classify_store_pointer(data, pointer);
+        for location in locations.iter().filter(|location| {
+            // `AddrSpace::getContain` is not represented separately: stack
+            // ranges are stored under their physical containing-space ID.
+            location.space == store_space
+        }) {
+            let aliases = match pointer {
+                StorePointer::Constant(address) => {
+                    ranges_overlap(location.offset, location.size, address, access_size)
+                }
+                StorePointer::Frame(offset) => {
+                    ranges_overlap(location.offset, location.size, offset as u64, access_size)
+                }
+                StorePointer::Unknown => true,
+            };
+            if !aliases {
+                continue;
+            }
             insert_indirect(data, store, *location);
             inserted += 1;
         }
     }
     inserted
+}
+
+#[derive(Copy, Clone)]
+enum StorePointer {
+    Constant(u64),
+    Frame(i64),
+    Unknown,
+}
+
+fn classify_store_pointer(data: &Funcdata, pointer: Option<VarnodeId>) -> StorePointer {
+    let Some(pointer) = pointer else {
+        return StorePointer::Unknown;
+    };
+    if let Some(stack_pointer) = data.spacebase
+        && let Some(offset) = frame_offset(data, pointer, stack_pointer)
+    {
+        return StorePointer::Frame(offset);
+    }
+    if data.varnode(pointer).flags.constant {
+        StorePointer::Constant(data.varnode(pointer).offset)
+    } else {
+        StorePointer::Unknown
+    }
+}
+
+fn ranges_overlap(left_offset: u64, left_size: u32, right_offset: u64, right_size: u32) -> bool {
+    if left_size == 0 || right_size == 0 {
+        return false;
+    }
+    let left_end = left_offset.saturating_add(u64::from(left_size));
+    let right_end = right_offset.saturating_add(u64::from(right_size));
+    left_offset < right_end && right_offset < left_end
 }
 
 /// Adds the return storage as an input of every `RETURN`.
@@ -247,7 +334,7 @@ fn insert_indirect_creation(data: &mut Funcdata, anchor: OpId, location: Locatio
 mod tests {
     use super::*;
     use crate::graph::SeqNum;
-    use ventris_lifter::{CONST_SPACE, REGISTER_SPACE};
+    use ventris_lifter::{RAM_SPACE, REGISTER_SPACE};
 
     fn graph_with(opcode: i32, extra_inputs: Vec<u64>) -> (Funcdata, OpId) {
         let mut data = Funcdata::default();
@@ -271,6 +358,24 @@ mod tests {
             offset,
             size: 4,
         }
+    }
+
+    fn indirect_locations(data: &Funcdata) -> Vec<Location> {
+        let mut locations: Vec<_> = data
+            .live_ops()
+            .filter(|(_, candidate)| candidate.opcode == op::INDIRECT)
+            .filter_map(|(_, candidate)| candidate.output)
+            .map(|output| {
+                let value = data.varnode(output);
+                Location {
+                    space: value.space,
+                    offset: value.offset,
+                    size: value.size,
+                }
+            })
+            .collect();
+        locations.sort_unstable();
+        locations
     }
 
     #[test]
@@ -304,27 +409,139 @@ mod tests {
     }
 
     #[test]
-    fn a_store_guards_only_its_own_space() {
+    fn a_constant_store_guards_only_the_named_location() {
         let mut data = Funcdata::default();
         let block = data.new_block(0x1000);
         let seq = SeqNum {
             address: 0x1000,
             order: 0,
         };
-        let space = data.new_constant(u64::from(REGISTER_SPACE), 4);
+        let space = data.new_constant(u64::from(RAM_SPACE), 4);
         let address = data.new_constant(0x40, 4);
         let value = data.new_constant(1, 4);
         let store = data.new_op(op::STORE, seq, vec![space, address, value]);
         data.op_insert_end(store, block);
+        let named = Location {
+            space: RAM_SPACE,
+            offset: 0x40,
+            size: 4,
+        };
         let locations = BTreeSet::from([
-            location(8),
+            named,
             Location {
-                space: CONST_SPACE,
-                offset: 0,
+                space: RAM_SPACE,
+                offset: 0x80,
                 size: 4,
             },
+            location(0x40),
         ]);
+
         assert_eq!(guard_stores(&mut data, &locations), 1);
+        assert_eq!(indirect_locations(&data), vec![named]);
+    }
+
+    #[test]
+    fn a_frame_relative_store_guards_only_its_frame_slot() {
+        let mut data = Funcdata::default();
+        let block = data.new_block(0x1000);
+        let stack_pointer = Location {
+            space: REGISTER_SPACE,
+            offset: 0x1d0,
+            size: 4,
+        };
+        let pointer = data.new_varnode(REGISTER_SPACE, 0x1d0, 4);
+        data.mark_input(pointer);
+        data.spacebase = Some(stack_pointer);
+        let delta = data.new_constant(0x10, 4);
+        let add = data.new_op(
+            op::INT_ADD,
+            SeqNum {
+                address: 0x1000,
+                order: 0,
+            },
+            vec![pointer, delta],
+        );
+        let address = data.new_unique(4);
+        data.op_set_output(add, Some(address));
+        data.op_insert_end(add, block);
+
+        let space = data.new_constant(u64::from(RAM_SPACE), 4);
+        let value = data.new_constant(1, 4);
+        let store = data.new_op(
+            op::STORE,
+            SeqNum {
+                address: 0x1004,
+                order: 0,
+            },
+            vec![space, address, value],
+        );
+        data.op_insert_end(store, block);
+        let named = Location {
+            space: RAM_SPACE,
+            offset: 0x10,
+            size: 4,
+        };
+        let locations = BTreeSet::from([
+            named,
+            Location {
+                space: RAM_SPACE,
+                offset: 0x20,
+                size: 4,
+            },
+            location(0x10),
+        ]);
+
+        assert_eq!(guard_stores(&mut data, &locations), 1);
+        assert_eq!(indirect_locations(&data), vec![named]);
+    }
+
+    #[test]
+    fn an_unknown_store_pointer_guards_every_location_in_its_space() {
+        let mut data = Funcdata::default();
+        let block = data.new_block(0x1000);
+        let space = data.new_constant(u64::from(RAM_SPACE), 4);
+        let pointer = data.new_varnode(REGISTER_SPACE, 0x20, 4);
+        data.mark_input(pointer);
+        let value = data.new_constant(1, 4);
+        let store = data.new_op(
+            op::STORE,
+            SeqNum {
+                address: 0x1000,
+                order: 0,
+            },
+            vec![space, pointer, value],
+        );
+        data.op_insert_end(store, block);
+        let locations = BTreeSet::from([
+            Location {
+                space: RAM_SPACE,
+                offset: 0x10,
+                size: 4,
+            },
+            Location {
+                space: RAM_SPACE,
+                offset: 0x20,
+                size: 4,
+            },
+            location(0x20),
+        ]);
+
+        assert_eq!(guard_stores(&mut data, &locations), 2);
+        assert_eq!(
+            indirect_locations(&data),
+            vec![
+                Location {
+                    space: RAM_SPACE,
+                    offset: 0x10,
+                    size: 4,
+                },
+                Location {
+                    space: RAM_SPACE,
+                    offset: 0x20,
+                    size: 4,
+                },
+            ]
+        );
     }
 
     #[test]
