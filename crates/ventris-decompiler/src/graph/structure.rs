@@ -92,7 +92,7 @@ pub enum Structured {
     /// A multi-way branch and its cases.
     ///
     /// `header` is everything up to and including the indirect branch. Each case
-    /// is one recovered body; `has_exit` records whether the cases converge on a
+    /// is one recovered body; `exit` records the block the cases converge on, when
     /// block after the switch, which is what lets the emitter spell `break`.
     Switch {
         header: Box<Structured>,
@@ -101,7 +101,7 @@ pub enum Structured {
         /// Each case's label and body. A case with no label is the default: the
         /// table named no value for it.
         cases: Vec<(Option<u64>, Structured)>,
-        has_exit: bool,
+        exit: Option<GraphBlockId>,
     },
     /// One edge of a two-way branch that no construct claimed. The other edge
     /// remains the fallthrough, so the branch keeps its condition instead of
@@ -1448,7 +1448,7 @@ impl<'a> Graph<'a> {
             header: Box::new(self.nodes[node].body.clone()),
             selector: table.switch_value,
             cases: labelled,
-            has_exit: exit.is_some(),
+            exit: exit.map(|exit| self.nodes[exit].entry),
         };
         self.absorb(node, &cases, body);
         // The composite is no longer a multi-way branch, so the rules that
@@ -2892,9 +2892,9 @@ fn ends_in_transfer(node: &Structured) -> bool {
             .is_some_and(|other| ends_in_transfer(then_body) && ends_in_transfer(other)),
         // A switch whose every case transfers has no fallthrough either, but
         // only when it has no exit block for control to converge on.
-        Structured::Switch {
-            cases, has_exit, ..
-        } => !has_exit && cases.iter().all(|(_, case)| ends_in_transfer(case)),
+        Structured::Switch { cases, exit, .. } => {
+            exit.is_none() && cases.iter().all(|(_, case)| ends_in_transfer(case))
+        }
         // A `break` leaves the construct it is in, exactly as a `goto` does.
         Structured::Break => true,
         Structured::Basic(_)

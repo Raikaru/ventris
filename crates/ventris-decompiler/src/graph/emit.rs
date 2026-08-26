@@ -1679,7 +1679,7 @@ impl Emitter<'_> {
                 header,
                 selector,
                 cases,
-                has_exit,
+                exit,
             } => {
                 let mut statements = self.emit_tree(header, scoped, phi_copies, targets);
                 // The indirect transfer the header ends with is replaced by the
@@ -1690,7 +1690,8 @@ impl Emitter<'_> {
                 let mut default = Vec::new();
                 for (label, case) in cases {
                     let mut body = self.emit_tree(case, scoped, phi_copies, targets);
-                    if *has_exit {
+                    if let Some(exit) = exit {
+                        drop_break_equivalent_goto(&mut body, self.data.block(*exit).start);
                         body.push(NativeStatement::Break);
                     }
                     match label {
@@ -2242,6 +2243,18 @@ enum Emission {
     Skip,
     Body(NativeStatement),
     Terminator(NativeStatement),
+}
+
+/// A switch case's own branch to the block after the switch is what `break` says.
+///
+/// `ruleBlockSwitch` only records an exit when every case leaves to it, so the
+/// construct has claimed that edge and Ghidra's `BlockSwitch::emit` never prints
+/// it - the edge belongs to the switch, not to the case. Emitting both put a
+/// `goto` in front of every `break` in `dl_G_MOVEWORD`.
+fn drop_break_equivalent_goto(body: &mut Vec<NativeStatement>, after: u64) {
+    if body.last() == Some(&NativeStatement::Goto(after)) {
+        body.pop();
+    }
 }
 
 #[cfg(test)]
@@ -3127,6 +3140,39 @@ mod tests {
         retain_live_assignments(&mut statements, &read);
         assert_eq!(statements[0], assignment);
     }
+    /// A `goto` to the block after the switch is exactly what the `break` that
+    /// follows it says, so emitting both leaves one in front of every `break`.
+    /// Only the case's *own* exit edge goes: a jump somewhere else must stay.
+    #[test]
+    fn a_case_goto_to_the_switch_exit_gives_way_to_break() {
+        let mut body = vec![
+            NativeStatement::Expression(Expr::Constant { value: 1, width: 4 }),
+            NativeStatement::Goto(0x1020),
+        ];
+        drop_break_equivalent_goto(&mut body, 0x1020);
+        assert_eq!(
+            body,
+            vec![NativeStatement::Expression(Expr::Constant {
+                value: 1,
+                width: 4
+            })],
+            "the exit edge is the break"
+        );
+
+        let mut elsewhere = vec![NativeStatement::Goto(0x1030)];
+        drop_break_equivalent_goto(&mut elsewhere, 0x1020);
+        assert_eq!(
+            elsewhere,
+            vec![NativeStatement::Goto(0x1030)],
+            "a jump anywhere else is not a break"
+        );
+
+        // Nothing to drop, and nothing to panic over.
+        let mut empty: Vec<NativeStatement> = Vec::new();
+        drop_break_equivalent_goto(&mut empty, 0x1020);
+        assert!(empty.is_empty());
+    }
+
     /// `__osRealloc` reached its shared epilogue with five jumps where the
     /// oracle emits none: each sat in trailing position inside nested `if`s,
     /// so falling out already lands on the label.

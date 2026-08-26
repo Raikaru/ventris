@@ -6,6 +6,18 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- Stopped printing a `goto` in front of every `break`. `ruleBlockSwitch` records
+  an exit only when every case leaves to it, so that edge belongs to the switch and
+  Ghidra's `BlockSwitch::emit` never prints it - we emitted the case's own branch
+  *and* the `break`. `Structured::Switch` now carries the exit block rather than a
+  bare `has_exit` flag, so the emitter drops only the case's own edge and leaves a
+  jump anywhere else alone. `dl_G_MOVEWORD` went from 6 gotos to 3.
+- Recorded from the investigation, because it cost several probes: the CLI
+  decompiles callees to recover their prototypes, so a debug print keyed on
+  nothing interleaves several functions' traces, and the *rendered* run is the
+  last of them. Every probe here now prints `self.data.entry` and the trace is
+  read unsorted; the sorted view had me chasing merges that belonged to a
+  different function.
 - Deleted the edge-scoring fallback in `rule_goto`. It had no counterpart in
   `blockaction.cc`: `selectGoto` offers only what `TraceDAG` produced, and when
   that list is exhausted with no loop left it calls `clipExtraRoots` and otherwise
