@@ -6,6 +6,15 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- `queryMapAddress_single`'s remaining `for` is now diagnosed rather than guessed
+  at, and the cause is upstream of the recogniser. Instrumenting every rejection
+  showed both candidate loops failing at one point: the loop variable's
+  loop-carried input is defined in the tail by a `MULTIEQUAL`, and Ghidra rejects
+  exactly that too - `if (possibleIterate->isMarker()) continue; // No iteration in
+  tail`. So the rule agrees; what differs is the graph. Ghidra's tail holds a real
+  arithmetic definition where ours holds a phi, which means a merge Ghidra performs
+  and we do not. Nothing in `forloop.rs` can close this, and no further guard there
+  should be attempted until that phi is gone.
 - A loop's tail is the block holding the *body's last op*, which is what
   `BlockWhileDo::finalTransform` uses (`getBlock(1)->lastOp()`), so the body's own
   printing order names it. Ours searched every block in the body for one that jumps
