@@ -502,6 +502,28 @@ impl Pipeline {
         memory: Option<&NativeMemory<'_>>,
         symbols: Option<&dyn Fn(u64) -> Option<String>>,
     ) -> BTreeMap<u64, NativeCallPrototype> {
+        self.call_prototypes_to_depth(caller, instruction_limit, abi, memory, symbols, 1)
+    }
+
+    /// Recovers each direct callee's prototype, giving the callee its own
+    /// callees' prototypes down to `depth`.
+    ///
+    /// A callee's parameters are only visible once its own calls carry
+    /// arguments: `sub_8005d01c` forwards all three of its arguments to
+    /// `sub_8009d098`, so decompiling it with no prototype for that call
+    /// recovers no parameters, and the caller then sees arity zero and drops
+    /// the arguments it computed. Ghidra has the whole program's prototypes
+    /// available; one level of recursion is what makes a forwarding callee
+    /// readable without decompiling transitively forever.
+    fn call_prototypes_to_depth(
+        &self,
+        caller: &NativeFunction,
+        instruction_limit: usize,
+        abi: Option<&ventris_target::Abi>,
+        memory: Option<&NativeMemory<'_>>,
+        symbols: Option<&dyn Fn(u64) -> Option<String>>,
+        depth: usize,
+    ) -> BTreeMap<u64, NativeCallPrototype> {
         let architecture = match self.architecture {
             Some(architecture) => architecture,
             None => return BTreeMap::new(),
@@ -514,12 +536,23 @@ impl Pipeline {
                 let callee = self
                     .lift_at(*target, instruction_limit.clamp(1, 1024))
                     .ok()?;
-                let document = NativeDecompiler.decompile_with_abi_memory_and_symbols(
+                let nested = depth.checked_sub(1).map(|next| {
+                    self.call_prototypes_to_depth(
+                        &callee,
+                        instruction_limit,
+                        abi,
+                        memory,
+                        symbols,
+                        next,
+                    )
+                });
+                let document = NativeDecompiler.decompile_with_call_prototypes(
                     architecture,
                     &callee,
                     abi,
                     memory,
                     symbols,
+                    nested.as_ref(),
                 );
                 Some((
                     *target,
