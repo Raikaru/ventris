@@ -282,6 +282,13 @@ All notable Ventris changes are documented here.
   table-backed switch the rule can claim, and `dl_G_MOVEWORD`'s `switch 0 vs 1`
   is a `BRANCHIND` whose table this pipeline does not recover. The rule is
   correct and tested; it has no corpus function to improve yet.
+- A member the body writes is now a member the structure declares. The graph
+  emitter named a field from its offset's unsigned bit pattern and the source
+  reconstruction named it from the signed value, so a structure reached through a
+  global-pointer register declared `field_neg_47e6` while the body wrote
+  `gp->field_ffffb81a` - a member that does not exist. Both spell it
+  `field_neg_<magnitude>` now, and the access rewriter recognises that spelling
+  instead of clamping a negative offset to zero.
 - A structure's layout starts where its first field does, not at zero. One
   reached through a global-pointer register has negative offsets, and measuring
   padding from zero reported every field as overlapping a predecessor it does not

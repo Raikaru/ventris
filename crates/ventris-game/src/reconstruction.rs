@@ -366,7 +366,7 @@ fn field_name_for_offset(offset: i64) -> String {
 /// It names the member after the offset, which is all it knows. This pass holds
 /// the nominal name, so it has to recognise that spelling to replace it.
 fn recovered_member(parameter: &str, offset: i64) -> String {
-    format!("{parameter}->field_{offset:x}")
+    format!("{parameter}->{}", field_name_for_offset(offset))
 }
 
 fn rewrite_recovered_field_accesses(
@@ -428,7 +428,7 @@ fn rewrite_recovered_field_accesses(
             // field name reach the output at all: without it the accesses stayed
             // `p->field_4a4`, the structure never matched a parameter, and the
             // declared type fell back to `uintptr_t`.
-            let recovered = recovered_member(&parameter, field.offset.max(0));
+            let recovered = recovered_member(&parameter, field.offset);
             *body = body.replace(&format!("({recovered}[0])"), &member);
             *body = body.replace(&format!("({recovered})"), &member);
             *body = replace_bare_member(body, &recovered, &member);

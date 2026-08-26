@@ -1057,6 +1057,22 @@ fn pointer_to_value(factory: &TypeFactory, ty: DataType, bits: u32) -> DataType 
     factory.get_type_pointer_with_bits(pointee, bits)
 }
 
+/// A field's name from its offset.
+///
+/// An offset reached through a global-pointer register is negative, and the
+/// source reconstruction names those `field_neg_<magnitude>`. Naming them here
+/// by their unsigned bit pattern instead produced `gp->field_ffffb81a` in the
+/// body beside a declared `field_neg_47e6` - a member the structure does not
+/// have. The two spellings have to agree.
+fn field_name(offset: u32) -> String {
+    let signed = offset as i32;
+    if signed < 0 {
+        format!("field_neg_{:x}", signed.unsigned_abs())
+    } else {
+        format!("field_{offset:x}")
+    }
+}
+
 fn pointer_after_arithmetic(
     data: &Funcdata,
     operation: &super::GraphOp,
@@ -1280,7 +1296,7 @@ fn recover_access_types(
                 .map(|(offset, (_, ty))| Field {
                     offset: *offset,
                     ty: ty.clone(),
-                    name: format!("field_{offset:x}"),
+                    name: field_name(*offset),
                 })
                 .collect();
             factory.get_type_struct_fields(format!("struct_{:x}", root.0), fields)
