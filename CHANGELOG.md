@@ -6,6 +6,20 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- The remaining loop residual is located precisely, and it is a structurer
+  capability gap rather than emitter cleanup. `decompSZS_subroutine__FPUcPUc`
+  recovers the oracle's two inner `do`/`while` loops but renders the outer one as
+  `while (1)` with four `goto`s to two exit labels, where the oracle has
+  `do { ... } while (param_2 < pbVar10)` and no gotos: `rule_do_while` does not
+  attach the bottom test when the loop carries more than one exit edge, so the
+  loop becomes an infinite one with jumps out. Three emitter-side attempts were
+  measured and reverted because they changed no output - pruning a jump across
+  intervening labels, extending the trailing-jump pruner past the first following
+  label (which also broke the standing rule that a trailing jump out of a *loop*
+  is an early exit, not a fallthrough), and collapsing a run of consecutive
+  labels onto the last. `queryMapAddress_single` renders `for=0` against 2 for
+  the same reason: its loops are recovered, but not in the shape that carries an
+  initializer and an iterator.
 - `preamble`'s six missing calls are closed. Two pieces were needed. The trivial
   jump model now evaluates a destination built out of constants: MIPS `jr` clears
   the target's low bits, so a folded address arrives as
