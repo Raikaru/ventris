@@ -6,6 +6,31 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- Give every direct callee its own call prototypes when recovering a caller.
+  `direct_call_prototypes` decompiled each callee with no prototypes for the
+  callee's own calls, so a forwarding callee recovered no parameters and the
+  caller then read arity zero and discarded the arguments it had computed.
+  `osContGetReadData` rendered `(void)` and called `sub_8005d01c()` empty; it now
+  renders `uint32_t arg0` and passes three arguments. `agrees` 25 -> 26,
+  `missing-parameters` 1 -> 0.
+- Require active output evidence before promoting a return value, porting
+  `AncestorRealistic` and `ancestorOpUse` with the COPY/PIECE ancestry that keeps
+  a direct pass-through valid. `agrees` 24 -> 25, `return-presence` 3 -> 1.
+- Measured negatives, recorded so they are not re-attempted blind: two of the
+  three `call-census` entries are census-tool artifacts rather than decompiler
+  defects. `changeGroupID__7JKRHeapFUc` emits one indirect call and so does the
+  oracle - `uVar2()` against `(**(code **)(*param_1 + 0x40))()` - and the lexical
+  counter cannot see the double-pointer spelling; `__FrameCallback__Fl` has both
+  real calls on both sides, and the 7-versus-8 is two `CONCAT44` pseudo-calls
+  counted in the oracle against one cast counted in ours. Only `preamble` is a
+  real defect: `sleigh_flow` stops at `0x80001030`'s `jr t2`, so the
+  `0x80001050` tail holding five `setCopReg` and the TLB write is never lifted.
+  Reclassifying `BRANCHIND` as fall-through rather than return changes no census
+  family, so the fix is jump-target discovery, not flow classification.
+- Rejected on measurement: extending the output-ancestry check to reject values
+  reaching stores makes `TRK_fill_mem` void as the oracle has it, and takes two
+  other functions' return values away with it - `return-presence` 1 -> 3 for no
+  `agrees` gain.
 - Added `ventris_decompiler::graph`, a mutable p-code data-flow graph ported
   from Ghidra 12.1.3's `Funcdata`/`Varnode`/`PcodeOp` object model: one varnode
   per definition, descendant lists, operand replacement, operation insertion and
