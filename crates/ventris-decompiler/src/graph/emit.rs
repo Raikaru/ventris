@@ -170,6 +170,9 @@ pub fn emit_structured(
     // one immediately following the loop but a later one, and the labels between
     // them only disappear here. Rewriting the jump can leave its label unneeded,
     // so the pruning runs once more.
+    // Before the loop-edge rewrite: a jump to a bare return is a return, not an
+    // exit edge, and duplicating it is what leaves the label unneeded.
+    inline_returns_at_jumps(&mut statements);
     rewrite_loop_edge_gotos(&mut statements, None);
     for _ in 0..8 {
         drop_labels_nothing_needs(&mut statements);
@@ -2262,6 +2265,68 @@ enum Emission {
 /// construct has claimed that edge and Ghidra's `BlockSwitch::emit` never prints
 /// it - the edge belongs to the switch, not to the case. Emitting both put a
 /// `goto` in front of every `break` in `dl_G_MOVEWORD`.
+/// Replaces a jump to a bare `return` with the return itself.
+///
+/// `uVar18 = 0xffffffff; goto L;` where `L: return uVar18;` is `return uVar18;`.
+/// Control transfers straight to the label, so nothing can change the value on the
+/// way and the copy reads the same thing. Ghidra duplicates a return rather than
+/// jumping to one, which is why `decompSZS_subroutine`'s early exit shows no `goto`
+/// in the oracle. The conditional form becomes `IfReturn`, which the renderer
+/// already prints as `if (c) return v;`.
+fn inline_returns_at_jumps(statements: &mut Vec<NativeStatement>) {
+    let mut returns: BTreeMap<u64, Option<Expr>> = BTreeMap::new();
+    collect_labelled_returns(statements, &mut returns);
+    if returns.is_empty() {
+        return;
+    }
+    substitute_returns(statements, &returns);
+}
+
+/// Every label whose next statement is a `return`, with the value it returns.
+fn collect_labelled_returns(
+    statements: &[NativeStatement],
+    found: &mut BTreeMap<u64, Option<Expr>>,
+) {
+    for (index, statement) in statements.iter().enumerate() {
+        if let NativeStatement::Label(label) = statement
+            && let Some(NativeStatement::Return(value)) = statements.get(index + 1)
+        {
+            found.insert(*label, value.clone());
+        }
+        for nested in nested_bodies_ref(statement) {
+            collect_labelled_returns(nested, found);
+        }
+    }
+}
+
+fn substitute_returns(
+    statements: &mut Vec<NativeStatement>,
+    returns: &BTreeMap<u64, Option<Expr>>,
+) {
+    for statement in statements.iter_mut() {
+        match statement {
+            NativeStatement::Goto(target) => {
+                if let Some(value) = returns.get(target) {
+                    *statement = NativeStatement::Return(value.clone());
+                }
+            }
+            NativeStatement::IfGoto { condition, target } => {
+                if let Some(value) = returns.get(target) {
+                    *statement = NativeStatement::IfReturn {
+                        condition: condition.clone(),
+                        value: value.clone(),
+                    };
+                }
+            }
+            other => {
+                for nested in nested_bodies(other) {
+                    substitute_returns(nested, returns);
+                }
+            }
+        }
+    }
+}
+
 /// Rewrites a jump to a loop's own edges as `continue` or `break`.
 ///
 /// A jump to the label that ends a loop's body says "start the next iteration",
@@ -3231,6 +3296,58 @@ mod tests {
         retain_live_assignments(&mut statements, &read);
         assert_eq!(statements[0], assignment);
     }
+    /// `uVar18 = -1; goto L;` with `L: return uVar18;` is `return uVar18;`.
+    /// Control transfers straight to the label, so nothing can change the value on
+    /// the way. Ghidra duplicates a return rather than jumping to one, which is why
+    /// `decompSZS_subroutine`'s early exit shows no `goto` in the oracle.
+    #[test]
+    fn a_jump_to_a_bare_return_becomes_the_return() {
+        let value = || {
+            Some(Expr::Temporary {
+                name: "result".into(),
+                width: 4,
+            })
+        };
+        let mut statements = vec![
+            NativeStatement::IfElse {
+                condition: Expr::Constant { value: 1, width: 1 },
+                then_body: vec![NativeStatement::Goto(0x1000)],
+                else_body: vec![NativeStatement::IfGoto {
+                    condition: Expr::Constant { value: 0, width: 1 },
+                    target: 0x1000,
+                }],
+            },
+            NativeStatement::Label(0x1000),
+            NativeStatement::Return(value()),
+        ];
+        inline_returns_at_jumps(&mut statements);
+        assert_eq!(
+            statements[0],
+            NativeStatement::IfElse {
+                condition: Expr::Constant { value: 1, width: 1 },
+                then_body: vec![NativeStatement::Return(value())],
+                else_body: vec![NativeStatement::IfReturn {
+                    condition: Expr::Constant { value: 0, width: 1 },
+                    value: value(),
+                }],
+            },
+            "both the bare and the conditional jump become returns"
+        );
+
+        // A label followed by anything else is not a return to duplicate.
+        let mut other = vec![
+            NativeStatement::Goto(0x2000),
+            NativeStatement::Label(0x2000),
+            NativeStatement::Expression(Expr::Constant { value: 7, width: 4 }),
+        ];
+        inline_returns_at_jumps(&mut other);
+        assert_eq!(
+            other[0],
+            NativeStatement::Goto(0x2000),
+            "only a jump straight to a return is one"
+        );
+    }
+
     /// `decompSZS_subroutine` matched the oracle's `while`, `do` and `if` counts
     /// exactly and still printed two jumps: one to the label ending the loop body,
     /// which is `continue`, and one to a label two constructs above the loop,

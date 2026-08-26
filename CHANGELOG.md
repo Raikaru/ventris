@@ -6,6 +6,13 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- **`agrees` is 31 of 37 (84%)** and `unstructured-control-flow` is **empty**.
+  A jump to a bare `return` now prints as the return. `uVar18 = -1; goto L;` with
+  `L: return uVar18;` is `return uVar18;` - control transfers straight to the label,
+  so nothing can change the value on the way - and Ghidra duplicates a return rather
+  than jumping to one. The conditional form becomes `IfReturn`, which the renderer
+  already prints as `if (c) return v;`. `decompSZS_subroutine` now matches the
+  oracle exactly: 3 `while`, 3 `do`, 19 `if`, no `goto`.
 - **`agrees` is 30 of 37 (81%)** after repairing the census itself, which had been
   measuring a call spelling rather than a call. `call_site_count` required an
   identifier before the argument list, so neither renderer's indirect call was
