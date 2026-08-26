@@ -842,6 +842,18 @@ impl<'a> Graph<'a> {
             if self.nodes[clause].successors.len() != 1 {
                 continue;
             }
+            // Ghidra's `if (clauseblock->isSwitchOut()) continue;` - "Don't use
+            // switch (possibly with goto edges)". Only the head was checked
+            // here, so a clause that itself ends in a computed jump could be
+            // absorbed into an `if` body, hiding the multi-way branch.
+
+            // Ghidra's `if (clauseblock->isSwitchOut()) continue;` - "Don't use
+            // switch (possibly with goto edges)". Only the head was checked
+            // here, so a clause that itself ends in a computed jump could be
+            // absorbed into an `if` body, hiding the multi-way branch.
+            if self.is_switch_out(clause) {
+                continue;
+            }
             if self.nodes[clause].successors[0] != other {
                 continue;
             }
@@ -2387,6 +2399,55 @@ mod tests {
         assert!(
             !graph.is_complex(simple, 2),
             "one comparison plus the branch is exactly the ceiling"
+        );
+    }
+
+    /// Ghidra's `if (clauseblock->isSwitchOut()) continue;` - "Don't use switch
+    /// (possibly with goto edges)". Only the head was checked here, so a clause
+    /// that itself ends in a computed jump could be absorbed into an `if` body,
+    /// hiding the multi-way branch.
+    #[test]
+    fn an_if_refuses_a_clause_that_ends_in_a_computed_jump() {
+        let build = |computed: bool| {
+            let mut data = Funcdata::default();
+            data.entry = 0x1000;
+            let head = data.new_block(0x1000);
+            let clause = data.new_block(0x1010);
+            let join = data.new_block(0x1020);
+            conditional(&mut data, head, 0x1010);
+            data.add_edge(head, clause);
+            data.add_edge(head, join);
+            data.add_edge(clause, join);
+            if computed {
+                let target = data.new_varnode(ventris_lifter::REGISTER_SPACE, 12, 4);
+                let branch = data.new_op(op::BRANCHIND, seq(0x1010), vec![target]);
+                data.op_insert_end(branch, clause);
+            }
+            data
+        };
+
+        let plain = build(false);
+        let mut graph = Graph::of(&plain, &[]);
+        let node = graph
+            .nodes
+            .iter()
+            .position(|candidate| candidate.entry == GraphBlockId(0))
+            .expect("the head is a node");
+        assert!(
+            graph.rule_if_no_exit(node),
+            "an ordinary clause is absorbed as an if body"
+        );
+
+        let switched = build(true);
+        let mut graph = Graph::of(&switched, &[]);
+        let node = graph
+            .nodes
+            .iter()
+            .position(|candidate| candidate.entry == GraphBlockId(0))
+            .expect("the head is a node");
+        assert!(
+            !graph.rule_if_no_exit(node),
+            "a clause ending in a computed jump is left for the switch rule"
         );
     }
 

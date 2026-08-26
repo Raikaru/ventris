@@ -6,6 +6,18 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- Audited `ruleBlockProperIf` and `ruleBlockIfElse` against ours the same way and
+  closed the portable gap: Ghidra checks the *clause* for `isSwitchOut`, not only
+  the head - "Don't use switch (possibly with goto edges)" - so a clause that
+  itself ends in a computed jump could be absorbed into an `if` body here, hiding
+  the multi-way branch from the switch rule that should claim it. Inert on the
+  present corpus, with a regression test asserting an ordinary clause is still
+  absorbed and one ending in `BRANCHIND` is not.
+- Still outstanding from that audit, recorded rather than guessed: `isDecisionOut`
+  on the head's edges, which Ghidra requires in both rules to avoid using a
+  loop-bottom or exit edge as a decision. It needs the loop-exit marking to be
+  consulted at rule time rather than only during collapse, so it is a real change
+  rather than a one-line guard.
 - Ported `isInteriorGotoTarget` too, the second of the three guards
   `CollapseStructure::ruleBlockOr` has and ours lacked. A block an unstructured
   jump enters is not the tail of one condition: control can arrive there without
