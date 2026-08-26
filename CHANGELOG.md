@@ -6,6 +6,39 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- Measured, not landed: `preamble`'s six missing calls are recoverable and the
+  fix does not pay for itself yet. MIPS `jr` masks its target, so the resolved
+  destination reaches `recover_trivial` as `INT_AND(INT_2COMP(2), target)`
+  through a COPY rather than as a bare constant, and `constant_value` reports it
+  unknown. Evaluating that chain and routing a folded-constant destination to the
+  trivial model before the table models - which all fail on a target already
+  known - lets multistage discovery reach `0x80001050` and emit exactly the
+  oracle's five `setCopReg` and `TLB_write_indexed_entry`, taking `call-census`
+  3 -> 2. It costs `unstructured-control-flow` 4 -> 6: the resolved BRANCHIND
+  still prints `goto *(0x80001050 & ...)` ahead of the block it reaches, and
+  `vm_boot` regresses identically, so `agrees` drops 26 -> 25.
+- Found while chasing that goto: `ActionSwitchNorm` is ported, unit-tested, and
+  registered in no pipeline - it has never run. Registering it after the
+  expression fixed point (normalization needs the folded destination) does remove
+  both gotos, `unstructured-control-flow` 6 -> 4, but its pre-existing
+  branch-input fold then damages a switch that previously worked:
+  `missing-conditional` 5 -> 6 and `missing-loop-or-switch` 2 -> 3. Dropping the
+  requirement that the graph already reach the target gives `call-census` 3 -> 4
+  with the same two regressions. All three variants are neutral or worse than
+  baseline on `agrees`, so none landed; the port of the branch-input fold needs
+  auditing against `JumpTable::foldInNormalization` before the pass is enabled.
+- `__FrameCallback__Fl` (`goto` 2 vs 0, `if` 3 vs 7) is blocked on
+  intra-instruction p-code control flow: a PPC paired-single lifts to a
+  `CALLOTHER` guarded by a `CBRANCH` whose target is in CONST space, meaning
+  "skip N p-code ops within this instruction". `block_leaders` in graph.rs builds
+  blocks purely from `function.edges`, which are machine addresses, so such a
+  branch is never a block boundary and its guard is lost. Ghidra's basic blocks
+  are p-code level; matching that is a structural change to `from_lifted` and
+  everything keyed on address-to-block.
+- `queryMapAddress_single`'s missing `for` loops are blocked earlier than the
+  loop finder: its condition reaches a free input varnode with no definition, so
+  `forloop.rs` cannot locate the head `MULTIEQUAL` or the iterator. The loop
+  code is not at fault; the value's definition is missing upstream.
 - Link a narrow register read to an overlapping wider definition regardless of
   offset. `tightest_containing` searched only for a wider definition at the
   *same* offset, but a big-endian bank writes the whole register at its base and
