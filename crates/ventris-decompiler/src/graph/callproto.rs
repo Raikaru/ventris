@@ -391,7 +391,7 @@ fn guard_is_for_call(data: &Funcdata, guard: OpId, call: OpId) -> bool {
 /// immediately preceding `INDIRECT`; any other reader makes a realistic value
 /// inactive (`fspec.cc` 5626-5643). The graph has no call-spec edge on a guard,
 /// so adjacency in the containing block is the available equivalent.
-fn only_call_use(
+pub(super) fn only_call_use(
     data: &Funcdata,
     value: VarnodeId,
     call: OpId,

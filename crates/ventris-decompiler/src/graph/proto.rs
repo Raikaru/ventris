@@ -26,11 +26,32 @@ use ventris_pcode::op;
 use super::guard::Location;
 use super::{Funcdata, OpId, VarnodeId};
 
+/// What `checkInputTrialUse` decided about a candidate parameter.
+///
+/// Ghidra's `ParamTrial` carries three states, not two, and the difference
+/// drives `ParamListStandard::fillinMap`:
+///
+/// * `Active` - realistic ancestry and this call is its only reader
+///   (`markActive`).
+/// * `Inactive` - a value the function received but never wrote, "not likely a
+///   parameter but maybe" (`markInactive`). A run of these below an active trial
+///   is a hole the convention had to pass through, so it is filled in.
+/// * `NoUse` - "An ancestor is unaffected, an unusual input, or killed by a
+///   call" (`markNoUse`). `forceNoUse` never fills these and forces every later
+///   trial inactive, so the argument list cannot be extended past one.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum TrialState {
+    Active,
+    Inactive,
+    NoUse,
+}
+
 /// One candidate parameter, before it is known to be used.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 struct Trial {
     location: Location,
     value: VarnodeId,
+    state: TrialState,
     used: bool,
 }
 
@@ -69,16 +90,31 @@ pub fn recover_call_arguments(
         if trials.is_empty() {
             continue;
         }
-        // A known callee states its own arity. Ghidra reaches the same place
-        // through a locked input prototype, where every parameter's trial is
-        // marked active outright (`ActionFuncLink::funcLinkInput`).
-        match target.and_then(arity_of) {
-            Some(arity) => {
-                for (index, trial) in trials.iter_mut().enumerate() {
-                    trial.used = index < arity;
-                }
+        if std::env::var("VENTRIS_PROBE_TRIALS").is_ok() {
+            eprintln!(
+                "trials @{:#x} arity={:?} {:?}",
+                data.op(call).seq.address,
+                target.and_then(arity_of),
+                trials
+                    .iter()
+                    .map(|trial| (trial.location.offset, trial.used))
+                    .collect::<Vec<_>>()
+            );
+        }
+        decide_trials(&mut trials, argument_sections);
+        // A known callee's arity may only *extend* the list. Ghidra constrains a
+        // call site by the callee's parameters exactly when the callee's input
+        // prototype is locked, where `ActionFuncLink::funcLinkInput` marks every
+        // parameter's trial active outright. An unlocked, *recovered* callee
+        // prototype constrains nothing: it is a guess made from the callee's own
+        // body, and truncating the caller's trials to it threw away arguments
+        // the trials had already justified - `getFirstFile__10JKRArchiveCFPCc`
+        // lost two of `FUN_8006909c`'s three, and the values feeding them then
+        // died as unread, emptying the `if` arm that computed them.
+        if let Some(arity) = target.and_then(arity_of) {
+            for trial in trials.iter_mut().take(arity) {
+                trial.used = true;
             }
-            None => decide_trials(&mut trials, argument_sections),
         }
         let arguments: Vec<VarnodeId> = trials
             .iter()
@@ -110,14 +146,17 @@ const MAX_INACTIVE_CHAIN: usize = 2;
 
 /// Decides which trials are parameters.
 ///
-/// `ParamListStandard::fillinMap`, whose load-bearing step is
-/// `forceInactiveChain`. The rule is *not* "stop at the first location nobody
-/// wrote": a convention may leave a slot untouched and still use the next one,
-/// so up to `MAX_INACTIVE_CHAIN` consecutive unused slots are holes to be filled
-/// rather than the end of the list. Only a longer run ends it, and then
-/// everything after that run is unused as well. Each resource section is decided
-/// on its own, because a run of untouched integer registers says nothing about
-/// the floating-point ones.
+/// `ParamListStandard::fillinMap`: `forceNoUse`, then `forceInactiveChain`, then
+/// "mark every active trial as used".
+///
+/// The rule is *not* "stop at the first location nobody wrote". A convention may
+/// leave a slot untouched and still use the next one, so up to
+/// `MAX_INACTIVE_CHAIN` consecutive *inactive* slots are holes to be filled
+/// rather than the end of the list. A `NoUse` trial is different: it is not a
+/// hole, it is proof the convention stopped, and `forceNoUse` forces every later
+/// trial inactive so nothing beyond it can anchor a fill. Each resource section
+/// is decided on its own, because a run of untouched integer registers says
+/// nothing about the floating-point ones.
 fn decide_trials(trials: &mut [Trial], argument_sections: &[Vec<Location>]) {
     let mut start = 0;
     for section in argument_sections {
@@ -125,11 +164,25 @@ fn decide_trials(trials: &mut [Trial], argument_sections: &[Vec<Location>]) {
         if start >= stop {
             break;
         }
+        // `forceNoUse`: once a slot is definitely not used, nothing after it is
+        // active either.
+        let mut seen_no_use = false;
+        for index in start..stop {
+            if seen_no_use {
+                trials[index].state = TrialState::Inactive;
+            } else if trials[index].state == TrialState::NoUse {
+                seen_no_use = true;
+            }
+        }
+        // `forceInactiveChain`, with `maxchain = 2`.
         let mut chain = 0;
         let mut seen_chain = false;
         let mut last_active = None;
         for index in start..stop {
-            if trials[index].used {
+            if trials[index].state == TrialState::NoUse {
+                continue;
+            }
+            if trials[index].state == TrialState::Active {
                 chain = 0;
                 if !seen_chain {
                     last_active = Some(index);
@@ -141,16 +194,20 @@ fn decide_trials(trials: &mut [Trial], argument_sections: &[Vec<Location>]) {
                 }
             }
             if seen_chain {
-                trials[index].used = false;
+                trials[index].state = TrialState::Inactive;
             }
         }
-        // Fill the holes: an unused slot below the last real parameter is still
-        // a parameter, because the convention had to pass it to reach the ones
-        // above it.
+        // "Across the range of active trials, fill in holes of inactive trials".
         if let Some(last_active) = last_active {
             for trial in &mut trials[start..=last_active] {
-                trial.used = true;
+                if trial.state == TrialState::Inactive {
+                    trial.state = TrialState::Active;
+                }
             }
+        }
+        // "Mark every active trial as used".
+        for trial in &mut trials[start..stop] {
+            trial.used = trial.state == TrialState::Active;
         }
         start = stop;
     }
@@ -174,10 +231,24 @@ fn register_trials(data: &Funcdata, call: OpId, argument_sections: &[Vec<Locatio
             // Slot zero is the callee, so the candidates start at one - Ghidra's
             // `ParamTrial::slotbase`.
             let value = operands.get(index + 1).copied()?;
+            // `checkInputTrialUse`: active when the ancestry is realistic *and*
+            // `ancestorOpUse` agrees that this call is its only reader; inactive
+            // when the value is an unwritten function input - "not likely a
+            // parameter but maybe"; definitely not used otherwise.
+            let state = if is_used(data, value)
+                && super::callproto::only_call_use(data, value, call, &mut BTreeSet::new())
+            {
+                TrialState::Active
+            } else if data.varnode(value).def.is_none() && !data.varnode(value).flags.constant {
+                TrialState::Inactive
+            } else {
+                TrialState::NoUse
+            };
             Some(Trial {
                 location,
                 value,
-                used: is_used(data, value),
+                state,
+                used: false,
             })
         })
         .collect()

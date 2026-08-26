@@ -1977,11 +1977,34 @@ impl NativeDecompiler {
         // merge for every address the function mentions.
         let mut locations = graph::guard::heritaged_locations(&data);
         locations.retain(|location| location.space == REGISTER_SPACE);
-        // A convention's parameter locations get a trial whether or not this
-        // function mentions them. A forwarding function passes arguments it
-        // never touches, so waiting for one to appear as a varnode loses them.
+        // Ghidra calls `Heritage::guard` once per address range *under
+        // heritage*, so a call only ever gets a parameter trial for a location
+        // the function mentions. Seeding the whole convention instead put
+        // registers the function never names under heritage; inside a loop the
+        // guard for one of those becomes a merge of its own previous guard, which
+        // looks exactly like a real argument, and `osContGetReadData`'s three-
+        // argument call came out with eight.
+        //
+        // The one case that does need seeding is a forwarding call: the callee's
+        // recovered arity says how many convention slots are in play even though
+        // this function never touches them. So the seed is bounded by the widest
+        // arity any call target claims, not by the whole convention.
+        let forwarded = call_prototypes
+            .map(|prototypes| {
+                function
+                    .calls
+                    .iter()
+                    .filter_map(|target| prototypes.get(target))
+                    .map(|prototype| prototype.parameters.len())
+                    .max()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0);
         if let Some(abi) = abi {
-            for vnode in abi_argument_vnodes(architecture, abi) {
+            for vnode in abi_argument_vnodes(architecture, abi)
+                .into_iter()
+                .take(forwarded)
+            {
                 locations.insert(graph::guard::Location {
                     space: vnode.space,
                     offset: vnode.offset,
@@ -1989,6 +2012,7 @@ impl NativeDecompiler {
                 });
             }
         }
+        let touched = locations.clone();
         let mut effects = graph::guard::CallEffects::default();
         if let Some(abi) = abi {
             for name in [Some(abi.stack_pointer), abi.frame_pointer]
@@ -2047,7 +2071,13 @@ impl NativeDecompiler {
             .map(|abi| {
                 abi_argument_sections(architecture, abi)
                     .iter()
-                    .map(|section| section.iter().map(to_location).collect())
+                    .map(|section| {
+                        section
+                            .iter()
+                            .map(to_location)
+                            .filter(|location| touched.contains(location))
+                            .collect()
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -2397,6 +2427,17 @@ impl NativeDecompiler {
         // and emission reads types to spell a field access. Ghidra recovers types
         // once more before it prints for the same reason.
         data.invalidate_types();
+        if std::env::var("VENTRIS_PROBE_CALLS").is_ok() {
+            for (id, operation) in data.live_ops() {
+                if matches!(operation.opcode, op::CALL | op::CALLIND) {
+                    eprintln!(
+                        "final call {id:?} @{:#x}: {} operands",
+                        operation.seq.address,
+                        operation.inputs.len()
+                    );
+                }
+            }
+        }
         // `ActionDominantCopy` belongs to Ghidra's merge phase, which runs after
         // simplification. Running it before the rounds meant computing the whole
         // variable merge over the largest version of the graph — 11,500 varnodes
