@@ -158,15 +158,10 @@ fn output_ancestry_step(data: &Funcdata, value: VarnodeId, seen: &mut BTreeSet<V
     }
 }
 
-/// Follow all descendants of an ancestor and reject uses other than the
-/// matched `RETURN`. This mirrors `Funcdata::onlyOpUse`
-/// (`funcdata_varnode.cc:1836-1934`).
-fn only_op_use(
-    data: &Funcdata,
-    value: VarnodeId,
-    return_op: OpId,
-    seen: &mut BTreeSet<VarnodeId>,
-) -> bool {
+/// Follow one returned value's descendants and reject uses other than a
+/// RETURN. This is the graph equivalent of `Funcdata::onlyOpUse`
+/// (`funcdata_varnode.cc:1836-1934`) for the output trial.
+fn only_return_use(data: &Funcdata, value: VarnodeId, seen: &mut BTreeSet<VarnodeId>) -> bool {
     if !seen.insert(value) {
         return true;
     }
@@ -175,9 +170,8 @@ fn only_op_use(
         let Some(operation) = data.opcode_of(descendant).map(|_| data.op(descendant)) else {
             continue;
         };
-        if operation.opcode == op::RETURN
-            && (descendant == return_op || operation.inputs.get(1).copied() == Some(value))
-        {
+        if operation.opcode == op::RETURN && operation.inputs.get(1).copied() == Some(value) {
+            // Multiple RETURNs carrying the same value are one output trial.
             continue;
         }
         match operation.opcode {
@@ -192,7 +186,7 @@ fn only_op_use(
             | op::RETURN => return false,
             _ => {
                 if let Some(output) = operation.output
-                    && !only_op_use(data, output, return_op, seen)
+                    && !only_return_use(data, output, seen)
                 {
                     return false;
                 }
@@ -202,55 +196,10 @@ fn only_op_use(
     true
 }
 
-/// Port `Funcdata::ancestorOpUse` for a function output. At the top ancestor
-/// Ghidra tests all descendants, while COPY/MULTIEQUAL paths recurse according
-/// to the operation shape (`funcdata_varnode.cc:1948-2025`).
-fn ancestor_op_use(
-    data: &Funcdata,
-    value: VarnodeId,
-    return_op: OpId,
-    depth: usize,
-    seen: &mut BTreeSet<VarnodeId>,
-) -> bool {
-    if depth == 0 || !seen.insert(value) {
-        return false;
-    }
-    let varnode = data.varnode(value);
-    let Some(def) = varnode.def else {
-        return varnode.flags.input && only_op_use(data, value, return_op, &mut BTreeSet::new());
-    };
-    let operation = data.op(def);
-    match operation.opcode {
-        op::INDIRECT => operation.inputs.first().copied().is_some_and(|input| {
-            ancestor_op_use(data, input, return_op, depth - 1, seen)
-        }),
-        op::MULTIEQUAL => operation.inputs.iter().copied().any(|input| {
-            ancestor_op_use(data, input, return_op, depth - 1, seen)
-        }),
-        // Internal temporaries are transparent to ancestorOpUse. A machine
-        // register COPY is the top ancestor and is checked by onlyOpUse.
-        op::COPY if varnode.flags.unique => operation.inputs.first().copied().is_some_and(
-            |input| ancestor_op_use(data, input, return_op, depth - 1, seen),
-        ),
-        op::SUBPIECE if varnode.flags.unique => operation.inputs.first().copied().is_some_and(
-            |input| ancestor_op_use(data, input, return_op, depth - 1, seen),
-        ),
-        op::PIECE if varnode.flags.unique => operation.inputs.iter().copied().any(|input| {
-            ancestor_op_use(data, input, return_op, depth - 1, seen)
-        }),
-        op::CALL | op::CALLIND | op::CALLOTHER => false,
-        _ => only_op_use(data, value, return_op, &mut BTreeSet::new()),
-    }
-}
-
-/// Return whether an output value satisfies Ghidra's ancestry and use checks.
-pub(crate) fn return_value_is_active(
-    data: &Funcdata,
-    return_op: OpId,
-    value: VarnodeId,
-) -> bool {
+/// Return whether an output value satisfies both Ghidra output-trial checks.
+pub(crate) fn return_value_is_active(data: &Funcdata, value: VarnodeId) -> bool {
     output_ancestry_allows(data, value, &mut BTreeSet::new())
-        && ancestor_op_use(data, value, return_op, 8, &mut BTreeSet::new())
+        && only_return_use(data, value, &mut BTreeSet::new())
 }
 
 /// Return the first non-dead basic block, if the graph has one.
@@ -453,7 +402,7 @@ impl ActionOutputPrototype {
             let mut kept = Vec::with_capacity(inputs.len());
             kept.push(inputs[0]);
             for value in inputs.iter().copied().skip(1) {
-                if return_value_is_active(data, return_op, value) {
+                if return_value_is_active(data, value) {
                     kept.push(value);
                 }
             }
