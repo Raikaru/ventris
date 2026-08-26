@@ -6,6 +6,19 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- A jump to one of a loop's own edges now prints as the keyword that means it: to
+  the label ending the loop body it is `continue`, to the label just past the loop
+  it is `break`. The rewrite runs *after* the label pruning, because the label such
+  a jump names is often not the one immediately following the loop and the ones
+  between only disappear there, and it handles the conditional form `if (c) goto L`
+  as well as the bare jump - which is the form a loop's own back edge usually takes,
+  and missing it was why the first attempt changed nothing. It refuses to descend
+  into a nested loop or a `switch`, where the keyword would bind to that instead.
+  `decompSZS_subroutine` went from 2 jumps to 1, with its `while`, `do` and `if`
+  counts already matching the oracle exactly.
+- The jump that remains there is *correctly* refused: one statement still follows
+  the loop in its enclosing body, so falling out does not reach the label and
+  `break` would skip that statement. Recorded rather than forced.
 - **`agrees` is 29 of 37 (78%)** and `unstructured-control-flow` is down to 1.
   A computed jump whose every recovered destination lies *outside* the function is
   not a branch: Ghidra's flow analysis only creates an edge to an address it is

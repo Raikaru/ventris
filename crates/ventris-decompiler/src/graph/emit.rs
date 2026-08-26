@@ -166,6 +166,17 @@ pub fn emit_structured(
         }
         drop_labels_nothing_needs(&mut statements);
     }
+    // After the label pruning: the label a loop's exit jump names is often not the
+    // one immediately following the loop but a later one, and the labels between
+    // them only disappear here. Rewriting the jump can leave its label unneeded,
+    // so the pruning runs once more.
+    rewrite_loop_edge_gotos(&mut statements, None);
+    for _ in 0..8 {
+        drop_labels_nothing_needs(&mut statements);
+        if drop_gotos_to_missing_labels(&mut statements) == 0 {
+            break;
+        }
+    }
     // Last: the guard clause needs the exit to be the statement after the test,
     // and a label sits between them until the labels nothing needs are gone.
     prefer_guard_clause(&mut statements);
@@ -2251,6 +2262,85 @@ enum Emission {
 /// construct has claimed that edge and Ghidra's `BlockSwitch::emit` never prints
 /// it - the edge belongs to the switch, not to the case. Emitting both put a
 /// `goto` in front of every `break` in `dl_G_MOVEWORD`.
+/// Rewrites a jump to a loop's own edges as `continue` or `break`.
+///
+/// A jump to the label that ends a loop's body says "start the next iteration",
+/// and a jump to the label just past the loop says "leave it". Ghidra spells both
+/// with the keyword; `decompSZS_subroutine` matched the oracle's `while`, `do` and
+/// `if` counts exactly and still printed two `goto`s, one of each kind.
+///
+/// A nested loop is not descended into, because `continue` and `break` bind to the
+/// innermost one, and neither is a `switch`, where `break` would leave the switch
+/// instead of the loop.
+fn rewrite_loop_edge_gotos(statements: &mut Vec<NativeStatement>, falling_out: Option<u64>) {
+    for index in 0..statements.len() {
+        // What control reaches by falling out of `statements[index]`: the label
+        // that follows it here, or - if nothing follows - whatever falling out of
+        // this whole list reaches. `loc_8006c6a8` in `decompSZS_subroutine` sits
+        // two constructs above the loop that jumps to it.
+        let after = match statements.get(index + 1) {
+            Some(NativeStatement::Label(label)) => Some(*label),
+            Some(_) => None,
+            None => falling_out,
+        };
+        let body = match &mut statements[index] {
+            NativeStatement::While { body, .. }
+            | NativeStatement::DoWhile { body, .. }
+            | NativeStatement::For { body, .. } => body,
+            other => {
+                for nested in nested_bodies(other) {
+                    rewrite_loop_edge_gotos(nested, after);
+                }
+                continue;
+            }
+        };
+        let tail = match body.last() {
+            Some(NativeStatement::Label(label)) => Some(*label),
+            _ => None,
+        };
+        if let Some(tail) = tail {
+            rewrite_jump(body, tail, &NativeStatement::Continue);
+        }
+        if let Some(after) = after {
+            rewrite_jump(body, after, &NativeStatement::Break);
+        }
+        // Inside the loop, falling out of the body reaches the loop's own test,
+        // which is the `continue` edge rather than anything outside.
+        rewrite_loop_edge_gotos(body, tail);
+    }
+}
+
+/// Replaces every `Goto(label)` with `keyword`, without entering a construct the
+/// keyword would bind to instead.
+fn rewrite_jump(body: &mut Vec<NativeStatement>, label: u64, keyword: &NativeStatement) {
+    for statement in body.iter_mut() {
+        match statement {
+            NativeStatement::Goto(target) if *target == label => {
+                *statement = keyword.clone();
+            }
+            // `if (c) goto L;` is `if (c) continue;` for the same L. The
+            // conditional form is what a loop's own back edge usually becomes,
+            // so without this the keyword rewrite missed most of them.
+            NativeStatement::IfGoto { condition, target } if *target == label => {
+                *statement = NativeStatement::IfElse {
+                    condition: condition.clone(),
+                    then_body: vec![keyword.clone()],
+                    else_body: Vec::new(),
+                };
+            }
+            NativeStatement::While { .. }
+            | NativeStatement::DoWhile { .. }
+            | NativeStatement::For { .. }
+            | NativeStatement::Switch { .. } => {}
+            other => {
+                for nested in nested_bodies(other) {
+                    rewrite_jump(nested, label, keyword);
+                }
+            }
+        }
+    }
+}
+
 fn drop_break_equivalent_goto(body: &mut Vec<NativeStatement>, after: u64) {
     // Trailing position at any depth: falling out of a trailing `if` lands on the
     // case's own `break`, so the jump inside it says nothing either. `dl_G_MOVEWORD`
@@ -3141,6 +3231,104 @@ mod tests {
         retain_live_assignments(&mut statements, &read);
         assert_eq!(statements[0], assignment);
     }
+    /// `decompSZS_subroutine` matched the oracle's `while`, `do` and `if` counts
+    /// exactly and still printed two jumps: one to the label ending the loop body,
+    /// which is `continue`, and one to a label two constructs above the loop,
+    /// which is `break`.
+    #[test]
+    fn a_jump_to_a_loop_edge_becomes_continue_or_break() {
+        let test = || Expr::Constant { value: 1, width: 1 };
+        let nest = |inner: Vec<NativeStatement>| NativeStatement::IfElse {
+            condition: test(),
+            then_body: inner,
+            else_body: Vec::new(),
+        };
+        let mut statements = vec![
+            nest(vec![NativeStatement::DoWhile {
+                body: vec![
+                    nest(vec![nest(vec![NativeStatement::Goto(0x2000)])]),
+                    nest(vec![NativeStatement::Goto(0x1000)]),
+                    NativeStatement::Label(0x1000),
+                ],
+                condition: test(),
+            }]),
+            NativeStatement::Label(0x2000),
+        ];
+        rewrite_loop_edge_gotos(&mut statements, None);
+
+        let body = match &statements[0] {
+            NativeStatement::IfElse { then_body, .. } => match &then_body[0] {
+                NativeStatement::DoWhile { body, .. } => body.clone(),
+                other => panic!("the loop is gone: {other:?}"),
+            },
+            other => panic!("the shape changed: {other:?}"),
+        };
+        assert_eq!(
+            body[0],
+            nest(vec![nest(vec![NativeStatement::Break])]),
+            "a jump past the loop is a break"
+        );
+        assert_eq!(
+            body[1],
+            nest(vec![NativeStatement::Continue]),
+            "a jump to the label ending the body is a continue"
+        );
+
+        // The conditional form of the same jump.
+        let mut conditional = vec![
+            NativeStatement::DoWhile {
+                body: vec![
+                    NativeStatement::IfGoto {
+                        condition: test(),
+                        target: 0x1000,
+                    },
+                    NativeStatement::Label(0x1000),
+                ],
+                condition: test(),
+            },
+            NativeStatement::Label(0x2000),
+        ];
+        rewrite_loop_edge_gotos(&mut conditional, None);
+        let body = match &conditional[0] {
+            NativeStatement::DoWhile { body, .. } => body.clone(),
+            other => panic!("the shape changed: {other:?}"),
+        };
+        assert_eq!(
+            body[0],
+            NativeStatement::IfElse {
+                condition: test(),
+                then_body: vec![NativeStatement::Continue],
+                else_body: Vec::new(),
+            },
+            "`if (c) goto tail;` is `if (c) continue;`"
+        );
+
+        // A jump out of an inner loop must not be read as the outer loop's edge.
+        let mut nested = vec![
+            NativeStatement::DoWhile {
+                body: vec![NativeStatement::DoWhile {
+                    body: vec![NativeStatement::Goto(0x2000)],
+                    condition: test(),
+                }],
+                condition: test(),
+            },
+            NativeStatement::Label(0x2000),
+        ];
+        rewrite_loop_edge_gotos(&mut nested, None);
+        let inner = match &nested[0] {
+            NativeStatement::DoWhile { body, .. } => body.clone(),
+            other => panic!("the shape changed: {other:?}"),
+        };
+        assert_eq!(
+            inner,
+            vec![NativeStatement::DoWhile {
+                body: vec![NativeStatement::Goto(0x2000)],
+                condition: test(),
+            }],
+            "break would leave the inner loop, not the outer one"
+        );
+    }
+
     /// A `goto` to the block after the switch is exactly what the `break` that
     /// follows it says, so emitting both leaves one in front of every `break`.
     /// Only the case's *own* exit edge goes: a jump somewhere else must stay.
