@@ -6,6 +6,23 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- Refuted this pass, and reverted rather than left as unexercised code: gating the
+  output trial on `ancestor_realistic` before marking it active, which is a step
+  Ghidra really runs (`AncestorRealistic::execute` in `ActionReturnRecovery`). It
+  changes nothing here because `TRK_fill_mem`'s `r3` ancestry *is* realistic - the
+  body does write it - so the value is not an untouched input. Ghidra separates
+  this case with `ancestorOpUse`, which asks how the *caller* uses the value, and
+  that context does not exist in a single-function decompile. The two functions
+  that legitimately `return param_1` have the identical shape, which is why all
+  four attempts at this have traded one for the others.
+- Located, not yet closed: `ksNesDrawBG`'s missing conditional is our `isComplex`
+  ceiling, and the specific gap is now identified. Ghidra's `BlockBasic::isComplex`
+  counts a write whose output `isAddrTied()` as a statement - a value that must live
+  at a fixed address because it maps to a symbol - and ours does not. With that
+  count, the clause block crosses the two-statement limit, becomes complex, and
+  `ruleBlockOr` declines the third merge, leaving `if (uVar8 < 0xec)` as its own
+  nested `if` exactly as the oracle has it. What is missing here is the mapped-symbol
+  fact, not the rule.
 - A conditional branch that still has both its edges keeps its test.
   `ActionPruneDeadTargets` repairs a terminator whose operand names a block that is
   gone; with one edge left it rewrote the operand, but with *two* it destroyed the
