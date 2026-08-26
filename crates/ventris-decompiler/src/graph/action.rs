@@ -233,6 +233,12 @@ impl Rule for RuleMultiCollapse {
             .iter()
             .copied()
             .find(|value| !is_phi(data, *value));
+        // `nofunc`: a `MULTIEQUAL` or an unwritten value cannot match by
+        // functional equality, only by being the very same value.
+        let mut no_func = base.is_some_and(|value| {
+            is_phi(data, value) || data.varnode(value).def.is_none()
+        });
+        let mut func_eq = false;
         let mut marked: std::collections::BTreeSet<VarnodeId> =
             std::collections::BTreeSet::from([output]);
         let mut collapse: Vec<VarnodeId> = vec![output];
@@ -244,8 +250,20 @@ impl Rule for RuleMultiCollapse {
                 continue;
             }
             match base {
-                None => base = Some(candidate),
+                None => {
+                    no_func = is_phi(data, candidate) || data.varnode(candidate).def.is_none();
+                    base = Some(candidate);
+                }
                 Some(chosen) if chosen == candidate => {}
+                // Functional equality: two *different* values computed alike.
+                // Ghidra allows it unless the base is a marker or unwritten.
+                Some(chosen)
+                    if !no_func
+                        && super::equality::functional_equality(data, chosen, candidate)
+                            == super::equality::Equality::Same =>
+                {
+                    func_eq = true;
+                }
                 Some(_) if is_phi(data, candidate) => {
                     marked.insert(candidate);
                     collapse.push(candidate);
@@ -256,10 +274,6 @@ impl Rule for RuleMultiCollapse {
             }
         }
         let Some(base) = base else { return 0 };
-        // Absolute equality: every branch is the same value, so each phi in the
-        // list becomes a copy of it. Ghidra's functional-equality path, which
-        // matches two different values computed alike, needs the block-local CSE
-        // it shares with `cseFindInBlock` and is not ported here.
         let mut changed = 0;
         for value in collapse {
             let Some(definition) = data.varnode(value).def else {
@@ -268,8 +282,54 @@ impl Rule for RuleMultiCollapse {
             if value == base {
                 continue;
             }
-            data.op_set_opcode(definition, op::COPY);
-            data.op_set_inputs(definition, vec![base]);
+            if !func_eq {
+                // Absolute equality: every branch is the same value, so the
+                // merge is a copy of it.
+                data.op_set_opcode(definition, op::COPY);
+                data.op_set_inputs(definition, vec![base]);
+                changed += 1;
+                continue;
+            }
+            // Functional equality: the branches compute the same thing from
+            // different values, so the merge becomes that computation. If this
+            // block already computes it, use that result instead of a second
+            // copy - `cseFindInBlock` bounded by the merge's earliest use, so
+            // the substitute is available where the value is read.
+            let Some(source) = data.varnode(base).def else {
+                continue;
+            };
+            let Some(block) = data.op(definition).parent else {
+                continue;
+            };
+            let earliest = data.earliest_use(block, value);
+            let substitute = data
+                .op(source)
+                .inputs
+                .clone()
+                .into_iter()
+                .find(|operand| !data.varnode(*operand).flags.constant)
+                .and_then(|operand| data.cse_find_in_block(source, operand, block, earliest));
+            if let Some(substitute) = substitute {
+                let Some(replacement) = data.op(substitute).output else {
+                    continue;
+                };
+                data.total_replace(value, replacement);
+                data.op_destroy(definition);
+                changed += 1;
+                continue;
+            }
+            // Otherwise copy the computation onto the merge. A merge that is no
+            // longer a merge has to move below any that remain, which is what
+            // `opInsertBegin` after `opUninsert` achieves.
+            let operands = data.op(source).inputs.clone();
+            let opcode = data.op(source).opcode;
+            let was_marker = data.op(definition).opcode == op::MULTIEQUAL;
+            data.op_set_inputs(definition, operands);
+            data.op_set_opcode(definition, opcode);
+            if was_marker {
+                data.op_uninsert(definition);
+                data.op_insert_begin(definition, block);
+            }
             changed += 1;
         }
         changed
@@ -787,8 +847,13 @@ mod tests {
         assert_eq!(data.op(add).inputs, vec![value]);
     }
 
+    /// Two arms computing the same thing from the same operands are
+    /// *functionally* equal, and `RuleMultiCollapse` collapses that: the merge
+    /// becomes the computation. Ghidra only refuses when the base branch is
+    /// itself a marker or unwritten - `nofunc` - because neither can be matched
+    /// except by being the very same value.
     #[test]
-    fn a_merge_of_one_value_is_not_a_merge() {
+    fn a_merge_of_two_values_computed_alike_becomes_that_computation() {
         let mut data = Funcdata::default();
         let entry = data.new_block(0x1000);
         let left = data.new_block(0x1010);
@@ -817,14 +882,55 @@ mod tests {
             .find(|(_, operation)| operation.opcode == op::MULTIEQUAL)
             .map(|(id, _)| id)
             .expect("a phi was placed");
-        // The two arms produce distinct SSA values, so this phi is real.
-        assert_eq!(RuleMultiCollapse.apply_op(phi, &mut data), 0);
+        assert_eq!(RuleMultiCollapse.apply_op(phi, &mut data), 1);
+        assert_eq!(
+            data.op(phi).opcode,
+            op::COPY,
+            "the merge is the computation both arms performed"
+        );
+        assert_eq!(data.op(phi).inputs, vec![shared]);
+    }
 
-        // Make both operands name one value, as copy propagation would.
-        let operands = data.op(phi).inputs.clone();
-        data.op_set_inputs(phi, vec![operands[0], operands[0]]);
+    /// A merge whose base branch is unwritten cannot match by functional
+    /// equality, so a differently computed branch keeps the merge.
+    #[test]
+    fn a_merge_against_an_unwritten_branch_refuses_functional_equality() {
+        let mut data = Funcdata::default();
+        let block = data.new_block(0x1000);
+        let unwritten = data.new_varnode(REGISTER_SPACE, 8, 4);
+        data.mark_input(unwritten);
+        let constant = data.new_constant(7, 4);
+        let copy = data.new_op(op::COPY, seq(0x1000), vec![constant]);
+        let computed = data.new_varnode(REGISTER_SPACE, 8, 4);
+        data.op_set_output(copy, Some(computed));
+        data.op_insert_end(copy, block);
+        let phi = data.new_op(op::MULTIEQUAL, seq(0x1000), vec![unwritten, computed]);
+        let result = data.new_varnode(REGISTER_SPACE, 8, 4);
+        data.op_set_output(phi, Some(result));
+        data.op_insert_end(phi, block);
+
+        assert_eq!(RuleMultiCollapse.apply_op(phi, &mut data), 0);
+        assert_eq!(data.op(phi).opcode, op::MULTIEQUAL);
+    }
+
+    /// Two operands naming one value collapse by absolute equality.
+    #[test]
+    fn a_merge_of_one_value_is_not_a_merge() {
+        let mut data = Funcdata::default();
+        let block = data.new_block(0x1000);
+        let constant = data.new_constant(7, 4);
+        let copy = data.new_op(op::COPY, seq(0x1000), vec![constant]);
+        let computed = data.new_varnode(REGISTER_SPACE, 8, 4);
+        data.op_set_output(copy, Some(computed));
+        data.op_insert_end(copy, block);
+        let phi = data.new_op(op::MULTIEQUAL, seq(0x1000), vec![computed, computed]);
+        let result = data.new_varnode(REGISTER_SPACE, 8, 4);
+        data.op_set_output(phi, Some(result));
+        data.op_insert_end(phi, block);
+
         assert_eq!(RuleMultiCollapse.apply_op(phi, &mut data), 1);
         assert_eq!(data.op(phi).opcode, op::COPY);
+        assert_eq!(data.op(phi).inputs, vec![computed]);
     }
 
     #[test]

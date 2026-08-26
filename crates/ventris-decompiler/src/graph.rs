@@ -520,6 +520,49 @@ impl Funcdata {
         id
     }
 
+    /// The earliest operation in a block that reads a value.
+    ///
+    /// Ghidra's `BlockBasic::earliestUse`, ordered by sequence number.
+    pub fn earliest_use(&self, block: GraphBlockId, value: VarnodeId) -> Option<OpId> {
+        self.varnodes[value.0 as usize]
+            .descendants
+            .iter()
+            .copied()
+            .filter(|op| self.ops[op.0 as usize].parent == Some(block))
+            .min_by_key(|op| self.ops[op.0 as usize].seq.order)
+    }
+
+    /// An operation in a block that already computes what `op` computes.
+    ///
+    /// Ghidra's `Funcdata::cseFindInBlock`. The search runs over the readers of
+    /// one of `op`'s operands, because a common subexpression has to read the
+    /// same value; `earliest` bounds it so the substitute is available where the
+    /// caller needs it.
+    pub fn cse_find_in_block(
+        &self,
+        op: OpId,
+        value: VarnodeId,
+        block: GraphBlockId,
+        earliest: Option<OpId>,
+    ) -> Option<OpId> {
+        let output = self.ops[op.0 as usize].output?;
+        let bound = earliest.map(|id| self.ops[id.0 as usize].seq.order);
+        self.varnodes[value.0 as usize]
+            .descendants
+            .iter()
+            .copied()
+            .filter(|candidate| *candidate != op)
+            .filter(|candidate| self.ops[candidate.0 as usize].parent == Some(block))
+            .filter(|candidate| {
+                bound.is_none_or(|bound| bound >= self.ops[candidate.0 as usize].seq.order)
+            })
+            .find(|candidate| {
+                self.ops[candidate.0 as usize].output.is_some_and(|other| {
+                    equality::functional_equality(self, output, other) == equality::Equality::Same
+                })
+            })
+    }
+
     pub fn new_constant(&mut self, value: u64, size: u32) -> VarnodeId {
         self.invalidate_masks();
         let id = self.new_varnode(CONST_SPACE, value, size);
