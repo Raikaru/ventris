@@ -6,6 +6,19 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- Link a narrow register read to an overlapping wider definition regardless of
+  offset. `tightest_containing` searched only for a wider definition at the
+  *same* offset, but a big-endian bank writes the whole register at its base and
+  reads the low half further in: MIPS64 `lui` defines `(64, 8)` and the
+  following `addiu` reads `(68, 4)`. Every `lui`/`addiu` address on N64
+  therefore minted an entry value, so real constants became invented parameters.
+  `preamble` rendered its base as `(uint32_t)(arg4 >> 0x20) - 0x51e0` and now
+  renders the oracle's `0x8008ae20`, and its computed jump folds from
+  `((uint32_t)(arg4 >> 0xa0) + 0x1050 & ...)()` to the concrete `0x80001050`.
+  `SUBPIECE`'s operand is now the distance to the wide value's least significant
+  end rather than a hardcoded zero, which is the far end of the register on a
+  big-endian bank. Census-neutral and gate-clean; it is a correctness fix and the
+  prerequisite for resolving `preamble`'s tail.
 - Give every direct callee its own call prototypes when recovering a caller.
   `direct_call_prototypes` decompiled each callee with no prototypes for the
   callee's own calls, so a forwarding callee recovered no parameters and the

@@ -238,31 +238,67 @@ fn insert_phi(data: &mut Funcdata, block: GraphBlockId, location: (u32, u64, u32
 
 /// Walks the dominator tree, replacing each read with the definition on top of
 /// its location's stack. This is `renameRecurse`.
-/// The narrowest definition that contains a location, if any.
+/// The narrowest definition whose bytes contain a location, if any.
 ///
-/// Sub-views share the containing register's offset in the banks this lifter
-/// emits, so the low bytes of a wider definition are the value being read. The
-/// stack top is used, so the definition found is the one that dominates here.
+/// A sub-view need not share the containing register's offset. Big-endian
+/// MIPS64 writes the whole 64-bit register at its base and reads the low half
+/// four bytes further in, so `lui` defining `(64, 8)` is the definition a later
+/// `addiu` reading `(68, 4)` must see. Searching only for a wider definition at
+/// the same offset missed that and minted an entry value, which is why every
+/// `lui`/`addiu` address on N64 became an invented parameter.
+///
+/// The stack top is used, so the definition found is the one that dominates
+/// here. Returns the definition with the byte offset and size of its location,
+/// which together decide how the read is truncated out of it.
 fn tightest_containing(
     stacks: &BTreeMap<(u32, u64, u32), Vec<VarnodeId>>,
     key: (u32, u64, u32),
-) -> Option<VarnodeId> {
+) -> Option<(VarnodeId, u64, u32)> {
     // Registers only. A temporary that happens to share an offset with a wider
     // temporary is not a view of it, and truncating one to the other discarded
     // real computation: a multiply's result was replaced by an undefined value.
     if key.0 != ventris_lifter::REGISTER_SPACE {
         return None;
     }
+    let end = key.1.checked_add(u64::from(key.2))?;
     stacks
-        .range((key.0, key.1, key.2 + 1)..=(key.0, key.1, u32::MAX))
-        .find_map(|((_, _, _), stack)| stack.last().copied())
+        .range((key.0, 0, 0)..=(key.0, key.1, u32::MAX))
+        .filter(|((_, offset, size), _)| {
+            // Strictly wider than the read, and covering all of its bytes.
+            (*offset, *size) != (key.1, key.2) && offset.saturating_add(u64::from(*size)) >= end
+        })
+        // The tightest is the latest-starting, then the smallest.
+        .min_by_key(|((_, offset, size), _)| (key.1 - *offset, *size))
+        .and_then(|((_, offset, size), stack)| {
+            stack.last().copied().map(|value| (value, *offset, *size))
+        })
 }
 
-/// Inserts a truncation of `wide` to `size` bytes ahead of `before`.
-fn truncate_before(data: &mut Funcdata, before: OpId, wide: VarnodeId, size: u32) -> VarnodeId {
+/// Inserts a truncation of `wide` to the `size` bytes at `offset` ahead of
+/// `before`.
+///
+/// `SUBPIECE`'s second operand counts least-significant bytes to discard, so it
+/// is the distance from the read to the wide value's least significant end -
+/// which is the far end of the register on a big-endian bank.
+fn truncate_before(
+    data: &mut Funcdata,
+    before: OpId,
+    wide: VarnodeId,
+    wide_at: (u64, u32),
+    location: (u64, u32),
+    little_endian: bool,
+) -> VarnodeId {
+    let (wide_offset, wide_size) = wide_at;
+    let (offset, size) = location;
+    let skip = if little_endian {
+        offset.saturating_sub(wide_offset)
+    } else {
+        (wide_offset.saturating_add(u64::from(wide_size)))
+            .saturating_sub(offset.saturating_add(u64::from(size)))
+    };
     let seq = data.op(before).seq;
-    let zero = data.new_constant(0, 4);
-    let truncate = data.new_op(op::SUBPIECE, seq, vec![wide, zero]);
+    let shift = data.new_constant(skip, 4);
+    let truncate = data.new_op(op::SUBPIECE, seq, vec![wide, shift]);
     // A unique output, so the truncation is not itself a definition of the
     // register and does not change what the rest of this walk sees.
     let narrow = data.new_unique(size);
@@ -297,7 +333,14 @@ fn rename(
                     // undefined register: `sb v1` after `addiu v1,zero,1`
                     // printed the bare register name and lost the constant.
                     None => match tightest_containing(stacks, key) {
-                        Some(wide) => truncate_before(data, op, wide, key.2),
+                        Some((wide, wide_offset, wide_size)) => truncate_before(
+                            data,
+                            op,
+                            wide,
+                            (wide_offset, wide_size),
+                            (key.1, key.2),
+                            little_endian,
+                        ),
                         None => {
                             let entry_value = data.new_varnode(key.0, key.1, key.2);
                             data.mark_input(entry_value);
@@ -538,5 +581,45 @@ mod tests {
         let operand = data.op(ret).inputs[0];
         assert!(data.varnode(operand).flags.input);
         assert!(data.varnode(operand).def.is_none());
+    }
+
+    /// A big-endian bank writes the whole register at its base and reads the low
+    /// half four bytes in: MIPS64 `lui` defines `(64, 8)` and the following
+    /// `addiu` reads `(68, 4)`. That read is a view of the definition, not an
+    /// undefined register handed to the function.
+    #[test]
+    fn a_big_endian_low_half_read_truncates_the_wide_definition() {
+        let mut data = Funcdata::default();
+        let block = data.new_block(0x1000);
+        let seq = SeqNum {
+            address: 0x1000,
+            order: 0,
+        };
+        let constant = data.new_constant(0x8009_0000, 8);
+        let wide = data.new_varnode(REGISTER_SPACE, 64, 8);
+        let define = data.new_op(op::COPY, seq, vec![constant]);
+        data.op_set_output(define, Some(wide));
+        data.op_insert_end(define, block);
+        let low = data.new_varnode(REGISTER_SPACE, 68, 4);
+        let ret = data.new_op(op::RETURN, seq, vec![low]);
+        data.op_insert_end(ret, block);
+
+        heritage_with_endianness(&mut data, false);
+
+        let operand = data.op(ret).inputs[0];
+        assert!(
+            !data.varnode(operand).flags.input,
+            "the low half is not a function input"
+        );
+        let truncation = data
+            .varnode(operand)
+            .def
+            .expect("the low half is defined by a truncation");
+        assert_eq!(data.op(truncation).opcode, op::SUBPIECE);
+        assert_eq!(data.op(truncation).inputs[0], wide);
+        // The low half of a big-endian register discards no less significant
+        // bytes, so the truncation starts at zero.
+        let skip = data.op(truncation).inputs[1];
+        assert_eq!(data.varnode(skip).offset, 0);
     }
 }
