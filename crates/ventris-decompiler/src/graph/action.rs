@@ -14,6 +14,28 @@
 //! Source authority: `Action`, `Rule`, `ActionPool`, `ActionGroup` in
 //! `action.hh`/`action.cc`, and the rules named on each implementation, at
 //! commit `8b4c91d4d5bd1549622bfbade0df199585b98365`.
+//!
+//! # Passes deliberately not ported
+//!
+//! Every remaining Ghidra action and rule is accounted for either by a note in
+//! the module that would own it, or here:
+//!
+//! * `ActionRestartGroup` (`action.cc`) - the restart-and-regroup driver. All
+//!   four of Ghidra's restart sources write into `Override` before setting
+//!   `setRestartPending`: `fspec.cc:5471` and `5503`, `heritage.cc:2581` via
+//!   `insertDeadcodeDelay`, and `jumptable.cc:2712-2717` via
+//!   `insertMultistageJump`. Nothing here can populate an `Override` -
+//!   `LoadOptions` and `Hints` carry no control-flow input - so the group would
+//!   iterate exactly once. A fixed round loop is used instead.
+//! * `RuleTransformCpool` (`ruleaction.cc:3902-3940`) - matches `CPOOLREF`. A
+//!   census of all 21 bundled packed SLA payloads found zero operation templates
+//!   with `ATTR_CODE=68`, against 203029 templates total, so no supported lifter
+//!   can emit the opcode.
+//! * `RuleUndistribute` and `RuleRightShiftSub` (`ruleaction.hh`) - declared but
+//!   registered zero times in Ghidra itself. Porting them would add code Ghidra
+//!   does not run.
+//! * `RuleGeneric` (`rulecompile.hh`) - part of the SLEIGH rule compiler, not a
+//!   decompiler rule, and never in scope.
 
 use std::collections::BTreeMap;
 
