@@ -36,6 +36,7 @@ REQUIRED_FILES = (
     "tools/verify_python_artifact.py",
     "tools/verify_python_source.py",
     "tools/verify_vsix.py",
+    "tools/output_check.py",
     "pyproject.toml",
     "MANIFEST.in",
     "integrations/vscode/package.json",

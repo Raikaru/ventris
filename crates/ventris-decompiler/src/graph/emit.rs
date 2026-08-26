@@ -50,6 +50,8 @@ pub fn emit_with_types(
         naming: &naming,
         resolver,
         types,
+        // The address-ordered path has no recovered signature to collide with.
+        parameter_names: BTreeSet::new(),
         architecture,
         // The address-ordered path has no construct tree, so it recovers no
         // `for` loops.
@@ -98,6 +100,7 @@ pub fn emit_structured(
         data,
         naming: &naming,
         resolver,
+        parameter_names: parameter_names.values().cloned().collect(),
         types,
         architecture,
         for_loops,
@@ -151,6 +154,7 @@ pub fn emit_structured(
             break;
         }
     }
+    drop_returns_before_reachable_code(&mut statements);
     drop_labels_nothing_needs(&mut statements);
     // A jump whose label was dropped, and a label whose last jump was dropped,
     // each expose the other, so both run until neither finds anything.
@@ -982,6 +986,36 @@ fn drop_labels_nothing_needs(statements: &mut Vec<NativeStatement>) {
     retain_needed_labels(statements, &named, false);
 }
 
+/// Removes a `return` that is immediately followed by reachable code.
+///
+/// Nothing can reach a statement that follows an unconditional return except by
+/// falling through it, so if the next statement is not a label the return is the
+/// wrong statement, not the code after it. Dropping the code would lose real
+/// behaviour; Ghidra emits the code and guards it instead.
+///
+/// `TRK_fill_mem` printed `return arg0;` immediately before a live
+/// `do { ... } while (arg2 != 0);`, from a block placed out of construct order.
+fn drop_returns_before_reachable_code(statements: &mut Vec<NativeStatement>) -> usize {
+    let mut removed = 0;
+    let mut index = 0;
+    while index < statements.len() {
+        for body in nested_bodies(&mut statements[index]) {
+            removed += drop_returns_before_reachable_code(body);
+        }
+        let spurious = matches!(statements[index], NativeStatement::Return(_))
+            && statements
+                .get(index + 1)
+                .is_some_and(|following| !matches!(following, NativeStatement::Label(_)));
+        if spurious {
+            statements.remove(index);
+            removed += 1;
+            continue;
+        }
+        index += 1;
+    }
+    removed
+}
+
 /// Removes a jump whose label is nowhere in the output.
 ///
 /// A `goto` to a label that was never emitted is not valid C. It arises when
@@ -1403,6 +1437,13 @@ struct Emitter<'a> {
     naming: &'a Naming,
     resolver: Resolver<'a>,
     types: &'a Types,
+    /// Names the signature already introduces.
+    ///
+    /// A variable group holding a function input at an argument location takes
+    /// that parameter's name, and the parameter is declared by the signature, so
+    /// declaring it again shadows it - `TRK_fill_mem` emitted both
+    /// `uintptr_t arg0;` and the parameter `arg0`, which is not valid C.
+    parameter_names: BTreeSet<String>,
     /// The `for` loops the structurer recovered, keyed by the block their header
     /// enters.
     for_loops: BTreeMap<super::GraphBlockId, super::forloop::ForLoop>,
@@ -1777,6 +1818,10 @@ impl Emitter<'_> {
             };
             let width = self.data.varnode(output).size;
             let _ = width;
+
+            if self.parameter_names.contains(name) {
+                continue; // The signature already declares it.
+            }
             if !declared.insert(name.to_string()) {
                 continue;
             }
@@ -1793,13 +1838,20 @@ impl Emitter<'_> {
     /// The names declared once at function scope, which later writes assign to
     /// rather than redeclare.
     fn scoped_names(&self) -> BTreeSet<String> {
-        self.phi_declarations()
-            .into_iter()
-            .filter_map(|statement| match statement {
-                NativeStatement::DeclareLocal { name, .. } => Some(name),
-                _ => None,
-            })
-            .collect()
+        // Parameter names belong here even though the signature declares them
+        // rather than a `DeclareLocal`: a write to a parameter is an assignment,
+        // and omitting them made the writer declare `uint32_t arg2 = ...`
+        // inside a block, shadowing the parameter it was assigning to.
+        let mut names: BTreeSet<String> = self.parameter_names.clone();
+        names.extend(
+            self.phi_declarations()
+                .into_iter()
+                .filter_map(|statement| match statement {
+                    NativeStatement::DeclareLocal { name, .. } => Some(name),
+                    _ => None,
+                }),
+        );
+        names
     }
 
     /// One operation as a statement, ignoring the non-printing marks. This is
@@ -3056,6 +3108,44 @@ mod tests {
             panic!("the loop is gone");
         };
         assert_eq!(body, &vec![NativeStatement::Goto(0x3000)]);
+    }
+
+    /// Nothing reaches a statement after an unconditional return except by
+    /// falling through it, so when the next statement is not a label the return
+    /// is the wrong statement - dropping the code instead would lose real
+    /// behaviour. A label after the return keeps it, because a jump can arrive
+    /// there.
+    #[test]
+    fn a_return_before_reachable_code_is_dropped_but_one_before_a_label_is_kept() {
+        let loop_body = || NativeStatement::While {
+            condition: Expr::Constant { value: 1, width: 1 },
+            body: vec![NativeStatement::Return(None)],
+        };
+        let mut statements = vec![
+            NativeStatement::Return(None),
+            loop_body(),
+            NativeStatement::Return(None),
+        ];
+        // Only the leading one: the return inside the loop body is last in its
+        // own list, so nothing follows it there.
+        assert_eq!(drop_returns_before_reachable_code(&mut statements), 1);
+        assert!(
+            matches!(statements[0], NativeStatement::While { .. }),
+            "the live loop survives and the return before it goes: {statements:?}"
+        );
+        assert!(matches!(statements[1], NativeStatement::Return(None)));
+        assert_eq!(statements.len(), 2);
+
+        let mut guarded = vec![
+            NativeStatement::Return(None),
+            NativeStatement::Label(0x3000),
+            NativeStatement::Return(None),
+        ];
+        assert_eq!(
+            drop_returns_before_reachable_code(&mut guarded),
+            0,
+            "a jump can arrive at the label, so the early return stands"
+        );
     }
 
     /// A jump to a label that was never emitted is not valid C. It survives when

@@ -6,6 +6,32 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- Added `tools/output_check.py`, a gate that asserts the rendered C is
+  structurally well formed on every corpus function. The quality census measures
+  how close the output is to Ghidra's; this measures something weaker but
+  absolute - that it is valid C at all. Ghidra never declares a variable twice,
+  never jumps to a label it did not print and never emits a statement after an
+  unconditional return, so each of those is an equivalence failure however the
+  census classifies the function. It checks parameter shadowing, repeated local
+  and global declarations, dangling jumps, brace balance, and statements after a
+  return. It is now a required tool in `release_check.py`, and it passes on all
+  36 functions.
+- Two defects it caught, both fixed. A parameter is declared by the signature, so
+  the variable holding it must not be declared again: `TRK_fill_mem` emitted
+  `uintptr_t arg0;` beside the parameter `arg0`, and suppressing only the
+  function-scope declaration then produced `uint32_t arg2 = arg2 + ...;` inside a
+  block - shadowing the parameter it was assigning to. Parameter names now stay
+  in `scoped_names` so a write to one is an assignment, while emitting no
+  declaration of their own.
+- A `return` immediately followed by reachable code is now removed. Nothing can
+  reach a statement after an unconditional return except by falling through it,
+  so when the next statement is not a label the return is the wrong statement,
+  not the code after it - dropping the code would lose real behaviour, and Ghidra
+  emits the code. `TRK_fill_mem` printed `return arg0;` directly before a live
+  `do { ... } while (arg2 != 0);`, from a block placed out of construct order; it
+  now renders one return where the oracle has two, 65 lines against 56, with the
+  loop intact. A return before a *label* is kept, because a jump can arrive
+  there.
 - One root cause now accounts for three separate residuals, and it is block
   placement in structuring rather than anything downstream. When a rule leaves an
   edge to a block no construct claims, `finish()` appends that block as its own
