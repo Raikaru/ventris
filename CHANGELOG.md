@@ -6,6 +6,16 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- Every temporary the body names is now declared. A value with no definition and
+  no register name renders as `Expr::Temporary`, which prints as a bare
+  identifier; Ghidra declares such a value instead - it prints `int unaff_r2;`
+  for a register the function never writes - and an undeclared identifier does
+  not compile. `ksNesDrawBG__FP18ksNesCommonWorkObjP13ksNesStateObj` named five
+  of them, `loc_2_35` through `loc_2_82`, all UNIQUE-space reads that reached the
+  printer unresolved. Verified pre-existing rather than introduced by the p-code
+  block split: the same five appear at `42ec853`, before it. `output_check.py`
+  now checks for undeclared identifiers too, and fails with exactly those five
+  when the declaration pass is removed.
 - Every block leader must name a lifted instruction. The p-code split added an
   exemption for machine-level leaders, keeping one whose address had no lifted
   instruction: the block then received no operations while still carrying the

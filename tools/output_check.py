@@ -85,6 +85,15 @@ def defects(source: str) -> list[str]:
     if source.count("{") != source.count("}"):
         found.append("braces are unbalanced")
 
+    # A value with no definition and no register name renders as a bare
+    # `loc_<space>_<offset>` identifier. Ghidra declares such a value - it prints
+    # `int unaff_r2;` for a register the function never writes - so referencing
+    # one without declaring it does not compile.
+    used = set(re.findall(r"\bloc_\d+_[0-9a-f]+\b", source))
+    introduced = set(re.findall(r"^\s*\w[\w ]*\s(loc_\d+_[0-9a-f]+);$", source, re.M))
+    if used - introduced:
+        found.append(f"an identifier is used but never declared: {sorted(used - introduced)}")
+
     lines = source.splitlines()
     for index, line in enumerate(lines):
         matched = RETURN.match(line)

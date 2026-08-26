@@ -155,6 +155,8 @@ pub fn emit_structured(
         }
     }
     drop_returns_before_reachable_code(&mut statements);
+    declare_unresolved_temporaries(&mut statements);
+
     drop_labels_nothing_needs(&mut statements);
     // A jump whose label was dropped, and a label whose last jump was dropped,
     // each expose the other, so both run until neither finds anything.
@@ -984,6 +986,71 @@ fn drop_labels_nothing_needs(statements: &mut Vec<NativeStatement>) {
     // "after a transfer". Passing `true` here kept a label on every leading
     // block, which printed a run of empty `loc_*:` lines.
     retain_needed_labels(statements, &named, false);
+}
+
+/// Declares every temporary the body names but nothing introduces.
+///
+/// A value with no definition and no register name renders as
+/// `Expr::Temporary`, which prints as a bare identifier. Ghidra declares such a
+/// value rather than leaving it dangling - it prints `int unaff_r2;` for a
+/// register the function never writes - and an undeclared identifier does not
+/// compile. `ksNesDrawBG__FP18ksNesCommonWorkObjP13ksNesStateObj` named five.
+fn declare_unresolved_temporaries(statements: &mut Vec<NativeStatement>) -> usize {
+    let mut wanted: BTreeMap<String, u32> = BTreeMap::new();
+    collect_temporaries(statements, &mut wanted);
+    if wanted.is_empty() {
+        return 0;
+    }
+    let mut declared = BTreeSet::new();
+    collect_declared(statements, &mut declared);
+    let missing: Vec<(String, u32)> = wanted
+        .into_iter()
+        .filter(|(name, _)| !declared.contains(name))
+        .collect();
+    let count = missing.len();
+    for (name, width) in missing.into_iter().rev() {
+        statements.insert(
+            0,
+            NativeStatement::DeclareLocal {
+                name,
+                ty: Type::Unsigned(width.max(1).saturating_mul(8)),
+            },
+        );
+    }
+    count
+}
+
+fn collect_temporaries(statements: &[NativeStatement], into: &mut BTreeMap<String, u32>) {
+    // `collect_names` already walks every expression a statement holds; the
+    // widths come from a second pass over the same names.
+    let mut names = BTreeSet::new();
+    collect_read_names(statements, &mut names, true);
+    for name in names {
+        if let Some(rest) = name.strip_prefix("loc_")
+            && rest.split('_').count() == 2
+            && rest.split('_').all(|part| !part.is_empty())
+        {
+            // The rendered width is not recoverable from the name, and a
+            // pointer-width integer is the safe declaration for an unresolved
+            // value.
+            into.insert(name, 4);
+        }
+    }
+}
+
+fn collect_declared(statements: &[NativeStatement], into: &mut BTreeSet<String>) {
+    for statement in statements {
+        match statement {
+            NativeStatement::DeclareLocal { name, .. } | NativeStatement::Declare { name, .. } => {
+                into.insert(name.clone());
+            }
+            other => {
+                for body in nested_bodies_ref(other) {
+                    collect_declared(body, into);
+                }
+            }
+        }
+    }
 }
 
 /// Removes a `return` that is immediately followed by reachable code.
