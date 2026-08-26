@@ -34,9 +34,9 @@ pub struct JumpTable {
 }
 
 #[derive(Copy, Clone)]
-struct Scale {
-    value: VarnodeId,
-    stride: u64,
+pub(crate) struct Scale {
+    pub(crate) value: VarnodeId,
+    pub(crate) stride: u64,
 }
 
 #[derive(Copy, Clone)]
@@ -114,7 +114,7 @@ pub(crate) fn same_value(data: &Funcdata, left: VarnodeId, right: VarnodeId) -> 
 /// quasi-copy operations handled by `strip_alias`.  A value defined by any
 /// other operation is not treated as an index; accepting it would turn an
 /// arbitrary pointer expression into a switch.
-fn parse_scaled(data: &Funcdata, value: VarnodeId) -> Option<Scale> {
+pub(crate) fn parse_scaled(data: &Funcdata, value: VarnodeId) -> Option<Scale> {
     let value = strip_alias(data, value);
     if data.varnode(value).flags.constant {
         return None;
@@ -159,7 +159,7 @@ fn parse_scaled(data: &Funcdata, value: VarnodeId) -> Option<Scale> {
 }
 
 /// Recover `constant base + scaled index` from a LOAD address.
-fn parse_address(data: &Funcdata, value: VarnodeId) -> Option<AddressModel> {
+pub(crate) fn parse_address(data: &Funcdata, value: VarnodeId) -> Option<AddressModel> {
     let value = strip_alias(data, value);
     let def = data.varnode(value).def?;
     let operation = data.op(def);
@@ -314,7 +314,11 @@ fn guard_bound(data: &Funcdata, compare: OpId, switch_value: VarnodeId) -> Optio
 /// Find the smallest range reaching the indirect branch, like
 /// `JumpBasic::findSmallestNormal` after `analyzeGuards` has populated its
 /// `GuardRecord`s.
-pub(crate) fn find_guard(data: &Funcdata, branch: OpId, switch_value: VarnodeId) -> Option<GuardModel> {
+pub(crate) fn find_guard(
+    data: &Funcdata,
+    branch: OpId,
+    switch_value: VarnodeId,
+) -> Option<GuardModel> {
     let branch_block = data.op(branch).parent?;
     let condition = |candidate: OpId| {
         let operation = data.op(candidate);
@@ -421,7 +425,11 @@ pub fn recover_jump_tables(
             // Once the destination has the shape of a table load, a missing or
             // unbounded guard must not fall through to the one-edge model.
             if parse_destination(data, destination).is_some() || contains_load(data, destination) {
+                // Ghidra's model order: `JumpBasic` first, then `JumpBasic2`
+                // for the two-stage shape where the index arrives through a
+                // phi, then the trivial one-edge model.
                 recover_basic(data, branch, read_memory)
+                    .or_else(|| super::jumpmodel::recover_jump_basic2(data, branch, read_memory))
             } else {
                 recover_trivial(data, branch)
             }

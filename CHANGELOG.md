@@ -509,6 +509,37 @@ All notable Ventris changes are documented here.
   `ActionSegmentize` needs a `SegmentOp` registry and segmented address-space
   metadata that no supported architecture defines here. `ActionLaneDivide` needs
   a laned-register registry and lane-description machinery.
+- `graph/consume.rs` gives consume propagation the convention sink Ghidra has and
+  this project lacked. `ActionDeadCode` seeds every varnode in a deadcode space
+  before removal is allowed (`coreaction.cc:3999-4010`); `deadcode::propagate`
+  seeded only operation sinks, so storage the convention claims looked dead. The
+  seed is storage-driven via `FuncProto::possible_input_param`, deliberately not
+  a `flags.input` guard.
+- `graph/callspecs.rs` builds `FuncCallSpecs` and ports `ActionDefaultParams`
+  (`coreaction.cc:2352-2377`) and `ActionExtraPopSetup` (1437-1467) against
+  explicit specs. Neither can run from the pipeline yet, and the blocker is
+  upstream rather than in the object: `direct_call_prototypes`
+  (`crates/ventris/src/lib.rs:398-437`) builds a `NativeCallPrototype` that is
+  types only (`native.rs:1530-1533`), with no `Abi` and no `Location`, so there is
+  no callee storage to link. Synthesising it from the convention was rejected -
+  the pass exists to propagate the callee's *recovered* storage decisions, and
+  manufacturing them re-derives what the callsite already assumes.
+- `graph/jumpmodel.rs` ports `JumpBasic2` (`jumptable.cc:1651-1784`) and the
+  `PathMeld` machinery it needs (`787-1017`), including `meldOps` block/SeqNum
+  merging and `truncatePaths`. Chained after `recover_basic` in Ghidra's model
+  order. Measured: no corpus movement, which is correct - the target function
+  `dl_G_MOVEWORD__5emu64Fv` has no `MULTIEQUAL`, so the model rightly declines,
+  and its real defect is `parse_address` refusing a register-derived constant
+  table base. `JumpBasicOverride` and the assisted model are rejected with
+  evidence: the former needs the absent `Override`, the latter a `JumpAssistOp`
+  no bundled spec declares.
+- `ActionVarnodeProps` stays unregistered after three hypotheses were tested and
+  refuted - statement-derived signature, missing consume sink, and reader-counting
+  instead of `ancestorRealistic`. The measurement that explains it: on
+  `osContGetReadData` the oracle renders one parameter, we render two without the
+  pass and none with it. The parameter count was already wrong; the pass converts
+  a two-versus-one error into a zero-versus-one error. The trial decision is the
+  real defect.
 - Measured, not skipped: `Override` is the single blocking prerequisite for four
   separate pieces of Ghidra, and nothing in this project can populate one.
   `LoadOptions` (`crates/ventris/src/lib.rs:27-34`) and `Hints` (95-103) carry no

@@ -153,13 +153,12 @@ impl FuncCallSpecs {
         self.callee_prototype.is_some()
     }
 
-    /// The call-site extra-pop read by `ActionExtraPopSetup`.
-    pub const fn get_extra_pop(&self) -> i32 {
-        self.prototype
-            .as_ref()
-            .map_or(EXTRAPOP_UNKNOWN, FuncProto::get_extra_pop)
+    pub fn get_extra_pop(&self) -> i32 {
+        match self.prototype.as_ref() {
+            Some(prototype) => prototype.get_extra_pop(),
+            None => EXTRAPOP_UNKNOWN,
+        }
     }
-
     /// The working extra-pop selected for this call, after model resolution.
     pub const fn effective_extra_pop(&self) -> i32 {
         self.effective_extra_pop
@@ -484,6 +483,23 @@ impl ActionExtraPopSetup {
             .collect();
         apply_extra_pop_calls(data, stack, &records)
     }
+
+    /// Apply known extra-pop adjustments and record each call's effective
+    /// value, matching `FuncCallSpecs::setEffectiveExtraPop` in Ghidra.
+    pub fn apply_with_mut(
+        data: &mut Funcdata,
+        stack: Location,
+        calls: &mut [FuncCallSpecs],
+    ) -> usize {
+        let changed = Self::apply_with(data, stack, calls);
+        for call in calls {
+            let extra_pop = call.get_extra_pop();
+            if extra_pop != EXTRAPOP_UNKNOWN {
+                call.set_effective_extra_pop(extra_pop);
+            }
+        }
+        changed
+    }
 }
 
 impl Action for ActionExtraPopSetup {
@@ -492,7 +508,7 @@ impl Action for ActionExtraPopSetup {
     }
 
     fn apply(&self, data: &mut Funcdata) -> usize {
-        Self::apply_with(data, self.stack, &self.calls.borrow())
+        Self::apply_with_mut(data, self.stack, &mut self.calls.borrow_mut())
     }
 }
 
@@ -570,7 +586,6 @@ mod tests {
         let mut spec = FuncCallSpecs::with_prototype(call, eval.clone());
         spec.set_callee_prototype(prototype(0x20, 0x40, EXTRAPOP_UNKNOWN));
         let before = spec.clone();
-
         assert_eq!(
             ActionDefaultParams::apply_with(&data, std::slice::from_mut(&mut spec), &eval),
             0
@@ -588,6 +603,7 @@ mod tests {
 
         let action = ActionExtraPopSetup::new(stack, vec![spec]);
         assert_eq!(Action::apply(&action, &mut data), 1);
+        assert_eq!(action.calls()[0].get_effective_extra_pop(), 8);
         assert!(data.live_ops().any(|(_, operation)| {
             operation.opcode == op::INT_ADD
                 && operation.output.is_some_and(|output| {

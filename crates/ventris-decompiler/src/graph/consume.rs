@@ -119,6 +119,9 @@ mod tests {
         let mut data = Funcdata::default();
         let claimed = data.new_varnode(REGISTER_SPACE, 0x20, 4);
         data.mark_input(claimed);
+        // The storage seed is deliberately not an `input`-flag filter.  A
+        // second version at the claimed location must receive the same seed.
+        let claimed_version = data.new_varnode(REGISTER_SPACE, 0x20, 4);
         let unclaimed = data.new_varnode(REGISTER_SPACE, 0x30, 4);
         data.mark_input(unclaimed);
 
@@ -126,6 +129,7 @@ mod tests {
 
         let consumed = consume_masks(&data);
         assert_eq!(consumed.get(&claimed), Some(&0xffff_ffff));
+        assert_eq!(consumed.get(&claimed_version), Some(&0xffff_ffff));
         assert_eq!(consumed.get(&unclaimed).copied().unwrap_or(0), 0);
     }
 

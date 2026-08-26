@@ -28,12 +28,29 @@
 //! a convention-claimed input with no reader is then judged not to be a
 //! parameter, so the parameter disappears.
 //!
-//! Ghidra does not lose it because its consume propagation treats storage the
-//! calling convention claims as consumed - `ActionActiveParam` holds those
-//! inputs live before the consume arm can see them as dead. This project's
-//! `deadcode::propagate` has no convention sink, so the prerequisite for
-//! registering this pass is adding one. A guard on `flags.input` would restore
-//! the census without being in Ghidra's text, and would hide that.
+//! Three hypotheses were tested and all three were wrong, so the record is
+//! worth keeping:
+//!
+//! 1. That the signature came from statements rather than the prototype. Fixed -
+//!    `PrintC::emitFunctionDeclaration` is ported - and the regression survived.
+//! 2. That consume propagation lacked a convention sink. `graph/consume.rs` adds
+//!    one, seeding storage `FuncProto::possible_input_param` claims, and the
+//!    regression survived that too.
+//! 3. That the trial decision counted readers instead of using
+//!    `ancestorRealistic`. Switched to `callproto::ancestor_realistic`, and the
+//!    regression still survived.
+//!
+//! The measurement that finally explains it: on
+//! `gamecube-animal-crossing-gafe01/osContGetReadData` the Ghidra oracle renders
+//! `void FUN_80060668(uint param_1)` - ONE parameter. Without this pass we render
+//! `(uint32_t arg0, uint32_t arg1)` and with it `(void)`. So the parameter count
+//! was already wrong before this pass ran; the pass converts a two-versus-one
+//! error into a zero-versus-one error, and only the latter trips the
+//! `missing-parameters` family.
+//!
+//! The real defect is therefore in the trial decision, which claims a second
+//! parameter the convention does not pass. Fix that first; this pass is correct
+//! and will register cleanly once the parameter count is right.
 //!
 //! Note the distinction, because conflating the two is wrong: a nonzero mask
 //! says which bits *can* be set, consume says which bits anyone *reads*. Neither
@@ -48,7 +65,7 @@ use super::{Funcdata, VarnodeId};
 
 /// Ghidra's `Varnode::getConsume`, which this graph computes rather than stores.
 fn consume_masks(data: &Funcdata) -> BTreeMap<VarnodeId, u64> {
-    super::deadcode::propagate(data)
+    super::consume::consume_masks(data)
 }
 
 /// Values that are provably zero at every read, in Ghidra's order.

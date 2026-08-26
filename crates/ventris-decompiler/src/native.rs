@@ -2281,8 +2281,11 @@ impl NativeDecompiler {
                             && varnode.size == trial.location.size
                     });
                 match held {
-                    // Ghidra decides a trial with `ancestorRealistic`: an input
-                    // the function never reads is not a parameter.
+                    // Ghidra decides a trial with `ancestorRealistic`. That is
+                    // stricter than this: measured, it rejects a pure input with
+                    // no definition and drops parameters the convention does
+                    // pass, so the reader test stands until the ancestor walk
+                    // handles an undefined input the way Ghidra's does.
                     Some(value) if !data.varnode(value).descendants.is_empty() => {
                         trial.value = Some(value);
                         trial.mark_active();
