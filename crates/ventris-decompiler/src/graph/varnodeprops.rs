@@ -18,57 +18,31 @@
 //! `deadcode::propagate` is the backwards consume propagation behind
 //! `getConsume`.
 //!
-//! NOT REGISTERED, and the blocker is measured, not assumed. Registering it
-//! costs one agreeing corpus function and adds a `missing-parameters` entry.
-//!
-//! The first hypothesis was that the signature came from statements rather than
-//! the prototype; that has since been fixed - `PrintC::emitFunctionDeclaration`
-//! is ported and the printer reads the prototype - and the regression survived
-//! it. The real cause is narrower: zeroing an input removes its descendants, and
-//! a convention-claimed input with no reader is then judged not to be a
-//! parameter, so the parameter disappears.
-//!
-//! Three hypotheses were tested and all three were wrong, so the record is
-//! worth keeping:
+//! REGISTERED. Getting there took four refuted hypotheses, and the record is
+//! worth keeping because each was plausible:
 //!
 //! 1. That the signature came from statements rather than the prototype. Fixed -
 //!    `PrintC::emitFunctionDeclaration` is ported - and the regression survived.
 //! 2. That consume propagation lacked a convention sink. `graph/consume.rs` adds
-//!    one, seeding storage `FuncProto::possible_input_param` claims, and the
-//!    regression survived that too.
+//!    one, and the regression survived that too.
 //! 3. That the trial decision counted readers instead of using
-//!    `ancestorRealistic`. Switched to `callproto::ancestor_realistic`, and the
-//!    regression still survived.
+//!    `ancestorRealistic`. That is stricter and dropped real parameters.
+//! 4. That the trial decision admitted a call-only pass-through operand.
+//!    Classifying those inactive made `osContGetReadData` match the oracle
+//!    exactly - and diverged `TRK_memset`'s globals in `corpus-smoke`, so it was
+//!    reverted. Gates outrank family counts.
 //!
-//! The measurement that finally explains it: on
-//! `gamecube-animal-crossing-gafe01/osContGetReadData` the Ghidra oracle renders
-//! `void FUN_80060668(uint param_1)` - ONE parameter. Without this pass we render
-//! `(uint32_t arg0, uint32_t arg1)` and with it `(void)`. So the parameter count
-//! was already wrong before this pass ran; the pass converts a two-versus-one
-//! error into a zero-versus-one error, and only the latter trips the
-//! `missing-parameters` family.
+//! The actual cause was ORDERING. This project decided parameter trials after
+//! the whole action pipeline, so a pass that removed a value's last non-call use
+//! changed the parameter decision retroactively. Ghidra decides inside the loop:
+//! `ActionActiveParam` decides trials and `ActionInputPrototype` promotes them
+//! once per round, so the decision converges with the graph. Moving prototype
+//! recovery into the round loop made this pass register with no census change in
+//! any family and `corpus-smoke` still passing.
 //!
-//! The trial decision was then fixed - a pure input whose every use reaches only
-//! a CALL argument is now marked inactive - and `osContGetReadData` renders one
-//! parameter, matching the oracle exactly. Registering this pass STILL costs it:
-//!
-//! ```text
-//! oracle            void FUN_80060668(uint param_1)
-//! pass skipped      void sub_80060668(uint32_t arg0)   <- agrees
-//! pass registered   void sub_80060668(void)            <- loses it
-//! ```
-//!
-//! So the fourth and actual cause is ORDERING. This project decides parameter
-//! trials after the whole action pipeline has run, so any pass that removes a
-//! value's last non-call use changes the parameter decision retroactively. Ghidra
-//! decides trials mid-loop with `ActionActiveParam`, fixes the prototype in
-//! `fixateproto`, and locks it - after which no later pass can reverse it.
-//!
-//! Registering this pass therefore needs the trial decision and promotion moved
-//! ahead of the pipeline with the prototype locked, not another guard here. That
-//! is a sequencing change with a real tradeoff - parameter types come from
-//! recovered types the pipeline produces - so it is recorded rather than
-//! attempted blind.
+//! It also exposed an unrealistic test fixture: a one-operand `RETURN` seeds no
+//! consume at all, because Ghidra's first `RETURN` operand is the return address
+//! and propagation skips it. Real returns carry both.
 //!
 //! Note the distinction, because conflating the two is wrong: a nonzero mask
 //! says which bits *can* be set, consume says which bits anyone *reads*. Neither
