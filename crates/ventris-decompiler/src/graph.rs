@@ -1224,6 +1224,9 @@ impl Funcdata {
         // because the `addiu` that consumed it ran again after the call.
         let embedded_delay_slots = embedded_delay_slot_addresses(function);
         for (address, instruction) in &function.instructions {
+            if embedded_delay_slots.contains(address) {
+                continue;
+            }
             for (index, operation) in instruction.pcode.ops.iter().enumerate() {
                 let order = index as u32;
                 if let Some(id) = block_of_position.get(&(*address, order)) {
