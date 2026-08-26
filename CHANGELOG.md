@@ -6,6 +6,18 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- `findLoopVariable` is now the same walk Ghidra performs: a depth-first cursor
+  over four frames, each remembering which operand it has reached. Ours had used a
+  work stack and bounded that stack's *length*, which cut the search short of a
+  loop variable four definitions above the tested value - the comment admitted the
+  bound was not the rule and recorded the difference as unmeasured. It is
+  measurable: a regression test puts the loop variable at the top of the four
+  frames and fails under the old bound. The visited set ours carried and Ghidra
+  does not is gone with it; that part is semantically inert, since revisiting a
+  definition finds nothing new.
+- Still open on `queryMapAddress_single`, and now narrowed to one metric: `for` 1
+  vs 2. Its `do` (6), `goto` (4) and structure all match the oracle; one loop that
+  Ghidra prints as `for` we print as `while`, and it is not the walk's depth.
 - A userop no longer disappears when nothing reads its result. Dead-code
   elimination kept the effect of `CALL` and `CALLIND` while dropping only the
   unread output, but destroyed a `CALLOTHER` outright - and a userop stands for

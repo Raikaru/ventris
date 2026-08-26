@@ -183,54 +183,61 @@ fn find_loop_variable(
     condition: VarnodeId,
     head: GraphBlockId,
     tail: GraphBlockId,
-    slot: usize,
+    slot_of_tail: usize,
 ) -> Option<(OpId, OpId)> {
     let root = data.varnode(condition).def?;
     if is_call_or_marker(data, root) {
         return None;
     }
-    let mut path = vec![root];
-    let mut seen = BTreeSet::from([root]);
-    while let Some(current) = path.pop() {
-        for input in data.op(current).inputs.clone() {
-            let Some(definition) = data.varnode(input).def else {
+    // Ghidra's exact walk: a depth-first cursor over `path[4]`, each frame
+    // remembering which operand it has reached, bounded at four frames. Ours had
+    // used a work stack with a visited set and bounded the stack's *length*. The
+    // visited set is the substantive difference - Ghidra has none, and will reach
+    // the same definition again by a second route, which is how it finds the loop
+    // variable of `queryMapAddress_single`'s second `for`.
+    let mut path: Vec<(OpId, usize)> = vec![(root, 0)];
+    while let Some((current, slot)) = path.pop() {
+        let inputs = data.op(current).inputs.clone();
+        if slot >= inputs.len() {
+            continue;
+        }
+        // Advance this frame's cursor before descending, as `path[count].slot++`
+        // does, so the frame resumes at the next operand when the child returns.
+        path.push((current, slot + 1));
+        let input = inputs[slot];
+        let Some(definition) = data.varnode(input).def else {
+            continue;
+        };
+        if data.op(definition).opcode == op::MULTIEQUAL {
+            if data.op(definition).parent != Some(head) {
+                continue;
+            }
+            let Some(carried) = data.op(definition).inputs.get(slot_of_tail).copied() else {
                 continue;
             };
-            if data.op(definition).opcode == op::MULTIEQUAL {
-                if data.op(definition).parent != Some(head) {
-                    continue;
-                }
-                let Some(carried) = data.op(definition).inputs.get(slot).copied() else {
-                    continue;
-                };
-                let Some(iterate) = data.varnode(carried).def else {
-                    continue;
-                };
-                if data.op(iterate).parent != Some(tail) || is_call_or_marker(data, iterate) {
-                    continue;
-                }
-                // `testTerminal` wants the statement last in its block, and
-                // Ghidra moves it to the end of the tail rather than requiring
-                // it be there, so long as the move is safe - which is what
-                // `is_moveable` below checks.
-                let Some(last) = last_printing_op(data, tail) else {
-                    continue;
-                };
-                if !is_moveable(data, iterate, last) {
-                    continue;
-                }
-                return Some((definition, iterate));
-            }
-            // Ghidra's `path[4]`: the tested value may sit up to four
-            // definitions above the loop variable. Note this bounds the work
-            // stack's length, not the traversal depth, so it is not that rule:
-            // carrying the depth per work item instead is the faithful form,
-            // and was measured to change no output on the present corpus.
-            if path.len() >= 3 || is_call_or_marker(data, definition) || !seen.insert(definition) {
+            let Some(iterate) = data.varnode(carried).def else {
+                continue;
+            };
+            if data.op(iterate).parent != Some(tail) || is_call_or_marker(data, iterate) {
                 continue;
             }
-            path.push(definition);
+            // `testTerminal` wants the statement last in its block, and Ghidra
+            // moves it to the end of the tail rather than requiring it be there,
+            // so long as the move is safe - which `is_moveable` checks.
+            let Some(last) = last_printing_op(data, tail) else {
+                continue;
+            };
+            if !is_moveable(data, iterate, last) {
+                continue;
+            }
+            return Some((definition, iterate));
         }
+        // `if (count == 3) continue;`: four frames, so a tested value may sit up
+        // to four definitions above the loop variable.
+        if path.len() >= 4 || is_call_or_marker(data, definition) {
+            continue;
+        }
+        path.push((definition, 0));
     }
     None
 }
@@ -318,6 +325,64 @@ fn is_call_or_marker(data: &Funcdata, operation: OpId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `findLoopVariable` walks up to four frames above the tested value, each
+    /// frame remembering which operand it has reached. Bounding the work stack's
+    /// length instead cut the walk short of a loop variable that far up.
+    #[test]
+    fn a_loop_variable_high_above_the_test_is_found() {
+        use crate::graph::SeqNum;
+        use ventris_lifter::REGISTER_SPACE;
+        let seq = |address: u64| SeqNum { address, order: 0 };
+        let mut data = Funcdata::default();
+        data.entry = 0x1000;
+        let head = data.new_block(0x1000);
+        let tail = data.new_block(0x1010);
+        let exit = data.new_block(0x1020);
+        data.add_edge(head, tail);
+        data.add_edge(head, exit);
+        data.add_edge(tail, head);
+
+        // The loop variable, merged at the head from an entry value and the tail.
+        let entry_value = data.new_constant(0, 4);
+        let carried = data.new_varnode(REGISTER_SPACE, 16, 4);
+        let phi = data.new_op(op::MULTIEQUAL, seq(0x1000), vec![entry_value, carried]);
+        let merged = data.new_varnode(REGISTER_SPACE, 16, 4);
+        data.op_set_output(phi, Some(merged));
+        data.op_insert_end(phi, head);
+
+        // Four definitions between the merged value and the tested one.
+        let mut value = merged;
+        for step in 0..3u64 {
+            let zero = data.new_constant(0, 4);
+            let op = data.new_op(op::INT_ADD, seq(0x1002 + step), vec![value, zero]);
+            let out = data.new_unique(4);
+            data.op_set_output(op, Some(out));
+            data.op_insert_end(op, head);
+            value = out;
+        }
+        let condition = data.new_unique(1);
+        let zero = data.new_constant(0, 4);
+        let test = data.new_op(op::INT_NOTEQUAL, seq(0x1008), vec![value, zero]);
+        data.op_set_output(test, Some(condition));
+        data.op_insert_end(test, head);
+        let destination = data.new_varnode(ventris_lifter::RAM_SPACE, 0x1010, 4);
+        let branch = data.new_op(op::CBRANCH, seq(0x1009), vec![destination, condition]);
+        data.op_insert_end(branch, head);
+
+        // The iterator, last in the tail.
+        let one = data.new_constant(1, 4);
+        let iterate = data.new_op(op::INT_ADD, seq(0x1010), vec![merged, one]);
+        data.op_set_output(iterate, Some(carried));
+        data.op_insert_end(iterate, tail);
+
+        let found = find_loop_variable(&data, condition, head, tail, 1);
+        assert_eq!(
+            found.map(|(_, iterate)| iterate),
+            Some(iterate),
+            "the loop variable sits at the top of the four frames"
+        );
+    }
 
     /// Ghidra's `findLoopVariable` reads the loop variable off the loop's own
     /// `CBRANCH` whatever the condition spans, so a short-circuit chain is not
