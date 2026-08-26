@@ -175,7 +175,9 @@ fn only_op_use(
         let Some(operation) = data.opcode_of(descendant).map(|_| data.op(descendant)) else {
             continue;
         };
-        if descendant == return_op && operation.inputs.get(1).copied() == Some(value) {
+        if operation.opcode == op::RETURN
+            && (descendant == return_op || operation.inputs.get(1).copied() == Some(value))
+        {
             continue;
         }
         match operation.opcode {
