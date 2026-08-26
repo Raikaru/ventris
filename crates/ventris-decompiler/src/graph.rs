@@ -1224,9 +1224,6 @@ impl Funcdata {
         // because the `addiu` that consumed it ran again after the call.
         let embedded_delay_slots = embedded_delay_slot_addresses(function);
         for (address, instruction) in &function.instructions {
-            if embedded_delay_slots.contains(address) {
-                continue;
-            }
             for (index, operation) in instruction.pcode.ops.iter().enumerate() {
                 let order = index as u32;
                 if let Some(id) = block_of_position.get(&(*address, order)) {
@@ -1558,6 +1555,97 @@ mod tests {
             edges: BTreeSet::new(),
             calls: BTreeSet::new(),
         }
+    }
+
+    /// A transfer's delay slot is folded into the transfer by the lifter, which
+    /// reports the bytes it absorbed - but the absorbed instruction is still in
+    /// the listing. Building the graph straight from the listing ran it a second
+    /// time, after the transfer instead of before it, and the second copy read
+    /// registers the call had meanwhile killed.
+    #[test]
+    fn an_embedded_delay_slot_is_not_executed_a_second_time() {
+        use std::collections::BTreeMap as Map;
+        use ventris_lifter::{Flow, LiftedInstruction, RAM_SPACE, REGISTER_SPACE};
+        use ventris_pcode::InstPcode;
+        let slot = |address: u64| PcodeOp {
+            opcode: op::INT_ADD,
+            output: Some(Varnode::new(REGISTER_SPACE, 8, 4)),
+            inputs: vec![
+                Varnode::new(REGISTER_SPACE, 16, 4),
+                Varnode::new(CONST_SPACE, address, 4),
+            ],
+        };
+        let mut instructions = Map::new();
+        // The call carries its slot's operation, and names one byte of slot.
+        instructions.insert(
+            0x1000,
+            LiftedInstruction {
+                address: 0x1000,
+                bytes: vec![0, 0, 0, 0],
+                pcode: InstPcode {
+                    len: 4,
+                    space: RAM_SPACE,
+                    offset: 0x1000,
+                    ops: vec![
+                        slot(0x40),
+                        PcodeOp {
+                            opcode: op::CALL,
+                            output: None,
+                            inputs: vec![Varnode::new(RAM_SPACE, 0x2000, 4)],
+                        },
+                    ],
+                },
+                flow: Flow::Call {
+                    target: 0x2000,
+                    fallthrough: 0x1004,
+                },
+                embedded_delay_slot_bytes: 1,
+            },
+        );
+        // The same instruction, still present in the listing.
+        instructions.insert(
+            0x1004,
+            LiftedInstruction {
+                address: 0x1004,
+                bytes: vec![0, 0, 0, 0],
+                pcode: InstPcode {
+                    len: 4,
+                    space: RAM_SPACE,
+                    offset: 0x1004,
+                    ops: vec![slot(0x40)],
+                },
+                flow: Flow::FallThrough(0x1008),
+                embedded_delay_slot_bytes: 0,
+            },
+        );
+        instructions.insert(
+            0x1008,
+            LiftedInstruction {
+                address: 0x1008,
+                bytes: vec![0, 0, 0, 0],
+                pcode: InstPcode {
+                    len: 4,
+                    space: RAM_SPACE,
+                    offset: 0x1008,
+                    ops: vec![PcodeOp {
+                        opcode: op::RETURN,
+                        output: None,
+                        inputs: vec![Varnode::new(REGISTER_SPACE, 496, 4)],
+                    }],
+                },
+                flow: Flow::Return,
+                embedded_delay_slot_bytes: 0,
+            },
+        );
+        let mut function = lifted();
+        function.entry = 0x1000;
+        function.instructions = instructions;
+        let data = Funcdata::from_lifted(&function);
+        let adds = data
+            .live_ops()
+            .filter(|(_, operation)| operation.opcode == op::INT_ADD)
+            .count();
+        assert_eq!(adds, 1, "the delay slot runs once, before the call");
     }
 
     #[test]
