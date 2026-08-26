@@ -23,10 +23,17 @@ All notable Ventris changes are documented here.
   counter cannot see the double-pointer spelling; `__FrameCallback__Fl` has both
   real calls on both sides, and the 7-versus-8 is two `CONCAT44` pseudo-calls
   counted in the oracle against one cast counted in ours. Only `preamble` is a
-  real defect: `sleigh_flow` stops at `0x80001030`'s `jr t2`, so the
-  `0x80001050` tail holding five `setCopReg` and the TLB write is never lifted.
-  Reclassifying `BRANCHIND` as fall-through rather than return changes no census
-  family, so the fix is jump-target discovery, not flow classification.
+  real defect, and measurement moved its diagnosis: discovery is not the cause.
+  `preamble` lifts 79 instructions over 316 bytes and does reach the
+  `0x80001050` tail; reclassifying `BRANCHIND` as fall-through rather than
+  return changes neither the lifted extent nor any census family. What actually
+  fails is target folding - `jr t2` renders as
+  `((uint32_t)(arg4 >> 0xa0) + 0x1050 & ...)()`, holding the `0x1050` offset
+  symbolically instead of folding it to a concrete address the way Ghidra does
+  before continuing there. The `arg4 >> 0xa0` operand is the compounding defect:
+  a MIPS64 32-bit sub-register read is modelled as a shift of a 64-bit pair, so
+  the base is unusable and no fold is possible. Fixing the sub-register width
+  modelling is the prerequisite, not flow classification or call recognition.
 - Rejected on measurement: extending the output-ancestry check to reject values
   reaching stores makes `TRK_fill_mem` void as the oracle has it, and takes two
   other functions' return values away with it - `return-presence` 1 -> 3 for no
