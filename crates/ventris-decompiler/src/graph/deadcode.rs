@@ -67,8 +67,14 @@ pub fn eliminate_dead_code(data: &mut Funcdata) -> usize {
         if consumed.get(&output).copied().unwrap_or(0) != 0 {
             continue;
         }
-        if matches!(opcode, op::CALL | op::CALLIND) {
+        if matches!(opcode, op::CALL | op::CALLIND | op::CALLOTHER) {
             // The call must still happen; only its unread result goes away.
+            //
+            // `CALLOTHER` belongs here too: a userop stands for behaviour the
+            // p-code cannot express, so it may have effects even when nothing
+            // reads what it returns. Destroying it emptied the paired-single
+            // dispatch arms in `__FrameCallback__Fl` and lost one of the four
+            // `ldexpf` calls the oracle makes.
             data.op_set_output(id, None);
             removed += 1;
             continue;
@@ -474,6 +480,28 @@ mod tests {
             .live_ops()
             .find(|(_, operation)| operation.opcode == op::CALL)
             .expect("the call itself survives");
+        assert!(operation.output.is_none());
+    }
+
+    /// A userop stands for behaviour the p-code cannot express, so it may have
+    /// effects even when nothing reads what it returns. Destroying it emptied the
+    /// paired-single dispatch arms in `__FrameCallback__Fl` and lost one of the
+    /// four `ldexpf` calls the oracle makes.
+    #[test]
+    fn a_userop_keeps_its_effect_and_loses_its_unread_result() {
+        let mut data = Funcdata::default();
+        let block = data.new_block(0x1000);
+        let argument = data.new_constant(0x3f, 4);
+        let userop = data.new_op(op::CALLOTHER, seq(0x1000), vec![argument]);
+        let result = data.new_unique(4);
+        data.op_set_output(userop, Some(result));
+        data.op_insert_end(userop, block);
+
+        assert_eq!(eliminate_dead_code(&mut data), 1);
+        let (_, operation) = data
+            .live_ops()
+            .find(|(_, operation)| operation.opcode == op::CALLOTHER)
+            .expect("the userop itself survives");
         assert!(operation.output.is_none());
     }
 

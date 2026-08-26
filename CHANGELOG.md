@@ -6,6 +6,14 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- A userop no longer disappears when nothing reads its result. Dead-code
+  elimination kept the effect of `CALL` and `CALLIND` while dropping only the
+  unread output, but destroyed a `CALLOTHER` outright - and a userop stands for
+  behaviour the p-code cannot express, so it may have effects regardless. Ghidra
+  reaches this through `PcodeOp::isCall()`, which is true for `CALLOTHER` as well.
+  This is what emptied the paired-single dispatch arms in `__FrameCallback__Fl`;
+  its `if` count went from 11 to 13 against the oracle's 12 and its body is 92
+  lines against the oracle's 87.
 - `ruleBlockOr` asks the wrong member of a concatenation about complexity.
   `BlockList::isComplex` is `getBlock(0)->isComplex()` - a composite answers for its
   *first* block, because that is the one whose statements would start running
