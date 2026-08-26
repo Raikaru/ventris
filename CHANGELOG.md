@@ -6,6 +6,17 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- A terminator that outlives the block it names is now repaired in the graph.
+  Ghidra's branch operands are block references, so removing a block cannot leave
+  a predecessor pointing at it; ours are addresses, and unreachable removal drops
+  the edge without touching the operand. `ActionPruneDeadTargets` converts a
+  conditional whose remaining destination is its own fall-through into a plain
+  branch, and destroys an unconditional one that names nothing at all. Measured
+  against the emitter's dangling-jump pass: with the graph pruner alone,
+  `TRK_fill_mem` and `decompSZS_subroutine__FPUcPUc` have no dangling jump left
+  to print, so the repair happens at the source rather than in the output for
+  two of the three cases; `__FrameCallback__Fl` still needs the emitter pass, so
+  both are kept. Its regression test fails without the action.
 - Located `__FrameCallback__Fl`'s remaining two families precisely. Three jump
   targets - `0x8000b594`, `0x8000b59c` and `0x8000b684` - are named by surviving
   jumps but never labelled, because the structurer leaves an edge to a block it

@@ -1488,27 +1488,34 @@ impl<'a> Graph<'a> {
 
     fn finish(self) -> Structured {
         let live: Vec<&Node> = self.nodes.iter().filter(|node| !node.collapsed).collect();
-        if live.len() == 1 {
-            return live[0].body.clone();
-        }
-        // Not fully structured: emit the remaining nodes in address order, with
-        // whatever gotos the collapse left in them.
-        let mut remaining: Vec<(GraphBlockId, Structured)> = self
-            .nodes
-            .iter()
-            .enumerate()
-            .filter(|(_, node)| !node.collapsed)
-            .map(|(index, node)| {
-                let first = if Some(index) == self.entry {
-                    GraphBlockId(0)
-                } else {
-                    node.entry
-                };
-                (first, node.body.clone())
-            })
-            .collect();
-        remaining.sort_by_key(|(entry, _)| self.data.block(*entry).start);
-        let mut members: Vec<Structured> = remaining.into_iter().map(|(_, body)| body).collect();
+        let mut members: Vec<Structured> = if live.len() == 1 {
+            // Fully structured, but still not necessarily complete: a rule that
+            // absorbs a node whose body another composite already owns drops
+            // blocks out of the tree, and the completeness guard below is the
+            // only thing that notices. `__FrameCallback__Fl` lost the block
+            // holding its `return`, so the function read as void and three
+            // surviving jumps named labels that were never emitted.
+            vec![live[0].body.clone()]
+        } else {
+            // Not fully structured: emit the remaining nodes in address order,
+            // with whatever gotos the collapse left in them.
+            let mut remaining: Vec<(GraphBlockId, Structured)> = self
+                .nodes
+                .iter()
+                .enumerate()
+                .filter(|(_, node)| !node.collapsed)
+                .map(|(index, node)| {
+                    let first = if Some(index) == self.entry {
+                        GraphBlockId(0)
+                    } else {
+                        node.entry
+                    };
+                    (first, node.body.clone())
+                })
+                .collect();
+            remaining.sort_by_key(|(entry, _)| self.data.block(*entry).start);
+            remaining.into_iter().map(|(_, body)| body).collect()
+        };
 
         // Every live block must appear exactly once. A rule that absorbs a node
         // whose body another composite already owns, or that leaves a stale
@@ -1527,6 +1534,9 @@ impl<'a> Graph<'a> {
             .filter(|id| !present.contains(id))
             .collect();
         missing.sort_by_key(|id| self.data.block(*id).start);
+        if missing.is_empty() && members.len() == 1 {
+            return members.remove(0);
+        }
         members.extend(missing.into_iter().map(Structured::Basic));
         let _ = &self.of_block;
         Structured::List(members)

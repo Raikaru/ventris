@@ -162,6 +162,72 @@ impl Action for ActionRedundBranch {
     }
 }
 
+/// Repairs a terminator that still names a block the graph no longer has.
+///
+/// Ghidra's branch operands are block references, so removing a block cannot
+/// leave a predecessor pointing at it. Here they are addresses, and unreachable
+/// removal drops the edge without touching the operand - leaving a `goto` to a
+/// label that is never emitted, because the block it names was never printed.
+/// `__FrameCallback__Fl` and `TRK_fill_mem` both carried such jumps.
+///
+/// A conditional whose remaining destination is its own fall-through decides
+/// nothing and goes; an unconditional one naming nothing at all goes with it.
+pub struct ActionPruneDeadTargets;
+
+impl Action for ActionPruneDeadTargets {
+    fn name(&self) -> &'static str {
+        "prune-dead-targets"
+    }
+
+    fn apply(&self, data: &mut Funcdata) -> usize {
+        let starts: std::collections::BTreeSet<u64> = data
+            .blocks()
+            .filter(|(_, block)| block.start_order == 0)
+            .map(|(_, block)| block.start)
+            .collect();
+        let stale: Vec<(OpId, GraphBlockId)> = data
+            .blocks()
+            .filter_map(|(block, _)| {
+                let terminator = last_live_op(data, block)?;
+                let operation = data.op(terminator);
+                if !matches!(operation.opcode, op::BRANCH | op::CBRANCH) {
+                    return None;
+                }
+                let target = operation.inputs.first().copied()?;
+                let varnode = data.varnode(target);
+                // A relative p-code destination names an operation, not an
+                // address, and is resolved elsewhere.
+                if varnode.space == ventris_lifter::CONST_SPACE {
+                    return None;
+                }
+                (!starts.contains(&varnode.offset)).then_some((terminator, block))
+            })
+            .collect();
+        let mut changed = 0;
+        for (terminator, block) in stale {
+            let successors = data.block(block).successors.clone();
+            match successors.len() {
+                // One destination left: say so plainly instead of naming a
+                // block that is gone.
+                1 => {
+                    let size = data
+                        .op(terminator)
+                        .inputs
+                        .first()
+                        .map(|value| data.varnode(*value).size)
+                        .unwrap_or(4);
+                    data.op_set_opcode(terminator, op::BRANCH);
+                    set_branch_target(data, terminator, successors[0], size);
+                }
+                // Nothing left to branch to at all.
+                _ => data.op_destroy(terminator),
+            }
+            changed += 1;
+        }
+        changed
+    }
+}
+
 /// Removes blocks unreachable from the entry, including their merge inputs.
 pub struct ActionUnreachable;
 
@@ -766,5 +832,38 @@ mod tests {
         let (mut data, _, second) = two_adds();
         assert_eq!(ActionMultiCse.apply(&mut data), 1);
         assert!(data.op(second).dead);
+    }
+
+    /// Unreachable removal drops the edge but not the operand, so a terminator
+    /// can outlive the block it names. Left alone it prints a `goto` to a label
+    /// nothing emits, because the named block was never printed.
+    #[test]
+    fn a_terminator_naming_a_removed_block_is_repaired() {
+        let (mut data, entry, target, fallthrough, branch) = branch_graph(0);
+        // Remove the taken side the way unreachable removal does: the edge goes,
+        // the operand still names 0x1010.
+        assert!(data.remove_edge(entry, target));
+        assert_eq!(ActionUnreachable.apply(&mut data), 1);
+        assert_eq!(
+            data.op(branch)
+                .inputs
+                .first()
+                .map(|value| data.varnode(*value).offset),
+            Some(0x1010),
+            "the operand still names the removed block"
+        );
+
+        assert_eq!(ActionPruneDeadTargets.apply(&mut data), 1);
+
+        assert_eq!(
+            data.op(branch).opcode,
+            op::BRANCH,
+            "one destination left, so the test decides nothing"
+        );
+        assert_eq!(
+            data.branch_target(branch),
+            Some(fallthrough),
+            "and it names the block that is still there"
+        );
     }
 }
