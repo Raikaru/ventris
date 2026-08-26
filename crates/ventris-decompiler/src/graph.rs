@@ -1233,6 +1233,19 @@ impl Funcdata {
                         (address.wrapping_add(u64::from(instruction.pcode.len)), 0)
                     };
                     internal.push(((*address, order), taken, (*address, order + 1)));
+                } else if operation.opcode == ventris_pcode::op::CBRANCH
+                    && (index + 1) < instruction.pcode.ops.len()
+                    && let Some(destination) = operation.inputs.first()
+                    && destination.space != CONST_SPACE
+                {
+                    // A conditional whose remaining operations are its own
+                    // not-taken arm: the taken side is the named address, the
+                    // other side is the rest of this instruction.
+                    internal.push((
+                        (*address, order),
+                        (destination.offset, 0),
+                        (*address, order + 1),
+                    ));
                 }
                 let inputs = operation
                     .inputs
@@ -1365,19 +1378,43 @@ fn block_leaders(function: &NativeFunction) -> BTreeSet<(u64, u32)> {
     leaders.retain(|(address, _)| function.instructions.contains_key(address));
     // A branch among one instruction's own operations splits it, exactly as a
     // machine branch splits a function. Both destinations begin a block.
+    //
+    // This covers a destination in the constant space - a relative p-code branch
+    // - and equally a `CBRANCH` to an address that is simply not the last
+    // operation of its instruction. PPC `beqlr` is the second shape: it lifts to
+    // `if (!cond) goto <next>; return;`, so the conditional return lives inside
+    // one instruction, and leaving it unsplit merged the guard away entirely.
     for (address, instruction) in &function.instructions {
+        let last = instruction.pcode.ops.len().saturating_sub(1);
         for (index, operation) in instruction.pcode.ops.iter().enumerate() {
-            let Some(target) = internal_branch_target(operation, index) else {
-                continue;
-            };
-            if (target as usize) < instruction.pcode.ops.len() {
-                leaders.insert((*address, target));
-            } else {
-                // Past the last operation is out of the instruction: the branch
-                // transfers to the next one, which therefore begins a block.
-                leaders.insert((address.wrapping_add(u64::from(instruction.pcode.len)), 0));
+            if let Some(target) = internal_branch_target(operation, index) {
+                if (target as usize) < instruction.pcode.ops.len() {
+                    leaders.insert((*address, target));
+                } else {
+                    // Past the last operation is out of the instruction: the
+                    // branch transfers to the next one, which therefore begins a
+                    // block.
+                    leaders.insert((address.wrapping_add(u64::from(instruction.pcode.len)), 0));
+                }
+                leaders.insert((*address, index as u32 + 1));
+            } else if operation.opcode == ventris_pcode::op::CBRANCH && index < last {
+                // The operations after it are the taken-or-not remainder of this
+                // instruction, so they are their own block - and the address it
+                // names begins one, exactly as a machine branch target does.
+                leaders.insert((*address, index as u32 + 1));
+                // A target that is simply this instruction's own successor is
+                // already where the following block begins; splitting there as
+                // well separates operations Ghidra keeps in one block. Only a
+                // target elsewhere needs a leader of its own.
+                let sequential = address.wrapping_add(u64::from(instruction.pcode.len));
+                if let Some(destination) = operation.inputs.first()
+                    && destination.space != CONST_SPACE
+                    && destination.offset != sequential
+                    && function.instructions.contains_key(&destination.offset)
+                {
+                    leaders.insert((destination.offset, 0));
+                }
             }
-            leaders.insert((*address, index as u32 + 1));
         }
     }
     // A machine-level leader stands whatever its instruction holds; an
@@ -1751,6 +1788,92 @@ mod tests {
             data.block_starting_at(0x1000),
             Some(at(0)),
             "only the block at p-code index zero begins at the address"
+        );
+    }
+
+    /// A `CBRANCH` to an address that is not its instruction's last operation
+    /// splits the instruction too. PPC `beqlr` is exactly this: it lifts to
+    /// `if (!cond) goto <next>; return;`, so the conditional return lives inside
+    /// one instruction, and leaving it unsplit merged the guard away -
+    /// `TRK_fill_mem` lost the oracle's `if (param_3 != 0)` and one of its two
+    /// returns.
+    #[test]
+    fn a_conditional_return_inside_one_instruction_splits_it() {
+        use ventris_lifter::{Flow, LiftedInstruction, RAM_SPACE, REGISTER_SPACE};
+        use ventris_pcode::{InstPcode, PcodeOp, Varnode};
+        let condition = Varnode::new(REGISTER_SPACE, 8, 1);
+        let body = |address: u64, ops: Vec<PcodeOp>, flow: Flow| LiftedInstruction {
+            address,
+            bytes: vec![0, 0, 0, 0],
+            pcode: InstPcode {
+                len: 4,
+                space: RAM_SPACE,
+                offset: address,
+                ops,
+            },
+            flow,
+            embedded_delay_slot_bytes: 0,
+        };
+        let mut instructions = BTreeMap::new();
+        // `if (!cond) goto 0x1004; return;`
+        instructions.insert(
+            0x1000u64,
+            body(
+                0x1000,
+                vec![
+                    PcodeOp::new(
+                        op::CBRANCH,
+                        None,
+                        vec![Varnode::new(RAM_SPACE, 0x1008, 4), condition],
+                    ),
+                    PcodeOp::new(op::RETURN, None, vec![condition]),
+                ],
+                Flow::FallThrough(0x1004),
+            ),
+        );
+        for address in [0x1004u64, 0x1008u64] {
+            instructions.insert(
+                address,
+                body(
+                    address,
+                    vec![PcodeOp::new(op::RETURN, None, vec![condition])],
+                    Flow::Return,
+                ),
+            );
+        }
+        let function = NativeFunction {
+            entry: 0x1000,
+            instructions,
+            edges: BTreeSet::from([(0x1000u64, 0x1004u64)]),
+            calls: BTreeSet::new(),
+        };
+
+        assert_eq!(
+            block_leaders(&function).iter().copied().collect::<Vec<_>>(),
+            vec![(0x1000, 0), (0x1000, 1), (0x1008, 0)],
+            "the conditional ends a block, the return after it begins one, and so \
+             does the address it names"
+        );
+        let data = Funcdata::from_lifted(&function);
+        let guard = data
+            .block_starting_at(0x1000)
+            .expect("the conditional begins a block");
+        assert_eq!(
+            data.block(guard).successors.len(),
+            2,
+            "it reaches both the next instruction and its own return: {:?}",
+            data.block(guard).successors
+        );
+        let returning = data
+            .blocks()
+            .find(|(_, block)| block.start == 0x1000 && block.start_order == 1)
+            .map(|(id, _)| id)
+            .expect("the guarded return is its own block");
+        let first = data.block(returning).ops[0];
+        assert_eq!(
+            data.op(first).opcode,
+            op::RETURN,
+            "and it begins with the guarded return"
         );
     }
 

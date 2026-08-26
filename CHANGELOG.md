@@ -6,6 +6,21 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- A `CBRANCH` to an address that is not its instruction's last operation now
+  splits that instruction, which recovers PPC's conditional return. `beqlr`
+  lifts to `if (!cond) goto <next>; return;` - the whole conditional return
+  inside one instruction - and `sleigh_flow` reports it as plain `FallThrough` so
+  the fall-through survives. With the instruction unsplit the guard was merged
+  away entirely: `TRK_fill_mem` lost the oracle's `if (param_3 != 0)` and one of
+  its two returns, and rendered the guarded loop unconditionally.
+  `missing-conditional` 4 -> 3, and `TRK_fill_mem` now matches the oracle on both
+  counts - four conditionals and two returns.
+- Measured while narrowing that rule: making the branch's *target* a leader as
+  well costs `unstructured-control-flow` 4 -> 5 when the target is the
+  instruction's own sequential successor, because that is already where the
+  following block begins and splitting again separates operations Ghidra keeps
+  together. The leader is therefore added only for a target elsewhere, which is
+  the case that genuinely needs one.
 - Added `tools/output_check.py`, a gate that asserts the rendered C is
   structurally well formed on every corpus function. The quality census measures
   how close the output is to Ghidra's; this measures something weaker but
