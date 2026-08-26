@@ -81,6 +81,18 @@ fn walk(data: &Funcdata, node: &Structured, found: &mut BTreeMap<GraphBlockId, F
     }
 }
 
+/// The block whose branch decides a condition.
+///
+/// A short-circuit chain is evaluated left to right and the *last* test is the one
+/// that transfers, so that is the block holding the `CBRANCH` Ghidra reads the
+/// loop variable from.
+fn deciding_block(test: &Condition) -> Option<GraphBlockId> {
+    match test {
+        Condition::Branch { block, .. } => Some(*block),
+        Condition::Or(_, last) | Condition::And(_, last) => deciding_block(last),
+    }
+}
+
 /// The `for` statements of one loop, or nothing if it must stay a `while`.
 fn for_loop(
     data: &Funcdata,
@@ -91,13 +103,17 @@ fn for_loop(
     let Some(head) = front_block(header) else {
         return None; // no head
     };
-    // The condition has to be a single test on a block: a short-circuit
-    // condition has no one loop variable to advance.
-    let Condition::Branch { block, .. } = test else {
-        return None; // condition is not a single test
+    // Ghidra reads the loop variable off the loop's own `CBRANCH`, whatever the
+    // condition spans: `findLoopVariable` takes `cbranch->getIn(1)` and walks the
+    // data flow back to a `MULTIEQUAL` in the head. A short-circuit condition
+    // still has exactly one deciding branch - its last test - so refusing them
+    // cost both of `queryMapAddress_single`'s `for` loops, whose conditions in
+    // the oracle are `&&` chains.
+    let Some(block) = deciding_block(test) else {
+        return None; // condition names no branch
     };
     let condition = data
-        .block(*block)
+        .block(block)
         .ops
         .iter()
         .copied()
@@ -303,28 +319,62 @@ fn is_call_or_marker(data: &Funcdata, operation: OpId) -> bool {
 mod tests {
     use super::*;
 
-    /// The gates are all conjunctive, so a shape that fails one must not
-    /// produce a `for`. This pins the two that carry the most weight: a
-    /// condition that is not a single test, and a loop with no single tail.
+    /// Ghidra's `findLoopVariable` reads the loop variable off the loop's own
+    /// `CBRANCH` whatever the condition spans, so a short-circuit chain is not
+    /// disqualifying - its *last* test is the one that transfers. Refusing them
+    /// outright cost both of `queryMapAddress_single`'s `for` loops, whose
+    /// conditions in the oracle are `&&` chains.
     #[test]
-    fn a_short_circuit_condition_never_becomes_a_for_loop() {
-        let data = Funcdata::default();
-        let header = Structured::Basic(GraphBlockId(0));
-        let body = Structured::Basic(GraphBlockId(1));
+    fn a_short_circuit_condition_is_decided_by_its_last_test() {
+        let branch = |block: u32| Condition::Branch {
+            block: GraphBlockId(block),
+            taken: true,
+        };
+        assert_eq!(deciding_block(&branch(3)), Some(GraphBlockId(3)));
+        assert_eq!(
+            deciding_block(&Condition::And(Box::new(branch(0)), Box::new(branch(1)))),
+            Some(GraphBlockId(1)),
+            "the second arm is evaluated last"
+        );
+        assert_eq!(
+            deciding_block(&Condition::Or(
+                Box::new(branch(0)),
+                Box::new(Condition::And(Box::new(branch(1)), Box::new(branch(2))))
+            )),
+            Some(GraphBlockId(2)),
+            "the deciding test is the innermost last one"
+        );
+    }
+
+    /// The remaining gates are conjunctive, so a shape that fails one must not
+    /// produce a `for`. Here the deciding block holds no branch at all.
+    #[test]
+    fn a_condition_with_no_branch_never_becomes_a_for_loop() {
+        let mut data = Funcdata::default();
+        data.entry = 0x1000;
+        let head = data.new_block(0x1000);
+        let tail = data.new_block(0x1010);
+        data.add_edge(head, tail);
+        data.add_edge(tail, head);
         let test = Condition::And(
             Box::new(Condition::Branch {
-                block: GraphBlockId(0),
+                block: head,
                 taken: true,
             }),
             Box::new(Condition::Branch {
-                block: GraphBlockId(1),
+                block: tail,
                 taken: true,
             }),
         );
         assert_eq!(
-            for_loop(&data, &header, &test, &body),
+            for_loop(
+                &data,
+                &Structured::Basic(head),
+                &test,
+                &Structured::Basic(tail)
+            ),
             None,
-            "a short-circuit condition has no single loop variable to advance"
+            "no CBRANCH in the deciding block means no loop variable"
         );
     }
 

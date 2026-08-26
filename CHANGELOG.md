@@ -6,6 +6,17 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- A short-circuit condition no longer disqualifies a `for` loop, and
+  `queryMapAddress_single`'s **`for` count now matches the oracle exactly (2)**,
+  as do its `if` (15) and `goto` (4). The recognizer had refused any condition that
+  was not a single test, on the reasoning that "a short-circuit condition has no
+  single loop variable to advance". Ghidra disagrees and the oracle proves it: both
+  of that function's `for` loops have `&&` conditions. `findLoopVariable` reads the
+  variable off the loop's own `CBRANCH` whatever the condition spans, because a
+  chain still has exactly one deciding test - its last. The test that pinned the
+  old assumption is replaced by one pinning the new rule, plus a rejection case on
+  a real fixture; the old one used an empty `Funcdata` and would have panicked the
+  moment the code looked past the condition at all.
 - A jump to one of a loop's own edges now prints as the keyword that means it: to
   the label ending the loop body it is `continue`, to the label just past the loop
   it is `break`. The rewrite runs *after* the label pruning, because the label such
