@@ -6,6 +6,15 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- A loop's tail is the block holding the *body's last op*, which is what
+  `BlockWhileDo::finalTransform` uses (`getBlock(1)->lastOp()`), so the body's own
+  printing order names it. Ours searched every block in the body for one that jumps
+  back to the head and refused outright when more than one did - stricter than
+  Ghidra, because a body whose earlier branches also return to the head still has
+  one last statement, and that is the iterator. `back_block` mirrors the existing
+  `front_block` for this. Inert on the present corpus, with a regression test that
+  fails under the old search and also checks that a last block with a second way
+  out is still refused.
 - `findLoopVariable` is now the same walk Ghidra performs: a depth-first cursor
   over four frames, each remembering which operand it has reached. Ours had used a
   work stack and bounded that stack's *length*, which cut the search short of a

@@ -158,19 +158,14 @@ fn for_loop(
 /// The block a loop body leaves through, when it leaves through exactly one that
 /// flows only back to the head.
 fn tail_block(data: &Funcdata, body: &Structured, head: GraphBlockId) -> Option<GraphBlockId> {
-    let mut blocks = BTreeSet::new();
-    super::structure::collect_blocks(body, &mut blocks);
-    let mut tail = None;
-    for block in blocks {
-        let successors = &data.block(block).successors;
-        if successors.len() == 1 && successors[0] == head {
-            if tail.is_some() {
-                return None; // Several tails: no single iterator statement.
-            }
-            tail = Some(block);
-        }
-    }
-    tail
+    // `BlockWhileDo::finalTransform` takes the parent of the body's *last op* -
+    // `getBlock(1)->lastOp()` - so the body's own printing order names the tail.
+    // Searching every block for one that jumps back and refusing when more than
+    // one does is stricter than Ghidra: a body whose earlier branches also return
+    // to the head still has one last statement, and that is the iterator.
+    let tail = super::structure::back_block(body)?;
+    let successors = &data.block(tail).successors;
+    (successors.len() == 1 && successors[0] == head).then_some(tail)
 }
 
 /// The loop variable's phi and the statement that advances it.
@@ -325,6 +320,40 @@ fn is_call_or_marker(data: &Funcdata, operation: OpId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `BlockWhileDo::finalTransform` takes the loop's tail as the parent of the
+    /// *body's last op*, so the body's printing order names it. Searching every
+    /// block for one that jumps back and refusing when more than one does is
+    /// stricter than Ghidra: a body whose earlier branches also return to the head
+    /// still has one last statement, and that is the iterator.
+    #[test]
+    fn the_tail_is_the_body_s_last_block_even_with_earlier_back_edges() {
+        let mut data = Funcdata::default();
+        data.entry = 0x1000;
+        let head = data.new_block(0x1000);
+        let early = data.new_block(0x1010);
+        let last = data.new_block(0x1020);
+        data.add_edge(head, early);
+        // Both blocks in the body return to the head.
+        data.add_edge(early, head);
+        data.add_edge(last, head);
+
+        let body = Structured::List(vec![Structured::Basic(early), Structured::Basic(last)]);
+        assert_eq!(
+            tail_block(&data, &body, head),
+            Some(last),
+            "the body's last block is the tail"
+        );
+
+        // A last block that leaves the loop is not a tail at all.
+        let exit = data.new_block(0x1030);
+        data.add_edge(last, exit);
+        assert_eq!(
+            tail_block(&data, &body, head),
+            None,
+            "a block with a second way out cannot hold the iterator"
+        );
+    }
 
     /// `findLoopVariable` walks up to four frames above the tested value, each
     /// frame remembering which operand it has reached. Bounding the work stack's

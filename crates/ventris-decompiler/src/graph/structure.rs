@@ -169,6 +169,37 @@ pub(super) fn front_block(node: &Structured) -> Option<GraphBlockId> {
     }
 }
 
+/// The last block a construct prints, mirroring [`front_block`].
+///
+/// `BlockWhileDo::finalTransform` finds the loop's tail as the parent of the
+/// *body's last op* - `getBlock(1)->lastOp()` - so it is the body's own printing
+/// order that decides, not a search for blocks that jump back.
+pub(super) fn back_block(node: &Structured) -> Option<GraphBlockId> {
+    match node {
+        Structured::Basic(block) => Some(*block),
+        Structured::List(members) => members.iter().rev().find_map(back_block),
+        Structured::IfElse {
+            then_body,
+            else_body,
+            header,
+            ..
+        } => else_body
+            .as_deref()
+            .and_then(back_block)
+            .or_else(|| back_block(then_body))
+            .or_else(|| back_block(header)),
+        Structured::WhileDo { body, header, .. } => back_block(body).or_else(|| back_block(header)),
+        Structured::Switch { cases, header, .. } => cases
+            .iter()
+            .rev()
+            .find_map(|(_, case)| back_block(case))
+            .or_else(|| back_block(header)),
+        Structured::DoWhile { body, .. } | Structured::InfLoop { body } => back_block(body),
+        Structured::Goto { from, .. } => Some(*from),
+        Structured::IfGoto { .. } | Structured::Break | Structured::IfBreak { .. } => None,
+    }
+}
+
 /// Turn a jump to the enclosing loop's exit into `break`.
 ///
 /// Port of `BlockGraph::scopeBreak` and the overrides on the loop and goto
