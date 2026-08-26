@@ -777,6 +777,10 @@ fn collect_read_names(statements: &[NativeStatement], read: &mut BTreeSet<String
                 }
             }
             NativeStatement::IndirectGoto(target) => collect_expr_names(target, read),
+            // An expression statement is kept for its effect, so everything it
+            // mentions is read. This arm was missing entirely, so those reads
+            // were invisible to liveness.
+            NativeStatement::Expression(value) => collect_expr_names(value, read),
             // A construct's own test is a read, and so is everything its
             // bodies read. The bodies go through the accessor so no construct
             // can be forgotten here - liveness is consulted before deleting an
@@ -2822,5 +2826,98 @@ mod tests {
             reads_before_write(&loop_assigns_first, name),
             "control returns to the top, so the read can be of the incoming value"
         );
+    }
+    /// Thirteen walkers recursed into `if`/`while`/`do-while` only, so a
+    /// no-op transfer inside a `for` body survived to the rendered output.
+    #[test]
+    fn a_goto_to_the_next_label_is_dropped_inside_a_for_body() {
+        let mut statements = vec![NativeStatement::For {
+            initializer: None,
+            condition: None,
+            step: None,
+            body: vec![
+                NativeStatement::Goto(0x2000),
+                NativeStatement::Label(0x2000),
+                NativeStatement::Return(None),
+            ],
+        }];
+        drop_gotos_to_next_statement(&mut statements);
+        let NativeStatement::For { body, .. } = &statements[0] else {
+            panic!("the for statement is gone");
+        };
+        assert_eq!(
+            body,
+            &vec![
+                NativeStatement::Label(0x2000),
+                NativeStatement::Return(None)
+            ]
+        );
+    }
+
+    /// The same gap in `collect_read_names` was the dangerous half: liveness
+    /// consults it before deleting an assignment, so a read that only happens
+    /// inside a `for` or `switch` body made the assignment look dead.
+    #[test]
+    fn a_read_inside_a_for_body_keeps_its_assignment_alive() {
+        let assignment = NativeStatement::Assign {
+            destination: Expr::Temporary {
+                name: "counter".into(),
+                width: 4,
+            },
+            source: Expr::Constant { value: 0, width: 4 },
+        };
+        let mut statements = vec![
+            assignment.clone(),
+            NativeStatement::For {
+                initializer: None,
+                condition: None,
+                step: None,
+                body: vec![NativeStatement::Expression(Expr::Temporary {
+                    name: "counter".into(),
+                    width: 4,
+                })],
+            },
+        ];
+        let mut read = BTreeSet::new();
+        collect_read_names(&statements, &mut read, false);
+        assert!(
+            read.contains("counter"),
+            "the read inside the for was missed"
+        );
+        retain_live_assignments(&mut statements, &read);
+        assert_eq!(statements[0], assignment);
+    }
+
+    #[test]
+    fn a_read_inside_a_switch_case_keeps_its_assignment_alive() {
+        let assignment = NativeStatement::Assign {
+            destination: Expr::Temporary {
+                name: "selected".into(),
+                width: 4,
+            },
+            source: Expr::Constant { value: 1, width: 4 },
+        };
+        let mut statements = vec![
+            assignment.clone(),
+            NativeStatement::Switch {
+                expression: Expr::Constant { value: 0, width: 4 },
+                cases: vec![(
+                    0,
+                    vec![NativeStatement::Expression(Expr::Temporary {
+                        name: "selected".into(),
+                        width: 4,
+                    })],
+                )],
+                default: Vec::new(),
+            },
+        ];
+        let mut read = BTreeSet::new();
+        collect_read_names(&statements, &mut read, false);
+        assert!(
+            read.contains("selected"),
+            "the read inside the switch case was missed"
+        );
+        retain_live_assignments(&mut statements, &read);
+        assert_eq!(statements[0], assignment);
     }
 }

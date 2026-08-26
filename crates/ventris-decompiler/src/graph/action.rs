@@ -581,6 +581,26 @@ pub fn default_pipeline() -> Box<dyn Action> {
     if !skip("expression") {
         pipeline = pipeline.add(Box::new(FixedPoint::new(Box::new(expression))));
     }
+    // Ghidra registers the bitfield rules in the `cleanup` pool, group
+    // `bitfields`, which runs after the full loop rather than inside it: they
+    // rewrite a mask-and-shift into a single ZPULL, so running them earlier
+    // would remove the shapes the expression rules match on.
+    if !skip("cleanup") {
+        let mut cleanup = ActionPool::new("cleanup");
+        for rule in [
+            Box::new(super::bitfield::RuleBitFieldOut) as Box<dyn Rule>,
+            Box::new(super::bitfield::RuleBitFieldLoad),
+            Box::new(super::bitfield::RuleBitFieldStore),
+            Box::new(super::bitfield::RulePullAbsorb),
+            Box::new(super::bitfield::RuleInsertAbsorb),
+        ] {
+            if dropped.iter().any(|name| name == rule.name()) {
+                continue;
+            }
+            cleanup = cleanup.add_rule(rule);
+        }
+        pipeline = pipeline.add(Box::new(FixedPoint::new(Box::new(cleanup))));
+    }
     if !skip("infer-types-rich") {
         pipeline = pipeline.add(Box::new(super::typefactory::ActionInferTypes));
     }

@@ -493,6 +493,20 @@ All notable Ventris changes are documented here.
   `unstructured-control-flow` at 9. One defect remains, recorded rather than
   papered over: `TRK_fill_mem`'s first `for` is missing its initializer, and the
   statement that computes it appears after both loops instead of before them.
+- An expression statement's operands are now collected as reads. The arm was
+  missing from `collect_read_names` entirely, so liveness could not see them.
+- Ported Ghidra's bitfield cleanup rules into `graph/bitfield.rs`: five of the
+  six, registered in a new `cleanup` pool that runs after the expression fixed
+  point, as Ghidra's `cleanup` pool does. `RuleBitFieldIn` is deliberately
+  absent: Ghidra guards it on `Datatype::hasBitfields` and traces input 0 only,
+  and without bit-range type metadata there is no guard, so it fired on ordinary
+  masked arithmetic and cost an agreeing function.
+- Ported `DynamicHash::uniqueHash` into `graph/dynamic.rs`, including all four
+  traversal methods and the exact bit packing.
+- Ported six lifecycle actions into `graph/actiondb.rs`. `ActionMergeMultiEntry`
+  is absent rather than present-and-inert; it needs symbol scope and mutable
+  high variables. The lifecycle state these actions set has no consumer in the
+  decompiler yet, so they are not registered in the pipeline.
 - Statement walkers no longer skip `for` and `switch` bodies. Thirteen of the
   seventeen walkers in `graph/emit.rs` recursed into `if`, `while` and `do-while`
   bodies only: `for` was added after most were written, and `switch` was never

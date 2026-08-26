@@ -10,19 +10,21 @@
 //! before the cleanup rule pool. `ActionAssignHigh` follows cleanup,
 //! `ActionPreferComplement`, `ActionStructureTransform`, and
 //! `ActionNormalizeBranches`, and begins the merge sequence.
-//! `ActionMergeMultiEntry` follows `ActionMergeRequired`, `ActionMarkExplicit`,
-//! and `ActionMarkImplied`, before `ActionMergeCopy`. `ActionMarkIndirectOnly`
-//! follows `ActionDynamicSymbols` and comes before speculative
-//! `ActionMergeAdjacent`, as required by the source comment. `ActionStop` is
-//! the final action, after `ActionPrototypeWarnings`.
+//! `ActionMarkIndirectOnly` follows `ActionDynamicSymbols` and comes before
+//! speculative `ActionMergeAdjacent`, as required by the source comment.
+//! `ActionStop` is the final action, after `ActionPrototypeWarnings`.
 //!
 //! The graph carries lifecycle markers and the per-varnode indirect-only bit,
 //! but it has no symbol scope, symbol entries, high-variable arena, or cover
-//! conflict machinery. The seven wrappers therefore preserve every state
-//! transition that the graph can represent. `merge_multi_entry` is deliberately
-//! unsupported rather than a guessed merge: Ghidra's implementation needs
-//! symbol-entry lookup and mutable `HighVariable` unions that this graph cannot
-//! express.
+//! conflict machinery. The six wrappers here preserve every state transition
+//! the graph can represent.
+//!
+//! `ActionMergeMultiEntry` is **not** ported and deliberately absent rather
+//! than present-and-inert. Ghidra's `Merge::mergeMultiEntry` needs
+//! `ScopeLocal`'s multi-entry symbol tree, `SymbolEntry` linked-varnode lookup,
+//! mutable `HighVariable` unions, and cover-conflict checks - none of which this
+//! graph has. A wrapper returning zero would report the slot as ported while
+//! doing nothing, so the gap is recorded here instead of in code.
 
 use super::Funcdata;
 use super::action::Action;
@@ -149,34 +151,6 @@ impl Action for ActionMarkIndirectOnly {
     }
 }
 
-/// Attempts Ghidra's symbol-entry merge for a multiple-entry function.
-///
-/// `Merge::mergeMultiEntry` collects every `Varnode` linked to each complete
-/// `SymbolEntry`, then unions their `HighVariable` objects unless cover
-/// conflicts forbid the merge. `Funcdata` has one entry address but no symbol
-/// scope, symbol-entry links, high-variable arena, or mutable cover-aware merge
-/// operation, so there is no faithful graph transformation to perform.
-pub fn merge_multi_entry(_data: &mut Funcdata) -> usize {
-    0
-}
-
-/// Exposes Ghidra's `ActionMergeMultiEntry` at its merge-phase slot.
-///
-/// The action remains visible to the pipeline, while `merge_multi_entry`
-/// intentionally reports no change until the graph grows the symbol and
-/// high-variable structures required by Ghidra.
-pub struct ActionMergeMultiEntry;
-
-impl Action for ActionMergeMultiEntry {
-    fn name(&self) -> &'static str {
-        "mergemultientry"
-    }
-
-    fn apply(&self, data: &mut Funcdata) -> usize {
-        merge_multi_entry(data)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,19 +241,5 @@ mod tests {
         assert_eq!(ActionMarkIndirectOnly.apply(&mut data), 0);
         assert!(data.varnode(indirect_input).flags.indirect_only);
         assert!(!data.varnode(ordinary_input).flags.indirect_only);
-    }
-
-    #[test]
-    fn merge_multi_entry_is_explicitly_unavailable_without_symbol_links() {
-        let mut data = Funcdata::default();
-        let block = data.new_block(0x2000);
-        let input = data.new_constant(1, 4);
-        let operation = data.new_op(op::COPY, seq(0x2000, 0), vec![input]);
-        data.op_insert_end(operation, block);
-        let before = data.clone();
-        assert_eq!(ActionMergeMultiEntry.apply(&mut data), 0);
-        assert_eq!(data, before);
-        assert_eq!(merge_multi_entry(&mut data), 0);
-        assert_eq!(data.block(block).ops, vec![operation]);
     }
 }
