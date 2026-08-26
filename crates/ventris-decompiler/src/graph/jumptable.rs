@@ -933,6 +933,48 @@ mod tests {
         assert_eq!(recovered[0].default_target, None);
     }
 
+    /// Ghidra's flow analysis only creates an edge to an address it is
+    /// decompiling, so a computed jump that leaves the function is a call through
+    /// the address. `vm_boot`'s `jr` to `0x700016cc` reads as
+    /// `(*(code *)&DAT_700016cc)()` there; here the trivial model recovered the
+    /// one constant destination, `truncate_indirect_jumps` saw a recovered table
+    /// and left it alone, and it rendered as `goto *(...)`.
+    #[test]
+    fn a_computed_jump_out_of_the_function_becomes_a_call() {
+        let build = || {
+            let mut data = Funcdata::default();
+            data.entry = 0x1000;
+            let block = data.new_block(0x1000);
+            let target = data.new_varnode(ventris_lifter::REGISTER_SPACE, 8, 4);
+            let branch = data.new_op(op::BRANCHIND, seq(0x1000), vec![target]);
+            data.op_insert_end(branch, block);
+            (data, branch, target)
+        };
+
+        let (mut data, branch, target) = build();
+        let outside = vec![JumpTable {
+            branch,
+            switch_value: target,
+            cases: vec![(0, 0x700016cc)],
+            default_target: None,
+        }];
+        assert_eq!(truncate_indirect_jumps(&mut data, &outside), 1);
+        assert_eq!(data.op(branch).opcode, op::CALLIND);
+
+        // A destination inside the function is a real branch and stays one.
+        let (mut data, branch, target) = build();
+        let landing = data.new_block(0x1010);
+        data.add_edge(GraphBlockId(0), landing);
+        let inside = vec![JumpTable {
+            branch,
+            switch_value: target,
+            cases: vec![(0, 0x1010)],
+            default_target: None,
+        }];
+        assert_eq!(truncate_indirect_jumps(&mut data, &inside), 0);
+        assert_eq!(data.op(branch).opcode, op::BRANCHIND);
+    }
+
     /// A `switch` with a bounds check reaches its default twice: from the guard
     /// that rejects an out-of-range selector, and from the table's own default
     /// entry. Two incoming edges make `ruleBlockSwitch` refuse that block as a
@@ -1106,7 +1148,24 @@ mod tests {
 ///
 /// Returns the number of jumps converted.
 pub fn truncate_indirect_jumps(data: &mut Funcdata, tables: &[JumpTable]) -> usize {
-    let recovered: BTreeSet<OpId> = tables.iter().map(|table| table.branch).collect();
+    // A recovered table whose every destination lies outside this function is not
+    // a branch either. Ghidra's flow analysis only ever creates an edge to an
+    // address it is decompiling; a computed jump that leaves the function is a
+    // call through the address, which is how `vm_boot`'s `jr` to `0x700016cc`
+    // reads as `(*(code *)&DAT_700016cc)()` there and as `goto *(...)` here.
+    let inside: BTreeSet<u64> = data.blocks().map(|(_, block)| block.start).collect();
+    let recovered: BTreeSet<OpId> = tables
+        .iter()
+        .filter(|table| {
+            table
+                .cases
+                .iter()
+                .map(|(_, target)| *target)
+                .chain(table.default_target)
+                .any(|target| inside.contains(&target))
+        })
+        .map(|table| table.branch)
+        .collect();
     let unrecovered: Vec<OpId> = data
         .live_ops()
         .filter(|(id, operation)| operation.opcode == op::BRANCHIND && !recovered.contains(id))

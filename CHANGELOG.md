@@ -6,6 +6,14 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- **`agrees` is 29 of 37 (78%)** and `unstructured-control-flow` is down to 1.
+  A computed jump whose every recovered destination lies *outside* the function is
+  not a branch: Ghidra's flow analysis only creates an edge to an address it is
+  decompiling, so such a jump is a call through the address. `vm_boot`'s `jr` to
+  `0x700016cc` reads as `(*(code *)&DAT_700016cc)()` in the oracle and had been
+  rendering as `goto *(...)` here, because the trivial model *did* recover the one
+  constant destination and `truncate_indirect_jumps` only converted branches with
+  no table at all. It now also converts a table with no in-function target.
 - **`agrees` is 28 of 37 (76%)** and `missing-conditional` is down to 2, from
   three fixes that all came out of one function, `getBuiltInTexture`, whose five
   nested `if`s had collapsed to two.
