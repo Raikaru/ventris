@@ -193,12 +193,10 @@ fn find_loop_variable(
                 if data.op(iterate).parent != Some(tail) || is_call_or_marker(data, iterate) {
                     continue;
                 }
-                // `testTerminal` requires the statement be the last in its
-                // block, and Ghidra only moves it there when that move is
-                // provably safe. Requiring it already be last keeps the port on
-                // the side that needs no move.
-                // Ghidra moves the statement to the end of the tail rather
-                // than requiring it be there, so long as the move is safe.
+                // `testTerminal` wants the statement last in its block, and
+                // Ghidra moves it to the end of the tail rather than requiring
+                // it be there, so long as the move is safe - which is what
+                // `is_moveable` below checks.
                 let Some(last) = last_printing_op(data, tail) else {
                     continue;
                 };
@@ -208,7 +206,10 @@ fn find_loop_variable(
                 return Some((definition, iterate));
             }
             // Ghidra's `path[4]`: the tested value may sit up to four
-            // definitions above the loop variable.
+            // definitions above the loop variable. Note this bounds the work
+            // stack's length, not the traversal depth, so it is not that rule:
+            // carrying the depth per work item instead is the faithful form,
+            // and was measured to change no output on the present corpus.
             if path.len() >= 3 || is_call_or_marker(data, definition) || !seen.insert(definition) {
                 continue;
             }
