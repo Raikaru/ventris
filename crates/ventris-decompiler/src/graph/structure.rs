@@ -945,6 +945,55 @@ impl<'a> Graph<'a> {
         })
     }
 
+    /// Whether a block is too complicated to become one arm of a short-circuit
+    /// condition, porting Ghidra's `BlockBasic::isComplex`.
+    ///
+    /// A short-circuit operator only evaluates its second arm when the first
+    /// did not decide the branch, but the collapse concatenates both bodies and
+    /// so runs the second unconditionally. Ghidra allows a complex *first*
+    /// block, because only its branch is printed, and refuses a complex second
+    /// one for exactly this reason.
+    ///
+    /// Without the guard `decompSZS_subroutine` collapsed blocks that compute a
+    /// value into an `||`, which both ran their statements unconditionally and
+    /// left two distinct values sharing one variable name - rendering as
+    /// `b || b` and `b || !b` where the source tests two different things.
+    ///
+    /// Statement counting follows Ghidra: the branch counts as one, so does a
+    /// call or an operation with no output, and so does a calculation whose
+    /// result is explicit rather than inlined into its reader. More than two
+    /// and the block is complex.
+    fn is_complex(&self, block: GraphBlockId, successors: usize) -> bool {
+        const MAX_IMPLIED_REF: usize = 2;
+        let mut statements = usize::from(successors >= 2);
+        for operation in self.data.block(block).ops.iter().copied() {
+            let op = self.data.op(operation);
+            if is_marker_opcode(op.opcode) {
+                continue;
+            }
+            if is_call_opcode(op.opcode) {
+                statements += 1;
+            } else if let Some(output) = op.output {
+                let descendants = &self.data.varnode(output).descendants;
+                let explicit = descendants.is_empty()
+                    || descendants.len() > MAX_IMPLIED_REF
+                    || descendants.iter().any(|reader| {
+                        is_marker_opcode(self.data.op(*reader).opcode)
+                            || self.data.op(*reader).parent != Some(block)
+                    });
+                if explicit {
+                    statements += 1;
+                }
+            } else if !is_flow_break_opcode(op.opcode) {
+                statements += 1;
+            }
+            if statements > 2 {
+                return true;
+            }
+        }
+        false
+    }
+
     /// The condition under which this node transfers to the given successor.
     fn condition_toward(&self, node: NodeId, successor: NodeId) -> Option<Condition> {
         let index = self.nodes[node]
@@ -978,6 +1027,11 @@ impl<'a> Graph<'a> {
                 continue;
             }
             if self.nodes[second].successors.len() != 2 {
+                continue;
+            }
+            // Ghidra's `if (orblock->isComplex()) continue;`. The second arm's
+            // body would run unconditionally once the two are concatenated.
+            if self.is_complex(self.nodes[second].exit, 2) {
                 continue;
             }
             if !self.nodes[second].successors.contains(&clause) {
@@ -1563,6 +1617,25 @@ fn dominates(
 /// Negation is pushed into the leaf so a combined test stays a tree of `&&` and
 /// `||` over branch conditions, which is what De Morgan's laws give and what C
 /// can spell without a temporary.
+/// Ghidra's `PcodeOp::isMarker`: a phi or an indirect effect, neither of which
+/// is a printed statement.
+fn is_marker_opcode(opcode: i32) -> bool {
+    matches!(opcode, op::MULTIEQUAL | op::INDIRECT)
+}
+
+fn is_call_opcode(opcode: i32) -> bool {
+    matches!(opcode, op::CALL | op::CALLIND | op::CALLOTHER)
+}
+
+/// Ghidra's `PcodeOp::isFlowBreak`: a transfer, which is not counted as a
+/// statement on top of the branch already counted.
+fn is_flow_break_opcode(opcode: i32) -> bool {
+    matches!(
+        opcode,
+        op::BRANCH | op::CBRANCH | op::BRANCHIND | op::RETURN
+    )
+}
+
 fn negate(condition: Condition) -> Condition {
     match condition {
         Condition::Branch { block, taken } => Condition::Branch {
@@ -2156,6 +2229,41 @@ mod tests {
         assert!(
             matches!(members[0], Structured::IfGoto { .. }),
             "outside a loop the jump has no break to become"
+        );
+    }
+
+    /// Ghidra refuses a short-circuit collapse when the second arm is complex,
+    /// because the collapse concatenates both bodies and would otherwise run
+    /// the second arm's statements unconditionally.
+    #[test]
+    fn a_complex_second_arm_is_not_collapsed_into_a_short_circuit() {
+        let mut data = Funcdata::default();
+        let busy = data.new_block(0x1000);
+        for order in 0..3 {
+            let call = data.new_op(
+                op::CALL,
+                crate::graph::SeqNum {
+                    address: 0x1000,
+                    order,
+                },
+                Vec::new(),
+            );
+            data.op_insert_end(call, busy);
+        }
+        let simple = data.new_block(0x2000);
+        let left = data.new_constant(1, 4);
+        let right = data.new_constant(2, 4);
+        let compare = data.new_op(op::INT_LESS, seq(0x2000), vec![left, right]);
+        data.op_insert_end(compare, simple);
+
+        let graph = Graph::of(&data, &[]);
+        assert!(
+            graph.is_complex(busy, 2),
+            "three calls are past Ghidra's two-statement ceiling"
+        );
+        assert!(
+            !graph.is_complex(simple, 2),
+            "one comparison plus the branch is exactly the ceiling"
         );
     }
 }

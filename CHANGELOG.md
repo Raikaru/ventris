@@ -509,6 +509,10 @@ All notable Ventris changes are documented here.
   `ActionSegmentize` needs a `SegmentOp` registry and segmented address-space
   metadata that no supported architecture defines here. `ActionLaneDivide` needs
   a laned-register registry and lane-description machinery.
+- A short-circuit collapse now refuses a complex second arm, porting Ghidra's
+  `BlockBasic::isComplex` guard from `ruleBlockOr`. The collapse concatenates
+  both bodies, so without the guard the second arm's statements ran
+  unconditionally. `missing-conditional` dropped from 7 corpus functions to 6.
 - A jump in trailing position inside nested `if` bodies is now dropped, since
   falling out of the nesting lands where the jump was going. `__osRealloc` went
   from five jumps to none and `unstructured-control-flow` from 7 corpus
