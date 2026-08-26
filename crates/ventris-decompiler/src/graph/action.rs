@@ -537,6 +537,7 @@ pub fn default_pipeline() -> Box<dyn Action> {
     // Copy propagation and indirect collapse run last: they remove the
     // operations the other rules match on, so running them earlier hides work.
     expression = expression
+        .add_rule(Box::new(super::protoconstraints::RulePiecePathology))
         .add_rule(Box::new(RulePropagateCopy))
         .add_rule(Box::new(RuleIndirectCollapse));
     // Prototype and parameter recovery runs before the expression set: an
@@ -600,6 +601,23 @@ pub fn default_pipeline() -> Box<dyn Action> {
             cleanup = cleanup.add_rule(rule);
         }
         pipeline = pipeline.add(Box::new(FixedPoint::new(Box::new(cleanup))));
+    }
+    // Ghidra's `protorecovery` group: prototype recovery reads the function's
+    // FuncProto, which the graph path populates from the target ABI.
+    // ActionUnjustifiedParams is at coreaction.cc:5737 and
+    // ActionPrototypeWarnings at 5794.
+    if !skip("protorecovery") {
+        let mut protorecovery = ActionGroup::new("protorecovery");
+        for action in [
+            Box::new(super::protorecovery::ActionInputPrototype) as Box<dyn Action>,
+            Box::new(super::protorecovery::ActionOutputPrototype),
+            Box::new(super::protorecovery::ActionPrototypeTypes),
+            Box::new(super::protoconstraints::ActionUnjustifiedParams),
+            Box::new(super::protoconstraints::ActionPrototypeWarnings),
+        ] {
+            protorecovery = protorecovery.add(action);
+        }
+        pipeline = pipeline.add(Box::new(protorecovery));
     }
     // Ghidra adds these to `blockrecovery` immediately after the cleanup pool
     // (coreaction.cc:5771-5773), before ActionNormalizeBranches.

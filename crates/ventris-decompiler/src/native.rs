@@ -2215,7 +2215,28 @@ impl NativeDecompiler {
         // where the convention is already in hand keeps the passes working on
         // real storage instead of a permanent `None`.
         if let Some(abi) = abi {
-            data.set_func_proto(graph::funcproto::FuncProto::new(*abi));
+            let mut proto = graph::funcproto::FuncProto::new(*abi);
+            // Ghidra's `ProtoModel` carries the convention's storage lists, and
+            // `FuncProto::deriveInputMap` filters trials against them. Without
+            // them every derive call is a no-op, so the prototype passes could
+            // not decide anything. The lists come from the same ABI helpers the
+            // address-ordered path already uses.
+            let to_location = |vnode: &Varnode| graph::guard::Location {
+                space: vnode.space,
+                offset: vnode.offset,
+                size: vnode.size,
+            };
+            proto.set_model_storage(
+                abi_argument_vnodes(architecture, abi)
+                    .iter()
+                    .map(to_location)
+                    .collect(),
+                abi_primary_return_vnodes(architecture, abi)
+                    .iter()
+                    .map(to_location)
+                    .collect(),
+            );
+            data.set_func_proto(proto);
         }
         let statements = graph::emit::emit_structured(
             &tables,

@@ -191,7 +191,6 @@ fn is_address_tied(data: &Funcdata, value: VarnodeId) -> bool {
     varnode.flags.volatile || varnode.space == ventris_lifter::RAM_SPACE
 }
 
-
 fn speculative_union(
     data: &Funcdata,
     variables: &mut Variables,

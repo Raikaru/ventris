@@ -509,6 +509,32 @@ All notable Ventris changes are documented here.
   `ActionSegmentize` needs a `SegmentOp` registry and segmented address-space
   metadata that no supported architecture defines here. `ActionLaneDivide` needs
   a laned-register registry and lane-description machinery.
+- Ported the passes that consume the new layer, and registered the ones that can
+  fire: `ActionInputPrototype`, `ActionOutputPrototype`, `ActionPrototypeTypes`,
+  `ActionUnjustifiedParams` and `ActionPrototypeWarnings` in a `protorecovery`
+  group, plus `RulePiecePathology` in the expression pool. `graph/scopeconsumers.rs`
+  adds `ActionRestructureVarnode`, `ActionMappedLocalSync`,
+  `RulePtrsubCharConstant` and `RuleStringCopy`.
+  The prototype's model storage is now populated from the target ABI, because
+  `FuncProto::derive_input_map` returns immediately on an empty storage list -
+  without it every prototype pass was provably unable to decide anything.
+- Measured honestly: the census is byte-identical with the `protorecovery` group
+  skipped. The passes run, read real model storage and mutate the prototype, but
+  nothing renders it - `recover_parameters` and `graph_return_type` still derive
+  parameters and return type from the emitted statements independently. Making
+  the document consume `FuncProto` is the remaining link and is a change in its
+  own right, not a wiring detail.
+- Four passes were deliberately left unregistered with no `Action` impl, because
+  their inputs have no writer anywhere in the project: `ActionExtraPopSetup` and
+  `ActionInternalStorage` (`set_extra_pop` and `set_internal_storage` have no
+  callers outside their own definitions and tests), and the four
+  `graph/scopeconsumers.rs` passes are dormant because nothing populates
+  `Funcdata::scope_local` - that needs Ghidra's `ScopeLocal::restructure`/
+  `MapState` gathering ported first.
+- `ActionDefaultParams` is a partial bridge only. Ghidra consumes `FuncCallSpecs`,
+  which is a per-call prototype *plus a link to the callee's own recovered
+  prototype*; the second half is what the pass actually reads, and
+  `guard::CallEffects` carries effects only.
 - Built the layer the remaining Ghidra passes read, which was blocking them
   rather than any missing pass:
   - `Funcdata::warning`/`warnings` - a deduplicating diagnostic sink, surfaced

@@ -329,43 +329,18 @@ pub fn apply_extra_pop_calls(
     changed
 }
 
-/// Set up stack adjustments using the one current prototype as a conservative
-/// fallback for every graph call.  A caller with per-call prototypes should
-/// prefer [`apply_extra_pop_calls`], which is the exact Ghidra input shape.
+/// The standalone bridge for `ActionExtraPopSetup` when the caller has the
+/// per-call prototype records that Ghidra's `Funcdata` supplies.
 pub struct ActionExtraPopSetup;
 
 impl ActionExtraPopSetup {
-    /// Apply the representable known-extra-pop branch.
-    pub fn apply_with(data: &mut Funcdata, proto: &mut FuncProto) -> usize {
-        let Some(stack) = data.spacebase else {
-            return 0;
-        };
-        let calls: Vec<ExtraPopCall> = data
-            .live_ops()
-            .filter(|(_, operation)| matches!(operation.opcode, op::CALL | op::CALLIND))
-            .map(|(id, _)| ExtraPopCall {
-                op: id,
-                proto: proto.clone(),
-            })
-            .collect();
-        apply_extra_pop_calls(data, stack, &calls)
+    /// Apply the known-extra-pop branch to explicit callsite metadata.
+    pub fn apply_with(data: &mut Funcdata, stack: Location, calls: &[ExtraPopCall]) -> usize {
+        apply_extra_pop_calls(data, stack, calls)
     }
 }
 
-impl Action for ActionExtraPopSetup {
-    fn name(&self) -> &'static str {
-        "extrapopsetup"
-    }
-
-    fn apply(&self, data: &mut Funcdata) -> usize {
-        let Some(mut proto) = data.func_proto().cloned() else {
-            return 0;
-        };
-        Self::apply_with(data, &mut proto)
-    }
-}
-
-fn eventual_constant(data: &Funcdata, value: VarnodeId, max_binary: u8, max_load: u8) -> bool {
+fn eventual_constant(data: &Funcdata, value: VarnodeId, max_binary: u8, mut max_load: u8) -> bool {
     let mut current = value;
     let mut seen = BTreeSet::new();
     loop {
@@ -385,6 +360,7 @@ fn eventual_constant(data: &Funcdata, value: VarnodeId, max_binary: u8, max_load
                 if max_load == 0 {
                     return false;
                 }
+                max_load -= 1;
                 let Some(input) = operation.inputs.get(1).copied() else {
                     return false;
                 };
@@ -444,7 +420,7 @@ fn storage_store_candidates(data: &Funcdata, proto: &FuncProto) -> Vec<OpId> {
 /// Identify stores that Ghidra would mark as unmapped for internal compiler
 /// constants.  The candidate list is useful to callers with an extended graph
 /// carrying `storeUnmapped`; the current graph intentionally has no such flag,
-/// so the Action itself declines the mutation while preserving the exact
+/// so the operation declines the mutation while preserving the exact
 /// precondition and candidate census.
 pub struct ActionInternalStorage;
 
@@ -463,19 +439,6 @@ impl ActionInternalStorage {
     pub fn apply_with(data: &mut Funcdata, proto: &mut FuncProto) -> usize {
         let _candidates = storage_store_candidates(data, proto);
         0
-    }
-}
-
-impl Action for ActionInternalStorage {
-    fn name(&self) -> &'static str {
-        "internalstorage"
-    }
-
-    fn apply(&self, data: &mut Funcdata) -> usize {
-        let Some(mut proto) = data.func_proto().cloned() else {
-            return 0;
-        };
-        Self::apply_with(data, &mut proto)
     }
 }
 
@@ -518,9 +481,9 @@ fn trace_pathology_forward(
     proto: &mut FuncProto,
     consumed_size: u32,
 ) -> usize {
-    let Some(output) = data.op(piece).output else {
+    if data.op(piece).output.is_none() {
         return 0;
-    };
+    }
     let mut worklist = vec![piece];
     let mut seen = BTreeSet::new();
     let mut changed = 0;
@@ -545,15 +508,12 @@ fn trace_pathology_forward(
                 }
                 op::CALL | op::CALLIND => {
                     // Per-call input-active/locked state is absent from this
-                    // graph.  Do not guess a callee byte-consumption update.
+                    // graph. Do not guess a callee byte-consumption update.
                 }
                 _ => {}
             }
         }
     }
-    // Keep the root live while the traversal is in progress; this assertion is
-    // also a cheap guard against an accidental traversal from a detached op.
-    let _ = output;
     changed
 }
 
@@ -605,7 +565,6 @@ impl RulePiecePathology {
         trace_pathology_forward(data, id, proto, consumed_size)
     }
 }
-
 impl Rule for RulePiecePathology {
     fn name(&self) -> &'static str {
         "piecepathology"
@@ -732,7 +691,7 @@ mod tests {
         let mut callee = prototype();
         callee.set_extra_pop(8);
         assert_eq!(
-            apply_extra_pop_calls(
+            ActionExtraPopSetup::apply_with(
                 &mut data,
                 stack,
                 &[ExtraPopCall {
