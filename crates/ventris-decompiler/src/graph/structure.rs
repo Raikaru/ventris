@@ -1690,9 +1690,23 @@ fn taken_successor(data: &Funcdata, block: GraphBlockId) -> Option<GraphBlockId>
         return None;
     }
     let target = operation.inputs.first().copied()?;
+    if data.varnode(target).space == ventris_lifter::CONST_SPACE {
+        // A branch within one instruction: the destination is a p-code index
+        // relative to the branching operation, so the taken block is the one
+        // starting at that operation of the same instruction.
+        let seq = data.op(terminator).seq;
+        let relative = data.varnode(target).offset as i64;
+        let order = u32::try_from(i64::from(seq.order).checked_add(relative)?).ok()?;
+        return data
+            .blocks()
+            .find(|(_, candidate)| candidate.start == seq.address && candidate.start_order == order)
+            .map(|(id, _)| id);
+    }
     let address = data.varnode(target).offset;
     data.blocks()
-        .find(|(_, candidate)| candidate.start == address)
+        // An instruction split into several blocks has one at order zero; a
+        // machine branch always arrives there.
+        .find(|(_, candidate)| candidate.start == address && candidate.start_order == 0)
         .map(|(id, _)| id)
 }
 

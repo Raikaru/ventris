@@ -179,6 +179,15 @@ pub struct GraphOp {
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct GraphBlock {
     pub start: u64,
+    /// Index of the block's first p-code operation within `start`'s
+    /// instruction.
+    ///
+    /// Ghidra's basic blocks are p-code level, not instruction level: a
+    /// `CBRANCH` whose destination is in the constant space branches *within*
+    /// one instruction's operations, so a block can begin part-way through an
+    /// instruction and two blocks can share a start address. PPC paired-single
+    /// arithmetic lifts to exactly that shape.
+    pub start_order: u32,
     pub ops: Vec<OpId>,
     pub predecessors: Vec<GraphBlockId>,
     pub successors: Vec<GraphBlockId>,
@@ -695,10 +704,19 @@ impl Funcdata {
     }
 
     pub fn new_block(&mut self, start: u64) -> GraphBlockId {
+        self.new_block_at(start, 0)
+    }
+
+    /// A block beginning at one p-code operation of an instruction.
+    ///
+    /// Only `from_lifted` needs a non-zero order, to split an instruction whose
+    /// own operations branch among themselves.
+    pub fn new_block_at(&mut self, start: u64, start_order: u32) -> GraphBlockId {
         self.invalidate_masks();
         let id = GraphBlockId(self.blocks.len() as u32);
         self.blocks.push(GraphBlock {
             start,
+            start_order,
             ..GraphBlock::default()
         });
         id
@@ -1153,18 +1171,25 @@ impl Funcdata {
             ..Self::default()
         };
         let leaders = block_leaders(function);
-        let mut block_of_address = BTreeMap::new();
-        for leader in &leaders {
-            let id = data.new_block(*leader);
-            block_of_address.insert(*leader, id);
+        let mut block_of_position: BTreeMap<(u64, u32), GraphBlockId> = BTreeMap::new();
+        for (address, order) in &leaders {
+            let id = data.new_block_at(*address, *order);
+            block_of_position.insert((*address, *order), id);
         }
         let mut block = None;
+        // Branches taken within one instruction, recorded while the operations
+        // are walked and wired once every block exists.
+        let mut internal: Vec<((u64, u32), (u64, u32), (u64, u32))> = Vec::new();
         for (address, instruction) in &function.instructions {
-            if let Some(id) = block_of_address.get(address) {
-                block = Some(*id);
-            }
-            let Some(block) = block else { continue };
             for (index, operation) in instruction.pcode.ops.iter().enumerate() {
+                let order = index as u32;
+                if let Some(id) = block_of_position.get(&(*address, order)) {
+                    block = Some(*id);
+                }
+                let Some(block) = block else { continue };
+                if let Some(target) = internal_branch_target(operation, index) {
+                    internal.push(((*address, order), (*address, target), (*address, order + 1)));
+                }
                 let inputs = operation
                     .inputs
                     .iter()
@@ -1172,7 +1197,7 @@ impl Funcdata {
                     .collect();
                 let seq = SeqNum {
                     address: *address,
-                    order: index as u32,
+                    order,
                 };
                 let op = data.new_op(operation.opcode, seq, inputs);
                 data.op_insert_end(op, block);
@@ -1182,10 +1207,24 @@ impl Funcdata {
                 }
             }
         }
+        // The taken side first, so `successors[0]` is the branch's own taken
+        // target exactly as it is for a machine-level conditional branch.
+        for (source, taken, fallthrough) in internal {
+            let Some(from) = enclosing_block(&block_of_position, source) else {
+                continue;
+            };
+            for destination in [taken, fallthrough] {
+                if let Some(to) = block_of_position.get(&destination).copied() {
+                    data.add_edge(from, to);
+                }
+            }
+        }
         for (source, target) in &function.edges {
             if let (Some(from), Some(to)) = (
-                enclosing_block(&block_of_address, *source),
-                block_of_address.get(target).copied(),
+                // A machine edge leaves the last operation of its instruction,
+                // which is the last block that instruction was split into.
+                enclosing_block(&block_of_position, (*source, u32::MAX)),
+                block_of_position.get(&(*target, 0)).copied(),
             ) {
                 data.add_edge(from, to);
             }
@@ -1216,8 +1255,8 @@ impl Funcdata {
 /// operation in the block", which decides a for-loop's iterator, a condition
 /// block's complexity and where a statement may be moved to, means nothing when
 /// the block holds one instruction.
-fn block_leaders(function: &NativeFunction) -> BTreeSet<u64> {
-    let mut leaders = BTreeSet::from([function.entry]);
+fn block_leaders(function: &NativeFunction) -> BTreeSet<(u64, u32)> {
+    let mut leaders = BTreeSet::from([(function.entry, 0u32)]);
     let mut arrivals: BTreeMap<u64, usize> = BTreeMap::new();
     let mut departures: BTreeMap<u64, usize> = BTreeMap::new();
     for (source, target) in &function.edges {
@@ -1228,7 +1267,7 @@ fn block_leaders(function: &NativeFunction) -> BTreeSet<u64> {
         // A join: flow arrives from more than one place, so it cannot be in the
         // middle of a block.
         if arrivals.get(target).copied().unwrap_or(0) > 1 {
-            leaders.insert(*target);
+            leaders.insert((*target, 0));
         }
         let Some(instruction) = function.instructions.get(source) else {
             continue;
@@ -1236,23 +1275,66 @@ fn block_leaders(function: &NativeFunction) -> BTreeSet<u64> {
         let sequential = source.wrapping_add(u64::from(instruction.pcode.len));
         if *target != sequential {
             // A branch ends its block, and both of its destinations begin one.
-            leaders.insert(*target);
-            leaders.insert(sequential);
+            leaders.insert((*target, 0));
+            leaders.insert((sequential, 0));
         } else if departures.get(source).copied().unwrap_or(0) > 1 {
             // The fall-through side of a conditional branch.
-            leaders.insert(*target);
+            leaders.insert((*target, 0));
         }
     }
-    leaders.retain(|address| function.instructions.contains_key(address));
+    leaders.retain(|(address, _)| function.instructions.contains_key(address));
+    // A branch among one instruction's own operations splits it, exactly as a
+    // machine branch splits a function. Both destinations begin a block.
+    for (address, instruction) in &function.instructions {
+        for (index, operation) in instruction.pcode.ops.iter().enumerate() {
+            let Some(target) = internal_branch_target(operation, index) else {
+                continue;
+            };
+            if (target as usize) <= instruction.pcode.ops.len() {
+                leaders.insert((*address, target));
+            }
+            leaders.insert((*address, index as u32 + 1));
+        }
+    }
+    // A machine-level leader stands whatever its instruction holds; an
+    // intra-instruction one must land on an operation that exists, or it would
+    // create a block nothing can be assigned to.
+    leaders.retain(|(address, order)| {
+        *order == 0
+            || function
+                .instructions
+                .get(address)
+                .is_some_and(|instruction| (*order as usize) < instruction.pcode.ops.len())
+    });
     leaders
 }
 
+/// The p-code index a `CBRANCH` inside one instruction transfers to.
+///
+/// A destination in the constant space is a *relative* p-code branch: the
+/// constant is added to the branching operation's own index. This is how SLEIGH
+/// expresses a guard over part of one instruction - PPC paired-single arithmetic
+/// and MIPS likely-branch delay slots both emit it - and treating it as an
+/// ordinary conditional branch to an address loses the guard entirely.
+fn internal_branch_target(operation: &ventris_pcode::PcodeOp, index: usize) -> Option<u32> {
+    if operation.opcode != ventris_pcode::op::CBRANCH {
+        return None;
+    }
+    let destination = operation.inputs.first()?;
+    if destination.space != CONST_SPACE {
+        return None;
+    }
+    let relative = destination.offset as i64;
+    let target = i64::try_from(index).ok()?.checked_add(relative)?;
+    u32::try_from(target).ok().filter(|target| *target > 0)
+}
+
 fn enclosing_block(
-    block_of_address: &BTreeMap<u64, GraphBlockId>,
-    address: u64,
+    block_of_position: &BTreeMap<(u64, u32), GraphBlockId>,
+    position: (u64, u32),
 ) -> Option<GraphBlockId> {
-    block_of_address
-        .range(..=address)
+    block_of_position
+        .range(..=position)
         .next_back()
         .map(|(_, id)| *id)
 }
@@ -1477,8 +1559,79 @@ mod tests {
         };
         assert_eq!(
             block_leaders(&function).iter().copied().collect::<Vec<_>>(),
-            vec![0x1000, 0x1004, 0x1010],
-            "0x1008 and 0x100c continue their block"
+            vec![(0x1000, 0), (0x1004, 0), (0x1010, 0)],
+            "0x1008 and 0x100c continue their block, and nothing branches inside an instruction"
+        );
+    }
+
+    /// A `CBRANCH` to the constant space branches within one instruction, so it
+    /// splits that instruction into blocks exactly as a machine branch splits a
+    /// function. PPC paired-single arithmetic lifts to this shape, and treating
+    /// the instruction as one block loses the guard entirely.
+    #[test]
+    fn a_branch_inside_one_instruction_splits_it() {
+        use ventris_lifter::{CONST_SPACE, Flow, LiftedInstruction, REGISTER_SPACE};
+        use ventris_pcode::{InstPcode, PcodeOp, Varnode};
+        let condition = Varnode::new(REGISTER_SPACE, 8, 1);
+        // op 0 computes, op 1 skips op 2, op 2 is guarded, op 3 always runs.
+        let ops = vec![
+            PcodeOp::new(op::COPY, Some(condition), vec![condition]),
+            PcodeOp::new(
+                op::CBRANCH,
+                None,
+                vec![Varnode::new(CONST_SPACE, 2, 4), condition],
+            ),
+            PcodeOp::new(op::COPY, Some(condition), vec![condition]),
+            PcodeOp::new(op::COPY, Some(condition), vec![condition]),
+        ];
+        let mut instructions = BTreeMap::new();
+        instructions.insert(
+            0x1000u64,
+            LiftedInstruction {
+                address: 0x1000,
+                bytes: vec![0, 0, 0, 0],
+                pcode: InstPcode {
+                    len: 4,
+                    space: ventris_lifter::RAM_SPACE,
+                    offset: 0x1000,
+                    ops,
+                },
+                flow: Flow::Return,
+                embedded_delay_slot_bytes: 0,
+            },
+        );
+        let function = NativeFunction {
+            entry: 0x1000,
+            instructions,
+            edges: BTreeSet::new(),
+            calls: BTreeSet::new(),
+        };
+
+        assert_eq!(
+            block_leaders(&function).iter().copied().collect::<Vec<_>>(),
+            vec![(0x1000, 0), (0x1000, 2), (0x1000, 3)],
+            "the branch ends a block and both destinations begin one"
+        );
+
+        let data = Funcdata::from_lifted(&function);
+        let blocks: Vec<(u64, u32, usize)> = data
+            .blocks()
+            .map(|(_, block)| (block.start, block.start_order, block.ops.len()))
+            .collect();
+        assert_eq!(
+            blocks,
+            vec![(0x1000, 0, 2), (0x1000, 2, 1), (0x1000, 3, 1)],
+            "one instruction became three blocks: {blocks:?}"
+        );
+        let guard = data
+            .blocks()
+            .find(|(_, block)| block.start_order == 0)
+            .map(|(id, _)| id)
+            .expect("the guarding block exists");
+        assert_eq!(
+            data.block(guard).successors.len(),
+            2,
+            "the guard reaches both the skipped body and the join"
         );
     }
 }

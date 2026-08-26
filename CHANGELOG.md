@@ -6,6 +6,19 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- Basic blocks are now p-code level, as Ghidra's are. A `CBRANCH` whose
+  destination lies in the constant space is a *relative* p-code branch - the
+  constant is added to the branching operation's own index - so it branches
+  within one instruction. `block_leaders` and `from_lifted` worked on machine
+  addresses only, so such a branch was never a block boundary and its guard was
+  discarded: `__FrameCallback__Fl` carries eighteen of them from PPC
+  paired-single arithmetic and rendered `if 3` against the oracle's 7. Leaders
+  are now `(address, p-code index)`, `GraphBlock` carries `start_order`, an
+  instruction splits into as many blocks as its own branches require, and
+  `taken_successor` resolves a constant destination to the block at that
+  operation so `successors[0]` stays the taken side. `missing-conditional`
+  5 -> 4, every other family unchanged, and `__FrameCallback__Fl` leaves that
+  family with its conditional count matching exactly.
 - Measured negative on the remaining loop shapes. `queryMapAddress_single`
   renders `for=0` against the oracle's 2 (and `while=7 do=4 goto=8` against
   `while=6 do=6 goto=4`); `decompSZS_subroutine__FPUcPUc` now matches the
