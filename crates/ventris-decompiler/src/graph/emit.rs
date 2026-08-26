@@ -75,7 +75,17 @@ pub fn emit_structured(
     rich: &super::typefactory::RecoveredTypes,
     factory: &super::typefactory::TypeFactory,
 ) -> Vec<NativeStatement> {
-    let naming = mark_explicit_named(data, merge_all(data), types, stack_pointer);
+    let parameter_names: BTreeMap<(u32, u64), String> = parameters
+        .iter()
+        .map(|(location, (name, _))| (*location, name.clone()))
+        .collect();
+    let naming = mark_explicit_named(
+        data,
+        merge_all(data),
+        types,
+        stack_pointer,
+        &parameter_names,
+    );
     let resolver = Resolver::with_types(data, &naming, register_name, types)
         .with_parameters(parameters)
         .with_rich(rich, factory);

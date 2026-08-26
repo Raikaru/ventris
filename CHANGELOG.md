@@ -6,6 +6,21 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- A variable group holding a function input at an argument location now takes
+  that parameter's own name. This closes the chain traced earlier: the trials
+  were right, the prototype held all three parameters, and the group even
+  resolved to `arg2` - but `make_unique` reserves the `arg`/`farg`/`varg`
+  namespace so an ordinary local can never collide with a parameter, which is
+  right for a local and wrong for the parameter itself. It renamed the
+  parameter's own variable to `var_arg2`, and because `recover_parameters`
+  derives the signature from the names in the emitted statements, the parameter
+  disappeared from it. `TRK_fill_mem` now renders
+  `sub_800a67d8(uintptr_t arg0, uint32_t arg1, uint32_t arg2)` against the
+  oracle's `FUN_800a67d8(int param_1, byte param_2, uint param_3)` - three
+  parameters where it previously showed two. The reserved-namespace rule still
+  applies to every other group, which the regression test pins from both sides.
+  The earlier attempt at this failed because it stopped at preferring the name;
+  the guard downstream was the actual blocker.
 - One global-pointer base is now declared once however many recovered structures
   reach it. `rewrite_recovered_field_accesses` pushed a declaration per
   structure, so a register reached as two different structures emitted two

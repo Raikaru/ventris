@@ -90,10 +90,17 @@ pub fn mark_explicit_named(
     highs: Variables,
     types: &Types,
     stack_pointer: Option<super::guard::Location>,
+    parameters: &BTreeMap<(u32, u64), String>,
 ) -> Naming {
     let mut naming = mark_explicit_with(data, highs);
     let group_of = |value: VarnodeId| naming.highs.high_of(value);
-    let recovered = super::namevars::Names::of(data, &group_of, types, stack_pointer);
+    let recovered = super::namevars::Names::of_with_parameters(
+        data,
+        &group_of,
+        types,
+        stack_pointer,
+        parameters,
+    );
     let renamed: BTreeMap<u32, String> = naming
         .names
         .keys()

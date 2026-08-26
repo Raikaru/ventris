@@ -54,6 +54,17 @@ impl Names {
         types: &Types,
         stack_pointer: Option<Location>,
     ) -> Self {
+        Self::of_with_parameters(data, group_of, types, stack_pointer, &BTreeMap::new())
+    }
+
+    /// As [`Self::of`], preferring a caller-supplied parameter name.
+    pub fn of_with_parameters(
+        data: &Funcdata,
+        group_of: &dyn Fn(VarnodeId) -> u32,
+        types: &Types,
+        stack_pointer: Option<Location>,
+        parameters: &BTreeMap<(u32, u64), String>,
+    ) -> Self {
         let mut groups: BTreeMap<u32, Vec<VarnodeId>> = BTreeMap::new();
         for index in 0..data.varnode_count() {
             let value = VarnodeId(index as u32);
@@ -90,8 +101,28 @@ impl Names {
             // This is the same priority as ActionNameVars after symbol
             // recovery: a location-specific stack name outranks a register
             // and both outrank the generic datatype name.
-            let candidate = stack_pointer
-                .and_then(|pointer| frame_name(data, &info.values, pointer))
+            let from_parameter = info.values.iter().copied().find_map(|value| {
+                let varnode = data.varnode(value);
+                (varnode.flags.input && varnode.def.is_none())
+                    .then(|| parameters.get(&(varnode.space, varnode.offset)).cloned())
+                    .flatten()
+            });
+            // A group that holds a function input at an argument location *is*
+            // that parameter, so it takes the parameter's own name verbatim.
+            // `make_unique` reserves the `arg` namespace so an ordinary local
+            // can never collide with a parameter, which is right for a local and
+            // wrong here: it renamed the parameter's own variable to `var_arg2`,
+            // and since the signature is recovered from the names in the emitted
+            // statements, the parameter vanished from it.
+            if let Some(name) = from_parameter {
+                used.insert(name.clone());
+                names.insert(info.group, name);
+                continue;
+            }
+            let candidate = (None as Option<String>)
+                .or_else(|| {
+                    stack_pointer.and_then(|pointer| frame_name(data, &info.values, pointer))
+                })
                 .or_else(|| register_name_for_group(data, &info.values))
                 .unwrap_or_else(|| {
                     let prefix = type_prefix(types, &info.values);
@@ -666,5 +697,43 @@ mod tests {
         data.op_set_output(copy, Some(value));
         data.op_insert_end(copy, block);
         assert!(action.apply(&mut data) >= 1);
+    }
+
+    /// A group holding a function input at an argument location *is* that
+    /// parameter, so it takes the parameter's own name verbatim. `make_unique`
+    /// reserves the `arg` namespace so an ordinary local can never collide with
+    /// a parameter - right for a local, wrong for the parameter itself, which it
+    /// renamed to `var_arg2`. Since the signature is recovered from the names in
+    /// the emitted statements, that dropped the parameter from it entirely:
+    /// `TRK_fill_mem` rendered two parameters against the oracle's three.
+    #[test]
+    fn a_group_holding_a_parameter_takes_the_parameter_name() {
+        let mut data = Funcdata::default();
+        data.entry = 0x1000;
+        let block = data.new_block(0x1000);
+        // The entry value of the third argument register, reassigned once, so
+        // the group holds both the input and a written version.
+        let entry_value = data.new_varnode(REGISTER_SPACE, 20, 4);
+        data.mark_input(entry_value);
+        let one = data.new_constant(1, 4);
+        let add = data.new_op(op::INT_ADD, seq(0x1000), vec![entry_value, one]);
+        let written = data.new_varnode(REGISTER_SPACE, 20, 4);
+        data.op_set_output(add, Some(written));
+        data.op_insert_end(add, block);
+
+        let parameters = BTreeMap::from([((REGISTER_SPACE, 20u64), "arg2".to_string())]);
+        let types = Types::default();
+        // One group for both versions, as the variable merge produces.
+        let named = Names::of_with_parameters(&data, &|_| 0, &types, None, &parameters);
+        assert_eq!(
+            named.name_of_group(0),
+            Some("arg2"),
+            "the parameter's own name, not `var_arg2`"
+        );
+
+        // Without the map the reserved-namespace rule still applies, so an
+        // ordinary local can never be spelled `arg2`.
+        let plain = Names::of(&data, &|_| 0, &types, None);
+        assert_ne!(plain.name_of_group(0), Some("arg2"));
     }
 }
