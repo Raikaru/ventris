@@ -6,6 +6,19 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- Ported `isDecisionOut` after all, closing the last portable gap from the
+  collapse-rule audit. My earlier note said it needed loop-exit marking at rule
+  time; reading `block.hh` corrected that - `isDecisionOut` excludes irreducible,
+  back and goto edges, and it is `isLoopDAGOut` that also excludes loop exits.
+  Surrendered edges are already gone from `successors` here, so what remains to
+  test is the back edge, which makes it a one-line guard in both if-rules:
+  `ruleBlockProperIf` requires it on the edge into the clause and
+  `ruleBlockIfElse` on both of the head's edges. An `if` built across a back edge
+  claims a branch where the flow is a loop. Inert on the present corpus, with a
+  regression test that fails without it.
+- All three collapse rules audited against `blockaction.cc` are now guard-for-
+  guard equivalent except `isGotoOut`, which has no analogue because this graph
+  deletes a surrendered edge where Ghidra flags it.
 - Audited `ruleBlockProperIf` and `ruleBlockIfElse` against ours the same way and
   closed the portable gap: Ghidra checks the *clause* for `isSwitchOut`, not only
   the head - "Don't use switch (possibly with goto edges)" - so a clause that

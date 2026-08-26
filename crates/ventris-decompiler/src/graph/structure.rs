@@ -791,6 +791,16 @@ impl<'a> Graph<'a> {
         if taken == node || fallthrough == node {
             return false;
         }
+        // Ghidra's `if (!bl->isDecisionOut(0)) return false;` and the same for
+        // edge one. A decision edge is one that is neither a back edge, a goto
+        // edge nor irreducible; surrendered edges are already gone from
+        // `successors` here, so the test that remains is the back edge. An `if`
+        // built across one would claim a branch where the flow is a loop.
+        if self.nodes[taken].entry <= self.nodes[node].entry
+            || self.nodes[fallthrough].entry <= self.nodes[node].entry
+        {
+            return false;
+        }
         for clause in [taken, fallthrough] {
             if self.nodes[clause].predecessors.len() != 1 {
                 return false;
@@ -834,6 +844,12 @@ impl<'a> Graph<'a> {
             [(taken, fallthrough, true), (fallthrough, taken, false)]
         {
             if clause == node || other == node {
+                continue;
+            }
+            // Ghidra's `if (!bl->isDecisionOut(i)) continue;` - the edge into the
+            // clause must be a decision edge, so not a back edge here. An `if`
+            // built across one claims a branch where the flow is a loop.
+            if self.nodes[clause].entry <= self.nodes[node].entry {
                 continue;
             }
             if self.nodes[clause].predecessors.len() != 1 {
@@ -2399,6 +2415,36 @@ mod tests {
         assert!(
             !graph.is_complex(simple, 2),
             "one comparison plus the branch is exactly the ceiling"
+        );
+    }
+
+    /// Ghidra requires the edges an `if` is built from to be *decision* edges -
+    /// neither back edges, goto edges nor irreducible. Surrendered edges are
+    /// already gone from `successors` here, so the test that remains is the back
+    /// edge: an `if` built across one claims a branch where the flow is a loop.
+    #[test]
+    fn an_if_refuses_a_clause_reached_by_a_back_edge() {
+        // Blocks in address order, as `from_lifted` creates them, because a back
+        // edge is recognised by the target's identifier preceding the source's.
+        let mut data = Funcdata::default();
+        data.entry = 0x1010;
+        let earlier = data.new_block(0x1000);
+        let head = data.new_block(0x1010);
+        let join = data.new_block(0x1020);
+        conditional(&mut data, head, 0x1000);
+        data.add_edge(head, earlier);
+        data.add_edge(head, join);
+        data.add_edge(earlier, join);
+
+        let mut graph = Graph::of(&data, &[]);
+        let node = graph
+            .nodes
+            .iter()
+            .position(|candidate| candidate.entry == head)
+            .expect("the head is a node");
+        assert!(
+            !graph.rule_if_no_exit(node),
+            "the clause is reached by a back edge, so no `if` is built"
         );
     }
 
