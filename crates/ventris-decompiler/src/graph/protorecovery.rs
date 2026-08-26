@@ -82,6 +82,134 @@ fn input_varnodes(data: &Funcdata, proto: &FuncProto) -> Vec<VarnodeId> {
         .collect()
 }
 
+/// Check the evidence Ghidra requires before marking a function-output trial
+/// active. `ActionReturnRecovery::apply` (`coreaction.cc:1937-1981`) first
+/// runs `AncestorRealistic::execute`, then `Funcdata::ancestorOpUse`.
+fn output_ancestry_allows(
+    data: &Funcdata,
+    value: VarnodeId,
+    seen: &mut BTreeSet<VarnodeId>,
+) -> bool {
+    if !seen.insert(value) {
+        return true;
+    }
+    let Some(def) = data.varnode(value).def else {
+        // A direct input can be a legitimate pass-through return. The
+        // output trial is not subject to input-trial promotion.
+        return true;
+    };
+    let operation = data.op(def);
+    match operation.opcode {
+        // These values are left by a callee, not produced by this function.
+        op::CALL | op::CALLIND | op::CALLOTHER | op::INDIRECT => false,
+        // A top-level MULTIEQUAL is traversed by AncestorRealistic. Its
+        // siblings must all have plausible ancestry, but a COPY to result
+        // storage is already solid movement and must not recurse into them.
+        op::MULTIEQUAL => operation.inputs.iter().copied().all(|input| {
+            output_ancestry_step(data, input, &mut BTreeSet::new())
+        }),
+        // A COPY/SUBPIECE with a non-input source is solid movement in
+        // AncestorRealistic. Only inspect a linear pass-through source when
+        // doing so can expose a call/guard result.
+        op::COPY | op::SUBPIECE => operation
+            .inputs
+            .first()
+            .copied()
+            .is_some_and(|input| output_ancestry_step(data, input, seen)),
+        op::PIECE => {
+            !operation.inputs.is_empty()
+                && operation
+                    .inputs
+                    .iter()
+                    .copied()
+                    .all(|input| output_ancestry_step(data, input, seen))
+        }
+        // Arithmetic and loads are solid movement in AncestorRealistic.
+        _ => true,
+    }
+}
+
+/// Walk one source in the minimal COPY/PIECE ancestry traversal used by
+/// `AncestorRealistic::enterNode` (`funcdata_varnode.cc:2109-2139`).
+fn output_ancestry_step(
+    data: &Funcdata,
+    value: VarnodeId,
+    seen: &mut BTreeSet<VarnodeId>,
+) -> bool {
+    if !seen.insert(value) {
+        return true;
+    }
+    let Some(def) = data.varnode(value).def else {
+        return true;
+    };
+    let operation = data.op(def);
+    match operation.opcode {
+        op::CALL | op::CALLIND | op::CALLOTHER | op::INDIRECT => false,
+        op::COPY | op::SUBPIECE => operation
+            .inputs
+            .first()
+            .copied()
+            .is_some_and(|input| output_ancestry_step(data, input, seen)),
+        op::PIECE => operation
+            .inputs
+            .get(1)
+            .copied()
+            .is_some_and(|input| output_ancestry_step(data, input, seen)),
+        // A MULTIEQUAL terminates the minimal copy walk and is solid.
+        _ => true,
+    }
+}
+
+/// Follow one returned value's descendants and reject uses other than a
+/// RETURN. This is the graph equivalent of `Funcdata::onlyOpUse`
+/// (`funcdata_varnode.cc:1836-1934`) for the output trial.
+fn only_return_use(
+    data: &Funcdata,
+    value: VarnodeId,
+    seen: &mut BTreeSet<VarnodeId>,
+) -> bool {
+    if !seen.insert(value) {
+        return true;
+    }
+    let descendants: Vec<OpId> = data.varnode(value).descendants.iter().copied().collect();
+    for descendant in descendants {
+        let Some(operation) = data.opcode_of(descendant).map(|_| data.op(descendant)) else {
+            continue;
+        };
+        if operation.opcode == op::RETURN
+            && operation.inputs.get(1).copied() == Some(value)
+        {
+            // Multiple RETURNs carrying the same value are one output trial.
+            continue;
+        }
+        match operation.opcode {
+            op::BRANCH
+            | op::CBRANCH
+            | op::BRANCHIND
+            | op::LOAD
+            | op::STORE
+            | op::CALL
+            | op::CALLIND
+            | op::CALLOTHER
+            | op::RETURN => return false,
+            _ => {
+                if let Some(output) = operation.output
+                    && !only_return_use(data, output, seen)
+                {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Return whether an output value satisfies both Ghidra output-trial checks.
+pub(crate) fn return_value_is_active(data: &Funcdata, value: VarnodeId) -> bool {
+    output_ancestry_allows(data, value, &mut BTreeSet::new())
+        && only_return_use(data, value, &mut BTreeSet::new())
+}
+
 /// Return the first non-dead basic block, if the graph has one.
 fn first_live_block(data: &Funcdata) -> Option<GraphBlockId> {
     data.blocks()
@@ -273,6 +401,24 @@ impl ActionOutputPrototype {
             .filter(|(_, operation)| operation.opcode == op::RETURN)
             .map(|(id, _)| id)
             .collect();
+        let mut changed = 0;
+        for return_op in returns.iter().copied() {
+            let inputs = data.op(return_op).inputs.clone();
+            if inputs.len() <= 1 {
+                continue;
+            }
+            let mut kept = Vec::with_capacity(inputs.len());
+            kept.push(inputs[0]);
+            for value in inputs.iter().copied().skip(1) {
+                if return_value_is_active(data, value) {
+                    kept.push(value);
+                }
+            }
+            if kept.len() != inputs.len() {
+                data.op_set_inputs(return_op, kept);
+                changed += 1;
+            }
+        }
         let values: Vec<VarnodeId> = returns
             .first()
             .map(|return_op| {
@@ -284,11 +430,12 @@ impl ActionOutputPrototype {
                     .collect::<Vec<VarnodeId>>()
             })
             .unwrap_or_default();
-        if data.is_high_on() {
-            usize::from(proto.update_output_types(data, &values))
+        let promoted = if data.is_high_on() {
+            proto.update_output_types(data, &values)
         } else {
-            usize::from(proto.update_output_no_types(data, &values))
-        }
+            proto.update_output_no_types(data, &values)
+        };
+        changed + usize::from(promoted)
     }
 }
 
