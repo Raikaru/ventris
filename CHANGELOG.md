@@ -6,6 +6,17 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- Refuted and reverted, with the measurement: widening `ActionDoNothing` to
+  Ghidra's actual test. `BlockBasic::isDoNothing` accepts any block with one way
+  out, at least one way in, and `hasOnlyMarkers()` - "(and a branch)" - so a block
+  holding only phis, or nothing at all, qualifies; ours demands exactly one `BRANCH`
+  op. Porting the wider test cost three functions: `agrees` 31 -> 30, with
+  `unstructured-control-flow` back to 2 and `missing-loop-or-switch` to 2. The
+  reason is the other half of Ghidra's implementation, `Funcdata::removeDoNothingBlock`,
+  which relocates the removed block's own `MULTIEQUAL`s; our `splice_block` simply
+  drops them, so widening the candidates loses phi structure and damages loop
+  shapes. The wider test is only safe together with that relocation, and it did not
+  even reach the six empty `if`s it was aimed at - those arms are not empty *blocks*.
 - `__FrameCallback__Fl` traced to the lifter, not the decompiler. Both renderers
   agree the function reads `GQR0` as an unaffected input and decodes it, but Ghidra's
   paired-single semantics emit only the scale test and its `ldexpf`:
