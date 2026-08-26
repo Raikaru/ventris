@@ -6,6 +6,25 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- Ported `JumpBasic::foldInOneGuard`, which we had never had. A `switch` compiled
+  with a range check reaches its default block twice - once from the guard that
+  rejects an out-of-range selector, once from the table's own default entry - so
+  that block has two incoming edges and `ruleBlockSwitch` refuses it: "a case can
+  only have the switch fall into it". Ghidra neutralises the guard by replacing the
+  comparison feeding its `CBRANCH` with a constant, so control always falls into
+  the switch and the default is reached only through the table. `dl_G_MOVEWORD`
+  went from 5 cases / 3 ifs / 6 gotos to **6 cases / 2 ifs / 2 gotos**, matching
+  the oracle's case and `if` counts exactly.
+- The ordering is load-bearing and cost a measured regression to learn: run as a
+  control-flow action *before* table recovery, the fold destroys the very guard
+  whose comparison `recover_basic` reads for the table's bound - the switch
+  vanished entirely (0 cases, 5 gotos, `output_check` failing). Ghidra calls
+  `foldInGuards` on an already-recovered `JumpTable`, so this now runs beside
+  `truncate_indirect_jumps`, after recovery.
+- Only the branch of `foldInOneGuard` that applies when the guard's target is
+  already one of the switch's destinations is ported; the other adds a new
+  unlabelled destination and needs the table registry Ghidra keeps. The test pins
+  both: the folding case, and that a guard leading somewhere else is left alone.
 - Stopped printing a `goto` in front of every `break`. `ruleBlockSwitch` records
   an exit only when every case leaves to it, so that edge belongs to the switch and
   Ghidra's `BlockSwitch::emit` never prints it - we emitted the case's own branch

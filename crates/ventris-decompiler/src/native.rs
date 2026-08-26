@@ -2332,6 +2332,11 @@ impl NativeDecompiler {
         // branch to nowhere. Ghidra converts it before anything structures the
         // graph, so the constructs are built over the call.
         graph::jumptable::truncate_indirect_jumps(&mut data, &tables);
+        // A switch's range-check guard reaches the same default block the table's
+        // own default entry names, so that block has two incoming edges and
+        // `ruleBlockSwitch` refuses it. Ghidra folds the guard into the switch -
+        // after the table is recovered, because the bound comes from the guard.
+        graph::jumptable::fold_in_guards(&mut data, &tables);
         let recovered = graph::types::infer_types(&data, &BTreeMap::new());
         // The rich table keeps the structures and arrays that `Type` cannot
         // represent, which is what lets a field read render as `p->field_40`

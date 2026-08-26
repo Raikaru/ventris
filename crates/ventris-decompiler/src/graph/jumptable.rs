@@ -591,6 +591,120 @@ impl Action for ActionResolvedIndirect {
     }
 }
 
+/// Folds a switch's range-check guard into the switch itself.
+///
+/// Ghidra's `JumpBasic::foldInOneGuard`. A `switch` compiled with a bounds check
+/// reaches its default twice: once from the guard that rejects an out-of-range
+/// selector, and once from the jump table's own default entry. Both name the same
+/// block, so that block has two incoming edges and `ruleBlockSwitch` refuses it -
+/// "a case can only have the switch fall into it" - which costs a case, leaves the
+/// guard as an extra `if`, and turns the case's edges into `goto`s.
+///
+/// Ghidra neutralises the guard: the comparison feeding its `CBRANCH` becomes a
+/// constant, so control always falls into the switch and the default is reached
+/// only through the table. This ports the branch of `foldInOneGuard` that applies
+/// when the guard's target is *already* one of the switch's destinations; the other
+/// branch, which adds a new unlabelled destination, needs the recovered table and
+/// is not reachable from the control-flow graph alone.
+/// Ghidra folds guards *after* the table is recovered, and the order matters
+/// here too: the bound `recover_basic` reads comes from the guard's own
+/// comparison, so neutralising the guard first loses the table entirely.
+pub fn fold_in_guards(data: &mut Funcdata, tables: &[JumpTable]) -> usize {
+    let switches: Vec<GraphBlockId> = tables
+        .iter()
+        .filter_map(|table| data.op(table.branch).parent)
+        .collect();
+    let mut folds: Vec<(OpId, usize, GraphBlockId, GraphBlockId)> = Vec::new();
+    for switch in switches {
+        // `noInterveningStatement`: nothing may happen between the guard's
+        // test and the branch, or folding the guard away would move it.
+        if !no_intervening_statement(data, switch) {
+            continue;
+        }
+        let targets = data.block(switch).successors.clone();
+        for guard in data.block(switch).predecessors.clone() {
+            let outs = data.block(guard).successors.clone();
+            if outs.len() != 2 {
+                continue;
+            }
+            // One arm must enter the switch directly, and the other must
+            // already be a destination of the switch.
+            let Some(into) = outs.iter().position(|out| *out == switch) else {
+                continue;
+            };
+            let target = outs[1 - into];
+            if target == switch || !targets.contains(&target) {
+                continue;
+            }
+            let Some(cbranch) = data
+                .block(guard)
+                .ops
+                .iter()
+                .copied()
+                .find(|candidate| data.op(*candidate).opcode == op::CBRANCH)
+            else {
+                continue;
+            };
+            folds.push((cbranch, into, guard, target));
+            break;
+        }
+    }
+    let mut changed = 0;
+    for (cbranch, into, guard, target) in folds {
+        let Some(condition) = data.op(cbranch).inputs.get(1).copied() else {
+            continue;
+        };
+        // `CBRANCH` takes its taken edge when the condition holds, and our
+        // successor list is taken-first, so the constant that always enters
+        // the switch is 1 when the switch is the taken arm and 0 otherwise.
+        let width = data.varnode(condition).size.max(1);
+        let always = data.new_constant(u64::from(into == 0), width);
+        data.op_set_input(cbranch, always, 1);
+        if data.remove_edge(guard, target) {
+            changed += 1;
+        }
+    }
+    changed
+}
+
+/// Ghidra's `BlockBasic::noInterveningStatement`.
+///
+/// Whether the block does nothing a reader would call a statement: no call, no
+/// store, nothing written to a tied address, and no value it computes read
+/// anywhere else.
+fn no_intervening_statement(data: &Funcdata, block: GraphBlockId) -> bool {
+    for operation in data.block(block).ops.iter().copied() {
+        let op = data.op(operation);
+        if matches!(
+            op.opcode,
+            op::MULTIEQUAL | op::INDIRECT | op::BRANCH | op::CBRANCH | op::BRANCHIND | op::RETURN
+        ) {
+            continue;
+        }
+        if matches!(
+            op.opcode,
+            op::CALL | op::CALLIND | op::CALLOTHER | op::STORE
+        ) {
+            return false;
+        }
+        if matches!(op.opcode, op::COPY | op::SUBPIECE) {
+            continue;
+        }
+        let Some(output) = op.output else {
+            return false;
+        };
+        if data
+            .varnode(output)
+            .descendants
+            .iter()
+            .any(|reader| data.op(*reader).parent != Some(block))
+        {
+            return false;
+        }
+    }
+    true
+}
+
 /// Normalizes a recovered switch before structure recovery.
 ///
 /// Ghidra's `ActionSwitchNorm::apply` calls `JumpTable::foldInNormalization`,
@@ -817,6 +931,77 @@ mod tests {
         assert_eq!(recovered[0].switch_value, destination);
         assert_eq!(recovered[0].cases, vec![(0x1234, 0x1234)]);
         assert_eq!(recovered[0].default_target, None);
+    }
+
+    /// A `switch` with a bounds check reaches its default twice: from the guard
+    /// that rejects an out-of-range selector, and from the table's own default
+    /// entry. Two incoming edges make `ruleBlockSwitch` refuse that block as a
+    /// case, so `dl_G_MOVEWORD` lost a case, kept the guard as a third `if`, and
+    /// turned the case exits into `goto`s. Ghidra neutralises the guard.
+    #[test]
+    fn a_range_check_guard_folds_into_its_switch() {
+        let mut data = Funcdata::default();
+        data.entry = 0x1000;
+        let guard = data.new_block(0x1000);
+        let switch = data.new_block(0x1010);
+        let case = data.new_block(0x1020);
+        let default = data.new_block(0x1030);
+        let selector = data.new_varnode(ventris_lifter::REGISTER_SPACE, 4, 4);
+        let condition = data.new_unique(1);
+        let compare = data.new_op(op::INT_LESS, seq(0x1000), vec![selector]);
+        data.op_set_output(compare, Some(condition));
+        data.op_insert_end(compare, guard);
+        let elsewhere = data.new_varnode(RAM_SPACE, 0x1030, 4);
+        let cbranch = data.new_op(op::CBRANCH, seq(0x1004), vec![elsewhere, condition]);
+        data.op_insert_end(cbranch, guard);
+        let target = data.new_varnode(ventris_lifter::REGISTER_SPACE, 8, 4);
+        let branch = data.new_op(op::BRANCHIND, seq(0x1010), vec![target]);
+        data.op_insert_end(branch, switch);
+        // The guard's rejecting arm and the table's default name one block.
+        data.add_edge(guard, default);
+        data.add_edge(guard, switch);
+        data.add_edge(switch, case);
+        data.add_edge(switch, default);
+
+        let tables = vec![JumpTable {
+            branch,
+            switch_value: target,
+            cases: vec![(0, 0x1020)],
+            default_target: Some(0x1030),
+        }];
+        assert_eq!(fold_in_guards(&mut data, &tables), 1);
+        assert_eq!(
+            data.block(guard).successors,
+            vec![switch],
+            "the guard now falls straight into the switch"
+        );
+        assert_eq!(
+            data.block(default).predecessors,
+            vec![switch],
+            "the default is reached only through the table"
+        );
+
+        // A guard whose rejecting arm is *not* one of the switch's destinations
+        // is the other branch of `foldInOneGuard`, which needs a new table entry.
+        let mut untouched = Funcdata::default();
+        untouched.entry = 0x1000;
+        let guard = untouched.new_block(0x1000);
+        let switch = untouched.new_block(0x1010);
+        let case = untouched.new_block(0x1020);
+        let elsewhere = untouched.new_block(0x1040);
+        let target = untouched.new_varnode(ventris_lifter::REGISTER_SPACE, 8, 4);
+        let branch = untouched.new_op(op::BRANCHIND, seq(0x1010), vec![target]);
+        untouched.op_insert_end(branch, switch);
+        untouched.add_edge(guard, elsewhere);
+        untouched.add_edge(guard, switch);
+        untouched.add_edge(switch, case);
+        let tables = vec![JumpTable {
+            branch,
+            switch_value: target,
+            cases: vec![(0, 0x1020)],
+            default_target: None,
+        }];
+        assert_eq!(fold_in_guards(&mut untouched, &tables), 0);
     }
 
     #[test]
