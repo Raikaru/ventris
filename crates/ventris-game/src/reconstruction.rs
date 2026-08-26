@@ -36,6 +36,10 @@ pub struct SourceStruct {
 pub struct SourceReconstruction {
     pub signature: SourceSignature,
     pub structs: Vec<SourceStruct>,
+    /// Declarations for structure bases that are not parameters, such as a
+    /// register carrying a global base. Without them the body names an
+    /// identifier nothing introduces.
+    pub globals: Vec<String>,
     pub body: String,
     pub diagnostics: Vec<String>,
 }
@@ -97,11 +101,13 @@ impl SourceReconstruction {
             .enumerate()
             .map(|(index, candidate)| source_struct(candidate, index, &mut diagnostics))
             .collect::<Vec<_>>();
-        rewrite_recovered_field_accesses(&mut signature, &structs, &mut body);
+        let mut globals = Vec::new();
+        rewrite_recovered_field_accesses(&mut signature, &structs, &mut body, &mut globals);
         prune_unused_parameters(&mut signature, &body);
         Ok(Self {
             signature,
             structs,
+            globals,
             body,
             diagnostics,
         })
@@ -151,6 +157,12 @@ impl SourceReconstruction {
             for unresolved in &structure.unresolved {
                 writeln!(out, "/* unresolved: {unresolved} */").unwrap();
             }
+        }
+        for declaration in &self.globals {
+            writeln!(out, "{declaration}").unwrap();
+        }
+        if !self.globals.is_empty() {
+            out.push('\n');
         }
         if !self.diagnostics.is_empty() {
             out.push_str("/* reconstruction diagnostics:\n");
@@ -369,10 +381,46 @@ fn recovered_member(parameter: &str, offset: i64) -> String {
     format!("{parameter}->{}", field_name_for_offset(offset))
 }
 
+/// The identifier a structure's members hang off, when it is not a parameter.
+///
+/// A register carrying a global base is the case this exists for. The base is
+/// accepted only if it is the sole identifier the structure's members are
+/// reached through, so a partial match cannot rename an unrelated variable.
+fn global_base(structure: &SourceStruct, body: &str) -> Option<String> {
+    let mut bases = std::collections::BTreeSet::new();
+    for field in &structure.fields {
+        for capture in regex_lite_find(body, &format!("->{}", field.name)).into_iter() {
+            bases.insert(capture);
+        }
+    }
+    (bases.len() == 1).then(|| bases.into_iter().next().expect("one base"))
+}
+
+/// The identifiers immediately before each occurrence of `needle` in `text`.
+fn regex_lite_find(text: &str, needle: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let bytes = text.as_bytes();
+    let mut from = 0;
+    while let Some(at) = text[from..].find(needle) {
+        let end = from + at;
+        let start = bytes[..end]
+            .iter()
+            .rposition(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_')
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        if start < end {
+            found.push(text[start..end].to_owned());
+        }
+        from = end + needle.len();
+    }
+    found
+}
+
 fn rewrite_recovered_field_accesses(
     signature: &mut SourceSignature,
     structs: &[SourceStruct],
     body: &mut String,
+    globals: &mut Vec<String>,
 ) {
     for structure in structs {
         let Some((parameter_index, match_count)) = signature
@@ -394,8 +442,7 @@ fn rewrite_recovered_field_accesses(
                             parameter.name,
                             field.offset.max(0)
                         )) || body.contains(&format!("{}->{}", parameter.name, field.name))
-                            || body
-                                .contains(&recovered_member(&parameter.name, field.offset.max(0)))
+                            || body.contains(&recovered_member(&parameter.name, field.offset))
                     })
                     .count();
                 (index, count)
@@ -405,6 +452,25 @@ fn rewrite_recovered_field_accesses(
             continue;
         };
         if match_count == 0 {
+            // The base may not be a parameter at all. A structure reached
+            // through a global-pointer register has a register for its base, and
+            // the members still need indexing where they are declared as byte
+            // arrays - and the base still needs declaring, or the body names an
+            // identifier nothing introduces.
+            if let Some(base) = global_base(structure, body) {
+                for field in &structure.fields {
+                    let member = if field.declarator_suffix.is_empty() {
+                        format!("({base}->{})", field.name)
+                    } else {
+                        format!("({base}->{}[0])", field.name)
+                    };
+                    let recovered = recovered_member(&base, field.offset);
+                    *body = body.replace(&format!("({recovered})"), &member);
+                    *body = replace_bare_member(body, &recovered, &member);
+                    strip_redundant_field_casts(body, field, &member);
+                }
+                globals.push(format!("{} *{base};", structure.name));
+            }
             continue;
         }
         let parameter = signature.parameters[parameter_index].name.clone();
@@ -913,7 +979,9 @@ mod tests {
             unresolved: Vec::new(),
         }];
         let mut body = String::from("void f(void) {\n    (arg0->field_4a4[0]) = 1;\n}\n");
-        rewrite_recovered_field_accesses(&mut signature, &structs, &mut body);
+        let mut globals = Vec::new();
+        rewrite_recovered_field_accesses(&mut signature, &structs, &mut body, &mut globals);
+        assert!(globals.is_empty(), "the base here is a parameter");
         assert!(
             body.contains("this_->fadeOut"),
             "the nominal name must reach the body, got {body}"
@@ -921,5 +989,43 @@ mod tests {
         assert!(!body.contains("field_4a4"), "got {body}");
         assert_eq!(signature.parameters[0].c_type, "GameWorld *");
         assert_eq!(signature.parameters[0].name, "this_");
+    }
+    /// A structure reached through a register carrying a global base needs that
+    /// base declared, and its byte-array members indexed, or the body names an
+    /// identifier nothing introduces and assigns whole arrays.
+    #[test]
+    fn a_structure_reached_through_a_register_declares_its_base() {
+        let mut signature = SourceSignature {
+            name: "f".into(),
+            return_type: "void".into(),
+            parameters: vec![SourceParameter {
+                name: "arg0".into(),
+                c_type: "uint32_t".into(),
+            }],
+        };
+        let structs = vec![SourceStruct {
+            name: "RecoveredStruct0".into(),
+            parameter_name: None,
+            fields: vec![SourceField {
+                offset: -0x47e6,
+                name: "field_neg_47e6".into(),
+                c_type: "uint8_t".into(),
+                declarator_suffix: "[2]".into(),
+                width: 2,
+            }],
+            unresolved: Vec::new(),
+        }];
+        let mut body = String::from("void f(void) {\n    gp->field_neg_47e6 = 0;\n}\n");
+        let mut globals = Vec::new();
+        rewrite_recovered_field_accesses(&mut signature, &structs, &mut body, &mut globals);
+        assert_eq!(globals, vec!["RecoveredStruct0 *gp;".to_string()]);
+        assert!(
+            body.contains("(gp->field_neg_47e6[0])"),
+            "a byte-array member cannot be assigned whole, got {body}"
+        );
+        assert_eq!(
+            signature.parameters[0].c_type, "uint32_t",
+            "an unrelated parameter keeps its type"
+        );
     }
 }

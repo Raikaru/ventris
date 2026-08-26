@@ -282,6 +282,16 @@ All notable Ventris changes are documented here.
   table-backed switch the rule can claim, and `dl_G_MOVEWORD`'s `switch 0 vs 1`
   is a `BRANCHIND` whose table this pipeline does not recover. The rule is
   correct and tested; it has no corpus function to improve yet.
+- A structure reached through a register that is not a parameter now gets its
+  base declared and its members indexed. On a raw PS2 image the graph path
+  rendered `gp->field_neg_47e6 = 0` with `gp` introduced nowhere and a two-byte
+  member assigned whole; it now emits `RecoveredStruct0 *gp;` and
+  `(gp->field_neg_47e6[0]) = 0`, so the output compiles. The base is accepted
+  only when it is the sole identifier the structure's members are reached
+  through, so a partial match cannot rename an unrelated variable.
+  This is the shape the address-ordered path spells as invented locals
+  (`uint16_t local_47e6`), which is a plausible-looking but wrong claim: these
+  are globals reached through the convention's global pointer, not locals.
 - A member the body writes is now a member the structure declares. The graph
   emitter named a field from its offset's unsigned bit pattern and the source
   reconstruction named it from the signed value, so a structure reached through a
