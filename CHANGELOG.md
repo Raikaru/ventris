@@ -6,6 +6,15 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- Measured negative on the remaining loop shapes. `queryMapAddress_single`
+  renders `for=0` against the oracle's 2 (and `while=7 do=4 goto=8` against
+  `while=6 do=6 goto=4`); `decompSZS_subroutine__FPUcPUc` now matches the
+  oracle's three `while` but renders `do=2 goto=6` against `do=3 goto=0`. The
+  suspected cause - `find_loop_variable`'s `path[4]` bound - is not it: the bound
+  is written against the work stack's length rather than the traversal depth, so
+  it is not Ghidra's rule, but carrying the depth per work item changes no output
+  on any corpus function, so the loop variable is not being lost there. Both
+  functions' residual is upstream of the loop finder.
 - Keep the composite's own edges out when absorbing a clause that returns.
   `rule_block_if_return` collapses an `if` whose clause returns, so that clause
   contributes no external successor and the union of the members' exits is empty.
