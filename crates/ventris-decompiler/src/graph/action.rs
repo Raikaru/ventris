@@ -601,6 +601,15 @@ pub fn default_pipeline() -> Box<dyn Action> {
         }
         pipeline = pipeline.add(Box::new(FixedPoint::new(Box::new(cleanup))));
     }
+    // Ghidra adds these to `blockrecovery` immediately after the cleanup pool
+    // (coreaction.cc:5771-5773), before ActionNormalizeBranches.
+    if !skip("blockrecovery") {
+        let mut blockrecovery = ActionGroup::new("blockrecovery");
+        for action in super::structuretransform::all() {
+            blockrecovery = blockrecovery.add(action);
+        }
+        pipeline = pipeline.add(Box::new(blockrecovery));
+    }
     if !skip("infer-types-rich") {
         pipeline = pipeline.add(Box::new(super::typefactory::ActionInferTypes));
     }

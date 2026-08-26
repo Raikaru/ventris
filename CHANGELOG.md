@@ -493,6 +493,22 @@ All notable Ventris changes are documented here.
   `unstructured-control-flow` at 9. One defect remains, recorded rather than
   papered over: `TRK_fill_mem`'s first `for` is missing its initializer, and the
   statement that computes it appears after both loops instead of before them.
+- Ported `ActionPreferComplement` and `ActionStructureTransform` into
+  `graph/structuretransform.rs` and registered them in a `blockrecovery` group
+  after the cleanup pool, matching Ghidra's order at `coreaction.cc:5771-5773`.
+  Both are output-neutral on the corpus - the census is byte-identical with the
+  group skipped - because the emitter already renders condition complements and
+  derives for-loops. They are registered for pipeline fidelity, not for a gain.
+- `ActionVarnodeProps`, `ActionForceGoto`, `ActionSegmentize` and
+  `ActionLaneDivide` were measured as unportable and no code was written for
+  them. `ActionVarnodeProps` is driven entirely by `autoLiveHold`,
+  `actionProperty`, `readOnly`, `getConsume` and `noDescend`, of which the graph
+  has none; consume analysis is the prerequisite, and `nonzero_masks` is not a
+  substitute since it says which bits *can* be set, not which are read.
+  `ActionForceGoto` needs an override object nothing would populate.
+  `ActionSegmentize` needs a `SegmentOp` registry and segmented address-space
+  metadata that no supported architecture defines here. `ActionLaneDivide` needs
+  a laned-register registry and lane-description machinery.
 - A jump in trailing position inside nested `if` bodies is now dropped, since
   falling out of the nesting lands where the jump was going. `__osRealloc` went
   from five jumps to none and `unstructured-control-flow` from 7 corpus

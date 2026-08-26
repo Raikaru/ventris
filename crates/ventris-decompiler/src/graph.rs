@@ -17,9 +17,8 @@
 //! `funcdata_op.cc` at commit `8b4c91d4d5bd1549622bfbade0df199585b98365`.
 
 pub mod action;
-pub mod structuretransform;
-pub mod bitfield;
 pub mod actiondb;
+pub mod bitfield;
 pub mod blockaction;
 pub mod branchaction;
 pub mod callproto;
@@ -60,6 +59,7 @@ pub mod splitvarnode;
 pub mod stackframe;
 pub mod storageaction;
 pub mod structure;
+pub mod structuretransform;
 pub mod subfloat;
 pub mod subflow;
 pub mod tracedag;

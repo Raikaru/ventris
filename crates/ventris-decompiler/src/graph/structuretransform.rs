@@ -611,11 +611,8 @@ mod tests {
         let condition = data.new_unique(1);
         data.op_set_output(comparison, Some(condition));
         data.op_insert_end(comparison, entry);
-        let branch = data.new_op(
-            op::CBRANCH,
-            seq(0x1000, 1),
-            vec![target(&mut data, then_block_start()), condition],
-        );
+        let branch_target = target(&mut data, then_block_start());
+        let branch = data.new_op(op::CBRANCH, seq(0x1000, 1), vec![branch_target, condition]);
         data.op_insert_end(branch, entry);
         (data, entry, then_block, else_block, comparison, branch)
     }
@@ -636,8 +633,14 @@ mod tests {
                 {
                     return Some((*then_block, *else_block));
                 }
-                full_if_else_bodies(then_body).or_else(|| full_if_else_bodies(else_body))
+                None
             }
+            Structured::IfElse {
+                header,
+                then_body,
+                else_body: None,
+                ..
+            } => full_if_else_bodies(header).or_else(|| full_if_else_bodies(then_body)),
             Structured::List(members) => members.iter().find_map(full_if_else_bodies),
             Structured::WhileDo { header, body, .. } => {
                 full_if_else_bodies(header).or_else(|| full_if_else_bodies(body))
@@ -702,7 +705,8 @@ mod tests {
         let initial = data.new_unique(4);
         data.op_set_output(initial_value, Some(initial));
         data.op_insert_end(initial_value, entry);
-        let entry_branch = data.new_op(op::BRANCH, seq(0x1000, 1), vec![target(&mut data, 0x1010)]);
+        let entry_target = target(&mut data, 0x1010);
+        let entry_branch = data.new_op(op::BRANCH, seq(0x1000, 1), vec![entry_target]);
         data.op_insert_end(entry_branch, entry);
 
         let carried = data.new_unique(4);
@@ -715,11 +719,8 @@ mod tests {
         let condition = data.new_unique(1);
         data.op_set_output(comparison, Some(condition));
         data.op_insert_end(comparison, head);
-        let head_branch = data.new_op(
-            op::CBRANCH,
-            seq(0x1010, 2),
-            vec![target(&mut data, 0x1020), condition],
-        );
+        let head_target = target(&mut data, 0x1020);
+        let head_branch = data.new_op(op::CBRANCH, seq(0x1010, 2), vec![head_target, condition]);
         data.op_insert_end(head_branch, head);
 
         let iterate = data.new_op(op::INT_ADD, seq(0x1020, 0), vec![loop_value, one]);
@@ -729,7 +730,8 @@ mod tests {
         let filler_output = data.new_unique(4);
         data.op_set_output(filler, Some(filler_output));
         data.op_insert_end(filler, body);
-        let body_branch = data.new_op(op::BRANCH, seq(0x1020, 2), vec![target(&mut data, 0x1010)]);
+        let body_target = target(&mut data, 0x1010);
+        let body_branch = data.new_op(op::BRANCH, seq(0x1020, 2), vec![body_target]);
         data.op_insert_end(body_branch, body);
         let exit_return = data.new_op(op::RETURN, seq(0x1030, 0), Vec::new());
         data.op_insert_end(exit_return, exit);
