@@ -6,6 +6,18 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- A rendered condition now comes from the block's terminator. `condition_expr`
+  took the *first* `CBRANCH` found anywhere in the block, while every pass that
+  reasons about a branch uses the last operation. With one instruction split into
+  several blocks an interior `CBRANCH` could sit mid-block, and its condition -
+  already folded to a constant, which is why no pass had removed the branch -
+  was rendered as the block's test. `__FrameCallback__Fl` printed
+  `if (!(0 || !(...)))` and two `if (0)`; it now prints none of them, three
+  fabricated constants down to zero, with the census unchanged.
+- Also measured and rejected: re-running the control-flow passes to convergence
+  after `ActionDominantCopy` (Ghidra keeps that pass inside the pool, so its pool
+  does re-converge). Changes no census family and no function's output, so the
+  constants it was meant to catch were never reachable that way.
 - Every pass that asks where a branch goes now uses one resolver.
   `branchaction.rs`, `blockaction.rs`, `structuretransform.rs` and
   `jumptable.rs` each mapped a branch's destination varnode to a block by

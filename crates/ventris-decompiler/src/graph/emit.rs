@@ -1577,14 +1577,19 @@ impl Emitter<'_> {
     fn condition_expr(&self, test: &Condition) -> Expr {
         match test {
             Condition::Branch { block, taken } => {
+                // The block's *terminator*, as every pass that reasons about a
+                // branch uses. A `CBRANCH` that is not last decides nothing
+                // about which successor is taken - reading the first one found
+                // picked up an interior branch of a split instruction and
+                // rendered its already-folded constant as `if (0)`.
                 let condition = self
                     .data
                     .block(*block)
                     .ops
-                    .iter()
+                    .last()
                     .copied()
                     .map(|op| self.data.op(op))
-                    .find(|operation| operation.opcode == op::CBRANCH)
+                    .filter(|operation| operation.opcode == op::CBRANCH)
                     .and_then(|operation| operation.inputs.get(1).copied())
                     .map(|value| self.resolver.resolve(value))
                     .unwrap_or(Expr::Constant { value: 1, width: 1 });
