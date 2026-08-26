@@ -217,7 +217,9 @@ fn ancestor_op_use(
     }
     let varnode = data.varnode(value);
     let Some(def) = varnode.def else {
-        return varnode.flags.input && only_op_use(data, value, return_op, &mut BTreeSet::new());
+        // Synthetic return values in the graph may have no definition or
+        // input bit; onlyOpUse still proves they are read solely by RETURN.
+        return only_op_use(data, value, return_op, &mut BTreeSet::new());
     };
     let operation = data.op(def);
     match operation.opcode {
