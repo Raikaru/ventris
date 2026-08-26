@@ -22,7 +22,7 @@ use super::action::Action;
 use super::{Funcdata, GraphBlockId, OpId, VarnodeId};
 use ventris_pcode::op;
 
-const MAX_TABLE_ENTRIES: u64 = 0x1_0000;
+pub(crate) const MAX_TABLE_ENTRIES: u64 = 0x1_0000;
 
 /// One recovered switch: the value tested, and each case label with its target address.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,23 +40,23 @@ struct Scale {
 }
 
 #[derive(Copy, Clone)]
-struct AddressModel {
-    base: u64,
-    index: VarnodeId,
-    stride: u64,
+pub(crate) struct AddressModel {
+    pub(crate) base: u64,
+    pub(crate) index: VarnodeId,
+    pub(crate) stride: u64,
 }
 
 #[derive(Copy, Clone)]
-struct DestinationModel {
-    address: AddressModel,
-    entry_size: u32,
-    target_bias: u64,
+pub(crate) struct DestinationModel {
+    pub(crate) address: AddressModel,
+    pub(crate) entry_size: u32,
+    pub(crate) target_bias: u64,
 }
 
 #[derive(Copy, Clone)]
-struct GuardModel {
-    bound: u64,
-    default_target: Option<u64>,
+pub(crate) struct GuardModel {
+    pub(crate) bound: u64,
+    pub(crate) default_target: Option<u64>,
 }
 
 /// Strip operations which preserve the low-order value bits used by a switch.
@@ -65,7 +65,7 @@ struct GuardModel {
 /// flow (`GuardRecord::quasiCopy` in `jumptable.cc`).  `BOOL_NEGATE` is included
 /// only for matching a condition value; it is never used while walking an
 /// address calculation.
-fn strip_alias(data: &Funcdata, start: VarnodeId) -> VarnodeId {
+pub(crate) fn strip_alias(data: &Funcdata, start: VarnodeId) -> VarnodeId {
     let mut current = start;
     let mut seen = BTreeSet::new();
     loop {
@@ -95,7 +95,7 @@ fn strip_alias(data: &Funcdata, start: VarnodeId) -> VarnodeId {
     }
 }
 
-fn constant_value(data: &Funcdata, value: VarnodeId) -> Option<u64> {
+pub(crate) fn constant_value(data: &Funcdata, value: VarnodeId) -> Option<u64> {
     let value = strip_alias(data, value);
     data.varnode(value)
         .flags
@@ -103,7 +103,7 @@ fn constant_value(data: &Funcdata, value: VarnodeId) -> Option<u64> {
         .then_some(data.varnode(value).offset)
 }
 
-fn same_value(data: &Funcdata, left: VarnodeId, right: VarnodeId) -> bool {
+pub(crate) fn same_value(data: &Funcdata, left: VarnodeId, right: VarnodeId) -> bool {
     strip_alias(data, left) == strip_alias(data, right)
 }
 
@@ -201,7 +201,7 @@ fn parse_address(data: &Funcdata, value: VarnodeId) -> Option<AddressModel> {
 }
 
 /// Trace a BRANCHIND destination back to a loaded table entry.
-fn parse_destination(data: &Funcdata, value: VarnodeId) -> Option<DestinationModel> {
+pub(crate) fn parse_destination(data: &Funcdata, value: VarnodeId) -> Option<DestinationModel> {
     let value = strip_alias(data, value);
     let def = data.varnode(value).def?;
     let operation = data.op(def);
@@ -251,7 +251,7 @@ fn contains_load(data: &Funcdata, value: VarnodeId) -> bool {
     }
 }
 
-fn block_reaches(data: &Funcdata, start: GraphBlockId, target: GraphBlockId) -> bool {
+pub(crate) fn block_reaches(data: &Funcdata, start: GraphBlockId, target: GraphBlockId) -> bool {
     let mut pending = vec![start];
     let mut seen = BTreeSet::new();
     while let Some(block) = pending.pop() {
@@ -314,7 +314,7 @@ fn guard_bound(data: &Funcdata, compare: OpId, switch_value: VarnodeId) -> Optio
 /// Find the smallest range reaching the indirect branch, like
 /// `JumpBasic::findSmallestNormal` after `analyzeGuards` has populated its
 /// `GuardRecord`s.
-fn find_guard(data: &Funcdata, branch: OpId, switch_value: VarnodeId) -> Option<GuardModel> {
+pub(crate) fn find_guard(data: &Funcdata, branch: OpId, switch_value: VarnodeId) -> Option<GuardModel> {
     let branch_block = data.op(branch).parent?;
     let condition = |candidate: OpId| {
         let operation = data.op(candidate);

@@ -509,6 +509,25 @@ All notable Ventris changes are documented here.
   `ActionSegmentize` needs a `SegmentOp` registry and segmented address-space
   metadata that no supported architecture defines here. `ActionLaneDivide` needs
   a laned-register registry and lane-description machinery.
+- Measured, not skipped: `Override` is the single blocking prerequisite for four
+  separate pieces of Ghidra, and nothing in this project can populate one.
+  `LoadOptions` (`crates/ventris/src/lib.rs:27-34`) and `Hints` (95-103) carry no
+  control-flow input, `Pipeline::analyze` passes none, and the graph API accepts
+  none. Every one of Ghidra's four restart sources writes into `Override` and
+  then sets `setRestartPending`:
+  - `fspec.cc:5471` - the `deindirect` CALLIND-to-CALL fallback
+  - `fspec.cc:5503` - the `forceSet` fallback when `lateRestriction` fails
+  - `heritage.cc:2581` - `Heritage::bumpDeadcodeDelay` via `insertDeadcodeDelay`
+  - `jumptable.cc:2712-2717` - `insertMultistageJump` when a recovered table has
+    one entry but the model implies more
+  So `ActionForceGoto` (`coreaction.cc:672-677`) and `ActionRestartGroup`
+  (`action.cc`) are both unportable here: the restart group would iterate exactly
+  once, which is a wrapper that cannot do work.
+- `RuleTransformCpool` (`ruleaction.cc:3902-3940`) is unportable for a stronger
+  reason than a missing constant pool: a census of all 21 bundled packed SLA
+  payloads found **zero** operation templates with `ATTR_CODE=68` (`CPOOLREF`),
+  against nonzero template counts everywhere - 39772 on x86-64, 317 on 6502 - so
+  no supported lifter can emit the opcode the rule matches on.
 - The prototype now drives the signature, closing the dead chain that made the
   whole prototype layer inert. Four separate breaks, each measured:
   - Nothing promoted a recovered trial into a `ProtoParameter`, so the prototype
