@@ -644,6 +644,73 @@ impl<'a> Resolver<'a> {
                     value: Box::new(value),
                 })
             }
+            op::PIECE => {
+                // Ghidra's `CPUI_PIECE` concatenates its first operand as the
+                // most significant part with its second as the least, which
+                // `PrintC` spells `CONCATxy`. The arithmetic is the same shift
+                // and or, and writing it out keeps the value printable rather
+                // than falling back to a bare placeholder.
+                let low = op.inputs.get(1).copied()?;
+                let low_bits = u64::from(self.data.varnode(low).size).saturating_mul(8);
+                let high = binary(
+                    BinaryOp::Left,
+                    input(0)?,
+                    Expr::Constant {
+                        value: low_bits,
+                        width: 4,
+                    },
+                );
+                return Some(binary(BinaryOp::Or, high, input(1)?));
+            }
+            op::INSERT => {
+                // The complement of a pull: `RuleBitFieldOut` and
+                // `RuleInsertAbsorb` produce it. Operands are the container, the
+                // value, then the position and width of the field.
+                let constant_at = |slot: usize| {
+                    op.inputs
+                        .get(slot)
+                        .copied()
+                        .filter(|value| self.data.varnode(*value).flags.constant)
+                        .map(|value| self.data.varnode(value).offset)
+                };
+                let position = constant_at(2)?;
+                let bits = constant_at(3)?;
+                if bits == 0 || bits > 64 {
+                    return None;
+                }
+                let mask = if bits >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << bits) - 1
+                };
+                let cleared = binary(
+                    BinaryOp::And,
+                    input(0)?,
+                    Expr::Constant {
+                        value: !(mask << position),
+                        width: 8,
+                    },
+                );
+                let mut field = binary(
+                    BinaryOp::And,
+                    input(1)?,
+                    Expr::Constant {
+                        value: mask,
+                        width: 8,
+                    },
+                );
+                if position != 0 {
+                    field = binary(
+                        BinaryOp::Left,
+                        field,
+                        Expr::Constant {
+                            value: position,
+                            width: 4,
+                        },
+                    );
+                }
+                return Some(binary(BinaryOp::Or, cleared, field));
+            }
             op::ZPULL | op::SPULL => {
                 // `RuleBitFieldLoad` rewrites a shift-and-mask extraction into
                 // one of these, and without a spelling the extracted value
@@ -1059,6 +1126,58 @@ mod tests {
         assert_eq!(
             resolver.resolve(defined),
             Expr::Constant { value: 5, width: 4 }
+        );
+    }
+
+    /// Every opcode a pass can write into the graph must be printable, or the
+    /// value falls back to a bare placeholder. `PIECE` and `INSERT` are both
+    /// produced by the bitfield rules.
+    #[test]
+    fn a_concatenation_and_a_bitfield_insert_are_both_printable() {
+        let render = |build: &dyn Fn(&mut Funcdata) -> VarnodeId| {
+            let mut data = Funcdata::default();
+            let block = data.new_block(0x1000);
+            let value = build(&mut data);
+            let ret = data.new_op(op::RETURN, seq(0x1010), vec![value]);
+            data.op_insert_end(ret, block);
+            let naming = mark_explicit(&data);
+            Resolver::new(&data, &naming, &names).resolve(value)
+        };
+
+        let piece = render(&|data: &mut Funcdata| {
+            let block = data.blocks().next().map(|(id, _)| id).expect("a block");
+            let high = data.new_constant(0xab, 2);
+            let low = data.new_constant(0xcd, 2);
+            let op = data.new_op(op::PIECE, seq(0x1000), vec![high, low]);
+            let output = data.new_unique(4);
+            data.op_set_output(op, Some(output));
+            data.op_insert_end(op, block);
+            output
+        });
+        assert!(
+            !matches!(piece, Expr::Temporary { .. }),
+            "a concatenation must print: {piece:?}"
+        );
+
+        let inserted = render(&|data: &mut Funcdata| {
+            let block = data.blocks().next().map(|(id, _)| id).expect("a block");
+            let container = data.new_constant(0xff00, 4);
+            let field = data.new_constant(0x5, 4);
+            let position = data.new_constant(4, 4);
+            let width = data.new_constant(4, 4);
+            let op = data.new_op(
+                op::INSERT,
+                seq(0x1000),
+                vec![container, field, position, width],
+            );
+            let output = data.new_unique(4);
+            data.op_set_output(op, Some(output));
+            data.op_insert_end(op, block);
+            output
+        });
+        assert!(
+            !matches!(inserted, Expr::Temporary { .. }),
+            "a bitfield insert must print: {inserted:?}"
         );
     }
 

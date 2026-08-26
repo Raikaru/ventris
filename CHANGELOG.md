@@ -6,6 +6,14 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- Swept for the rest of that defect class and closed it. Comparing every opcode
+  any pass writes into the graph (`new_op` and `op_set_opcode`) against every
+  opcode the three printers mention left `PIECE` and `INSERT` unprintable
+  alongside the pulls. `PIECE` is Ghidra's concatenation, which `PrintC` spells
+  `CONCATxy`, and `INSERT` is the complement of a pull produced by
+  `RuleBitFieldOut` and `RuleInsertAbsorb`; both now render as the arithmetic
+  they stand for. The sweep reports zero unprintable opcodes, so no pass can
+  produce a value the printer has to fall back on.
 - `ZPULL` and `SPULL` are now spelled by the printer. `RuleBitFieldLoad` rewrites
   a shift-and-mask extraction into one of them, and nothing in `value.rs`,
   `emit.rs` or `native.rs` handled either opcode - so `translate` returned
