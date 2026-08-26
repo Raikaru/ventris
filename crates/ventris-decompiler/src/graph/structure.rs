@@ -1027,6 +1027,18 @@ impl<'a> Graph<'a> {
             if second == node || clause == node || clause == second {
                 continue;
             }
+            // Ghidra's `if (bl->isBackEdgeOut(i)) continue;` - "Don't use loop
+            // branch to get to orblock". A short-circuit condition is evaluated
+            // in one pass through the code, so reaching the second test by
+            // looping back is not that shape at all.
+
+            // Ghidra's `if (bl->isBackEdgeOut(i)) continue;` - "Don't use loop
+            // branch to get to orblock". A short-circuit condition is evaluated
+            // in one pass through the code, so reaching the second test by
+            // looping back is not that shape at all.
+            if self.nodes[second].entry <= self.nodes[node].entry {
+                continue;
+            }
             // Nothing else may reach the second test, or it is a join rather
             // than the tail of one condition.
             if self.nodes[second].predecessors.len() != 1 {
@@ -2319,6 +2331,42 @@ mod tests {
         assert!(
             !graph.is_complex(simple, 2),
             "one comparison plus the branch is exactly the ceiling"
+        );
+    }
+
+    /// Ghidra's `ruleBlockOr` refuses to reach the second test through a back
+    /// edge - "Don't use loop branch to get to orblock". A short-circuit
+    /// condition is evaluated in one pass, so a second test reached by looping
+    /// back is not that shape, however well the clause targets line up.
+    #[test]
+    fn a_short_circuit_does_not_reach_its_second_test_by_looping_back() {
+        let mut data = Funcdata::default();
+        data.entry = 0x1010;
+        // Blocks are created in address order, as `from_lifted` does, because a
+        // back edge is recognised by the target's block identifier preceding the
+        // source's.
+        let earlier = data.new_block(0x1000);
+        let head = data.new_block(0x1010);
+        let clause = data.new_block(0x1020);
+        let other = data.new_block(0x1030);
+        // The head tests, and one edge goes *backwards* to another test that
+        // shares the head's clause - the shape the rule would otherwise merge.
+        conditional(&mut data, head, 0x1000);
+        data.add_edge(head, earlier);
+        data.add_edge(head, clause);
+        conditional(&mut data, earlier, 0x1020);
+        data.add_edge(earlier, clause);
+        data.add_edge(earlier, other);
+
+        let mut graph = Graph::of(&data, &[]);
+        let node = graph
+            .nodes
+            .iter()
+            .position(|candidate| candidate.entry == head)
+            .expect("the head is a node");
+        assert!(
+            !graph.rule_block_or(node),
+            "the second test is reached by a back edge, so no condition is built"
         );
     }
 

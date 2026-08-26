@@ -6,6 +6,19 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- Ported the back-edge guard `ruleBlockOr` has and ours did not. Ghidra refuses
+  to reach the second test of a short-circuit through a back edge - the comment
+  in `blockaction.cc` reads "Don't use loop branch to get to orblock" - because a
+  short-circuit condition is evaluated in one pass, so a second test reached by
+  looping back is not that shape however well the clause targets line up.
+  Reading `CollapseStructure::ruleBlockOr` against ours also shows two further
+  guards still missing, `isGotoOut` on the head's own edges and
+  `isInteriorGotoTarget` on the second test, both recorded here rather than
+  guessed at. Inert on the present corpus; the regression test builds the exact
+  shape and fails without the guard. Note for anyone extending this: a back edge
+  is recognised by the target's *block identifier* preceding the source's, so a
+  hand-built fixture must create its blocks in address order the way
+  `from_lifted` does, or the test silently proves nothing.
 - `ksNesDrawBG__FP18ksNesCommonWorkObjP13ksNesStateObj`'s last conditional is now
   isolated to short-circuit merging, and the obvious lever is refuted. With the
   pulls printable its conditions read as real bit tests, and the single remaining
