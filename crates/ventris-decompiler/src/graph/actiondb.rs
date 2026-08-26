@@ -14,17 +14,16 @@
 //! speculative `ActionMergeAdjacent`, as required by the source comment.
 //! `ActionStop` is the final action, after `ActionPrototypeWarnings`.
 //!
-//! The graph carries lifecycle markers and the per-varnode indirect-only bit,
-//! but it has no symbol scope, symbol entries, high-variable arena, or cover
-//! conflict machinery. The six wrappers here preserve every state transition
-//! the graph can represent.
+//! The graph carries lifecycle markers and the per-varnode indirect-only bit.
+//! The six wrappers here preserve every state transition it can represent.
 //!
-//! `ActionMergeMultiEntry` is **not** ported and deliberately absent rather
-//! than present-and-inert. Ghidra's `Merge::mergeMultiEntry` needs
-//! `ScopeLocal`'s multi-entry symbol tree, `SymbolEntry` linked-varnode lookup,
-//! mutable `HighVariable` unions, and cover-conflict checks - none of which this
-//! graph has. A wrapper returning zero would report the slot as ported while
-//! doing nothing, so the gap is recorded here instead of in code.
+//! `ActionMergeMultiEntry` is ported. Every facility its note once said was
+//! missing now exists: `graph::scope`'s multi-entry symbol tree with its
+//! `symbol_entries` lookup, `graph::mergeaction::Variables` standing in for the
+//! `HighVariable` union, and `graph::cover` for the conflict check. The work
+//! lives in `mergeaction::merge_multi_entry`, in Ghidra's position between the
+//! required and the speculative merges; the action itself is a registration
+//! marker because the partition is a side computation the renderer consumes.
 
 use super::Funcdata;
 use super::action::Action;

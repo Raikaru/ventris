@@ -327,7 +327,68 @@ fn merge_type(data: &Funcdata, variables: &mut Variables, types: &Types, covers:
     }
 }
 
-/// Compute required, COPY, adjacent, and same-type speculative merges.
+/// Groups the values of a symbol mapped at several storage locations.
+///
+/// Ghidra's `Merge::mergeMultiEntry`, driven by `ActionMergeMultiEntry`
+/// (`coreaction.cc:5781`). One source variable can live in more than one place
+/// over its lifetime - a register in one range, a stack slot in another - and the
+/// local scope records that as one symbol with several map entries. Without this
+/// the emitter prints one variable per storage location and the source's single
+/// variable is split.
+///
+/// The merge is a *required* one, so a cover conflict does not veto it silently:
+/// `mergeTestRequired` refuses, and the refusal leaves the values in separate
+/// variables exactly as Ghidra's `setUnmerged` does.
+fn merge_multi_entry(data: &Funcdata, variables: &mut Variables) {
+    let Some(scope) = data.scope_local() else {
+        return;
+    };
+    for symbol in scope.symbols() {
+        if !symbol.is_multi_entry() {
+            continue;
+        }
+        let mut group: Vec<VarnodeId> = Vec::new();
+        for entry in scope.symbol_entries(symbol.id()) {
+            // An entry narrower than the symbol is a piece of it, not the whole
+            // variable: `if (entry->getSize() != symbol->getType()->getSize())`.
+            let Some(storage) = entry.location() else {
+                continue;
+            };
+            group.extend(linked_varnodes(data, storage));
+        }
+        let Some((first, rest)) = group.split_first() else {
+            continue;
+        };
+        for value in rest.iter().copied() {
+            if variables.same(*first, value) {
+                continue;
+            }
+            if !merge_test_required(data, *first, value) {
+                continue;
+            }
+            variables.union(*first, value);
+        }
+    }
+}
+
+/// Every value held at one storage location.
+///
+/// Ghidra's `Funcdata::findLinkedVarnodes` walks the varnode bank by location;
+/// this graph keeps the same relation on the varnode list.
+fn linked_varnodes(data: &Funcdata, storage: super::guard::Location) -> Vec<VarnodeId> {
+    (0..data.varnode_count())
+        .map(|index| VarnodeId(index as u32))
+        .filter(|value| {
+            let varnode = data.varnode(*value);
+            varnode.space == storage.space
+                && varnode.offset == storage.offset
+                && varnode.size == storage.size
+                && can_merge(data, *value)
+        })
+        .collect()
+}
+
+/// Compute required, multi-entry, COPY, adjacent, and same-type merges.
 ///
 /// This is intentionally a pure side computation. The action wrappers below
 /// return zero because applying them cannot mutate a partition held elsewhere;
@@ -341,10 +402,30 @@ pub fn merge_all(data: &Funcdata) -> Variables {
     let types = infer_types(data, &seed);
     let mut variables = Variables::new(data.varnode_count());
     required_union(data, &mut variables);
+    // Ghidra's order: `ActionMergeMultiEntry` comes after the required merges
+    // and before the speculative ones.
+    merge_multi_entry(data, &mut variables);
     merge_copy(data, &mut variables, &types, &covers);
     merge_adjacent(data, &mut variables, &types, &covers);
     merge_type(data, &mut variables, &types, &covers);
     variables
+}
+
+/// Registration marker for Ghidra's `ActionMergeMultiEntry`.
+///
+/// The actual side-partition work is performed by [`merge_all`], which runs
+/// `merge_multi_entry` in Ghidra's position: after the required merges and
+/// before the speculative ones.
+pub struct ActionMergeMultiEntry;
+
+impl Action for ActionMergeMultiEntry {
+    fn name(&self) -> &'static str {
+        "mergemultientry"
+    }
+
+    fn apply(&self, _data: &mut Funcdata) -> usize {
+        0
+    }
 }
 
 /// Registration marker for Ghidra's `ActionMergeCopy`.

@@ -235,9 +235,8 @@ impl Rule for RuleMultiCollapse {
             .find(|value| !is_phi(data, *value));
         // `nofunc`: a `MULTIEQUAL` or an unwritten value cannot match by
         // functional equality, only by being the very same value.
-        let mut no_func = base.is_some_and(|value| {
-            is_phi(data, value) || data.varnode(value).def.is_none()
-        });
+        let mut no_func =
+            base.is_some_and(|value| is_phi(data, value) || data.varnode(value).def.is_none());
         let mut func_eq = false;
         let mut marked: std::collections::BTreeSet<VarnodeId> =
             std::collections::BTreeSet::from([output]);
