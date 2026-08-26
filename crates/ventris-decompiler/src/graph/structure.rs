@@ -425,22 +425,7 @@ impl<'a> Graph<'a> {
                 (head, tails, body, unique_count)
             })
             .collect();
-        // `orderLoopBodies`: "Sort based on nesting depth (deepest come first)
-        // (sorting is stable)". A loop is contained in another when its head lies
-        // inside that one's body. Taking the outer loop first lets it surrender an
-        // edge that belongs to the inner one, which is the whole reason Ghidra
-        // insists on the order; ours walked the heads in block order instead.
-        let depth: Vec<usize> = found
-            .iter()
-            .map(|(head, ..)| {
-                found
-                    .iter()
-                    .filter(|(other, _, body, _)| other != head && body.contains(head))
-                    .count()
-            })
-            .collect();
-        let mut order: Vec<usize> = (0..found.len()).collect();
-        order.sort_by_key(|index| core::cmp::Reverse(depth[*index]));
+        let order = innermost_first(&found);
         for index in order {
             let (head, tails, body, unique_count) = core::mem::take(&mut found[index]);
             let mut tails = tails;
@@ -1820,6 +1805,30 @@ pub(super) fn collect_blocks(node: &Structured, into: &mut BTreeSet<GraphBlockId
 }
 
 /// Whether one block dominates another, by walking the dominator tree upward.
+/// `orderLoopBodies`' final step, `loopbody.sort()`: "Sort based on nesting depth
+/// (deepest come first) (sorting is stable)".
+///
+/// A loop is contained in another when its head lies inside that one's base, so
+/// the nesting depth is the number of other bodies that contain this head. The
+/// order is load-bearing rather than cosmetic: taking an outer loop first lets it
+/// surrender an edge that belongs to an inner one, and that edge then prints as a
+/// `goto` no later rule can take back.
+fn innermost_first(found: &[(NodeId, Vec<NodeId>, Vec<NodeId>, usize)]) -> Vec<usize> {
+    let depth: Vec<usize> = found
+        .iter()
+        .map(|(head, ..)| {
+            found
+                .iter()
+                .filter(|(other, _, body, _)| other != head && body.contains(head))
+                .count()
+        })
+        .collect();
+    let mut order: Vec<usize> = (0..found.len()).collect();
+    // Stable, as Ghidra's `list::sort` is, so equal depths keep discovery order.
+    order.sort_by_key(|index| core::cmp::Reverse(depth[*index]));
+    order
+}
+
 fn dominates(
     dominance: &super::heritage::Dominance,
     ancestor: GraphBlockId,
@@ -2753,6 +2762,36 @@ mod tests {
         assert!(
             !graph.rule_cat(node),
             "a block ending in an unresolved computed jump is left alone"
+        );
+    }
+
+    /// Loop bodies must be handed to the goto selector deepest-first. Walking the
+    /// heads in block order - which is what a map keyed by head gives you - lets
+    /// an outer loop surrender an edge belonging to an inner one.
+    #[test]
+    fn loop_bodies_are_ordered_deepest_first() {
+        // Three nested loops discovered head-first: outer contains middle
+        // contains inner. Bodies are the base sets `findBase` would return.
+        let found = vec![
+            (0usize, vec![9usize], vec![0usize, 3, 6, 9], 2usize),
+            (3usize, vec![8usize], vec![3usize, 6, 8], 2usize),
+            (6usize, vec![7usize], vec![6usize, 7], 2usize),
+        ];
+        assert_eq!(
+            innermost_first(&found),
+            vec![2, 1, 0],
+            "the innermost loop is offered its edges first"
+        );
+
+        // Two loops at the same depth keep the order they were discovered in.
+        let siblings = vec![
+            (0usize, vec![1usize], vec![0usize, 1], 2usize),
+            (4usize, vec![5usize], vec![4usize, 5], 2usize),
+        ];
+        assert_eq!(
+            innermost_first(&siblings),
+            vec![0, 1],
+            "equal depths are a stable sort, as Ghidra's list::sort is"
         );
     }
 
