@@ -6,6 +6,12 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- Consecutive blocks within one instruction now fall through to each other.
+  With the p-code split in place but no fall-through edge, the guarded body of an
+  internal branch had no successor at all and read as a dead end. Inert on the
+  present corpus - `__FrameCallback__Fl`'s residual gotos have an unrelated cause
+  - but load-bearing by construction, and the regression test proves it: without
+  the pass the body's successors are `[]`.
 - Basic blocks are now p-code level, as Ghidra's are. A `CBRANCH` whose
   destination lies in the constant space is a *relative* p-code branch - the
   constant is added to the branching operation's own index - so it branches

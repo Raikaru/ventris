@@ -1219,6 +1219,28 @@ impl Funcdata {
                 }
             }
         }
+        // Consecutive blocks within one instruction fall through to each other.
+        // Without this the guarded body of an internal branch has no successor
+        // at all, so it reads as a dead end and structuring emits a goto rather
+        // than the `if` the guard actually is.
+        let positions: Vec<((u64, u32), GraphBlockId)> =
+            block_of_position.iter().map(|(k, v)| (*k, *v)).collect();
+        for pair in positions.windows(2) {
+            let ((address, _), from) = pair[0];
+            let ((next_address, _), to) = pair[1];
+            if address != next_address {
+                continue; // The machine edges below carry flow between instructions.
+            }
+            let terminal = data
+                .block(from)
+                .ops
+                .last()
+                .copied()
+                .is_some_and(|op| leaves_block_unconditionally(data.op(op).opcode));
+            if !terminal {
+                data.add_edge(from, to);
+            }
+        }
         for (source, target) in &function.edges {
             if let (Some(from), Some(to)) = (
                 // A machine edge leaves the last operation of its instruction,
@@ -1307,6 +1329,16 @@ fn block_leaders(function: &NativeFunction) -> BTreeSet<(u64, u32)> {
                 .is_some_and(|instruction| (*order as usize) < instruction.pcode.ops.len())
     });
     leaders
+}
+
+/// Whether an operation always transfers control away from its block.
+///
+/// A block ending in one of these does not fall through, so no fall-through
+/// edge may be drawn out of it. `CBRANCH` is deliberately absent: it falls
+/// through when not taken.
+fn leaves_block_unconditionally(opcode: i32) -> bool {
+    use ventris_pcode::op;
+    matches!(opcode, op::BRANCH | op::BRANCHIND | op::RETURN)
 }
 
 /// The p-code index a `CBRANCH` inside one instruction transfers to.
@@ -1623,15 +1655,21 @@ mod tests {
             vec![(0x1000, 0, 2), (0x1000, 2, 1), (0x1000, 3, 1)],
             "one instruction became three blocks: {blocks:?}"
         );
-        let guard = data
-            .blocks()
-            .find(|(_, block)| block.start_order == 0)
-            .map(|(id, _)| id)
-            .expect("the guarding block exists");
+        let at = |order: u32| {
+            data.blocks()
+                .find(|(_, block)| block.start_order == order)
+                .map(|(id, _)| id)
+                .expect("the block exists")
+        };
         assert_eq!(
-            data.block(guard).successors.len(),
+            data.block(at(0)).successors.len(),
             2,
             "the guard reaches both the skipped body and the join"
+        );
+        assert_eq!(
+            data.block(at(2)).successors,
+            vec![at(3)],
+            "the guarded body falls through to the join rather than dead-ending"
         );
     }
 }
