@@ -6,6 +6,16 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- `ksNesDrawBG__FP18ksNesCommonWorkObjP13ksNesStateObj`'s last conditional is now
+  isolated to short-circuit merging, and the obvious lever is refuted. With the
+  pulls printable its conditions read as real bit tests, and the single remaining
+  difference is that Ghidra keeps `uVar8 < 0xec` as a *separate nested* `if`
+  inside `((… & 8) != 0) && (7 < uVar8)`, where we fold all three into one
+  expression. Tightening `ruleBlockOr`'s `isComplex` ceiling from two statements
+  to one does not change that function's conditional count at all and costs
+  `missing-conditional` 3 -> 4 elsewhere, so the extra merge is not gated by
+  complexity. Ghidra must be refusing it on the shared-clause or predecessor
+  test instead.
 - Swept for the rest of that defect class and closed it. Comparing every opcode
   any pass writes into the graph (`new_op` and `op_set_opcode`) against every
   opcode the three printers mention left `PIECE` and `INSERT` unprintable
