@@ -6,6 +6,22 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- A conditional branch that still has both its edges keeps its test.
+  `ActionPruneDeadTargets` repairs a terminator whose operand names a block that is
+  gone; with one edge left it rewrote the operand, but with *two* it destroyed the
+  branch outright, leaving a two-way block with nothing to test. The emitter can
+  only render that as a fabricated constant, which is where `DBGEXIImm`'s `if (!1)`
+  came from - three of its branches were being destroyed this way, all naming the
+  same merged-away block. The taken edge is the successor that is *not* the block's
+  sequential fallthrough, and blocks are created in address order, so it is
+  identified without any flow information. `DBGEXIImm` now prints
+  `if (!(arg1 < 1))` there, a real test, and no fabricated conditions remain in it.
+- Two diagnosis notes worth keeping. The `control_flow` actions in `native.rs` are
+  applied directly rather than through the pool, so `VENTRIS_SKIP_ACTION` does not
+  reach them - an action bisect over that array is silently meaningless, which cost
+  a wrong "no action is responsible" conclusion. `VENTRIS_SKIP_GROUP=expression`
+  *did* move it, and the actual culprit was found by printing a backtrace from
+  `op_destroy` when the destroyed op is a `CBRANCH`.
 - **`agrees` is 31 of 37 (84%)** and `unstructured-control-flow` is **empty**.
   A jump to a bare `return` now prints as the return. `uVar18 = -1; goto L;` with
   `L: return uVar18;` is `return uVar18;` - control transfers straight to the label,

@@ -219,6 +219,41 @@ impl Action for ActionPruneDeadTargets {
                     data.op_set_opcode(terminator, op::BRANCH);
                     set_branch_target(data, terminator, successors[0], size);
                 }
+                // A conditional branch that still has both its edges keeps
+                // its test: only the *operand* is stale, because the block it
+                // named was merged away while the edge was rewired to the
+                // survivor. Destroying it left a two-way block with nothing to
+                // test, which the emitter could only render as a fabricated
+                // constant - `DBGEXIImm` printed `if (!1)` where the oracle has
+                // `if (param_3 == 0)`.
+                //
+                // The taken edge is the successor that is *not* this block's
+                // sequential fallthrough, and blocks are created in address
+                // order, so the fallthrough is the successor whose start is the
+                // next block start after this one.
+                2 if data.op(terminator).opcode == op::CBRANCH => {
+                    let here = data.block(block).start;
+                    let sequential = starts.range(here + 1..).next().copied();
+                    let taken: Vec<GraphBlockId> = successors
+                        .iter()
+                        .copied()
+                        .filter(|successor| Some(data.block(*successor).start) != sequential)
+                        .collect();
+                    match taken.as_slice() {
+                        [taken] => {
+                            let size = data
+                                .op(terminator)
+                                .inputs
+                                .first()
+                                .map(|value| data.varnode(*value).size)
+                                .unwrap_or(4);
+                            set_branch_target(data, terminator, *taken, size);
+                        }
+                        // Neither or both look like the fallthrough: there is no
+                        // edge to name, so the branch cannot be repaired here.
+                        _ => data.op_destroy(terminator),
+                    }
+                }
                 // Nothing left to branch to at all.
                 _ => data.op_destroy(terminator),
             }
@@ -832,6 +867,42 @@ mod tests {
         let (mut data, _, second) = two_adds();
         assert_eq!(ActionMultiCse.apply(&mut data), 1);
         assert!(data.op(second).dead);
+    }
+
+    /// A conditional branch that still has *both* its edges keeps its test: only
+    /// the operand is stale, because the block it named was merged away while the
+    /// edge was rewired to the survivor. Destroying it left a two-way block with
+    /// nothing to test, which the emitter could only render as a fabricated
+    /// constant - `DBGEXIImm` printed `if (!1)` where the oracle has
+    /// `if (param_3 == 0)`.
+    #[test]
+    fn a_stale_operand_on_a_live_two_way_branch_is_renamed_not_removed() {
+        let mut data = Funcdata::default();
+        data.entry = 0x1000;
+        let entry = data.new_block(0x1000);
+        // The sequential fallthrough, and the block the edge was rewired to.
+        let fallthrough = data.new_block(0x1010);
+        let survivor = data.new_block(0x1020);
+        data.add_edge(entry, fallthrough);
+        data.add_edge(entry, survivor);
+        // The operand names a block that no longer exists.
+        let destination = data.new_varnode(RAM_SPACE, 0x1018, 4);
+        let condition = data.new_unique(1);
+        let branch = data.new_op(op::CBRANCH, seq(0x1000, 0), vec![destination, condition]);
+        data.op_insert_end(branch, entry);
+
+        assert_eq!(ActionPruneDeadTargets.apply(&mut data), 1);
+        assert!(!data.op(branch).dead, "the test survives");
+        assert_eq!(data.op(branch).opcode, op::CBRANCH);
+        assert_eq!(
+            data.op(branch)
+                .inputs
+                .first()
+                .map(|value| data.varnode(*value).offset),
+            Some(0x1020),
+            "the operand names the taken edge, not the sequential fallthrough"
+        );
+        assert_eq!(data.block(entry).successors.len(), 2, "both edges remain");
     }
 
     /// Unreachable removal drops the edge but not the operand, so a terminator
