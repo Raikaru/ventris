@@ -6,6 +6,17 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- Refuted, and recorded so it is not retried: making a parameter's name outrank
+  the register spelling does not recover `TRK_fill_mem`'s third parameter.
+  Exempting a function input from `register_name_for_group`'s
+  "this register is written somewhere" refusal does change the naming - `uVar8`
+  and `pVar18` become `r20` and `r12` - so the group is nameable. But threading
+  the parameter map into group naming and preferring it produced no `arg2` at
+  all, which means no varnode in that group carries `flags.input` at `(4, 20)`
+  with no definition; the register spelling is reached by a different route than
+  the input flag. It also cost `call-census` 2 -> 3. Both halves reverted. The
+  next step is to find what actually holds r5's entry value in that group, not to
+  add another naming preference on top.
 - `TRK_fill_mem`'s two families trace to one cause, now located exactly. Its
   input trials are right - r3, r4 and r5 all `Active` with values - and
   `promote_input_trials` puts all three into the prototype, verified by probe
