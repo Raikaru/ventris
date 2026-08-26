@@ -469,7 +469,20 @@ fn rewrite_recovered_field_accesses(
                     *body = replace_bare_member(body, &recovered, &member);
                     strip_redundant_field_casts(body, field, &member);
                 }
-                globals.push(format!("{} *{base};", structure.name));
+                // One storage location has one type. Two recovered structures
+                // can both be reached through the same global-pointer register,
+                // and pushing a declaration per structure emitted two globals
+                // with the same name - `DBGEXIImm` declared `pVar18` twice,
+                // which is not valid C. The first declaration stands and the
+                // first declaration stands; a second would only rename the same
+                // storage.
+                let declaration = format!("{} *{base};", structure.name);
+                let already = globals
+                    .iter()
+                    .any(|existing| existing.ends_with(&format!("*{base};")));
+                if !already {
+                    globals.push(declaration);
+                }
             }
             continue;
         }
@@ -1026,6 +1039,65 @@ mod tests {
         assert_eq!(
             signature.parameters[0].c_type, "uint32_t",
             "an unrelated parameter keeps its type"
+        );
+    }
+
+    /// One storage location has one type. Two recovered structures reached
+    /// through the same global-pointer register must not each declare it, or the
+    /// output holds two globals with the same name and does not compile.
+    #[test]
+    fn one_global_base_is_declared_once_however_many_structures_reach_it() {
+        let mut signature = SourceSignature {
+            name: "f".into(),
+            return_type: "void".into(),
+            parameters: vec![SourceParameter {
+                name: "arg0".into(),
+                c_type: "uint32_t".into(),
+            }],
+        };
+        let field = |offset: i64, name: &str| SourceField {
+            offset,
+            name: name.into(),
+            c_type: "uint8_t".into(),
+            declarator_suffix: "[1]".into(),
+            width: 1,
+        };
+        let structs = vec![
+            SourceStruct {
+                name: "RecoveredStruct0".into(),
+                parameter_name: None,
+                fields: vec![field(-0x47e6, "field_neg_47e6")],
+                unresolved: Vec::new(),
+            },
+            SourceStruct {
+                name: "RecoveredStruct1".into(),
+                parameter_name: None,
+                fields: vec![field(-0x40, "field_neg_40")],
+                unresolved: Vec::new(),
+            },
+        ];
+        let mut body = String::from(
+            "void f(void) {\n    gp->field_neg_47e6 = 0;\n    gp->field_neg_40 = 1;\n}\n",
+        );
+        let mut globals = Vec::new();
+        rewrite_recovered_field_accesses(&mut signature, &structs, &mut body, &mut globals);
+
+        assert_eq!(
+            globals,
+            vec!["RecoveredStruct0 *gp;".to_string()],
+            "the first declaration stands and the second is not printed"
+        );
+        let names: Vec<&str> = globals
+            .iter()
+            .filter_map(|declaration| declaration.split('*').nth(1))
+            .collect();
+        assert_eq!(
+            names.len(),
+            names
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            "no two globals share a name: {globals:?}"
         );
     }
 }

@@ -6,6 +6,14 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- One global-pointer base is now declared once however many recovered structures
+  reach it. `rewrite_recovered_field_accesses` pushed a declaration per
+  structure, so a register reached as two different structures emitted two
+  globals with the same name - `DBGEXIImm` printed both
+  `RecoveredStruct0 *pVar18;` and `RecoveredStruct1 *pVar18;`, which does not
+  compile. One storage location has one type, so the first declaration stands.
+  Census-neutral; the regression test fails without it, producing exactly that
+  pair.
 - Refuted, and recorded so it is not retried: making a parameter's name outrank
   the register spelling does not recover `TRK_fill_mem`'s third parameter.
   Exempting a function input from `register_name_for_group`'s
