@@ -181,16 +181,24 @@ impl std::error::Error for PipelineError {}
 /// inlines, and each name carries a declaration and usually a cast.
 /// Which path renders a function.
 ///
-/// The address-ordered path is still the default, for one measured reason: on a
-/// raw image with no symbols the graph path renders a convention register's
-/// base as `gp->field_ffffb81a`, which is closer to the truth than the
-/// address-ordered path's invented `local_47e6` but leaves `gp` undeclared and
-/// the 2-byte members typed as byte arrays. Everything else it now leads on,
-/// including `corpus-smoke`, which it passes on every entry.
-fn graph_pipeline_requested() -> bool {
-    std::env::var("VENTRIS_PIPELINE")
-        .map(|value| value.eq_ignore_ascii_case("graph"))
-        .unwrap_or(false)
+/// The graph path is the default wherever a calling convention is known, which
+/// is every `--target`. Its parameters, return storage and globals all come from
+/// the convention: `ActionFuncLink`'s trials are the convention's argument
+/// locations, `guard_returns` needs its result storage, and a global pointer is
+/// a convention register. Given only `--arch` there is no convention to port
+/// from - measured, three separate ways: a forwarding function lost its
+/// parameter, a function returning a value reported `void`, and a global base
+/// went undeclared - so the address-ordered path, which defaults those decisions
+/// per architecture, still answers there.
+///
+/// `VENTRIS_PIPELINE` forces either path, which is how the census and the smoke
+/// gate compare them.
+fn graph_pipeline_default(abi: Option<&ventris_target::Abi>) -> bool {
+    match std::env::var("VENTRIS_PIPELINE") {
+        Ok(value) if value.eq_ignore_ascii_case("address") => false,
+        Ok(value) if value.eq_ignore_ascii_case("graph") => true,
+        _ => abi.is_some(),
+    }
 }
 
 /// An immutable loaded binary plus its explicit target decision.
@@ -341,15 +349,14 @@ impl Pipeline {
         let architecture = self
             .architecture
             .ok_or(PipelineError::ArchitectureRequired)?;
-        // Measured against the Ghidra oracle on all thirty-seven hash-verified
-        // corpus functions the graph path leads the address-ordered one on
-        // `agrees`, `excess-casts`, `unstructured-control-flow` (9 functions
-        // against 15), `missing-loop-or-switch`, `return-presence`,
-        // `oversized-expression` and `unreduced-flag-expression`, and it now
-        // passes `corpus-smoke` on every entry. What still keeps it behind an
-        // environment variable is `graph_pipeline_requested`'s reason: an
-        // undeclared convention register on a raw image with no symbols.
-        let document = if graph_pipeline_requested() {
+        // The graph path is the default wherever a convention is known. Measured
+        // against the Ghidra oracle on all thirty-seven hash-verified corpus
+        // functions it leads the address-ordered one on `agrees`,
+        // `excess-casts`, `unstructured-control-flow`, `missing-loop-or-switch`,
+        // `return-presence`, `oversized-expression` and
+        // `unreduced-flag-expression`, and it passes `corpus-smoke` on every
+        // entry.
+        let document = if graph_pipeline_default(abi) {
             decompiler.decompile_via_graph(
                 architecture,
                 &function,

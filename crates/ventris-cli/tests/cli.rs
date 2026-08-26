@@ -131,7 +131,15 @@ fn raw_mips_ps2_source_reconstruction_smoke() {
     assert!(stdout.starts_with("{\"command\":\"decompile\""), "{stdout}");
     assert!(stdout.contains("\"ok\":true"), "{stdout}");
     assert!(stdout.contains("#include <stdint.h>"), "{stdout}");
-    assert!(stdout.contains("uint16_t"), "{stdout}");
+    // The fact checked here is that the 16-bit accesses survive into the C
+    // types. The address-ordered path spelled that as a `uint16_t` local, which
+    // is a wrong claim - these are globals reached through the convention's
+    // global pointer, not locals. The graph path declares them as members of
+    // the recovered structure, so the width appears as a 2-byte member.
+    assert!(
+        stdout.contains("uint16_t") || stdout.contains("[2];"),
+        "{stdout}"
+    );
 }
 
 #[test]

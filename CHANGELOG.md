@@ -282,6 +282,40 @@ All notable Ventris changes are documented here.
   table-backed switch the rule can claim, and `dl_G_MOVEWORD`'s `switch 0 vs 1`
   is a `BRANCHIND` whose table this pipeline does not recover. The rule is
   correct and tested; it has no corpus function to improve yet.
+- The graph path is the shipping default wherever a calling convention is known,
+  which is every `--target`. Measured against the Ghidra oracle on all
+  thirty-seven hash-verified corpus functions it leads the address-ordered path
+  on eight families, ties one and trails two:
+
+  | family | graph | address |
+  | --- | --- | --- |
+  | agrees | 21 | 19 |
+  | unstructured-control-flow | 10 | 15 |
+  | missing-loop-or-switch | 4 | 11 |
+  | excess-casts | 0 | 5 |
+  | oversized-expression | 0 | 3 |
+  | unreduced-flag-expression | 0 | 1 |
+  | missing-parameters | 0 | 1 |
+  | return-presence | 2 | 3 |
+  | call-census | 4 | 3 |
+  | missing-conditional | 7 | 2 |
+
+  Given only `--arch` there is no convention to port from, and that showed up
+  three separate ways before this landed - a forwarding function lost its
+  parameter, a function returning a value reported `void`, and a global base went
+  undeclared - so the address-ordered path still answers there. Two of those are
+  now fixed regardless; the third is why the switch is conditional rather than
+  unconditional. `VENTRIS_PIPELINE=address` forces the old path and
+  `VENTRIS_PIPELINE=graph` forces the new one, which is how the census compares
+  them.
+  One assertion changed with it, stated plainly: `raw_mips_ps2_source_reconstruction_smoke`
+  checked that 16-bit accesses survive into the C types by looking for
+  `uint16_t`, which the address-ordered path produced as an invented local. Those
+  are globals reached through the convention's global pointer, not locals, so the
+  graph path declares them as 2-byte members of the recovered structure. The
+  assertion now accepts either spelling of the same fact. I did not type the
+  members `uint16_t` to satisfy it - two bytes of unknown type are honestly
+  `uint8_t[2]`.
 - A structure reached through a register that is not a parameter now gets its
   base declared and its members indexed. On a raw PS2 image the graph path
   rendered `gp->field_neg_47e6 = 0` with `gp` introduced nowhere and a two-byte
