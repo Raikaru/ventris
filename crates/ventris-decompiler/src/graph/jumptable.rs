@@ -566,7 +566,8 @@ impl Action for ActionResolvedIndirect {
                     return None;
                 }
                 let reached = successors[0];
-                data.block_covers(reached, target, 0).then_some((branch, reached))
+                data.block_covers(reached, target, 0)
+                    .then_some((branch, reached))
             })
             .collect();
         let mut changed = 0;

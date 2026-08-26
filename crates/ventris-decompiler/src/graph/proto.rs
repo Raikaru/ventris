@@ -36,11 +36,17 @@ struct Trial {
 
 /// Rebuilds every call's operand list from its recovered parameters.
 ///
-/// `argument_locations` is the convention's parameter storage, in the order the
-/// convention assigns it. Returns the number of calls given arguments.
+/// `argument_sections` is the convention's parameter storage in the order the
+/// convention assigns it, split into resource sections
+/// (`ParamListStandard::separateSections`). The candidate operands are already
+/// on the call - `guard::guard_calls` appended one per location before renaming,
+/// exactly as `Heritage::guardCalls` does - so a trial's value is the operand
+/// renaming bound to that slot, which is what `checkInputTrialUse` reads.
+///
+/// Returns the number of calls whose operand list changed.
 pub fn recover_call_arguments(
     data: &mut Funcdata,
-    argument_locations: &[Location],
+    argument_sections: &[Vec<Location>],
     arity_of: &dyn Fn(u64) -> Option<usize>,
 ) -> usize {
     let calls: Vec<(OpId, Option<u64>)> = data
@@ -59,54 +65,115 @@ pub fn recover_call_arguments(
         .collect();
     let mut recovered = 0;
     for (call, target) in calls {
-        let trials = register_trials(data, call, argument_locations);
-        if std::env::var("VENTRIS_PROBE_TRIALS").is_ok() {
-            eprintln!(
-                "call {call:?} target={target:?}: trials={:?}",
-                trials
-                    .iter()
-                    .map(|trial| (
-                        trial.location.offset,
-                        trial.used,
-                        data.varnode(trial.value).offset,
-                        data.varnode(trial.value).flags.constant,
-                    ))
-                    .collect::<Vec<_>>()
-            );
-        }
-        // A known callee states its own arity. Ghidra's `FuncCallSpecs` uses
-        // the callee prototype when it has one, which is the only way to see
-        // an argument this function forwards without touching.
-        let arity = target.and_then(arity_of);
-        let arguments: Vec<VarnodeId> = match arity {
-            Some(arity) => trials.iter().take(arity).map(|trial| trial.value).collect(),
-            None => trials
-                .iter()
-                .take_while(|trial| trial.used)
-                .map(|trial| trial.value)
-                .collect(),
-        };
-        if arguments.is_empty() {
+        let mut trials = register_trials(data, call, argument_sections);
+        if trials.is_empty() {
             continue;
         }
+        // A known callee states its own arity. Ghidra reaches the same place
+        // through a locked input prototype, where every parameter's trial is
+        // marked active outright (`ActionFuncLink::funcLinkInput`).
+        match target.and_then(arity_of) {
+            Some(arity) => {
+                for (index, trial) in trials.iter_mut().enumerate() {
+                    trial.used = index < arity;
+                }
+            }
+            None => decide_trials(&mut trials, argument_sections),
+        }
+        let arguments: Vec<VarnodeId> = trials
+            .iter()
+            .filter(|trial| trial.used)
+            .map(|trial| trial.value)
+            .collect();
         let Some(target) = data.op(call).inputs.first().copied() else {
             continue;
         };
         let mut inputs = vec![target];
         inputs.extend(arguments);
-        data.op_set_inputs(call, inputs);
+        if inputs != data.op(call).inputs {
+            data.op_set_inputs(call, inputs);
+        }
+        // `buildInputFromTrials` is followed by `clearActiveInput`: the operands
+        // are the arguments from here on, so nothing may re-derive them from the
+        // convention's candidate storage again.
+        data.clear_input_active(call);
         recovered += 1;
     }
     recovered
 }
 
-/// One trial per parameter location, carrying the value that reaches the call.
-fn register_trials(data: &Funcdata, call: OpId, argument_locations: &[Location]) -> Vec<Trial> {
-    argument_locations
+/// How long a run of unused parameter slots may be before everything after it
+/// is unused too.
+///
+/// `ParamListStandard::fillinMap` passes `maxchain = 2` to `forceInactiveChain`.
+const MAX_INACTIVE_CHAIN: usize = 2;
+
+/// Decides which trials are parameters.
+///
+/// `ParamListStandard::fillinMap`, whose load-bearing step is
+/// `forceInactiveChain`. The rule is *not* "stop at the first location nobody
+/// wrote": a convention may leave a slot untouched and still use the next one,
+/// so up to `MAX_INACTIVE_CHAIN` consecutive unused slots are holes to be filled
+/// rather than the end of the list. Only a longer run ends it, and then
+/// everything after that run is unused as well. Each resource section is decided
+/// on its own, because a run of untouched integer registers says nothing about
+/// the floating-point ones.
+fn decide_trials(trials: &mut [Trial], argument_sections: &[Vec<Location>]) {
+    let mut start = 0;
+    for section in argument_sections {
+        let stop = (start + section.len()).min(trials.len());
+        if start >= stop {
+            break;
+        }
+        let mut chain = 0;
+        let mut seen_chain = false;
+        let mut last_active = None;
+        for index in start..stop {
+            if trials[index].used {
+                chain = 0;
+                if !seen_chain {
+                    last_active = Some(index);
+                }
+            } else {
+                chain += 1;
+                if chain > MAX_INACTIVE_CHAIN {
+                    seen_chain = true;
+                }
+            }
+            if seen_chain {
+                trials[index].used = false;
+            }
+        }
+        // Fill the holes: an unused slot below the last real parameter is still
+        // a parameter, because the convention had to pass it to reach the ones
+        // above it.
+        if let Some(last_active) = last_active {
+            for trial in &mut trials[start..=last_active] {
+                trial.used = true;
+            }
+        }
+        start = stop;
+    }
+}
+
+/// One trial per parameter location, carrying the value bound to its operand.
+///
+/// The operand *is* the value: `guard::guard_calls` appended a free varnode per
+/// candidate location before renaming, and renaming replaced it with whatever
+/// definition reaches the call. `checkInputTrialUse` reads exactly that -
+/// `op->getIn(slot)` - and never re-derives it from the location, which it
+/// cannot: the reaching definition may be a temporary, a merge, or a constant.
+fn register_trials(data: &Funcdata, call: OpId, argument_sections: &[Vec<Location>]) -> Vec<Trial> {
+    let operands = data.op(call).inputs.clone();
+    argument_sections
         .iter()
+        .flatten()
         .copied()
-        .filter_map(|location| {
-            let value = incoming_value(data, call, location)?;
+        .enumerate()
+        .filter_map(|(index, location)| {
+            // Slot zero is the callee, so the candidates start at one - Ghidra's
+            // `ParamTrial::slotbase`.
+            let value = operands.get(index + 1).copied()?;
             Some(Trial {
                 location,
                 value,
@@ -114,30 +181,6 @@ fn register_trials(data: &Funcdata, call: OpId, argument_locations: &[Location])
             })
         })
         .collect()
-}
-
-/// The value a location holds when control reaches the call.
-///
-/// The guard pass put an `INDIRECT` for this location immediately before the
-/// call; its first operand is that value. Without a guard there is nothing to
-/// read, and the location cannot be shown to carry an argument.
-fn incoming_value(data: &Funcdata, call: OpId, location: Location) -> Option<VarnodeId> {
-    let block = data.op(call).parent?;
-    let ops = &data.block(block).ops;
-    let position = ops.iter().position(|candidate| *candidate == call)?;
-    ops[..position]
-        .iter()
-        .rev()
-        .map(|id| data.op(*id))
-        .filter(|operation| operation.opcode == op::INDIRECT)
-        .find_map(|operation| {
-            let output = operation.output?;
-            let varnode = data.varnode(output);
-            let matches = varnode.space == location.space
-                && varnode.offset == location.offset
-                && varnode.size == location.size;
-            matches.then(|| operation.inputs.first().copied())?
-        })
 }
 
 /// Whether a value is real enough to be an argument.
@@ -164,6 +207,13 @@ fn is_used_guarded(data: &Funcdata, value: VarnodeId, seen: &mut BTreeSet<Varnod
         // A merge or a guard is only as real as what flows into it, so look
         // through them rather than accepting them outright.
         Some(def) => match data.op(def).opcode {
+            // An indirect *creation* is where backtracking stops:
+            // `AncestorRealistic::execute` returns `pop_failkill` for it, which
+            // is "killedbycall". The value is whatever a previous callee left in
+            // the register, so this call did not prepare it and it is not an
+            // argument. Looking through would reach the placeholder constant and
+            // report every convention register as a parameter.
+            op::INDIRECT if data.is_indirect_creation(def) => false,
             op::MULTIEQUAL | op::INDIRECT => data
                 .op(def)
                 .inputs
@@ -217,7 +267,10 @@ mod tests {
         data.op_insert_end(call, block);
 
         let locations = BTreeSet::from([location(0x10), location(0x20), location(0x30)]);
-        guard_calls(&mut data, &locations, &CallEffects::default());
+        // `guardCalls` appends one candidate operand per parameter location
+        // before renaming; the trial values are read back from those operands.
+        let candidates = [location(0x10), location(0x20), location(0x30)];
+        guard_calls(&mut data, &locations, &CallEffects::default(), &candidates);
         heritage(&mut data);
         (data, call)
     }
@@ -226,7 +279,10 @@ mod tests {
     fn a_written_argument_register_becomes_a_call_argument() {
         let (mut data, call) = one_argument_call();
         let locations = [location(0x10), location(0x20), location(0x30)];
-        assert_eq!(recover_call_arguments(&mut data, &locations, &|_| None), 1);
+        assert_eq!(
+            recover_call_arguments(&mut data, &[locations.to_vec()], &|_| None),
+            1
+        );
         assert_eq!(
             data.op(call).inputs.len(),
             2,
@@ -251,7 +307,7 @@ mod tests {
         // The convention's second and third registers were never written, so
         // they cannot be arguments and no later register can be either.
         let locations = [location(0x10), location(0x20), location(0x30)];
-        recover_call_arguments(&mut data, &locations, &|_| None);
+        recover_call_arguments(&mut data, &[locations.to_vec()], &|_| None);
         for argument in data.op(call).inputs.iter().skip(1).copied() {
             assert!(
                 data.varnode(argument).flags.constant || data.varnode(argument).def.is_some(),
@@ -269,11 +325,11 @@ mod tests {
         let call = data.new_op(op::CALL, seq(0x1000), vec![target]);
         data.op_insert_end(call, block);
         let locations = BTreeSet::from([location(0x10)]);
-        guard_calls(&mut data, &locations, &CallEffects::default());
+        guard_calls(&mut data, &locations, &CallEffects::default(), &[]);
         heritage(&mut data);
 
         assert_eq!(
-            recover_call_arguments(&mut data, &[location(0x10)], &|_| None),
+            recover_call_arguments(&mut data, &[vec![location(0x10)]], &|_| None),
             0,
             "nothing wrote the argument register"
         );
@@ -305,10 +361,11 @@ mod tests {
         data.op_insert_end(call, join);
 
         let locations = BTreeSet::from([location(0x10)]);
-        guard_calls(&mut data, &locations, &CallEffects::default());
+        let candidates = [location(0x10)];
+        guard_calls(&mut data, &locations, &CallEffects::default(), &candidates);
         heritage(&mut data);
         assert_eq!(
-            recover_call_arguments(&mut data, &[location(0x10)], &|_| None),
+            recover_call_arguments(&mut data, &[vec![location(0x10)]], &|_| None),
             1
         );
         assert_eq!(data.op(call).inputs.len(), 2);

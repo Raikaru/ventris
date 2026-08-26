@@ -1119,6 +1119,39 @@ impl<'a> Graph<'a> {
         false
     }
 
+    /// Whether the block holds observable work the emitter would have to hoist
+    /// out of a condition.
+    ///
+    /// A call or a store is observable, and concatenating the bodies moves it
+    /// *before* the combined test, so it would run whether or not the first test
+    /// reached it. Ghidra does not have this problem: `PrintC` prints the second
+    /// block's work inside the condition, inlining a single-reader result
+    /// directly - `if (a && FUN(x) != 0)` - and falling back to a comma
+    /// expression when the result is explicit, `(iVar2 = FUN(x), iVar2 != 0)`.
+    ///
+    /// So the refusal is only for the cases this emitter cannot inline: an
+    /// observable operation whose result nothing in the block reads, or whose
+    /// result has more readers than an implied expression may have. A call whose
+    /// result the test itself consumes is inlined and folds correctly.
+    fn must_hoist_side_effect(&self, block: GraphBlockId) -> bool {
+        const MAX_IMPLIED_REF: usize = 2;
+        self.data.block(block).ops.iter().copied().any(|operation| {
+            let op = self.data.op(operation);
+            if !is_call_opcode(op.opcode) && op.opcode != ventris_pcode::op::STORE {
+                return false;
+            }
+            let Some(output) = op.output else {
+                return true;
+            };
+            let descendants = &self.data.varnode(output).descendants;
+            descendants.is_empty()
+                || descendants.len() > MAX_IMPLIED_REF
+                || descendants
+                    .iter()
+                    .any(|reader| self.data.op(*reader).parent != Some(block))
+        })
+    }
+
     /// The condition under which this node transfers to the given successor.
     fn condition_toward(&self, node: NodeId, successor: NodeId) -> Option<Condition> {
         let index = self.nodes[node]
@@ -1197,6 +1230,18 @@ impl<'a> Graph<'a> {
             // concatenation the two are different blocks, and the head is the one
             // whose statements would start running unconditionally.
             if self.is_complex(self.nodes[second].entry, 2) {
+                continue;
+            }
+            // Concatenating the two bodies puts the second test's statements
+            // *before* the combined condition, so they run whether or not the
+            // first test would have reached them. Ghidra gets away with this
+            // because `PrintC` emits the second block's work inside the
+            // condition as a comma expression - `(iVar2 = FUN_80021320(iVar5),
+            // iVar2 != 0)`. Until the emitter can spell that, a second test
+            // carrying a side effect must not be folded: hoisting a call out of
+            // a short circuit calls it unconditionally, which is a different
+            // program.
+            if self.must_hoist_side_effect(self.nodes[second].entry) {
                 continue;
             }
             if !self.nodes[second].successors.contains(&clause) {

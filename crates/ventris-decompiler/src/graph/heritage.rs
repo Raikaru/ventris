@@ -342,12 +342,41 @@ fn rename(
                             little_endian,
                         ),
                         None => {
-                            let entry_value = data.new_varnode(key.0, key.1, key.2);
-                            data.mark_input(entry_value);
+                            let entry_value = data.set_input_varnode(key.0, key.1, key.2);
                             stacks.entry(key).or_default().push(entry_value);
                             entry_value
                         }
                     },
+                };
+                // "INDIRECTs and their op really happen AT SAME TIME"
+                // (`Heritage::renameRecurse`). A guard inserted *before* a call
+                // defines the location's value *after* it, so a read belonging
+                // to the call itself - an appended parameter operand - must see
+                // the definition below the guard, not the guard's own output.
+                // Without this the argument a call passes is the value the call
+                // left behind, which is either undefined or a later value
+                // entirely.
+                let current = match data.varnode(current).def {
+                    Some(definition)
+                        if data.op(definition).opcode == op::INDIRECT
+                            && data
+                                .op(definition)
+                                .inputs
+                                .get(1)
+                                .copied()
+                                .and_then(|annotation| data.iop_target(annotation))
+                                == Some(op) =>
+                    {
+                        let stack = stacks.entry(key).or_default();
+                        if stack.len() >= 2 {
+                            stack[stack.len() - 2]
+                        } else {
+                            let entry_value = data.set_input_varnode(key.0, key.1, key.2);
+                            stacks.entry(key).or_default().insert(0, entry_value);
+                            entry_value
+                        }
+                    }
+                    _ => current,
                 };
                 if current != input {
                     data.op_set_input(op, current, slot);
@@ -391,8 +420,7 @@ fn rename(
             let current = match stacks.get(&key).and_then(|stack| stack.last().copied()) {
                 Some(current) => current,
                 None => {
-                    let entry_value = data.new_varnode(key.0, key.1, key.2);
-                    data.mark_input(entry_value);
+                    let entry_value = data.set_input_varnode(key.0, key.1, key.2);
                     stacks.entry(key).or_default().push(entry_value);
                     entry_value
                 }

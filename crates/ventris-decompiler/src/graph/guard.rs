@@ -29,20 +29,48 @@ pub struct Location {
     pub size: u32,
 }
 
-/// Which locations survive a call, standing in for Ghidra's `EffectRecord`.
+/// What a call does to a location, standing in for Ghidra's `EffectRecord`.
 ///
-/// Ghidra reads the effect of a call from the callee prototype. Ventris carries
-/// the same fact in its target ABI, so the model is supplied by the caller
-/// rather than guessed here: a location absent from `preserved` is treated as
-/// changed by the call, which is the conservative direction.
+/// Ghidra reads the effect from the callee prototype and distinguishes three
+/// outcomes, not two (`heritage.cc:1509-1524`):
+///
+/// * `unaffected` - no guard at all, the value simply survives.
+/// * `killedbycall` - `newIndirectCreation`, an `INDIRECT` whose input is a
+///   constant rather than the previous value. The location's value after the
+///   call has *no data flow from before it*.
+/// * `unknown_effect` / `return_address` - `newIndirectOp`, an `INDIRECT` that
+///   threads the previous value through.
+///
+/// Collapsing the last two into one loses the distinction that matters most: a
+/// threading `INDIRECT` lets a constant a caller-saved register held *before* a
+/// call reach the code after it, so a later test on that register folds to a
+/// constant and its conditional disappears. Ghidra keeps the conditional
+/// because the killed register's post-call value is unrelated to its pre-call
+/// value.
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
 pub struct CallEffects {
     pub preserved: BTreeSet<(u32, u64)>,
+    /// Locations whose value after a call is unrelated to their value before it.
+    ///
+    /// Ghidra's `<killedbycall>` list. Reading the shipped cspecs shows what
+    /// belongs here and, just as importantly, what does not: PowerPC lists
+    /// `r3`, `r4`, `f1`; MIPS lists `v0`, `v1`, `f0`, `f1`, `at`. It is the
+    /// convention's *result* storage, not every register the callee is free to
+    /// clobber. A caller-saved register outside the list keeps `unknown_effect`,
+    /// so its old value is threaded through - Ghidra is deliberately
+    /// conservative there, because a callee that never touches the register
+    /// leaves the caller's value in place.
+    pub killed: BTreeSet<(u32, u64)>,
 }
 
 impl CallEffects {
     pub fn preserves(&self, location: &Location) -> bool {
         self.preserved.contains(&(location.space, location.offset))
+    }
+
+    /// Whether the callee destroys the location outright.
+    pub fn kills(&self, location: &Location) -> bool {
+        self.killed.contains(&(location.space, location.offset))
     }
 }
 
@@ -59,15 +87,41 @@ pub fn heritaged_locations(data: &Funcdata) -> BTreeSet<Location> {
         .collect()
 }
 
-/// Inserts `INDIRECT` definitions for locations a call may change.
+/// Inserts `INDIRECT` definitions for locations a call may change, and gives the
+/// call one operand per location the convention could pass a parameter in.
 ///
-/// Ghidra's `guardCalls`. The inserted op reads the location's value before the
-/// call and defines its value after, so renaming records a real definition
-/// instead of the analysis silently forgetting the location.
+/// Ghidra's `Heritage::guardCalls`, both arms. The `INDIRECT` arm gives a
+/// location an explicit definition whose input is its previous value, so
+/// renaming records a real definition instead of the analysis silently
+/// forgetting the location.
+///
+/// The second arm is the one that makes argument recovery possible at all
+/// (`heritage.cc:1495-1507`):
+///
+/// ```text
+/// if (fc->isInputActive() && tryregister) {
+///   int4 inputCharacter = fc->characterizeAsInputParam(transAddr,size);
+///   if (inputCharacter == ParamEntry::contains_justified) {
+///     ...
+///     active->registerTrial(transAddr,size);
+///     Varnode *vn = fd->newVarnode(size,addr);
+///     fd->opInsertInput(op,vn,op->numInput());
+/// ```
+///
+/// A call instruction names no arguments, so Ghidra *appends a free varnode per
+/// candidate parameter location before renaming*, and renaming binds each one to
+/// the value live at the call. Only then can a trial be decided, because
+/// `checkInputTrialUse` reads `op->getIn(slot)`. Recovering the values after
+/// renaming instead - from the guards - sees only the locations that still had a
+/// guard, which is why calls came out with too few arguments: the arm that fills
+/// a `char *` and a literal zero into `FUN_8006909c(param_1,pcVar4,0)` was
+/// reduced to `FUN_8006909c(param_1)`, and the values feeding the dropped
+/// operands then died as unread.
 pub fn guard_calls(
     data: &mut Funcdata,
     locations: &BTreeSet<Location>,
     effects: &CallEffects,
+    argument_locations: &[Location],
 ) -> usize {
     let calls: Vec<OpId> = data
         .live_ops()
@@ -80,7 +134,19 @@ pub fn guard_calls(
             if effects.preserves(location) {
                 continue;
             }
-            insert_indirect(data, call, *location);
+            if effects.kills(location) {
+                insert_indirect_creation(data, call, *location);
+            } else {
+                insert_indirect(data, call, *location);
+            }
+            inserted += 1;
+        }
+        // Appended after the guards so the operand reads the location's value as
+        // it is *at* the call, which is what the guard's own input names.
+        for location in argument_locations {
+            let value = data.new_varnode(location.space, location.offset, location.size);
+            let slot = data.op(call).inputs.len();
+            data.op_set_input(call, value, slot);
             inserted += 1;
         }
     }
@@ -146,10 +212,33 @@ pub fn guard_returns(data: &mut Funcdata, storage: &[Location]) -> usize {
 fn insert_indirect(data: &mut Funcdata, anchor: OpId, location: Location) -> OpId {
     let seq = data.op(anchor).seq;
     let before = data.new_varnode(location.space, location.offset, location.size);
-    let cause = data.new_constant(seq.address, 4);
+    // Ghidra's `newVarnodeIop`: the annotation names the *operation*, not its
+    // address. Renaming has to ask "does this INDIRECT annotate the op I am
+    // looking at", and two calls can share an address on a delay-slot
+    // architecture, so an address cannot answer it.
+    let cause = data.new_iop(anchor);
     let indirect = data.new_op(op::INDIRECT, seq, vec![before, cause]);
     let after = data.new_varnode(location.space, location.offset, location.size);
     data.op_set_output(indirect, Some(after));
+    data.op_insert_before(indirect, anchor);
+    indirect
+}
+
+/// Creates `out = INDIRECT(0, op)` immediately before `anchor`, where `out` has
+/// no data flow from before the operation.
+///
+/// Ghidra's `Funcdata::newIndirectCreation`. The distinction from
+/// `insert_indirect` is the whole point: the location's previous value is *not*
+/// an operand, so nothing the caller had in a killed register can reach the code
+/// after the call.
+fn insert_indirect_creation(data: &mut Funcdata, anchor: OpId, location: Location) -> OpId {
+    let seq = data.op(anchor).seq;
+    let placeholder = data.new_constant(0, location.size);
+    let cause = data.new_iop(anchor);
+    let indirect = data.new_op(op::INDIRECT, seq, vec![placeholder, cause]);
+    let after = data.new_varnode(location.space, location.offset, location.size);
+    data.op_set_output(indirect, Some(after));
+    data.mark_indirect_creation(indirect);
     data.op_insert_before(indirect, anchor);
     indirect
 }
@@ -189,7 +278,7 @@ mod tests {
         let (mut data, _) = graph_with(op::CALL, vec![0x2000]);
         let locations = BTreeSet::from([location(8), location(16)]);
         let effects = CallEffects::default();
-        assert_eq!(guard_calls(&mut data, &locations, &effects), 2);
+        assert_eq!(guard_calls(&mut data, &locations, &effects, &[]), 2);
         let indirects: Vec<_> = data
             .live_ops()
             .filter(|(_, candidate)| candidate.opcode == op::INDIRECT)
@@ -208,9 +297,10 @@ mod tests {
         let (mut data, _) = graph_with(op::CALL, vec![0x2000]);
         let locations = BTreeSet::from([location(8), location(16)]);
         let effects = CallEffects {
+            killed: BTreeSet::new(),
             preserved: BTreeSet::from([(REGISTER_SPACE, 16)]),
         };
-        assert_eq!(guard_calls(&mut data, &locations, &effects), 1);
+        assert_eq!(guard_calls(&mut data, &locations, &effects, &[]), 1);
     }
 
     #[test]
@@ -253,6 +343,7 @@ mod tests {
             &mut data,
             &BTreeSet::from([location(8)]),
             &CallEffects::default(),
+            &[],
         );
         let block = data.op(call).parent.expect("the call has a block");
         let ops = &data.block(block).ops;

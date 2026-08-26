@@ -345,10 +345,10 @@ impl FuncCallSpecs {
     pub fn recover_arguments(
         &self,
         data: &mut Funcdata,
-        argument_locations: &[Location],
+        argument_sections: &[Vec<Location>],
         arity_of: &dyn Fn(u64) -> Option<usize>,
     ) -> usize {
-        recover_call_arguments(data, argument_locations, arity_of)
+        recover_call_arguments(data, argument_sections, arity_of)
     }
 }
 

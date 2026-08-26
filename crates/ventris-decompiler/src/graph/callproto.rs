@@ -695,6 +695,12 @@ impl Action for ActionActiveParam {
     fn apply(&self, data: &mut Funcdata) -> usize {
         let mut changed = 0;
         for call in calls(data) {
+            // `ActionActiveParam::apply` only touches a call whose trials are
+            // still open. Once `buildInputFromTrials` has rebuilt the operand
+            // list, the slots hold arguments rather than candidate locations.
+            if !data.is_input_active(call) {
+                continue;
+            }
             let locations = locations_before_call(data, call);
             if locations.is_empty() {
                 continue;
@@ -880,7 +886,7 @@ mod tests {
         let call = data.new_op(op::CALL, seq(0x1000, 0), vec![target]);
         data.op_insert_end(call, block);
         let set = locations.iter().copied().collect::<BTreeSet<_>>();
-        guard_calls(&mut data, &set, &CallEffects::default());
+        guard_calls(&mut data, &set, &CallEffects::default(), &[]);
         if with_heritage {
             heritage(&mut data);
         }
@@ -959,6 +965,7 @@ mod tests {
             &mut data,
             &BTreeSet::from([loc_lo, loc_hi]),
             &CallEffects::default(),
+            &[],
         );
         heritage(&mut data);
         let arguments = call_arguments(&data, &[loc_lo, loc_hi]);
@@ -1002,6 +1009,7 @@ mod tests {
             &mut data,
             &BTreeSet::from([first, gap, later]),
             &CallEffects::default(),
+            &[],
         );
         heritage(&mut data);
         let arguments = call_arguments(&data, &[first, gap, later]);

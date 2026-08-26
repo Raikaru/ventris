@@ -149,6 +149,14 @@ pub const OTHER_SPACE: u32 = 1;
 pub const UNIQUE_SPACE: u32 = 2;
 pub const RAM_SPACE: u32 = 3;
 pub const REGISTER_SPACE: u32 = 4;
+/// Ghidra's `IPTR_IOP`, the space whose "addresses" name p-code operations.
+///
+/// An `INDIRECT`'s second operand is an annotation identifying the operation
+/// responsible for the indirect effect, not a value. Ghidra encodes it as a
+/// constant in this dedicated space (`Funcdata::newVarnodeIop`) precisely so it
+/// cannot be confused with an ordinary constant, and renaming relies on being
+/// able to ask which operation an `INDIRECT` annotates.
+pub const IOP_SPACE: u32 = 5;
 
 #[cfg(test)]
 mod tests {

@@ -356,37 +356,7 @@ impl Action for ActionDoNothing {
             if !data.unblocked_multi(block, 0) {
                 continue;
             }
-            if std::env::var("VENTRIS_PROBE_DONOTHING").is_ok() {
-                eprintln!(
-                    "do-nothing: removing {:#x}/{} ops={} in={:?} out={:#x}",
-                    data.block(block).start,
-                    data.block(block).start_order,
-                    data.block(block).ops.len(),
-                    data.block(block)
-                        .predecessors
-                        .iter()
-                        .map(|id| data.block(*id).start)
-                        .collect::<Vec<_>>(),
-                    data.block(successors[0]).start,
-                );
-            }
             if data.remove_do_nothing_block(block) {
-                if std::env::var("VENTRIS_PROBE_DONOTHING").is_ok() {
-                    let dead_defs: Vec<String> = data
-                        .blocks()
-                        .flat_map(|(_, graph_block)| graph_block.ops.clone())
-                        .flat_map(|op| data.op(op).inputs.clone())
-                        .filter(|value| {
-                            data.varnode(*value)
-                                .def
-                                .is_some_and(|definition| data.op(definition).dead)
-                        })
-                        .map(|value| format!("{value:?}"))
-                        .collect();
-                    if !dead_defs.is_empty() {
-                        eprintln!("  stranded reads: {dead_defs:?}");
-                    }
-                }
                 return 1;
             }
         }

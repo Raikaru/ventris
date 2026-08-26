@@ -125,6 +125,11 @@ pub struct VarnodeFlags {
     /// Ghidra's `Varnode::indirectonly` bit lets merge and variable naming
     /// retain an otherwise illegal input when it has no ordinary data-flow use.
     pub indirect_only: bool,
+    /// The value is created by an `INDIRECT` and has no data flow before it.
+    ///
+    /// Ghidra's `Varnode::indirect_creation`, set by `newIndirectCreation` for a
+    /// location a call destroys.
+    pub indirect_creation: bool,
 }
 
 /// One value in the data-flow graph.
@@ -170,6 +175,20 @@ pub struct GraphOp {
     pub output: Option<VarnodeId>,
     pub inputs: Vec<VarnodeId>,
     pub parent: Option<GraphBlockId>,
+    /// The operation indirectly creates its output.
+    ///
+    /// Ghidra's `PcodeOp::indirect_creation`. Only an `INDIRECT` standing for a
+    /// location a call destroys carries it, and no rule may collapse such an
+    /// `INDIRECT` into its first operand.
+    pub indirect_creation: bool,
+    /// The call's parameter trials have not been decided yet.
+    ///
+    /// Ghidra's `FuncCallSpecs::isInputActive`. `ActionActiveParam` decides the
+    /// trials while it is set and calls `clearActiveInput` once
+    /// `buildInputFromTrials` has rebuilt the operand list. After that the
+    /// operands are the arguments, not the candidate locations, so re-deriving
+    /// them from the convention's storage would read the wrong slots.
+    pub input_active: bool,
     /// Set when the operation has been removed from the graph but its slot is
     /// retained so existing identifiers stay valid.
     pub dead: bool,
@@ -481,11 +500,89 @@ impl Funcdata {
         self.new_varnode(UNIQUE_SPACE, offset, size)
     }
 
+    /// The function's input value at a location, creating it only if absent.
+    ///
+    /// Ghidra's `Funcdata::setInputVarnode`, which returns the *existing* input
+    /// varnode when one already covers the location. Minting a fresh input per
+    /// read instead gives one location several "entry values", and parameter
+    /// promotion and naming then disagree about which is the parameter - a
+    /// recovered pointer parameter came out as a file-scope global.
+    pub fn set_input_varnode(&mut self, space: u32, offset: u64, size: u32) -> VarnodeId {
+        if let Some(existing) = self.located.get(&(space, offset, size)).and_then(|held| {
+            held.iter()
+                .copied()
+                .find(|id| self.varnodes[id.0 as usize].flags.input)
+        }) {
+            return existing;
+        }
+        let id = self.new_varnode(space, offset, size);
+        self.mark_input(id);
+        id
+    }
+
     pub fn new_constant(&mut self, value: u64, size: u32) -> VarnodeId {
         self.invalidate_masks();
         let id = self.new_varnode(CONST_SPACE, value, size);
         self.varnodes[id.0 as usize].flags.constant = true;
         id
+    }
+
+    /// Creates the annotation naming an operation, as Ghidra's `newVarnodeIop`
+    /// does.
+    ///
+    /// The value is not a value: it is an `INDIRECT`'s second operand, saying
+    /// which operation is responsible for the indirect effect.
+    pub fn new_iop(&mut self, target: OpId) -> VarnodeId {
+        self.invalidate_masks();
+        let id = self.new_varnode(ventris_lifter::IOP_SPACE, u64::from(target.0), 4);
+        self.varnodes[id.0 as usize].flags.constant = true;
+        id
+    }
+
+    /// The operation an `INDIRECT` annotates, if its second operand names one.
+    ///
+    /// Ghidra's `PcodeOp::getOpFromConst`.
+    pub fn iop_target(&self, value: VarnodeId) -> Option<OpId> {
+        let varnode = &self.varnodes[value.0 as usize];
+        if varnode.space != ventris_lifter::IOP_SPACE {
+            return None;
+        }
+        let index = u32::try_from(varnode.offset).ok()?;
+        ((index as usize) < self.ops.len()).then_some(OpId(index))
+    }
+
+    /// Marks an `INDIRECT` as indirectly *creating* its output.
+    ///
+    /// Ghidra's `Funcdata::markIndirectCreation`. The output has no data flow
+    /// before this operation, so no rule may collapse the `INDIRECT` into its
+    /// first operand: doing so would claim the killed location still holds
+    /// whatever it held before.
+    pub fn mark_indirect_creation(&mut self, op: OpId) {
+        self.invalidate_masks();
+        self.ops[op.0 as usize].indirect_creation = true;
+        if let Some(output) = self.ops[op.0 as usize].output {
+            self.varnodes[output.0 as usize].flags.indirect_creation = true;
+        }
+    }
+
+    /// Whether the operation indirectly creates its output.
+    pub fn is_indirect_creation(&self, op: OpId) -> bool {
+        self.ops[op.0 as usize].indirect_creation
+    }
+
+    /// Whether a call's parameter trials are still open.
+    ///
+    /// Ghidra's `FuncCallSpecs::isInputActive`.
+    pub fn is_input_active(&self, op: OpId) -> bool {
+        self.ops[op.0 as usize].input_active
+    }
+
+    /// Records that a call's operand list is now its argument list.
+    ///
+    /// Ghidra's `FuncCallSpecs::clearActiveInput`, called once
+    /// `buildInputFromTrials` has run.
+    pub fn clear_input_active(&mut self, op: OpId) {
+        self.ops[op.0 as usize].input_active = false;
     }
 
     /// Marks a value as entering the function without a definition.
@@ -753,6 +850,8 @@ impl Funcdata {
             output: None,
             inputs: Vec::new(),
             parent: None,
+            indirect_creation: false,
+            input_active: true,
             dead: false,
         });
         for (slot, input) in inputs.into_iter().enumerate() {
@@ -1217,10 +1316,14 @@ impl Funcdata {
 
     /// The block's last live operation.
     fn last_opcode(&self, block: GraphBlockId) -> Option<i32> {
-        self.blocks[block.0 as usize].ops.iter().rev().find_map(|op| {
-            let operation = &self.ops[op.0 as usize];
-            (!operation.dead).then_some(operation.opcode)
-        })
+        self.blocks[block.0 as usize]
+            .ops
+            .iter()
+            .rev()
+            .find_map(|op| {
+                let operation = &self.ops[op.0 as usize];
+                (!operation.dead).then_some(operation.opcode)
+            })
     }
 
     /// Whether the block ends in a computed jump.
@@ -1539,10 +1642,12 @@ impl Funcdata {
                         continue;
                     };
                     self.op_remove_input(phi, slot);
-                    let inner = self.varnodes[dead_value.0 as usize].def.filter(|definition| {
-                        self.ops[definition.0 as usize].opcode == ventris_pcode::op::MULTIEQUAL
-                            && self.ops[definition.0 as usize].parent == Some(block)
-                    });
+                    let inner = self.varnodes[dead_value.0 as usize]
+                        .def
+                        .filter(|definition| {
+                            self.ops[definition.0 as usize].opcode == ventris_pcode::op::MULTIEQUAL
+                                && self.ops[definition.0 as usize].parent == Some(block)
+                        });
                     for index in arriving.iter().copied() {
                         let operand = match inner {
                             Some(definition) => self.ops[definition.0 as usize]
@@ -1601,9 +1706,7 @@ impl Funcdata {
                 .retain(|held| *held != block);
         }
         for op in self.blocks[block.0 as usize].ops.clone() {
-            if unreachable
-                && let Some(output) = self.ops[op.0 as usize].output
-            {
+            if unreachable && let Some(output) = self.ops[op.0 as usize].output {
                 self.descend_to_undef(output);
             }
             self.op_destroy(op);

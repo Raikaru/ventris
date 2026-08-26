@@ -1048,8 +1048,27 @@ fn collect_temporaries(statements: &[NativeStatement], into: &mut BTreeMap<Strin
             // pointer-width integer is the safe declaration for an unresolved
             // value.
             into.insert(name, 4);
+            continue;
+        }
+        // `ActionNameVars`'s generic datatype name, `<prefix>Var<n>`. A group
+        // whose only definition is an indirect *creation* - the value a callee
+        // left in a killed register - is read but never assigned, so nothing
+        // introduces it. Ghidra declares exactly this case, as `int iVar2;`.
+        if is_generated_temporary(&name) {
+            into.insert(name, 4);
         }
     }
+}
+
+/// Whether the name is `ActionNameVars`'s generic `<prefix>Var<n>` form.
+fn is_generated_temporary(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix(['b', 'i', 'u', 'f', 'p']) else {
+        return false;
+    };
+    let Some(digits) = rest.strip_prefix("Var") else {
+        return false;
+    };
+    !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn collect_declared(statements: &[NativeStatement], into: &mut BTreeSet<String>) {

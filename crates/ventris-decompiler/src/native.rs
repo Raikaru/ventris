@@ -425,6 +425,14 @@ fn graph_return_type(
 /// spin.
 const GRAPH_PIPELINE_ROUNDS: usize = 8;
 
+/// How many times Ghidra's outer `actfullloop` may repeat its main loop.
+///
+/// `ActionDoNothing`, and Ghidra's other full-loop actions, only ever see a
+/// graph the main loop has settled. Removing a block can expose work for the
+/// main loop again, so the outer loop repeats; the cap bounds that the same way
+/// `GRAPH_PIPELINE_ROUNDS` bounds the inner one.
+const GRAPH_FULL_LOOP_ROUNDS: usize = 3;
+
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum CompilerNormalForm {
     Canonical,
@@ -921,18 +929,27 @@ fn definition_available(value: Varnode, definitions: &BTreeMap<ValueKey, Expr>) 
     })
 }
 
-fn abi_argument_vnodes(architecture: Architecture, abi: &Abi) -> Vec<Varnode> {
+/// The convention's parameter storage, split into resource sections.
+///
+/// Ghidra's `ParamListStandard::separateSections`. The integer and
+/// floating-point registers are separate resources: a call that passes one
+/// float and one integer leaves the *other* class's first register untouched,
+/// and a chain of untouched slots in one section says nothing about the other.
+/// Every rule that reasons about chains of unused parameter slots therefore
+/// runs per section.
+fn abi_argument_sections(architecture: Architecture, abi: &Abi) -> Vec<Vec<Varnode>> {
     let groups = [
         AbiRegisterClass::Integer,
         AbiRegisterClass::Floating,
         AbiRegisterClass::Vector,
     ];
-    let mut registers = Vec::new();
+    let mut sections = Vec::new();
     for class in groups {
         let group = abi.arguments.group(class);
         let Some(count) = group.count() else {
             continue;
         };
+        let mut registers = Vec::new();
         for index in 0..count {
             if let Some(register) = group
                 .at(index)
@@ -941,8 +958,18 @@ fn abi_argument_vnodes(architecture: Architecture, abi: &Abi) -> Vec<Varnode> {
                 registers.push(register);
             }
         }
+        if !registers.is_empty() {
+            sections.push(registers);
+        }
     }
-    registers
+    sections
+}
+
+fn abi_argument_vnodes(architecture: Architecture, abi: &Abi) -> Vec<Varnode> {
+    abi_argument_sections(architecture, abi)
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 fn abi_return_vnodes(architecture: Architecture, abi: &Abi) -> Vec<Varnode> {
@@ -1981,6 +2008,17 @@ impl NativeDecompiler {
             for vnode in abi_register_group_vnodes(architecture, abi, abi.callee_saved) {
                 effects.preserved.insert((vnode.space, vnode.offset));
             }
+            // Ghidra's `<killedbycall>` list is the convention's result storage.
+            // Its post-call value is the callee's, with no relation to whatever
+            // the caller had there, so `guardCalls` gives it an indirect
+            // *creation* rather than an `INDIRECT` threading the old value
+            // through. Threading it is what let a constant a `lui` had left in
+            // the return register survive the call and fold the conditional
+            // that tested the call's result.
+            for vnode in abi_return_vnodes(architecture, abi) {
+                effects.killed.insert((vnode.space, vnode.offset));
+                effects.preserved.remove(&(vnode.space, vnode.offset));
+            }
         }
         // A hardwired-zero register reads as the constant zero. The lifter
         // emits it as an ordinary register, so without this `addiu v1,zero,1`
@@ -1997,7 +2035,25 @@ impl NativeDecompiler {
         // `$v0` by the `lui` before the first call, and three of its five
         // conditionals folded away.
         let call_locations = locations.clone();
-        graph::guard::guard_calls(&mut data, &call_locations, &effects);
+        let to_location = |vnode: &Varnode| graph::guard::Location {
+            space: vnode.space,
+            offset: vnode.offset,
+            size: vnode.size,
+        };
+        // The convention's parameter storage, split into resource sections, is
+        // needed twice: `guardCalls` appends one candidate operand per location
+        // before renaming, and the trial decision reads them back afterwards.
+        let argument_sections: Vec<Vec<graph::guard::Location>> = abi
+            .map(|abi| {
+                abi_argument_sections(architecture, abi)
+                    .iter()
+                    .map(|section| section.iter().map(to_location).collect())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let argument_locations: Vec<graph::guard::Location> =
+            argument_sections.iter().flatten().copied().collect();
+        graph::guard::guard_calls(&mut data, &call_locations, &effects, &argument_locations);
         // A return reads the convention's result storage. Without this the
         // returned value has no reader, dead code removes the computation, and
         // the function reports `void`. With no convention the architecture's
@@ -2029,22 +2085,13 @@ impl NativeDecompiler {
         // Arguments must be recovered while the guards that name each
         // location's value at the call still exist: simplification collapses
         // them once nothing distinguishes their effect.
-        if let Some(abi) = abi {
-            let argument_locations: Vec<graph::guard::Location> =
-                abi_argument_vnodes(architecture, abi)
-                    .into_iter()
-                    .map(|vnode| graph::guard::Location {
-                        space: vnode.space,
-                        offset: vnode.offset,
-                        size: vnode.size,
-                    })
-                    .collect();
+        if abi.is_some() {
             let arity_of = |target: u64| {
                 call_prototypes
                     .and_then(|prototypes| prototypes.get(&target))
                     .map(|prototype| prototype.parameters.len())
             };
-            graph::proto::recover_call_arguments(&mut data, &argument_locations, &arity_of);
+            graph::proto::recover_call_arguments(&mut data, &argument_sections, &arity_of);
         }
         // Simplification, unreachable-block removal, and dead code each expose
         // work for the others: folding a condition orphans a block, removing a
@@ -2077,7 +2124,7 @@ impl NativeDecompiler {
             graph::action::Action::apply(action.as_ref(), &mut data);
         }
         let pipeline = graph::action::default_pipeline();
-        let control_flow: [&dyn graph::action::Action; 14] = [
+        let control_flow: [&dyn graph::action::Action; 13] = [
             &graph::branchaction::ActionDeterminedBranch,
             // Unreachable removal drops an edge without touching the branch
             // operand, so a terminator can outlive the block it names.
@@ -2086,7 +2133,6 @@ impl NativeDecompiler {
             // ordinary branch; leaving it indirect renders `goto *(...)`.
             &graph::jumptable::ActionResolvedIndirect,
             &graph::branchaction::ActionRedundBranch,
-            &graph::branchaction::ActionDoNothing,
             &graph::branchaction::ActionUnreachable,
             &graph::branchaction::ActionCse,
             &graph::branchaction::ActionMultiCse,
@@ -2103,6 +2149,16 @@ impl NativeDecompiler {
             &graph::condprop::ActionConditionalExe,
             &graph::stackframe::ActionStackPtrFlow,
         ];
+        // `ActionDoNothing` is deliberately *not* in that list. Ghidra registers
+        // it on `actfullloop`, not `actmainloop` (`coreaction.cc:5734` against
+        // `5541-5726`): it runs once after the whole main loop has reached a
+        // fixed point and after that loop's own `ActionDeadCode`, never
+        // interleaved with simplification. The distinction is measurable, not
+        // pedantic - running it per round removed the empty arms of conditionals
+        // that later rounds were still going to fill, and cost three corpus
+        // functions an `if` each (`DBGEXIImm`, `getFirstFile__10JKRArchiveCFPCc`,
+        // `ksNesDrawBG__FP18ksNesCommonWorkObjP13ksNesStateObj`).
+        let full_loop: [&dyn graph::action::Action; 1] = [&graph::branchaction::ActionDoNothing];
         // Which end a piece of a value comes from decides what every split of
         // an aggregate means, so the graph is told before any rule runs.
         data.big_endian = architecture_is_big_endian(architecture);
@@ -2148,206 +2204,199 @@ impl NativeDecompiler {
             data.set_func_proto(proto);
         }
 
-        for _ in 0..GRAPH_PIPELINE_ROUNDS {
-            // `ActionInferTypes` is a pass in Ghidra's pool, not a query the
-            // rules make: types are re-derived once per round, and the rules in
-            // that round read what it produced. Re-deriving after every rewrite
-            // instead cost fifty seconds on one corpus function.
-            data.invalidate_types();
-            let mut changed = graph::action::Action::apply(pipeline.as_ref(), &mut data);
-            for pass in control_flow {
-                if skipped_passes.iter().any(|name| name == pass.name()) {
-                    continue;
+        // Ghidra's `actfullloop` wraps `actmainloop`: the main loop runs to a
+        // fixed point, then the outer loop's own actions run once, and the whole
+        // thing repeats. `ActionDoNothing` lives on the outer loop, so it only
+        // ever sees a settled graph.
+        for _ in 0..GRAPH_FULL_LOOP_ROUNDS {
+            let mut full_loop_changed = 0;
+            for _ in 0..GRAPH_PIPELINE_ROUNDS {
+                // `ActionInferTypes` is a pass in Ghidra's pool, not a query the
+                // rules make: types are re-derived once per round, and the rules in
+                // that round read what it produced. Re-deriving after every rewrite
+                // instead cost fifty seconds on one corpus function.
+                data.invalidate_types();
+                let mut changed = graph::action::Action::apply(pipeline.as_ref(), &mut data);
+                for pass in control_flow {
+                    if skipped_passes.iter().any(|name| name == pass.name()) {
+                        continue;
+                    }
+                    changed += pass.apply(&mut data);
                 }
-                changed += pass.apply(&mut data);
-            }
-            changed += graph::deadcode::eliminate_dead_code(&mut data);
-            if let Some(abi) = abi
-                && let Some(vnode) =
-                    abi_register_vnode(architecture, abi.stack_pointer, abi.pointer_bits)
-            {
-                changed += graph::deadcode::eliminate_dead_frame_stores(
-                    &mut data,
-                    graph::guard::Location {
+                changed += graph::deadcode::eliminate_dead_code(&mut data);
+                if let Some(abi) = abi
+                    && let Some(vnode) =
+                        abi_register_vnode(architecture, abi.stack_pointer, abi.pointer_bits)
+                {
+                    changed += graph::deadcode::eliminate_dead_frame_stores(
+                        &mut data,
+                        graph::guard::Location {
+                            space: vnode.space,
+                            offset: vnode.offset,
+                            size: vnode.size,
+                        },
+                    );
+                }
+                if changed == 0 {
+                    break;
+                }
+                // Ghidra recovers the prototype inside the loop: `ActionActiveParam`
+                // decides trials and `ActionInputPrototype` promotes them once per
+                // round, so the decision converges with the graph and every later
+                // round sees it. Deciding once after the loop let a pass that removed
+                // a value's last non-call use change the decision retroactively;
+                // deciding once before it decided on a graph still full of dead code.
+                // A recovered prototype is what the prototype passes read. Attaching it
+                // where the convention is already in hand keeps the passes working on
+                // real storage instead of a permanent `None`.
+                if let Some(abi) = abi {
+                    let mut proto = graph::funcproto::FuncProto::new(*abi);
+                    // Ghidra's `ProtoModel` carries the convention's storage lists, and
+                    // `FuncProto::deriveInputMap` filters trials against them. Without
+                    // them every derive call is a no-op, so the prototype passes could
+                    // not decide anything. The lists come from the same ABI helpers the
+                    // address-ordered path already uses.
+                    let to_location = |vnode: &Varnode| graph::guard::Location {
                         space: vnode.space,
                         offset: vnode.offset,
                         size: vnode.size,
-                    },
-                );
-            }
-            if changed == 0 {
-                break;
-            }
-            // Ghidra recovers the prototype inside the loop: `ActionActiveParam`
-            // decides trials and `ActionInputPrototype` promotes them once per
-            // round, so the decision converges with the graph and every later
-            // round sees it. Deciding once after the loop let a pass that removed
-            // a value's last non-call use change the decision retroactively;
-            // deciding once before it decided on a graph still full of dead code.
-            // A recovered prototype is what the prototype passes read. Attaching it
-            // where the convention is already in hand keeps the passes working on
-            // real storage instead of a permanent `None`.
-            if let Some(abi) = abi {
-                let mut proto = graph::funcproto::FuncProto::new(*abi);
-                // Ghidra's `ProtoModel` carries the convention's storage lists, and
-                // `FuncProto::deriveInputMap` filters trials against them. Without
-                // them every derive call is a no-op, so the prototype passes could
-                // not decide anything. The lists come from the same ABI helpers the
-                // address-ordered path already uses.
-                let to_location = |vnode: &Varnode| graph::guard::Location {
-                    space: vnode.space,
-                    offset: vnode.offset,
-                    size: vnode.size,
-                };
-                proto.set_model_storage(
-                    abi_argument_vnodes(architecture, abi)
-                        .iter()
-                        .map(to_location)
-                        .collect(),
-                    abi_primary_return_vnodes(architecture, abi)
-                        .iter()
-                        .map(to_location)
-                        .collect(),
-                );
-                // `ActionActiveParam` registers a trial per model location and
-                // decides it; `ActionInputPrototype` promotes the survivors into
-                // parameters. Without the promotion the prototype held no
-                // parameters whatever the prototype passes decided.
-                let mut inputs = graph::callproto::ParamActive::new();
-                for location in proto.model_input_storage() {
-                    inputs.register(*location);
-                }
-                // `ActionInputPrototype` sees an entry input as active when it has
-                // a descendant, but only after `ActionActiveParam` has removed
-                // call-only pass-through operands from each call. The graph action
-                // deliberately refuses to shorten an existing call, so those
-                // operands can still be visible here through transparent
-                // `INDIRECT`/`COPY`/`SUBPIECE`/`PIECE`/`MULTIEQUAL` nodes.
-                // In particular, an `INDIRECT` guard whose output feeds a later
-                // CALL is still this pass-through chain; treating the guard as a
-                // terminal use would incorrectly retain that call-only input.
-                //
-                // Reconstruct that distinction by treating a chain whose only
-                // terminal use is a CALL argument as inactive. Do not call
-                // `ancestor_realistic` directly: its `ancestor_verdict` maps an
-                // undefined input (`def = None`) to `UntouchedInput`, and the
-                // public boolean collapses that to false. Ghidra records the same
-                // case as inactive (`fspec.cc:5645-5646`), not definitely absent;
-                // rejecting every undefined input loses the PS1 `a2` parameter.
-                for trial in inputs.trials_mut() {
-                    let held = (0..data.varnode_count())
-                        .map(|index| graph::VarnodeId(index as u32))
-                        .find(|value| {
-                            let varnode = data.varnode(*value);
-                            varnode.flags.input
-                                && varnode.space == trial.location.space
-                                && varnode.offset == trial.location.offset
-                                && varnode.size == trial.location.size
-                        });
-                    match held {
-                        Some(value) if !data.varnode(value).descendants.is_empty() => {
-                            trial.value = Some(value);
-                            if !data.varnode(value).descendants.is_empty() {
-                                trial.mark_active();
-                            } else {
-                                trial.mark_inactive();
+                    };
+                    proto.set_model_storage(
+                        abi_argument_vnodes(architecture, abi)
+                            .iter()
+                            .map(to_location)
+                            .collect(),
+                        abi_primary_return_vnodes(architecture, abi)
+                            .iter()
+                            .map(to_location)
+                            .collect(),
+                    );
+                    // `ActionActiveParam` registers a trial per model location and
+                    // decides it; `ActionInputPrototype` promotes the survivors into
+                    // parameters. Without the promotion the prototype held no
+                    // parameters whatever the prototype passes decided.
+                    let mut inputs = graph::callproto::ParamActive::new();
+                    for location in proto.model_input_storage() {
+                        inputs.register(*location);
+                    }
+                    // `ActionInputPrototype` sees an entry input as active when it has
+                    // a descendant, but only after `ActionActiveParam` has removed
+                    // call-only pass-through operands from each call. The graph action
+                    // deliberately refuses to shorten an existing call, so those
+                    // operands can still be visible here through transparent
+                    // `INDIRECT`/`COPY`/`SUBPIECE`/`PIECE`/`MULTIEQUAL` nodes.
+                    // In particular, an `INDIRECT` guard whose output feeds a later
+                    // CALL is still this pass-through chain; treating the guard as a
+                    // terminal use would incorrectly retain that call-only input.
+                    //
+                    // Reconstruct that distinction by treating a chain whose only
+                    // terminal use is a CALL argument as inactive. Do not call
+                    // `ancestor_realistic` directly: its `ancestor_verdict` maps an
+                    // undefined input (`def = None`) to `UntouchedInput`, and the
+                    // public boolean collapses that to false. Ghidra records the same
+                    // case as inactive (`fspec.cc:5645-5646`), not definitely absent;
+                    // rejecting every undefined input loses the PS1 `a2` parameter.
+                    for trial in inputs.trials_mut() {
+                        let held = (0..data.varnode_count())
+                            .map(|index| graph::VarnodeId(index as u32))
+                            .find(|value| {
+                                let varnode = data.varnode(*value);
+                                varnode.flags.input
+                                    && varnode.space == trial.location.space
+                                    && varnode.offset == trial.location.offset
+                                    && varnode.size == trial.location.size
+                            });
+                        match held {
+                            Some(value) if !data.varnode(value).descendants.is_empty() => {
+                                trial.value = Some(value);
+                                if !data.varnode(value).descendants.is_empty() {
+                                    trial.mark_active();
+                                } else {
+                                    trial.mark_inactive();
+                                }
                             }
+                            _ => trial.mark_no_use(),
                         }
-                        _ => trial.mark_no_use(),
                     }
-                }
-                // Ghidra's `ParamListStandard::buildTrialMap` keeps an unreferenced
-                // trial that sits *before* a referenced one: the parameter exists,
-                // the function just ignores it. Only the trailing unused run is
-                // dropped. Without this a hole truncates the list, because
-                // `ParamActive::used` is a leading run of active trials.
-                let last_used = inputs
-                    .trials()
-                    .iter()
-                    .rposition(|trial| trial.is_active())
-                    .map(|index| index + 1)
-                    .unwrap_or(0);
-                for trial in inputs.trials_mut().iter_mut().take(last_used) {
-                    if !trial.is_active() {
-                        trial.mark_active();
-                    }
-                }
-                graph::parampromote::promote_input_trials(&data, &mut proto, &inputs);
-                // Ghidra names a parameter through the symbol its scope holds, and
-                // `emitPrototypeInputs` prints the type alone when there is no
-                // symbol. Until scope population lands, name them the way the body
-                // already refers to them - a signature whose names disagree with the
-                // body's is not valid C.
-                for index in 0..proto.params().len() {
-                    if proto
-                        .get_param(index)
-                        .is_some_and(|parameter| parameter.get_name().is_empty())
-                    {
-                        let (location, ty) = {
-                            let parameter = proto.get_param(index).expect("checked above");
-                            (parameter.get_address(), parameter.get_type().clone())
-                        };
-                        proto.set_param_parts(index, format!("arg{index}"), location, ty);
-                    }
-                }
-                let mut returns = graph::callproto::ParamActive::new();
-                for location in proto.model_output_storage() {
-                    returns.register(*location);
-                }
-                let returned = data.live_ops().find_map(|(_, operation)| {
-                    (operation.opcode == ventris_pcode::op::RETURN)
-                        .then(|| operation.inputs.get(1).copied())
-                        .flatten()
-                });
-                for trial in returns.trials_mut() {
-                    match returned {
-                        Some(value)
-                            if data.varnode(value).space == trial.location.space
-                                && data.varnode(value).offset == trial.location.offset =>
-                        {
-                            trial.value = Some(value);
+                    // Ghidra's `ParamListStandard::buildTrialMap` keeps an unreferenced
+                    // trial that sits *before* a referenced one: the parameter exists,
+                    // the function just ignores it. Only the trailing unused run is
+                    // dropped. Without this a hole truncates the list, because
+                    // `ParamActive::used` is a leading run of active trials.
+                    let last_used = inputs
+                        .trials()
+                        .iter()
+                        .rposition(|trial| trial.is_active())
+                        .map(|index| index + 1)
+                        .unwrap_or(0);
+                    for trial in inputs.trials_mut().iter_mut().take(last_used) {
+                        if !trial.is_active() {
                             trial.mark_active();
                         }
-                        _ => trial.mark_no_use(),
                     }
+                    graph::parampromote::promote_input_trials(&data, &mut proto, &inputs);
+                    // Ghidra names a parameter through the symbol its scope holds, and
+                    // `emitPrototypeInputs` prints the type alone when there is no
+                    // symbol. Until scope population lands, name them the way the body
+                    // already refers to them - a signature whose names disagree with the
+                    // body's is not valid C.
+                    for index in 0..proto.params().len() {
+                        if proto
+                            .get_param(index)
+                            .is_some_and(|parameter| parameter.get_name().is_empty())
+                        {
+                            let (location, ty) = {
+                                let parameter = proto.get_param(index).expect("checked above");
+                                (parameter.get_address(), parameter.get_type().clone())
+                            };
+                            proto.set_param_parts(index, format!("arg{index}"), location, ty);
+                        }
+                    }
+                    let mut returns = graph::callproto::ParamActive::new();
+                    for location in proto.model_output_storage() {
+                        returns.register(*location);
+                    }
+                    let returned = data.live_ops().find_map(|(_, operation)| {
+                        (operation.opcode == ventris_pcode::op::RETURN)
+                            .then(|| operation.inputs.get(1).copied())
+                            .flatten()
+                    });
+                    for trial in returns.trials_mut() {
+                        match returned {
+                            Some(value)
+                                if data.varnode(value).space == trial.location.space
+                                    && data.varnode(value).offset == trial.location.offset =>
+                            {
+                                trial.value = Some(value);
+                                trial.mark_active();
+                            }
+                            _ => trial.mark_no_use(),
+                        }
+                    }
+                    graph::parampromote::promote_output_trials(&data, &mut proto, &returns);
+                    data.set_func_proto(proto);
+                    // `ScopeLocal::restructure` gathers the stack's varnodes into ranges
+                    // and enters a symbol for each. It runs after the prototype so the
+                    // parameter entries exist, and before anything that reads the scope.
+                    let scope =
+                        graph::scopepopulate::build_local_scope(&data, ventris_lifter::RAM_SPACE);
+                    data.set_scope_local(scope);
                 }
-                graph::parampromote::promote_output_trials(&data, &mut proto, &returns);
-                data.set_func_proto(proto);
-                // `ScopeLocal::restructure` gathers the stack's varnodes into ranges
-                // and enters a symbol for each. It runs after the prototype so the
-                // parameter entries exist, and before anything that reads the scope.
-                let scope =
-                    graph::scopepopulate::build_local_scope(&data, ventris_lifter::RAM_SPACE);
-                data.set_scope_local(scope);
+            }
+            for pass in full_loop {
+                if skipped_passes.iter().any(|name| name == pass.name()) {
+                    continue;
+                }
+                full_loop_changed += pass.apply(&mut data);
+            }
+            if full_loop_changed == 0 {
+                break;
             }
         }
         // The last round's rewrites are not in the types the round started with,
         // and emission reads types to spell a field access. Ghidra recovers types
         // once more before it prints for the same reason.
         data.invalidate_types();
-        if std::env::var("VENTRIS_PROBE_CALLS").is_ok() {
-            for (id, operation) in data.live_ops() {
-                if matches!(operation.opcode, op::CALL | op::CALLIND) {
-                    eprintln!(
-                        "final call {id:?}: {:?}",
-                        operation
-                            .inputs
-                            .iter()
-                            .map(|value| {
-                                let varnode = data.varnode(*value);
-                                (
-                                    *value,
-                                    varnode.space,
-                                    varnode.offset,
-                                    varnode.flags.constant,
-                                    varnode.def,
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                    );
-                }
-            }
-        }
         // `ActionDominantCopy` belongs to Ghidra's merge phase, which runs after
         // simplification. Running it before the rounds meant computing the whole
         // variable merge over the largest version of the graph — 11,500 varnodes

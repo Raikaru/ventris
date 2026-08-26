@@ -364,8 +364,14 @@ fn local_mask(data: &Funcdata, operation: &super::GraphOp, masks: &[u64]) -> u64
             .copied()
             .filter(|input| Some(*input) != operation.output)
             .fold(0, |mask, input| mask | masks[input.0 as usize]),
-        op::INDIRECT => input0,
-        op::LOAD | op::CALL | op::CALLIND => full,
+        // `PcodeOp::getNZMaskLocal` has no `CPUI_INDIRECT` case, so an
+        // `INDIRECT` falls to its default and reports the full mask. Looking
+        // through to the first operand is not equivalent: the operand of an
+        // indirect *creation* is a placeholder standing for "no previous
+        // value", so propagating its mask claimed a location a call destroyed
+        // was provably zero, and `ActionVarnodeProps` then replaced it with the
+        // constant zero.
+        op::LOAD | op::CALL | op::CALLIND | op::INDIRECT => full,
         _ => full,
     };
 

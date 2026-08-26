@@ -511,21 +511,28 @@ impl Rule for RuleIndirectCollapse {
         else {
             return 0;
         };
+        // An `INDIRECT` that indirectly *creates* its output must never collapse:
+        // `RuleIndirectCollapse` returns 0 for `op->isIndirectCreation()`, and
+        // collapsing would replace a location a call destroyed with the
+        // placeholder constant standing in for "no previous value".
+        if data.is_indirect_creation(id) {
+            return 0;
+        }
         // The responsible operation is named by the second operand. If it is
         // gone, there is no indirect effect left to describe.
         let cause_alive = operation
             .inputs
             .get(1)
             .copied()
-            .map(|cause| data.varnode(cause))
-            .map(|cause| data.has_op_at(cause.offset))
-            .unwrap_or(false);
+            .and_then(|cause| data.iop_target(cause))
+            .is_some_and(|cause| data.opcode_of(cause).is_some());
         if cause_alive {
             return 0;
         }
-        data.op_set_opcode(id, op::COPY);
-        data.op_set_inputs(id, vec![source]);
-        let _ = output;
+        // `totalReplace` then `opDestroy`: the value flows on directly, and the
+        // marker itself is gone rather than left as an assignment to print.
+        data.total_replace(output, source);
+        data.op_destroy(id);
         1
     }
 }

@@ -11,7 +11,9 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::sync::LazyLock;
 use ventris_format::Image;
-pub use ventris_pcode::{CONST_SPACE, OTHER_SPACE, RAM_SPACE, REGISTER_SPACE, UNIQUE_SPACE};
+pub use ventris_pcode::{
+    CONST_SPACE, IOP_SPACE, OTHER_SPACE, RAM_SPACE, REGISTER_SPACE, UNIQUE_SPACE,
+};
 use ventris_pcode::{InstPcode, PcodeOp, op};
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
