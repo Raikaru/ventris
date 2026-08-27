@@ -86,9 +86,17 @@ impl NonzeroMasks {
 
 /// Recompute all non-zero masks.
 ///
-/// Ghidra's `ActionNonzeroMask::apply` calls `Funcdata::calcNZMask`.  The
-/// graph model keeps analysis results outside `Funcdata`, so `apply` returns
-/// the number of values made more precise than their conservative full mask.
+/// Ghidra's `ActionNonzeroMask::apply` calls `Funcdata::calcNZMask`, which
+/// writes each mask onto its varnode, so the pass has to run before anything
+/// reads one. Here the masks live in a cache on `Funcdata`
+/// (`Funcdata::nonzero_masks`) that every graph mutation invalidates, so they
+/// are recomputed on demand by whichever rule asks first.
+///
+/// **Deliberately not registered** (`coreaction.cc:5558`): `apply` reports how
+/// many values came out more precise than their conservative full mask and
+/// changes nothing. The main loop stops when `changed` reaches zero, so a
+/// non-zero count from a pure computation only buys extra rounds of every
+/// other pass and cannot buy a different answer.
 pub struct ActionNonzeroMask;
 
 impl Action for ActionNonzeroMask {

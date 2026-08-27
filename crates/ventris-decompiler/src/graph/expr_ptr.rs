@@ -1006,11 +1006,5 @@ mod tests {
 }
 
 pub fn all() -> Vec<Box<dyn Rule>> {
-    vec![
-        Box::new(RulePtrArith),
-        Box::new(RulePtraddUndo),
-        Box::new(RulePtrsubUndo),
-        Box::new(RuleStructOffset0),
-        Box::new(RulePushPtr),
-    ]
+    vec![Box::new(RulePtraddUndo), Box::new(RulePtrsubUndo)]
 }

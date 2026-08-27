@@ -222,6 +222,22 @@ pub fn check_cycle(data: &Funcdata, value: VarnodeId) -> bool {
 pub type TrashRegister = (u32, u64, u32);
 
 /// Identify likely-trash flows from an explicit set of ABI trash registers.
+///
+/// Ghidra registers this on the full loop (`coreaction.cc:5730`) and it reads
+/// `ProtoModel::likelytrash`, filled from a cspec's `<likelytrash>` element.
+///
+/// **Not registered, because no data source for it exists here or in Ghidra for
+/// these targets.** `<likelytrash>` appears in the shipped 12.1.3 cspecs only
+/// under `Ghidra/Processors/x86` - x86gcc, x86win, x86borland, x86delphi and
+/// x86-32-golang - and in none of MIPS, PowerPC or ARM, which are the
+/// architectures this pipeline decompiles. `ventris-target` has no trash-register
+/// field either, so there is nothing to construct the set from.
+///
+/// This is a stricter bar than the one `RuleFuncPtrEncoding` clears: that rule
+/// reads `Funcdata::funcptr_align`, a field that exists and is zero, so
+/// registering it is faithful and inert. Here the reader itself is absent, and
+/// registering with a hardcoded empty set would assert an ABI fact no spec in
+/// the tree states.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ActionLikelyTrash {
     trash: BTreeSet<TrashRegister>,

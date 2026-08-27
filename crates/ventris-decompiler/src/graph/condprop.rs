@@ -460,7 +460,22 @@ pub fn constant_pointer_targets(data: &Funcdata) -> BTreeMap<VarnodeId, u64> {
     targets
 }
 
-/// Address-only projection of Ghidra's `ActionConstantPtr`.
+/// Address-only projection of Ghidra's `ActionConstantPtr` (`coreaction.cc:5711`).
+///
+/// **Deliberately not registered, because it mutates nothing.** Ghidra's version
+/// turns a constant into a spacebase-relative pointer through
+/// `Funcdata::spacebaseConstant(op, slot, entry, rampoint, fullEncoding, size)`,
+/// and that needs a `SymbolEntry` - `isPointer` looks the RAM address up in the
+/// symbol table before the rewrite. This pipeline has no symbol table binding
+/// addresses to entries, which is the same prerequisite `graph::bitfield` and
+/// `graph::splitvarnode` record for the declared-type rules, so what remains
+/// here is the address projection: which constants a load or store treats as an
+/// address.
+///
+/// Registering a pass whose `apply` returns a count without changing the graph
+/// would be worse than leaving it out. The main loop breaks when `changed`
+/// reaches zero, so a non-zero count from a pure computation buys extra rounds
+/// of every other pass and cannot buy a different answer.
 pub struct ActionConstantPtr;
 
 impl Action for ActionConstantPtr {

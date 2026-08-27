@@ -727,6 +727,33 @@ pub fn default_pipeline() -> Box<dyn Action> {
     if !skip("expression") {
         pipeline = pipeline.add(Box::new(FixedPoint::new(Box::new(expression))));
     }
+    // Ghidra's second rule pool, `oppool2` (`coreaction.cc:5713-5721`). It sits
+    // in the main loop *after* `ActionBlockStructure` and `ActionConstantPtr` and
+    // before the determined-branch and unreachable passes, and it holds exactly
+    // five rules: `RulePushPtr`, `RuleStructOffset0`, `RulePtrArith`,
+    // `RuleLoadVarnode` and `RuleStoreVarnode`.
+    //
+    // All five were in the single expression pool, which runs earlier. The pool
+    // boundary is the point: these rewrite pointer arithmetic and stack-variable
+    // accesses, and Ghidra runs them only once the block structure and the
+    // constant-pointer marks exist, so that a pointer they synthesise is not
+    // then re-derived by the arithmetic rules that ran before them.
+    if !skip("expression2") {
+        let mut second = ActionPool::new("oppool2");
+        for rule in [
+            Box::new(super::expr_ptr::RulePushPtr) as Box<dyn Rule>,
+            Box::new(super::expr_ptr::RuleStructOffset0),
+            Box::new(super::expr_ptr::RulePtrArith),
+            Box::new(super::expr_memory::RuleLoadVarnode),
+            Box::new(super::expr_memory::RuleStoreVarnode),
+        ] {
+            if dropped.iter().any(|name| name == rule.name()) {
+                continue;
+            }
+            second = second.add_rule(rule);
+        }
+        pipeline = pipeline.add(Box::new(FixedPoint::new(Box::new(second))));
+    }
     // Ghidra's `cleanup` pool, which runs after the full loop rather than inside
     // it. The bitfield rules rewrite a mask-and-shift into a single ZPULL, so
     // running them earlier would remove the shapes the expression rules match
@@ -796,13 +823,17 @@ pub fn default_pipeline() -> Box<dyn Action> {
         }
         pipeline = pipeline.add(Box::new(protorecovery));
     }
-    // Ghidra adds these to `blockrecovery` immediately after the cleanup pool
-    // (coreaction.cc:5771-5773), before ActionNormalizeBranches.
+    // Ghidra adds these immediately after the cleanup pool: `ActionPreferComplement`
+    // (`coreaction.cc:5770`), `ActionStructureTransform` (`5772`) and then
+    // `ActionNormalizeBranches` (`5773`). The third was never registered - it
+    // inverts a branch-only comparison together with its target, which is the
+    // normalization the merge phase after it expects to already have happened.
     if !skip("blockrecovery") {
         let mut blockrecovery = ActionGroup::new("blockrecovery");
         for action in super::structuretransform::all() {
             blockrecovery = blockrecovery.add(action);
         }
+        blockrecovery = blockrecovery.add(Box::new(super::branchaction::ActionNormalizeBranches));
         pipeline = pipeline.add(Box::new(blockrecovery));
     }
     if !skip("infer-types-rich") {

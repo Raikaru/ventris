@@ -353,12 +353,19 @@ impl FuncCallSpecs {
 }
 
 /// `ActionDefaultParams` from Ghidra's `base` group at position
-/// `defaultparams` (`coreaction.cc`, lines 2352-2377).
+/// `defaultparams` (registered at `coreaction.cc:5531`, body at `2352-2377`).
 ///
-/// The action is configured with explicit call specs because `Funcdata` does
-/// not yet own a call-spec arena.  The static [`Self::apply_with`] form is
-/// useful to a pipeline that owns its records elsewhere; the [`Action`] impl
-/// makes the same operation registerable once a configured action is built.
+/// **Not registered in the pipeline, and the reason is architectural rather
+/// than a missing accessor.** The action needs a per-call-site
+/// `FuncCallSpecs` arena - Ghidra's `Funcdata::qlst` - to write a default
+/// prototype into. This pipeline never grew one: per-call parameter recovery
+/// took the trial route instead (`graph::callproto`'s `register_trials` and
+/// `recover_call_arguments`, driven by `ActionActiveParam`), and the
+/// convention's storage reaches a call through the `FuncProto` on `Funcdata`.
+/// Adding an arena purely to host this action would put two independent
+/// prototypes on every call site, and the trial machinery is the one that is
+/// measured. The static [`Self::apply_with`] form stays available for a caller
+/// that does own its records.
 pub struct ActionDefaultParams {
     calls: RefCell<Vec<FuncCallSpecs>>,
     eval_model: FuncProto,
@@ -448,9 +455,19 @@ impl Action for ActionDefaultParams {
 /// `ActionExtraPopSetup` from Ghidra's `base` group at position
 /// `extrapopsetup` (`coreaction.cc`, line 5533; body around lines 1443-1464).
 ///
-/// Only the known-extra-pop branch is representable by the current graph.  An
-/// unknown value would require Ghidra's IOP-space varnode and an `INDIRECT`
-/// creation marker, neither of which is a field on this graph.
+/// **Not registered, and provably inert for every supported target.** The whole
+/// action is a stack adjustment of `extrapop` bytes after a call, and the
+/// shipped cspecs for the architectures this pipeline decompiles declare
+/// `extrapop="0"`: `Ghidra/Processors/MIPS/data/languages/*.cspec` and
+/// `.../PowerPC/...` both do, and Ghidra's own default is `extrapop=0`
+/// (`fspec.cc:2346`). A zero adjustment inserts nothing, so registering it -
+/// which would also need the per-call-site arena `ActionDefaultParams` above
+/// describes - could not change any output here.
+///
+/// Only the known-extra-pop branch is representable in any case. An unknown
+/// value needs Ghidra's IOP-space varnode and an `INDIRECT` creation marker;
+/// both facilities now exist (`Funcdata::new_iop`, `mark_indirect_creation`),
+/// so that half is no longer the blocker - the arena is.
 pub struct ActionExtraPopSetup {
     stack: Location,
     calls: RefCell<Vec<FuncCallSpecs>>,

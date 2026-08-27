@@ -2581,12 +2581,14 @@ impl NativeDecompiler {
                     full_loop_changed += graph::action::Action::apply(&split, &mut data);
                 }
             }
-            // Ghidra's full loop ends with `ActionSwitchNorm` (`5735`),
-            // `ActionReturnSplit` (`5736`), `ActionUnjustifiedParams` (`5737`)
-            // and `ActionStartTypes` (`5738`). The first and last were never
-            // registered: `ActionSwitchNorm` folds a recovered switch's
-            // normalization into the table before structuring sees it, and
-            // `ActionStartTypes` is what turns type recovery on at all.
+            // Ghidra's full loop ends with `ActionLikelyTrash` (`5730`),
+            // `ActionSwitchNorm` (`5735`), `ActionReturnSplit` (`5736`),
+            // `ActionUnjustifiedParams` (`5737`) and `ActionStartTypes` (`5738`).
+            // `ActionSwitchNorm` folds an unlabelled switch's normalization and
+            // `ActionStartTypes` turns type recovery on; neither had ever been
+            // registered. `ActionLikelyTrash` stays out for a reason recorded in
+            // `graph::marking`: no cspec outside x86 declares `<likelytrash>`,
+            // so its list is empty for every target here.
             for action in [
                 &graph::jumptable::ActionSwitchNorm as &dyn graph::action::Action,
                 &graph::actiondb::ActionStartTypes,
@@ -2615,6 +2617,20 @@ impl NativeDecompiler {
                 }
             }
         }
+        // Ghidra's merge phase opens with `ActionStartCleanUp` (`5743`) and
+        // `ActionAssignHigh` (`5774`): the first records the varnode boundary at
+        // which cleanup begins, the second enables the high-level variable phase.
+        // Both were unregistered, so `clean_up_index` and `high_level_index`
+        // stayed at zero and anything reading them saw "no boundary".
+        for action in [
+            &graph::actiondb::ActionStartCleanUp as &dyn graph::action::Action,
+            &graph::actiondb::ActionAssignHigh,
+        ] {
+            if skipped_passes.iter().any(|skip| skip == action.name()) {
+                continue;
+            }
+            graph::action::Action::apply(action, &mut data);
+        }
         // `ActionDominantCopy` belongs to Ghidra's merge phase, which runs after
         // simplification. Running it before the rounds meant computing the whole
         // variable merge over the largest version of the graph — 11,500 varnodes
@@ -2626,6 +2642,19 @@ impl NativeDecompiler {
             }
             graph::action::Action::apply(action.as_ref(), &mut data);
         }
+        // `ActionMarkIndirectOnly` sits between the required and the speculative
+        // merges in Ghidra (`coreaction.cc:5782`, with its own comment saying
+        // exactly that), and it marks an abnormal input whose every graph use
+        // reaches an `INDIRECT`. Variable naming and merging read that bit to
+        // keep such an input rather than discard it as illegal.
+        if !skipped_passes.iter().any(|skip| skip == "markindirectonly") {
+            graph::action::Action::apply(&graph::actiondb::ActionMarkIndirectOnly, &mut data);
+        }
+        // `ActionStop` is Ghidra's last action (`coreaction.cc:5795`) and sets
+        // `processing_complete`. Everything after this point reads the graph to
+        // print it rather than to change it, which is exactly the boundary the
+        // flag marks.
+        graph::action::Action::apply(&graph::actiondb::ActionStop, &mut data);
 
         let naming = |space: u32, offset: u64, _size: u32| -> Option<String> {
             (space == REGISTER_SPACE).then(|| register_name(architecture, offset))

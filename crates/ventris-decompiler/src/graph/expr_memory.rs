@@ -773,9 +773,5 @@ mod tests {
 
 /// Every non-cleanup requested rule with a faithful graph implementation.
 pub fn all() -> Vec<Box<dyn Rule>> {
-    vec![
-        Box::new(RuleEarlyRemoval),
-        Box::new(RuleLoadVarnode),
-        Box::new(RuleStoreVarnode),
-    ]
+    vec![Box::new(RuleEarlyRemoval)]
 }

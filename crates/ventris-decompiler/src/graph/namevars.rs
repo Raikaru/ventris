@@ -152,6 +152,13 @@ impl Names {
 /// pointer when it has that information.
 pub struct ActionNameVars;
 
+/// **Deliberately not registered** (`coreaction.cc:5791`). `apply` computes the
+/// merge, the types and the names and then reports how many names it produced,
+/// changing nothing: naming in this port is a side computation the emitter
+/// performs, not a graph mutation. The main loop stops when `changed` reaches
+/// zero, so registering a pure computation that returns a non-zero count only
+/// buys extra rounds of every other pass. `graph::emit` calls `Names::of` at
+/// the point the names are needed.
 impl Action for ActionNameVars {
     fn name(&self) -> &'static str {
         "namevars"
