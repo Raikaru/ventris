@@ -717,12 +717,23 @@ fn no_intervening_statement(data: &Funcdata, block: GraphBlockId) -> bool {
 
 /// Normalizes a recovered switch before structure recovery.
 ///
-/// Ghidra's `ActionSwitchNorm::apply` calls `JumpTable::foldInNormalization`,
-/// which makes BRANCHIND consume the unnormalized switch variable and leaves
-/// the address-calculation ops for dead-code cleanup.  This reduced graph has
-/// no jump-table registry, so the action performs that local fold for every
-/// guarded basic-model branch; label recovery remains the explicit
-/// `recover_jump_tables` API above.
+/// Ghidra's `ActionSwitchNorm::apply` walks `Funcdata::jumpvec` and, **only for
+/// a table that is not yet labelled**, matches the model, recovers labels and
+/// calls `JumpTable::foldInNormalization`; then it folds guards for every table.
+///
+/// That precondition is the whole of the difference. This action used to
+/// re-derive candidates from every `BRANCHIND` and fold normalization
+/// unconditionally, because the graph had no table registry to consult. It has
+/// one now, and every table `recover_jump_tables` produces carries concrete
+/// `(label, target)` cases - it is labelled by construction - so Ghidra's fold
+/// does not apply to any of them. Doing it anyway rewrote the `BRANCHIND`
+/// operand of an already-recovered switch, and cost `dl_G_MOVEWORD__5emu64Fv`
+/// its whole structure: `agrees` 30 -> 29, with `unstructured-control-flow`,
+/// `missing-loop-or-switch` and `call-census` appearing together.
+///
+/// Guard folding, the action's other half, runs in the structuring phase where
+/// the tables are re-recovered against the simplified graph
+/// (`graph::jumptable::fold_in_guards`).
 pub struct ActionSwitchNorm;
 
 impl Action for ActionSwitchNorm {
@@ -731,19 +742,29 @@ impl Action for ActionSwitchNorm {
     }
 
     fn apply(&self, data: &mut Funcdata) -> usize {
-        let candidates: Vec<(OpId, VarnodeId)> = data
-            .live_ops()
-            .filter(|(_, operation)| operation.opcode == op::BRANCHIND)
-            .filter_map(|(branch, operation)| {
-                let destination = operation.inputs.first().copied()?;
-                let model = parse_destination(data, destination)?;
-                find_guard(data, branch, model.address.index).map(|_| (branch, model.address.index))
-            })
+        // `if (!jt->isLabelled())` - `coreaction.cc`'s ActionSwitchNorm.
+        let unlabelled: Vec<OpId> = data
+            .jump_tables
+            .iter()
+            .filter(|table| table.cases.is_empty())
+            .map(|table| table.branch)
             .collect();
         let mut changed = 0;
-        for (branch, switch_value) in candidates {
-            if data.op(branch).inputs.first().copied() != Some(switch_value) {
-                data.op_set_input(branch, switch_value, 0);
+        for branch in unlabelled {
+            if data.opcode_of(branch) != Some(op::BRANCHIND) {
+                continue;
+            }
+            let Some(destination) = data.op(branch).inputs.first().copied() else {
+                continue;
+            };
+            let Some(model) = parse_destination(data, destination) else {
+                continue;
+            };
+            if find_guard(data, branch, model.address.index).is_none() {
+                continue;
+            }
+            if data.op(branch).inputs.first().copied() != Some(model.address.index) {
+                data.op_set_input(branch, model.address.index, 0);
                 changed += 1;
             }
         }
@@ -1056,8 +1077,10 @@ mod tests {
         assert_eq!(fold_in_guards(&mut untouched, &tables), 0);
     }
 
+    /// `ActionSwitchNorm` folds the destination only for a table Ghidra has not
+    /// labelled yet, which is the `if (!jt->isLabelled())` in its `apply`.
     #[test]
-    fn action_switch_norm_folds_the_branch_destination() {
+    fn action_switch_norm_folds_only_an_unlabelled_table() {
         let mut fixture = bounded_fixture();
         // Make the branch consume the loaded result through an explicit COPY.
         let loaded = fixture.data.op(fixture.branch).inputs[0];
@@ -1066,9 +1089,34 @@ mod tests {
         fixture.data.op_set_output(copy, Some(copy_out));
         fixture.data.op_insert_before(copy, fixture.branch);
         fixture.data.op_set_input(fixture.branch, copy_out, 0);
+
+        // No table in the registry: nothing to normalize, however foldable the
+        // shape looks. This is the arm that used to fire unconditionally.
+        assert_eq!(ActionSwitchNorm.apply(&mut fixture.data), 0);
+        assert_eq!(fixture.data.op(fixture.branch).inputs[0], copy_out);
+
+        // A labelled table - concrete cases - is left alone, because Ghidra has
+        // already recovered it and normalization is part of recovery.
+        fixture.data.jump_tables = vec![JumpTable {
+            branch: fixture.branch,
+            switch_value: fixture.index,
+            cases: vec![(0, 0x1020)],
+            default_target: None,
+        }];
+        assert_eq!(ActionSwitchNorm.apply(&mut fixture.data), 0);
+        assert_eq!(fixture.data.op(fixture.branch).inputs[0], copy_out);
+
+        // An unlabelled one is what the fold exists for.
+        fixture.data.jump_tables = vec![JumpTable {
+            branch: fixture.branch,
+            switch_value: fixture.index,
+            cases: Vec::new(),
+            default_target: None,
+        }];
         assert_eq!(ActionSwitchNorm.apply(&mut fixture.data), 1);
         assert_eq!(fixture.data.op(fixture.branch).inputs[0], fixture.index);
     }
+
     #[test]
     fn action_switch_norm_declines_without_a_guard() {
         let mut fixture = bounded_fixture();
@@ -1079,6 +1127,13 @@ mod tests {
             .map(|(id, _)| id)
             .expect("guard compare");
         fixture.data.op_destroy(compare);
+        // An unlabelled table, so only the missing guard can decline it.
+        fixture.data.jump_tables = vec![JumpTable {
+            branch: fixture.branch,
+            switch_value: fixture.index,
+            cases: Vec::new(),
+            default_target: None,
+        }];
         let destination = fixture.data.op(fixture.branch).inputs[0];
         assert_eq!(ActionSwitchNorm.apply(&mut fixture.data), 0);
         assert_eq!(fixture.data.op(fixture.branch).inputs[0], destination);

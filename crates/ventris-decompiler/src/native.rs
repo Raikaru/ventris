@@ -2019,6 +2019,13 @@ impl NativeDecompiler {
         // Leaving them empty is the honest statement that the types in this
         // document came from somewhere else.
         let mut data = graph::Funcdata::from_lifted(function);
+        // `ActionStart` is Ghidra's very first action (`coreaction.cc:5527`) and
+        // it sets `processing_started`. None of the lifecycle actions were
+        // registered, so every flag they own stayed false for the whole
+        // pipeline - and a rule that reads one is then not conservative but
+        // inert. `RuleEarlyRemoval` was gated behind `processing_complete`,
+        // which only `ActionStop` sets, and Ghidra runs `ActionStop` last.
+        graph::action::Action::apply(&graph::actiondb::ActionStart, &mut data);
         // Only registers are guarded here. Memory locations are named by their
         // loads and stores, and guarding them without alias analysis invents a
         // merge for every address the function mentions.
@@ -2573,6 +2580,21 @@ impl NativeDecompiler {
                     let split = graph::blockaction::ActionReturnSplit { goto_edges };
                     full_loop_changed += graph::action::Action::apply(&split, &mut data);
                 }
+            }
+            // Ghidra's full loop ends with `ActionSwitchNorm` (`5735`),
+            // `ActionReturnSplit` (`5736`), `ActionUnjustifiedParams` (`5737`)
+            // and `ActionStartTypes` (`5738`). The first and last were never
+            // registered: `ActionSwitchNorm` folds a recovered switch's
+            // normalization into the table before structuring sees it, and
+            // `ActionStartTypes` is what turns type recovery on at all.
+            for action in [
+                &graph::jumptable::ActionSwitchNorm as &dyn graph::action::Action,
+                &graph::actiondb::ActionStartTypes,
+            ] {
+                if skipped_passes.iter().any(|name| name == action.name()) {
+                    continue;
+                }
+                full_loop_changed += action.apply(&mut data);
             }
             if full_loop_changed == 0 {
                 break;

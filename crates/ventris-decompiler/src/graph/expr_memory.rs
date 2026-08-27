@@ -205,10 +205,22 @@ fn is_private_temporary(data: &Funcdata, value: VarnodeId) -> bool {
     flags.unique && !flags.constant && !flags.volatile && !is_auto_live(data, value)
 }
 
-/// `deadRemovalAllowedSeen` is per-space in Ghidra.  Requiring a completed
-/// graph and the internal unique space is a stricter global certificate.
+/// Ghidra's `Heritage::deadRemovalAllowed`: `pass > info->deadcodedelay`
+/// (`heritage.cc:2829-2834`), a per-space counter that delays removal until the
+/// space has stopped acquiring new varnodes.
+///
+/// This graph has no multi-pass heritage and therefore no delay to compare
+/// against, and `graph::deadcode::eliminate_dead_code` already removes dead
+/// operations in these spaces on every round with no delay - so the condition is
+/// unconditionally true here, and the space test is what carries the caution.
+///
+/// It previously read `data.processing_complete`, which was not a stricter
+/// certificate but an impossible one: only `ActionStop` sets that flag and
+/// Ghidra runs `ActionStop` last (`coreaction.cc:5795`), while this rule lives in
+/// `actprop` (`5563`) deep inside the main loop. The guard could never be true
+/// where the rule runs, so the rule was decoration rather than a port.
 fn dead_removal_allowed(data: &Funcdata, value: VarnodeId) -> bool {
-    data.processing_complete && data.varnode(value).space == UNIQUE_SPACE
+    data.varnode(value).space == UNIQUE_SPACE
 }
 
 /// Remove an unread operation only when the graph can prove that its output is
@@ -693,10 +705,17 @@ mod tests {
         assert_eq!(data.varnode(truncation).offset, 0);
     }
 
-    /// Ghidra's RuleEarlyRemoval drops only unread, non-call outputs after its
-    /// liveness and dead-removal guards have admitted the storage.
+    /// Ghidra's `RuleEarlyRemoval` drops only unread, non-call outputs whose
+    /// storage its liveness guards admit.
+    ///
+    /// The space test is the whole dead-removal gate here: `deadRemovalAllowed`
+    /// is `pass > deadcodedelay` (`heritage.cc:2829-2834`) and this graph has no
+    /// multi-pass heritage to delay. An earlier version also demanded
+    /// `processing_complete`, which made the rule unreachable rather than
+    /// cautious - `ActionStop` sets that flag last (`coreaction.cc:5795`) and
+    /// this rule runs in `actprop` (`5563`).
     #[test]
-    fn early_removal_requires_private_temporary_and_completed_graph() {
+    fn early_removal_drops_an_unread_private_temporary() {
         let mut data = Funcdata::default();
         let block = data.new_block(0x3000);
         let input = data.new_varnode(REGISTER_SPACE, 0, 4);
@@ -706,12 +725,24 @@ mod tests {
         data.op_set_output(operation, Some(output));
         data.op_insert_end(operation, block);
 
-        // The missing per-space permission is treated as live until the graph
-        // has reached its completed state.
-        assert_eq!(RuleEarlyRemoval.apply_op(operation, &mut data), 0);
-        data.processing_complete = true;
+        // Nothing reads the unique output, and no liveness guard claims it.
         assert_eq!(RuleEarlyRemoval.apply_op(operation, &mut data), 1);
         assert!(data.opcode_of(operation).is_none());
+
+        // A reader keeps it, which is `hasNoDescend` doing its job.
+        let mut read = Funcdata::default();
+        let block = read.new_block(0x3008);
+        let input = read.new_varnode(REGISTER_SPACE, 0, 4);
+        let one = read.new_constant(1, 4);
+        let operation = read.new_op(op::INT_ADD, seq(0x3008), vec![input, one]);
+        let output = read.new_unique(4);
+        read.op_set_output(operation, Some(output));
+        read.op_insert_end(operation, block);
+        let consumer = read.new_op(op::INT_ADD, seq(0x300c), vec![output, one]);
+        let consumed = read.new_unique(4);
+        read.op_set_output(consumer, Some(consumed));
+        read.op_insert_end(consumer, block);
+        assert_eq!(RuleEarlyRemoval.apply_op(operation, &mut read), 0);
 
         let mut tied = Funcdata::default();
         let block = tied.new_block(0x3010);
@@ -721,7 +752,6 @@ mod tests {
         let output = tied.new_varnode(REGISTER_SPACE, 0x20, 4);
         tied.op_set_output(operation, Some(output));
         tied.op_insert_end(operation, block);
-        tied.processing_complete = true;
         assert_eq!(RuleEarlyRemoval.apply_op(operation, &mut tied), 0);
 
         let mut indirect = Funcdata::default();
