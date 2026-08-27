@@ -438,6 +438,15 @@ fn graph_return_type(
 /// may feed each other before the pipeline stops. Each pass is monotone, so a
 /// small bound suffices; the cap exists so a rule pair that oscillates cannot
 /// spin.
+///
+/// **The rendered output is a fixed point well inside this bound, and that is
+/// measured, not assumed.** Every one of the 40 corpus functions renders
+/// byte-identically at caps 4, 8 and 16; only caps 2 and 3 differ, on two and
+/// four functions respectively. So the residual per-round rule churn that
+/// `VENTRIS_TRACE_ROUNDS` reports - the expression pool alternating 25/33 on
+/// `animal_crossing_gafe01`'s largest function - is idempotent work, not a
+/// decision the cap is making. An earlier note here claimed the cap decided the
+/// output; that was wrong, and this is the experiment that refuted it.
 const GRAPH_PIPELINE_ROUNDS: usize = 8;
 
 /// How many times Ghidra's outer `actfullloop` may repeat its main loop.
@@ -2367,8 +2376,10 @@ impl NativeDecompiler {
                 // per round. A function whose cost is flat in `--limit` is not
                 // slow because it is big; it is slow because some stage keeps
                 // reporting a change and the loop runs to its cap, which also
-                // means the output depends on the cap rather than on a fixed
-                // point. This is how to find which stage that is.
+                // means the loop is doing work it cannot retire. The rendered
+                // output is a fixed point by round 4 regardless - see
+                // `GRAPH_PIPELINE_ROUNDS` - so this finds waste, not a wrong
+                // answer. It is still worth finding: churn hides real churn.
                 let trace = std::env::var("VENTRIS_TRACE_ROUNDS").is_ok();
                 let stage = std::time::Instant::now();
                 let mut changed = graph::action::Action::apply(pipeline.as_ref(), &mut data);

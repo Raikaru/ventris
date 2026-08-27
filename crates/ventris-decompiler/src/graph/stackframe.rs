@@ -226,7 +226,9 @@ impl Action for ActionSpacebase {
 /// normalisation, not progress: those same ten rewrites were reported on every
 /// round of all twenty-four iterations of `animal_crossing_gafe01`'s largest
 /// function, so the loop could never reach a fixed point and the emitted C was
-/// decided by the iteration cap. Counting normalisation as a change asks the
+/// never able to report a fixed point - wasted work rather than a wrong answer,
+/// since the rendered output is identical at caps 4, 8 and 16. Counting
+/// normalisation as a change asks the
 /// loop to wait for a form the pointer rules are entitled to undo. The work
 /// still happens every round, so the graph the loop finishes on is canonical;
 /// only the vote on whether anything is still moving is withheld.

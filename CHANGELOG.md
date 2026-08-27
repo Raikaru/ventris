@@ -6,12 +6,21 @@ All notable Ventris changes are documented here.
 
 ### Added
 
-- The pipeline did not reach a fixed point, and now the reason is measured rather
-  than suspected. `VENTRIS_TRACE_ROUNDS` and a per-rule counter in `ActionPool`
-  show `animal_crossing_gafe01`'s largest function alternating between 45 and 33
-  rule firings for every one of its twenty-four iterations, never reporting zero,
-  so the emitted C was decided by the iteration cap instead of by convergence.
-  Two distinct causes, both named:
+- The rule pool did not reach a fixed point, and the reason is now measured. But
+  the first thing to record is a correction: **an earlier claim in these notes,
+  that the emitted C was therefore decided by the iteration cap, was wrong.**
+  Every one of the 40 corpus functions renders byte-identically at
+  `GRAPH_PIPELINE_ROUNDS` of 4, 8 and 16; only caps 2 and 3 differ, on two and
+  four functions. The output is a fixed point by round 4, so the churn the trace
+  reports is wasted work rather than a decision the cap is making. That does not
+  make it uninteresting - churn hides churn, and the cost is real - but it is a
+  performance and hygiene defect, not a correctness one, and the notes and code
+  comments that said otherwise are fixed.
+
+  `VENTRIS_TRACE_ROUNDS` and a per-rule counter in `ActionPool` show
+  `animal_crossing_gafe01`'s largest function alternating between 45 and 33 rule
+  firings for every one of its twenty-four iterations, never reporting zero. Two
+  distinct causes, both named:
   * `ActionStackPtrFlow` reported the same ten rewrites every round. Its
     canonical form is `spacebase + constant` and the pointer rules Ghidra keeps
     in `oppool2` legitimately rewrite that back into `PTRSUB`/`PTRADD`, so the two
@@ -42,10 +51,14 @@ All notable Ventris changes are documented here.
   COPY shape and this graph's STORE shape, and it does find the four slots on that
   function; the statement-level pass that retires a spill is still keyed on a
   matched save/restore pair, and the reload has been dead-code eliminated by then.
-  **The phase boundary is therefore blocked on spacebase varnodes**, and that is
-  the next piece of the port rather than a limitation to live with. The cheaper
-  compensations were tried and removed rather than left in: a scope-aware spill
-  filter that never fired, and an expression-walk helper for slot reads.
+  **The phase boundary is therefore blocked on spacebase varnodes.** With the
+  cap-dependence claim refuted, though, that blockage is a fidelity item and not
+  a correctness one: the faithful placement is *measurably worse* on the only
+  metric the project has, so moving it is not something equivalence demands - it
+  is something equivalence currently argues against. It stays recorded, with its
+  prerequisite, rather than shipped. The cheaper compensations were tried and
+  removed rather than left in: a scope-aware spill filter that never fired, and
+  an expression-walk helper for slot reads.
 - The remaining six unimplemented rules were re-audited against the current tree
   rather than trusted. Five blockers are confirmed absent: no bitfield variant or
   aggregate members or `debug_info` consumer (`RuleBitFieldIn`), no truncated
@@ -66,10 +79,22 @@ All notable Ventris changes are documented here.
   position it produced **zero** splits across five `animal_crossing_gafe01`
   functions, so it is unregistered rather than left as a silent no-op - the same
   standard applied to `RuleSegment` and `ActionLikelyTrash`.
-  That is now the third independent measurement pointing at one prerequisite:
+  That is the third independent measurement pointing at one facility:
   `IPTR_SPACEBASE` address spaces. The cleanup-pool phase boundary wants them, so
-  does `ActionRestrictLocal`, and so does this. Porting them is the next piece of
-  the port, and until they exist these three are blocked rather than optional.
+  does `ActionRestrictLocal`, and so does this. All three are structural fidelity
+  rather than observable equivalence - none of them changes the rendered C today,
+  and the one that could was measured worse - so the facility is named as the
+  thing that would unblock them, not as an outstanding correctness debt.
+- The cap sweep that produced the correction above is worth keeping as a
+  procedure, because it is the only way to tell "the loop is still moving" from
+  "the answer is still moving". Render every corpus function, hash each render,
+  then rebuild at a different `GRAPH_PIPELINE_ROUNDS` and diff the hashes.
+  Measured: caps 4, 8 and 16 agree on all 40 functions; cap 3 differs on four
+  (`preamble`, `TRK_fill_mem`, `decompSZS_subroutine`, `queryMapAddress_single`)
+  and cap 2 on two (`__FrameCallback__Fl`, `dl_G_MOVEWORD`). Convergence of the
+  *output* is therefore at round 4, with the cap at 8 giving twice that margin.
+  A trace that shows a pass reporting changes forever proves nothing about the
+  answer on its own; this is the experiment that settles it.
 
 - The port's own census was wrong, and fixing it found roughly forty real items.
   The old check asked whether each Ghidra rule *name appeared anywhere* in the

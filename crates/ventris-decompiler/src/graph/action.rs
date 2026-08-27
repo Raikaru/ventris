@@ -829,7 +829,9 @@ pub fn default_pipeline() -> Box<dyn Action> {
 /// and `Rule2Comp2Sub` pair with `RuleSub2Add` the same way. Measured on
 /// `animal_crossing_gafe01`'s largest function the pool alternated between 45 and
 /// 33 firings for every one of its twenty-four iterations and never reported
-/// zero, so the emitted C was decided by the iteration cap.
+/// zero, so the pool never reported a fixed point. It was wasted work rather
+/// than a wrong answer: every corpus function renders byte-identically at caps
+/// 4, 8 and 16, so the cap was not deciding the output.
 ///
 /// # Why it is called from inside the loop anyway
 ///
