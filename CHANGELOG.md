@@ -6,6 +6,19 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- `RuleDoubleStore` is ported whole. It had been combining the two stores and
+  walking away from the `INDIRECT`s that guarded them, leaving annotations
+  pointing at destroyed operations and the combined store's own indirect effect
+  unrecorded; `testIndirectUse` and `reassignIndirects` (`double.cc:3357-3441`)
+  are now both here. Two details of `noWriteConflict` came with them, and they
+  only matter once guards exist: the scan starts *before* the first `STORE`,
+  walking back over the `INDIRECT`s that annotate it, because those are the ones
+  the combined store inherits, and an `INDIRECT` caused by either store of the
+  pair is one of those annotations rather than an aliasing conflict. Treating it
+  as a conflict refused every pair whose stores carried guards - which is most
+  of them. The rule also honours `isPrecisLo`/`isPrecisHi` now that
+  `attemptMarking` sets them, so its discovery is no longer purely structural.
+  Census-neutral on this corpus, where no pair survives to the rule.
 - The emitter can spell C's comma operator, so a short-circuit no longer has to
   hoist its second test's work. `Expr::Assign` and `Expr::Comma` are new, with
   the two lowest precedences C gives them, and `Condition::Sequenced` is how the

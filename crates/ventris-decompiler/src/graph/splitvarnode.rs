@@ -28,11 +28,14 @@
 //! storage test only to input locations.  `Funcdata::hasUnreachableBlocks` is
 //! ported and its guard is honoured.
 //!
-//! `RuleDoubleStore` omits Ghidra's `RuleDoubleStore::testIndirectUse` and
-//! `RuleDoubleStore::reassignIndirects` path.  The IOP annotation it needs now
-//! exists - `Funcdata::new_iop` and `iop_target` - and so does
-//! `Funcdata::op_uninsert`, so what remains is the reassignment itself rather
-//! than a missing facility.
+//! `RuleDoubleStore` is ported whole, `testIndirectUse` and
+//! `reassignIndirects` included, and with them `noWriteConflict`'s two details
+//! that only matter once guards are in play: the scan starts *before* the first
+//! `STORE`, walking back over the `INDIRECT`s that annotate it, and an
+//! `INDIRECT` caused by either store of the pair is one of those annotations
+//! rather than an aliasing conflict.  The rule also honours `isPrecisLo` and
+//! `isPrecisHi` now that `RuleDoubleIn`/`RuleDoubleOut`'s `attemptMarking` sets
+//! them, so its discovery is no longer purely structural.
 //!
 //! `RuleSplitCopy`, `RuleSplitLoad`, and `RuleSplitStore` are ported and
 //! registered, in `graph::splitdatatype`, which is where the `SplitDatatype`
@@ -757,28 +760,48 @@ fn memory_space(data: &Funcdata, id: OpId) -> Option<u64> {
     constant(data, input(data, id, 0)?)
 }
 
-/// Reject a pair if a same-space write, call, or control transfer intervenes.
-fn no_write_conflict(data: &Funcdata, first: OpId, second: OpId, space: u64) -> Option<OpId> {
+/// Reject a pair if a same-space write, call, or control transfer intervenes,
+/// and collect the `INDIRECT`s the pair itself caused.
+///
+/// `RuleDoubleLoad::noWriteConflict`. Two details matter and were missing. The
+/// scan starts *before* the first `STORE`, walking back over the `INDIRECT`s
+/// that annotate it, because those are the ones the combined store has to
+/// inherit. And an `INDIRECT` caused by either op of the pair is not a conflict
+/// at all - it is one of those annotations - so it is collected rather than
+/// rejected. Treating it as a conflict refused every pair whose stores had
+/// guards, which is most of them.
+fn no_write_conflict(
+    data: &Funcdata,
+    first: OpId,
+    second: OpId,
+    space: u64,
+    indirects: &mut Vec<OpId>,
+) -> Option<OpId> {
     let (block_first, pos_first) = op_position(data, first)?;
     let (block_second, pos_second) = op_position(data, second)?;
     if block_first != block_second {
         return None;
     }
-    let (start, end) = if pos_first <= pos_second {
-        (pos_first, pos_second)
+    let (early, late, mut start, end) = if pos_first <= pos_second {
+        (first, second, pos_first, pos_second)
     } else {
-        (pos_second, pos_first)
+        (second, first, pos_second, pos_first)
     };
+    // "Extend the range of PcodeOps to include any CPUI_INDIRECTs associated
+    // with the initial STORE".
+    if data.opcode_of(early) == Some(op::STORE) {
+        while start > 0 {
+            let previous = data.block(block_first).ops[start - 1];
+            if data.opcode_of(previous) != Some(op::INDIRECT) {
+                break;
+            }
+            start -= 1;
+        }
+    }
     let block = data.block(block_first);
-    for candidate in block
-        .ops
-        .iter()
-        .copied()
-        .skip(start + 1)
-        .take(end - start - 1)
-    {
+    for candidate in block.ops[start..end].to_vec() {
         let operation = data.op(candidate);
-        if operation.dead {
+        if operation.dead || candidate == early {
             continue;
         }
         match operation.opcode {
@@ -795,7 +818,10 @@ fn no_write_conflict(data: &Funcdata, first: OpId, second: OpId, space: u64) -> 
                 }
             }
             op::INDIRECT => {
-                if output(data, candidate)
+                let affector = input(data, candidate, 1).and_then(|value| data.iop_target(value));
+                if affector == Some(early) || affector == Some(late) {
+                    indirects.push(candidate);
+                } else if output(data, candidate)
                     .map(|value| data.varnode(value).space == space as u32)
                     .unwrap_or(false)
                 {
@@ -812,13 +838,98 @@ fn no_write_conflict(data: &Funcdata, first: OpId, second: OpId, space: u64) -> 
             }
         }
     }
-    Some(
-        if sequence_order(data, first) >= sequence_order(data, second) {
-            first
-        } else {
-            second
-        },
-    )
+    Some(late)
+}
+
+/// Whether the pair's `INDIRECT`s may be moved to a combined store.
+///
+/// `RuleDoubleStore::testIndirectUse`. An `INDIRECT` output read between the two
+/// stores by anything other than a later `INDIRECT` of the second store cannot
+/// be relocated: the reader expects the value the first store left. The pairing
+/// count is the subtle half - an output that feeds a later `INDIRECT` must feed
+/// *only* later `INDIRECT`s, and only one of them, because the earlier op is
+/// about to be removed.
+fn test_indirect_use(data: &Funcdata, first: OpId, second: OpId, indirects: &[OpId]) -> bool {
+    let (early, late) = if sequence_order(data, second) < sequence_order(data, first) {
+        (second, first)
+    } else {
+        (first, second)
+    };
+    let Some((block, early_position)) = op_position(data, early) else {
+        return false;
+    };
+    let Some((_, late_position)) = op_position(data, late) else {
+        return false;
+    };
+    for guard in indirects.iter().copied() {
+        let Some(out) = output(data, guard) else {
+            continue;
+        };
+        let mut uses = 0usize;
+        let mut paired = 0usize;
+        for reader in data.varnode(out).descendants.iter().copied() {
+            uses += 1;
+            let Some((reader_block, reader_position)) = op_position(data, reader) else {
+                continue;
+            };
+            if reader_block != block
+                || reader_position < early_position
+                || reader_position > late_position
+            {
+                continue;
+            }
+            let annotates_late = data.opcode_of(reader) == Some(op::INDIRECT)
+                && input(data, reader, 1).and_then(|value| data.iop_target(value)) == Some(late);
+            if annotates_late {
+                paired += 1;
+                continue;
+            }
+            return false;
+        }
+        if paired > 0 && uses != paired {
+            return false;
+        }
+        if paired > 1 {
+            return false;
+        }
+    }
+    true
+}
+
+/// Moves the pair's `INDIRECT`s onto the combined store.
+///
+/// `RuleDoubleStore::reassignIndirects`. A pair of `INDIRECT`s where the later
+/// reads the earlier's output collapses to the later one, which takes over the
+/// earlier's input; then every survivor moves in front of the new store and its
+/// annotation is repointed at it. Without this the guards keep annotating
+/// destroyed operations, and the combined store's own indirect effect goes
+/// unrecorded.
+fn reassign_indirects(data: &mut Funcdata, new_store: OpId, indirects: &[OpId]) {
+    let members: BTreeSet<OpId> = indirects.iter().copied().collect();
+    for guard in indirects.iter().copied() {
+        let Some(value) = input(data, guard, 0) else {
+            continue;
+        };
+        let Some(earlier) = definition(data, value) else {
+            continue;
+        };
+        if !members.contains(&earlier) {
+            continue;
+        }
+        if let Some(inherited) = input(data, earlier, 0) {
+            data.op_set_input(guard, inherited, 0);
+        }
+        data.op_destroy(earlier);
+    }
+    for guard in indirects.iter().copied() {
+        if data.opcode_of(guard).is_none() {
+            continue;
+        }
+        data.op_uninsert(guard);
+        data.op_insert_before(guard, new_store);
+        let annotation = data.new_iop(new_store);
+        data.op_set_input(guard, annotation, 1);
+    }
 }
 
 fn direct_load(data: &Funcdata, piece: VarnodeId) -> Option<OpId> {
@@ -3866,7 +3977,9 @@ impl Rule for RuleDoubleLoad {
         if !split.find_definition_point(data) {
             return 0;
         }
-        let Some(latest) = no_write_conflict(data, load_lo, load_hi, space_lo) else {
+        let mut indirects = Vec::new();
+        let Some(latest) = no_write_conflict(data, load_lo, load_hi, space_lo, &mut indirects)
+        else {
             return 0;
         };
         let size = split.size();
@@ -3905,6 +4018,13 @@ impl Rule for RuleDoubleStore {
         ) else {
             return 0;
         };
+        // `if (!vnlo->isPrecisLo()) return 0;`. The marks exist now, set by
+        // `RuleDoubleIn`/`RuleDoubleOut`'s `attemptMarking`, so the discovery no
+        // longer has to be purely structural: a pair Ghidra has not recognised
+        // as a double-precision whole is not one here either.
+        if !precision_marked(data, low_value, Precision::Lo) {
+            return 0;
+        }
         let Some(low_def) = definition(data, low_value) else {
             return 0;
         };
@@ -3938,6 +4058,10 @@ impl Rule for RuleDoubleStore {
             let Some(high_value) = output(data, high_def) else {
                 continue;
             };
+            // `if (!vnhi->isPrecisHi()) continue;`
+            if !precision_marked(data, high_value, Precision::Hi) {
+                continue;
+            }
             if data.varnode(high_value).size + low_size != data.varnode(whole).size {
                 continue;
             }
@@ -3972,15 +4096,26 @@ impl Rule for RuleDoubleStore {
                 {
                     continue;
                 }
-                let Some(latest) = no_write_conflict(data, id, high_store, low_space) else {
+                let mut indirects = Vec::new();
+                let Some(latest) =
+                    no_write_conflict(data, id, high_store, low_space, &mut indirects)
+                else {
                     continue;
                 };
+                // `testIndirectUse`: a guard whose output something between the
+                // two stores still reads cannot be relocated.
+                if !test_indirect_use(data, id, high_store, &indirects) {
+                    continue;
+                }
                 let seq = data.op(latest).seq;
                 let new_store =
                     data.new_op(op::STORE, seq, vec![data.op(id).inputs[0], low_ptr, whole]);
                 data.op_insert_after(new_store, latest);
                 data.op_destroy(id);
                 data.op_destroy(high_store);
+                // The guards annotated the two stores that are now gone; they
+                // belong to the combined store.
+                reassign_indirects(data, new_store, &indirects);
                 return 1;
             }
         }
@@ -4797,6 +4932,11 @@ mod tests {
         );
         let low = low.expect("low piece");
         let high = high.expect("high piece");
+        // `RuleDoubleIn::attemptMarking` sets these from the shape of the graph
+        // before `RuleDoubleStore` ever looks, and the rule requires them:
+        // `if (!vnlo->isPrecisLo()) return 0;`.
+        set_precision(&mut data, low, Precision::Lo);
+        set_precision(&mut data, high, Precision::Hi);
         let (low_store, _) = add_op(&mut data, block, 3, op::STORE, vec![space, base, low], None);
         let (high_store, _) = add_op(
             &mut data,
@@ -4832,6 +4972,166 @@ mod tests {
     #[test]
     fn double_store_declines_noncontiguous_pointers() {
         let (mut data, _block, low_store, _whole, _low, _high_store) = store_fixture(8);
+        assert_eq!(RuleDoubleStore.apply_op(low_store, &mut data), 0);
+        assert_eq!(data.opcode_of(low_store), Some(op::STORE));
+    }
+
+    /// Builds the store pair with an `INDIRECT` guarding each store, laid out
+    /// the way `Heritage` leaves them: each guard immediately precedes the store
+    /// it annotates, and the second reads the first's output.
+    fn guarded_store_fixture() -> (Funcdata, OpId, OpId, OpId, OpId) {
+        let (mut data, block) = graph();
+        let space = memory_space(&mut data);
+        let base = input_pointer(&mut data, 0x200);
+        let whole = input_pointer(&mut data, 0x300);
+        let zero = data.new_constant(0, 4);
+        let four = data.new_constant(4, 4);
+        let (_, low) = add_op(
+            &mut data,
+            block,
+            0,
+            op::SUBPIECE,
+            vec![whole, zero],
+            Some(4),
+        );
+        let (_, high) = add_op(
+            &mut data,
+            block,
+            1,
+            op::SUBPIECE,
+            vec![whole, four],
+            Some(4),
+        );
+        let low = low.expect("low piece");
+        let high = high.expect("high piece");
+        set_precision(&mut data, low, Precision::Lo);
+        set_precision(&mut data, high, Precision::Hi);
+        let high_ptr = add_pointer(&mut data, block, 2, base, 4);
+        let guarded = data.new_varnode(RAM_SPACE, 0x40, 4);
+
+        // `guard_lo` then `low_store`, `guard_hi` then `high_store`.
+        let guard_lo = data.new_op(op::INDIRECT, seq(3), vec![guarded]);
+        let guard_lo_out = data.new_varnode(RAM_SPACE, 0x40, 4);
+        data.op_set_output(guard_lo, Some(guard_lo_out));
+        data.op_insert_end(guard_lo, block);
+        let (low_store, _) = add_op(&mut data, block, 4, op::STORE, vec![space, base, low], None);
+        let annotation_lo = data.new_iop(low_store);
+        data.op_set_input(guard_lo, annotation_lo, 1);
+
+        let guard_hi = data.new_op(op::INDIRECT, seq(5), vec![guard_lo_out]);
+        let guard_hi_out = data.new_varnode(RAM_SPACE, 0x40, 4);
+        data.op_set_output(guard_hi, Some(guard_hi_out));
+        data.op_insert_end(guard_hi, block);
+        let (high_store, _) = add_op(
+            &mut data,
+            block,
+            6,
+            op::STORE,
+            vec![space, high_ptr, high],
+            None,
+        );
+        let annotation_hi = data.new_iop(high_store);
+        data.op_set_input(guard_hi, annotation_hi, 1);
+
+        (data, low_store, high_store, guard_lo, guard_hi)
+    }
+
+    /// `noWriteConflict` starts its scan *before* the first `STORE`, walking
+    /// back over the `INDIRECT`s that annotate it, and an `INDIRECT` caused by
+    /// either store of the pair is collected rather than treated as an aliasing
+    /// conflict. We were doing neither, so any store carrying a guard - which is
+    /// most of them - was refused on its own annotation.
+    #[test]
+    fn double_store_collects_the_guards_of_both_stores() {
+        let (data, low_store, high_store, guard_lo, guard_hi) = guarded_store_fixture();
+        let mut indirects = Vec::new();
+        let latest = no_write_conflict(
+            &data,
+            low_store,
+            high_store,
+            u64::from(RAM_SPACE),
+            &mut indirects,
+        );
+        assert_eq!(latest, Some(high_store), "the later store is the anchor");
+        assert_eq!(
+            indirects,
+            vec![guard_lo, guard_hi],
+            "both guards belong to the pair, and the first is before the first store"
+        );
+    }
+
+    /// `reassignIndirects`: the pair of guards collapses to the later one, which
+    /// inherits the earlier's input, and the survivor moves in front of the
+    /// combined store and annotates it. Leaving the guards behind would point
+    /// them at destroyed operations.
+    #[test]
+    fn double_store_moves_its_guards_onto_the_combined_store() {
+        let (mut data, low_store, high_store, guard_lo, guard_hi) = guarded_store_fixture();
+        let guarded = data.op(guard_lo).inputs[0];
+        assert_eq!(RuleDoubleStore.apply_op(low_store, &mut data), 1);
+        assert_eq!(data.opcode_of(low_store), None);
+        assert_eq!(data.opcode_of(high_store), None);
+        let combined = data
+            .live_ops()
+            .find(|(_, operation)| operation.opcode == op::STORE)
+            .map(|(id, _)| id)
+            .expect("one combined store");
+
+        // The earlier guard fed the later one, so only the later survives.
+        assert_eq!(data.opcode_of(guard_lo), None, "the pair collapsed");
+        assert_eq!(data.opcode_of(guard_hi), Some(op::INDIRECT));
+        assert_eq!(
+            data.op(guard_hi).inputs[0],
+            guarded,
+            "the survivor took over the earlier guard's input"
+        );
+        assert_eq!(
+            data.iop_target(data.op(guard_hi).inputs[1]),
+            Some(combined),
+            "and now annotates the combined store"
+        );
+        let ops = &data.block(data.op(guard_hi).parent.expect("a block")).ops;
+        let guard_position = ops.iter().position(|id| *id == guard_hi);
+        let store_position = ops.iter().position(|id| *id == combined);
+        assert!(
+            guard_position < store_position,
+            "and sits in front of it, as opInsertBefore leaves it"
+        );
+    }
+
+    /// `testIndirectUse`: a guard whose output is read between the two stores by
+    /// something that is not a later guard of the second store cannot be moved -
+    /// that reader wants the value the first store left behind.
+    #[test]
+    fn double_store_declines_when_a_guard_is_read_in_between() {
+        let (mut data, low_store, high_store, guard_lo, _guard_hi) = guarded_store_fixture();
+        let guard_lo_out = data.op(guard_lo).output.expect("a guarded value");
+        let block = data.op(low_store).parent.expect("a block");
+        // An ordinary read of the first guard's output, before the second store.
+        let (_, _) = add_op(
+            &mut data,
+            block,
+            5,
+            op::INT_ADD,
+            vec![guard_lo_out, guard_lo_out],
+            Some(4),
+        );
+        let mut indirects = Vec::new();
+        assert!(
+            no_write_conflict(
+                &data,
+                low_store,
+                high_store,
+                u64::from(RAM_SPACE),
+                &mut indirects
+            )
+            .is_some(),
+            "the read is not an aliasing conflict on its own"
+        );
+        assert!(
+            !test_indirect_use(&data, low_store, high_store, &indirects),
+            "but the guard cannot be relocated past its reader"
+        );
         assert_eq!(RuleDoubleStore.apply_op(low_store, &mut data), 0);
         assert_eq!(data.opcode_of(low_store), Some(op::STORE));
     }
