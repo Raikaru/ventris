@@ -2788,7 +2788,32 @@ impl NativeDecompiler {
             {
                 stable_registers.insert(name.strip_prefix('$').unwrap_or(name).to_owned());
             }
-            let restored = graph_restored_slots(architecture, abi, &statements);
+            // A matched save/restore pair is one signal. The other is the scope
+            // itself: `ActionRestrictLocal` marks the frame slot that parks an
+            // unaffected register not-mapped (`coreaction.cc:2036`), and a slot
+            // that is not a local has no business being printed. That second
+            // signal is what catches the pair whose reload dead-code elimination
+            // already removed, which is how `osContGetReadData` came to print its
+            // prologue spills once the cleanup pool moved out of the main loop.
+            let mut restored = graph_restored_slots(architecture, abi, &statements);
+            if let Some(scope) = data.scope_local() {
+                for statement in &statements {
+                    let NativeStatement::Store { address, .. } = statement else {
+                        continue;
+                    };
+                    let Some(slot) = prologue_stack_slot(architecture, abi, address) else {
+                        continue;
+                    };
+                    let location = graph::guard::Location {
+                        space: scope.space(),
+                        offset: slot.1 as u64,
+                        size: 4,
+                    };
+                    if !scope.is_mapped(location) {
+                        restored.insert(slot);
+                    }
+                }
+            }
             statements.retain(|statement| {
                 !is_matched_abi_stack_save(architecture, abi, &restored, statement)
             });

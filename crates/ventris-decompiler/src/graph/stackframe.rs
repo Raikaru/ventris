@@ -126,6 +126,26 @@ pub fn frame_offset(data: &Funcdata, address: VarnodeId, stack_pointer: Location
 }
 
 /// Canonicalise stack-pointer arithmetic into one spacebase plus a constant.
+///
+/// Ghidra's `ActionStackPtrFlow::apply` latches on `analysis_finished` because
+/// its per-round work is `checkClog`, which converges. **This action is not that
+/// operation**: it normalises `INT_SUB`/`PTRSUB`/`PTRADD` stack arithmetic into
+/// `spacebase + constant`, which is the job Ghidra gives the always-live pointer
+/// rules in `oppool2` - `RulePtrArith`, `RuleStructOffset0`, `RulePushPtr`. So it
+/// has to keep running as later rounds expose more stack arithmetic, and both
+/// forms of latch were tried and reverted: latching after one application, and
+/// latching on Ghidra's own `changed == 0`, each left `osContGetReadData`
+/// printing bare `r1` register names with its prologue spills intact, because the
+/// arithmetic copy propagation exposes arrives after the first quiet round.
+///
+/// What it does instead is report **zero**. The rewrite is idempotent
+/// normalisation, not progress: those same ten rewrites were reported on every
+/// round of all twenty-four iterations of `animal_crossing_gafe01`'s largest
+/// function, so the loop could never reach a fixed point and the emitted C was
+/// decided by the iteration cap. Counting normalisation as a change asks the
+/// loop to wait for a form the pointer rules are entitled to undo. The work
+/// still happens every round, so the graph the loop finishes on is canonical;
+/// only the vote on whether anything is still moving is withheld.
 pub struct ActionStackPtrFlow;
 
 impl Action for ActionStackPtrFlow {
@@ -135,26 +155,37 @@ impl Action for ActionStackPtrFlow {
 
     fn apply(&self, data: &mut Funcdata) -> usize {
         let operations: Vec<OpId> = data.live_ops().map(|(id, _)| id).collect();
-        let mut changed = 0;
         for id in operations {
             if data.opcode_of(id).is_none() {
                 continue;
             }
-            if canonicalize_arithmetic(data, id) {
-                changed += 1;
-            }
+            canonicalize_arithmetic(data, id);
         }
-        changed
+        0
     }
 }
 
 /// Restrict stack locations that cannot be mapped as ordinary locals.
 ///
-/// Ghidra's implementation calls `ScopeLocal::markNotMapped` for locked
-/// call-parameter and saved-register ranges.  The graph contract has neither
-/// `FuncCallSpecs`/prototype locks nor a `ScopeLocal` range tree, so there is no
-/// sound mutation this action can make.  It remains an explicit no-op rather
-/// than guessing from raw CALL operands and misclassifying ordinary locals.
+/// Ghidra's `ActionRestrictLocal::apply` (`coreaction.cc:2007-2049`, registered at
+/// `5553`) has two halves. The **locked call-parameter** half needs
+/// `FuncCallSpecs::isInputLocked` and `getSpacebaseOffset`, which this graph has
+/// no arena for - see `graph::callspecs::ActionDefaultParams` - so it stays out.
+///
+/// The **saved-register** half is ported here, and its old blocker was stale: the
+/// note said the graph has no `ScopeLocal` range tree, but `ScopeLocal` has had
+/// `mark_not_mapped` and its unmapped ranges for some time. The algorithm is
+/// exactly Ghidra's: for every location the prototype says the callee leaves
+/// alone, take the function's input varnode there, and for each `COPY` reading it
+/// whose output lands in the local space, mark that storage not-mapped. That is
+/// where an unaffected value gets parked, and marking it stops the frame slot
+/// becoming a local.
+///
+/// Leaving this a no-op is what made the prologue spills print. Once Ghidra's
+/// cleanup pool moved out of the main loop - where it belongs - `osContGetReadData`
+/// and `GameWorld::drawMainMenuOpt` showed their saved-register stores, because
+/// the reload had been dead-code eliminated and nothing else claimed the slot.
+/// Ghidra never had that problem: these ranges are not locals in the first place.
 pub struct ActionRestrictLocal;
 
 impl Action for ActionRestrictLocal {
@@ -162,10 +193,50 @@ impl Action for ActionRestrictLocal {
         "restrictlocal"
     }
 
-    fn apply(&self, _data: &mut Funcdata) -> usize {
-        0
+    fn apply(&self, data: &mut Funcdata) -> usize {
+        let Some(local_space) = data.scope_local().map(|scope| scope.space()) else {
+            return 0;
+        };
+        // `for(;eiter!=endeiter;++eiter)` over the prototype's effect records,
+        // skipping `killedbycall` - which is what `Funcdata::unaffected` already
+        // holds, since only preserved locations are recorded there.
+        let preserved: Vec<(u32, u64)> = data.unaffected.iter().copied().collect();
+        let mut parked: Vec<(u64, u32)> = Vec::new();
+        for (space, offset) in preserved {
+            for size in [8u32, 4, 2, 1] {
+                for input in data.at_location(space, offset, size) {
+                    if !data.varnode(*input).flags.input {
+                        continue;
+                    }
+                    for reader in data.varnode(*input).descendants.iter().copied() {
+                        if data.opcode_of(reader) != Some(op::COPY) {
+                            continue;
+                        }
+                        let Some(output) = data.op(reader).output else {
+                            continue;
+                        };
+                        // `isUnaffectedStorage(outvn)` is `vn->getSpace() == space`
+                        // (`varmap.hh:244`).
+                        let varnode = data.varnode(output);
+                        if varnode.space == local_space {
+                            parked.push((varnode.offset, varnode.size));
+                        }
+                    }
+                }
+            }
+        }
+        let Some(scope) = data.scope_local_mut() else {
+            return 0;
+        };
+        let mut marked = 0;
+        for (offset, size) in parked {
+            scope.mark_not_mapped(local_space, offset, size, false);
+            marked += 1;
+        }
+        marked
     }
 }
+
 /// Whether a value is derived from the frame base at all.
 ///
 /// `frame_offset` answers "at which offset", and returns nothing when there is no
@@ -533,6 +604,13 @@ fn canonicalize_arithmetic(data: &mut Funcdata, id: OpId) -> bool {
 
     let width = data.varnode(output).size.max(1);
     let constant = data.new_constant(offset_bits(offset, width), width);
+    if std::env::var("VENTRIS_TRACE_STACKPTR").is_ok() {
+        let before = data.op(id);
+        eprintln!(
+            "stackptr rewrite {id:?} op={} inputs={:?} -> INT_ADD base={base:?} off={offset} width={width} const={constant:?}",
+            before.opcode, before.inputs
+        );
+    }
     data.op_set_opcode(id, op::INT_ADD);
     data.op_set_inputs(id, vec![base, constant]);
     true
@@ -609,7 +687,10 @@ mod tests {
         let (_, unrelated) = arithmetic(&mut data, block, op::INT_ADD, vec![unknown, plus_ten], 4);
 
         let action = ActionStackPtrFlow;
-        assert_eq!(action.apply(&mut data), 3);
+        // The normalisation reports zero rather than counting its own rewrites:
+        // the pointer rules are entitled to undo the canonical form, so counting
+        // it as progress kept the loop from ever reaching a fixed point.
+        assert_eq!(action.apply(&mut data), 0);
         assert_eq!(
             frame_offset(&data, chained, stack_pointer()),
             Some(-0x10),

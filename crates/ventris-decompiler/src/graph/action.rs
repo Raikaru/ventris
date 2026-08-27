@@ -108,7 +108,11 @@ impl Action for ActionPool {
                 };
                 let mut applied = 0;
                 for rule in rules.iter().copied() {
-                    applied += self.rules[rule].apply_op(id, data);
+                    let fired = self.rules[rule].apply_op(id, data);
+                    applied += fired;
+                    if fired > 0 && std::env::var("VENTRIS_TRACE_RULES").is_ok() {
+                        eprintln!("rule {} fired {fired} on {id:?}", self.rules[rule].name());
+                    }
                     if data.opcode_of(id) != Some(opcode) {
                         break;
                     }
@@ -754,13 +758,125 @@ pub fn default_pipeline() -> Box<dyn Action> {
         }
         pipeline = pipeline.add(Box::new(FixedPoint::new(Box::new(second))));
     }
-    // Ghidra's `cleanup` pool, which runs after the full loop rather than inside
-    // it. The bitfield rules rewrite a mask-and-shift into a single ZPULL, so
-    // running them earlier would remove the shapes the expression rules match
-    // on; the same ordering argument is why `RuleMultNegOne` and
-    // `RuleAddUnsigned` belong here and not in the expression pool - they
-    // rewrite an addition of a large constant into a subtraction, which is a
-    // presentation choice the arithmetic rules must not see.
+    // Ghidra's `localrecovery` group, plus `ActionRestrictLocal` which precedes
+    // it in the main loop (`coreaction.cc:5553`, before `ActionDeadCode` at
+    // `5554` - its own comment says "Do before dead code removed"). It marks the
+    // frame slots that hold saved registers not-mapped, so they never become
+    // locals; leaving it a no-op is what let prologue spills print.
+    if !skip("localrecovery") {
+        let mut localrecovery = ActionGroup::new("localrecovery");
+        for action in [
+            Box::new(super::stackframe::ActionRestrictLocal) as Box<dyn Action>,
+            Box::new(super::scopeconsumers::ActionRestructureVarnode),
+            Box::new(super::scopeconsumers::ActionMappedLocalSync),
+        ] {
+            localrecovery = localrecovery.add(action);
+        }
+        pipeline = pipeline.add(Box::new(localrecovery));
+    }
+    // Ghidra's `protorecovery` group: prototype recovery reads the function's
+    // FuncProto, which the graph path populates from the target ABI.
+    // ActionUnjustifiedParams is at coreaction.cc:5737 and
+    // ActionPrototypeWarnings at 5794.
+    if !skip("protorecovery") {
+        let mut protorecovery = ActionGroup::new("protorecovery");
+        for action in [
+            Box::new(super::protorecovery::ActionInputPrototype) as Box<dyn Action>,
+            Box::new(super::protorecovery::ActionOutputPrototype),
+            Box::new(super::protorecovery::ActionPrototypeTypes),
+            Box::new(super::protoconstraints::ActionUnjustifiedParams),
+            Box::new(super::protoconstraints::ActionPrototypeWarnings),
+        ] {
+            protorecovery = protorecovery.add(action);
+        }
+        pipeline = pipeline.add(Box::new(protorecovery));
+    }
+    // `ActionPreferComplement` (`coreaction.cc:5770`), `ActionStructureTransform`
+    // (`5772`) and `ActionNormalizeBranches` (`5773`) are at Ghidra's top level,
+    // after the loop. They stay per-round here for the same reason the cleanup
+    // pool does, which `cleanup_pipeline` records in full: this graph has no
+    // spacebase varnodes, so the frame handling Ghidra does once cannot be done
+    // once here.
+    if !skip("blockrecovery") {
+        let mut blockrecovery = ActionGroup::new("blockrecovery");
+        for action in super::structuretransform::all() {
+            blockrecovery = blockrecovery.add(action);
+        }
+        blockrecovery = blockrecovery.add(Box::new(super::branchaction::ActionNormalizeBranches));
+        pipeline = pipeline.add(Box::new(blockrecovery));
+    }
+    if !skip("infer-types-rich") {
+        pipeline = pipeline.add(Box::new(super::typefactory::ActionInferTypes));
+    }
+    // The cleanup pool belongs *after* the loop, and running it here is a
+    // measured compromise recorded on `cleanup_pipeline`. It is added last so
+    // that within a round it still sees a simplified graph.
+    pipeline = pipeline.add(cleanup_pipeline());
+    Box::new(pipeline)
+}
+
+/// Everything Ghidra runs **once, after** the full loop has settled.
+///
+/// `actcleanup` is added to the universal group rather than to `actfullloop`
+/// (`coreaction.cc:5769`), and the merge and block-recovery actions follow it at
+/// the same level (`5770-5795`). That is a phase boundary, not a naming detail:
+/// the cleanup pool holds rules that are the exact inverses of rules in the
+/// expression pool, and they are safe together only because they never run in
+/// the same loop.
+///
+/// Having this inside the per-round group is what made the pipeline oscillate.
+/// `RuleMultNegOne` (cleanup, `5747`) rewrites `a * -1` to `-a`, and
+/// `Rule2Comp2Mult` (expression) rewrites `-a` back to `a * -1`; `RuleSubRight`
+/// and `Rule2Comp2Sub` pair with `RuleSub2Add` the same way. Measured on
+/// `animal_crossing_gafe01`'s largest function the pool alternated between 45 and
+/// 33 firings for every one of its twenty-four iterations and never reported
+/// zero, so the emitted C was decided by the iteration cap.
+///
+/// # Why it is called from inside the loop anyway
+///
+/// Moving it out was implemented, measured, and reverted. `agrees` went 31 -> 29:
+/// `osContGetReadData` and `GameWorld::drawMainMenuOpt` began printing their
+/// prologue register spills, which is what the `excess-casts` family reports when
+/// a `*(uint32_t *)(r1 - 4) = r31;` survives into the output.
+///
+/// The cause is a missing facility, not the placement. Ghidra never has to
+/// remove those stores, because `ActionRestrictLocal` (`coreaction.cc:2036`)
+/// marks the frame slot that parks a preserved register as not-mapped, so it is
+/// never a local. That algorithm looks for a **`COPY` whose output lands in the
+/// stack space** - `isUnaffectedStorage` is `vn->getSpace() == space`
+/// (`varmap.hh:244`). Ghidra has such varnodes because `IPTR_SPACEBASE` spaces
+/// and `ActionSpacebase` give every frame slot its own varnode. This graph keeps
+/// a stack save as a `STORE` to a RAM address computed from the stack-pointer
+/// register, so there is no COPY and no stack-space varnode to mark: the ported
+/// `graph::stackframe::ActionRestrictLocal` runs and marks **zero** slots, which
+/// was measured rather than assumed.
+///
+/// With the pool inside the loop, its rules keep rewriting the spill shapes until
+/// the statement-level pass that removes matched save/restore pairs can recognise
+/// them. That is compensation, and it costs the fixed point: the pool alternates
+/// 25/33 forever. The honest state of the port is that **the phase boundary is
+/// blocked on spacebase varnodes**, and the exchange rate is currently two
+/// agreeing functions against a cap-determined answer on one.
+///
+/// The prerequisite is therefore `IPTR_SPACEBASE`-style address spaces plus
+/// `ActionSpacebase`, after which this should be called once from
+/// `native.rs` after the full loop and the compensation removed.
+pub fn cleanup_pipeline() -> Box<dyn Action> {
+    let dropped: Vec<String> = std::env::var("VENTRIS_SKIP_RULE")
+        .map(|value| value.split(',').map(str::trim).map(str::to_owned).collect())
+        .unwrap_or_default();
+    let skip = |name: &str| {
+        std::env::var("VENTRIS_SKIP_GROUP")
+            .map(|value| value.split(',').any(|entry| entry.trim() == name))
+            .unwrap_or(false)
+    };
+    let mut pipeline = ActionGroup::new("cleanup-pipeline");
+    // Ghidra's `cleanup` pool. The bitfield rules rewrite a mask-and-shift into a
+    // single ZPULL, so running them earlier would remove the shapes the
+    // expression rules match on; the same ordering argument is why
+    // `RuleMultNegOne` and `RuleAddUnsigned` belong here - they rewrite an
+    // addition of a large constant into a subtraction, a presentation choice the
+    // arithmetic rules must not see.
     //
     // Registration order follows `coreaction.cc:5745-5767`.
     if !skip("cleanup") {
@@ -792,52 +908,6 @@ pub fn default_pipeline() -> Box<dyn Action> {
             cleanup = cleanup.add_rule(rule);
         }
         pipeline = pipeline.add(Box::new(FixedPoint::new(Box::new(cleanup))));
-    }
-    // Ghidra's `localrecovery` group, which reads the local scope:
-    // ActionRestructureVarnode at coreaction.cc:5555-5557 and
-    // ActionMappedLocalSync at 5741-5743.
-    if !skip("localrecovery") {
-        let mut localrecovery = ActionGroup::new("localrecovery");
-        for action in [
-            Box::new(super::scopeconsumers::ActionRestructureVarnode) as Box<dyn Action>,
-            Box::new(super::scopeconsumers::ActionMappedLocalSync),
-        ] {
-            localrecovery = localrecovery.add(action);
-        }
-        pipeline = pipeline.add(Box::new(localrecovery));
-    }
-    // Ghidra's `protorecovery` group: prototype recovery reads the function's
-    // FuncProto, which the graph path populates from the target ABI.
-    // ActionUnjustifiedParams is at coreaction.cc:5737 and
-    // ActionPrototypeWarnings at 5794.
-    if !skip("protorecovery") {
-        let mut protorecovery = ActionGroup::new("protorecovery");
-        for action in [
-            Box::new(super::protorecovery::ActionInputPrototype) as Box<dyn Action>,
-            Box::new(super::protorecovery::ActionOutputPrototype),
-            Box::new(super::protorecovery::ActionPrototypeTypes),
-            Box::new(super::protoconstraints::ActionUnjustifiedParams),
-            Box::new(super::protoconstraints::ActionPrototypeWarnings),
-        ] {
-            protorecovery = protorecovery.add(action);
-        }
-        pipeline = pipeline.add(Box::new(protorecovery));
-    }
-    // Ghidra adds these immediately after the cleanup pool: `ActionPreferComplement`
-    // (`coreaction.cc:5770`), `ActionStructureTransform` (`5772`) and then
-    // `ActionNormalizeBranches` (`5773`). The third was never registered - it
-    // inverts a branch-only comparison together with its target, which is the
-    // normalization the merge phase after it expects to already have happened.
-    if !skip("blockrecovery") {
-        let mut blockrecovery = ActionGroup::new("blockrecovery");
-        for action in super::structuretransform::all() {
-            blockrecovery = blockrecovery.add(action);
-        }
-        blockrecovery = blockrecovery.add(Box::new(super::branchaction::ActionNormalizeBranches));
-        pipeline = pipeline.add(Box::new(blockrecovery));
-    }
-    if !skip("infer-types-rich") {
-        pipeline = pipeline.add(Box::new(super::typefactory::ActionInferTypes));
     }
     Box::new(pipeline)
 }
