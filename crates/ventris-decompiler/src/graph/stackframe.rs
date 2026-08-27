@@ -125,6 +125,90 @@ pub fn frame_offset(data: &Funcdata, address: VarnodeId, stack_pointer: Location
     frame_offset_inner(data, address, stack_pointer, &mut active)
 }
 
+/// Marks the frame-base values and splits a shared spacebase definition.
+///
+/// Ghidra's `ActionSpacebase::apply` is `data.spacebase()`
+/// (`coreaction.hh:277-278`), and `Funcdata::spacebase` (`funcdata.cc:230`) does
+/// two things: it marks each stack-pointer varnode as a spacebase with a
+/// `TypeSpacebase` pointer type, and - for a spacebase varnode that is *defined*
+/// by an `INT_ADD` and still has more than one reader - calls
+/// `Funcdata::splitUses` to give every reader its own definition.
+///
+/// The marking half needs nothing here: `Funcdata::spacebase` already records the
+/// frame-base location, and the modules that ask "is this the spacebase" compare
+/// against it, which is the same fact Ghidra stores as a per-varnode bit.
+///
+/// `splitUses` is the half that rewrites. Ghidra's comment says why the split
+/// waits: the varnode is "given a chance for descendants to be eliminated
+/// naturally" first, and only a *still*-shared frame expression is duplicated, so
+/// each use carries its own offset rather than a common temporary.
+///
+/// **Ported but deliberately not registered, because it cannot fire here.** The
+/// rewrite needs a spacebase varnode *at the frame-base location* whose defining
+/// operation is an `INT_ADD`. Ghidra has those because the stack-pointer register
+/// is repeatedly redefined in its own space; this graph pushes every derived frame
+/// value into a fresh unique instead, so the frame-base location holds exactly one
+/// varnode - the incoming input, which has no definition. Registered at
+/// `coreaction.cc:5557` it produced **zero** splits across five
+/// `animal_crossing_gafe01` functions, measured rather than assumed, so it would
+/// have been a silent no-op in the pipeline.
+///
+/// This is the third measurement pointing at the same prerequisite:
+/// `graph::action::cleanup_pipeline` records the phase boundary it blocks, and
+/// `ActionRestrictLocal` below needed a representation adaptation for the same
+/// reason. `IPTR_SPACEBASE` address spaces are the facility all three want.
+pub struct ActionSpacebase;
+
+impl Action for ActionSpacebase {
+    fn name(&self) -> &'static str {
+        "spacebase"
+    }
+
+    fn apply(&self, data: &mut Funcdata) -> usize {
+        let Some(frame) = data.spacebase else {
+            return 0;
+        };
+        // Every live value at the frame-base location, which is what Ghidra
+        // iterates as `vbank.beginLoc(point.size, Address(point.space, point.offset))`.
+        let candidates: Vec<VarnodeId> = data
+            .at_location(frame.space, frame.offset, frame.size)
+            .to_vec();
+        let mut changed = 0;
+        for value in candidates {
+            let Some(def) = data.varnode(value).def else {
+                continue;
+            };
+            if data.opcode_of(def) != Some(op::INT_ADD) {
+                continue;
+            }
+            let readers: Vec<OpId> = data.varnode(value).descendants.iter().copied().collect();
+            if readers.len() < 2 {
+                continue; // "Only one descendant"
+            }
+            let inputs = data.op(def).inputs.clone();
+            let seq = data.op(def).seq;
+            let size = data.varnode(value).size;
+            for reader in readers {
+                let Some(slot) = data
+                    .op(reader)
+                    .inputs
+                    .iter()
+                    .position(|operand| *operand == value)
+                else {
+                    continue;
+                };
+                let duplicate = data.new_op(op::INT_ADD, seq, inputs.clone());
+                let output = data.new_varnode(frame.space, frame.offset, size);
+                data.op_set_output(duplicate, Some(output));
+                data.op_insert_before(duplicate, def);
+                data.op_set_input(reader, output, slot);
+                changed += 1;
+            }
+        }
+        changed
+    }
+}
+
 /// Canonicalise stack-pointer arithmetic into one spacebase plus a constant.
 ///
 /// Ghidra's `ActionStackPtrFlow::apply` latches on `analysis_finished` because

@@ -56,6 +56,20 @@ All notable Ventris changes are documented here.
   split by `graph::splitvarnode`'s `IndirectForm` and `PhiForm`. What it would add
   is Ghidra's `SplitFlow::traceForward`/`traceBackward` for the cases those two
   decline, and only that tracing is genuinely missing.
+- `ActionSpacebase` is ported and, measured, cannot fire. Its rewriting half is
+  `Funcdata::splitUses` (`funcdata.cc:230`, `1571`), which duplicates a spacebase
+  definition that still has several readers so each use carries its own frame
+  offset. It needs a varnode *at the frame-base location* defined by an `INT_ADD`;
+  Ghidra has those because the stack-pointer register is redefined in its own
+  space, while this graph pushes every derived frame value into a fresh unique, so
+  the frame-base location holds only the incoming input. Registered at its Ghidra
+  position it produced **zero** splits across five `animal_crossing_gafe01`
+  functions, so it is unregistered rather than left as a silent no-op - the same
+  standard applied to `RuleSegment` and `ActionLikelyTrash`.
+  That is now the third independent measurement pointing at one prerequisite:
+  `IPTR_SPACEBASE` address spaces. The cleanup-pool phase boundary wants them, so
+  does `ActionRestrictLocal`, and so does this. Porting them is the next piece of
+  the port, and until they exist these three are blocked rather than optional.
 
 - The port's own census was wrong, and fixing it found roughly forty real items.
   The old check asked whether each Ghidra rule *name appeared anywhere* in the
