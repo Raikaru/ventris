@@ -636,7 +636,10 @@ pub fn default_pipeline() -> Box<dyn Action> {
         .unwrap_or_default();
     // Each new batch is switchable so an oscillating pair can be attributed to
     // one batch without a rebuild per guess.
-    let batches: [(&str, Vec<Box<dyn Rule>>); 10] = [
+    // `splitdatatype` is deliberately absent: Ghidra registers `RuleSplitCopy`,
+    // `RuleSplitLoad` and `RuleSplitStore` in the *cleanup* pool
+    // (`coreaction.cc:5754-5756`), not here, and the pool decides when they run.
+    let batches: [(&str, Vec<Box<dyn Rule>>); 9] = [
         ("expr_bool", super::expr_bool::all()),
         ("expr_arith", super::expr_arith::all()),
         ("expr_divmod", super::expr_divmod::all()),
@@ -646,7 +649,6 @@ pub fn default_pipeline() -> Box<dyn Action> {
         ("expr_memory", super::expr_memory::all()),
         ("splitvarnode", super::splitvarnode::all()),
         ("subfloat", super::subfloat::all()),
-        ("splitdatatype", super::splitdatatype::all()),
     ];
     let skipped_batches: Vec<String> = std::env::var("VENTRIS_SKIP_BATCH")
         .map(|value| value.split(',').map(str::trim).map(str::to_owned).collect())
@@ -670,11 +672,14 @@ pub fn default_pipeline() -> Box<dyn Action> {
     }
     // Copy propagation and indirect collapse run last: they remove the
     // operations the other rules match on, so running them earlier hides work.
+    //
+    // `RulePtrsubCharConstant` and `RuleStringCopy` used to sit here, but Ghidra
+    // registers both in the *cleanup* pool (`coreaction.cc:5755`, `5760`). A
+    // cleanup rule running inside the main loop rewrites shapes the expression
+    // rules still need, which is the whole reason the pool boundary exists.
     expression = expression
         .add_rule(Box::new(super::protoconstraints::RulePiecePathology))
         .add_rule(Box::new(super::orconsume::RuleOrConsume))
-        .add_rule(Box::new(super::scopeconsumers::RulePtrsubCharConstant))
-        .add_rule(Box::new(super::scopeconsumers::RuleStringCopy))
         .add_rule(Box::new(RulePropagateCopy))
         .add_rule(Box::new(RuleIndirectCollapse));
     // Prototype and parameter recovery runs before the expression set: an
@@ -736,10 +741,19 @@ pub fn default_pipeline() -> Box<dyn Action> {
         for rule in [
             Box::new(super::expr_arith::RuleMultNegOne) as Box<dyn Rule>,
             Box::new(super::expr_arith::RuleAddUnsigned),
+            Box::new(super::expr_arith::Rule2Comp2Sub),
             Box::new(super::subfloat::RuleDumptyHumpLate),
+            Box::new(super::expr_rules::RuleSubRight),
+            Box::new(super::expr_float::RuleFloatSignCleanup),
+            Box::new(super::scopeconsumers::RulePtrsubCharConstant),
+            Box::new(super::expr_ptr::RulePieceStructure),
+            Box::new(super::splitdatatype::RuleSplitCopy),
+            Box::new(super::splitdatatype::RuleSplitLoad),
+            Box::new(super::splitdatatype::RuleSplitStore),
+            Box::new(super::scopeconsumers::RuleStringCopy),
+            Box::new(super::bitfield::RuleBitFieldStore),
             Box::new(super::bitfield::RuleBitFieldOut),
             Box::new(super::bitfield::RuleBitFieldLoad),
-            Box::new(super::bitfield::RuleBitFieldStore),
             Box::new(super::bitfield::RulePullAbsorb),
             Box::new(super::bitfield::RuleInsertAbsorb),
         ] {

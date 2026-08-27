@@ -1748,7 +1748,6 @@ pub fn all() -> Vec<Box<dyn Rule>> {
     vec![
         Box::new(Rule2Comp2Mult),
         Box::new(RuleLeftRight),
-        Box::new(Rule2Comp2Sub),
         Box::new(RuleSub2Add),
         Box::new(RuleSubCommute),
         Box::new(RuleAndOrLump),

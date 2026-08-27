@@ -2,19 +2,26 @@
 //!
 //! The implementations below follow the real `applyOp` bodies for
 //! `RuleAndPiece`, `RuleConcatCommute`, `RuleConcatLeftShift`, `RuleConcatZero`,
-//! `RuleConcatZext`, `RulePiece2Sext`, `RuleShiftPiece`, and `RuleOrMask`.
+//! `RuleConcatZext`, `RulePiece2Sext`, `RuleShiftPiece`, `RuleExtensionPush`, and
+//! `RuleOrMask`.
 //!
-//! One requested rule remains omitted:
+//! `RuleExtensionPush` is registered in Ghidra's cleanup pool
+//! (`coreaction.cc:5755`), not this module's expression pool, so it is public
+//! but intentionally omitted from `all()`.  Its input/output constant,
+//! address-force, and address-tied refusals (`ruleaction.cc:7439-7444`) are
+//! represented by the graph.
 //!
-//! * `RuleExtensionPush` is registered in Ghidra's cleanup pool
-//!   (`coreaction.cc:5755`), not this module's expression pool.  Its input and
-//!   output address-force guards (`ruleaction.cc:7440,7444`) have no graph
-//!   flag; `Funcdata::is_addr_tied` covers only the separate address-tied
-//!   guard.  The output type-lock and name-lock guards are also absent
-//!   (`ruleaction.cc:7443`).  Omitting any of these guards would make the rule
-//!   fire more often than Ghidra, and `RulePushPtr::duplicateNeed`'s required
-//!   pointer/type duplication machinery is likewise not available
-//!   (`ruleaction.cc:7467-7469`).
+//! A repository grep finds type/name lock state on `scope::SymbolFlags`
+//! (`scope.rs:258-268,382-388`) and `funcproto::ProtoParameter`
+//! (`funcproto.rs:87-90,151-158`), but no corresponding lock bits on
+//! `GraphVarnode` (`graph.rs:108-154`) and no pipeline transfer to a varnode.
+//! The output type-lock/name-lock refusal (`ruleaction.cc:7443`) is therefore
+//! vacuous for this graph and can be omitted without making the rule fire more.
+//! The descendant-shape refusals and the `RulePushPtr::duplicateNeed` rewrite
+//! (`ruleaction.cc:7445-7469`) use the graph's descendant, insertion, and
+//! destruction APIs; recovered types are not represented, while applicable
+//! outputs are unique because of the address-tied refusal.
+//!
 //!
 //! Source authority: `Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc`
 //! in the pinned Ghidra 12.1.3 tree.
@@ -66,6 +73,116 @@ fn is_free(data: &Funcdata, value: VarnodeId) -> bool {
 
 fn def(data: &Funcdata, value: VarnodeId) -> Option<OpId> {
     data.varnode(value).def
+}
+/// Duplicate an extension into every descendant, as
+/// `RulePushPtr::duplicateNeed` does for `RuleExtensionPush`.
+fn duplicate_extension_need(id: OpId, data: &mut Funcdata) {
+    let original = data.op(id).clone();
+    let output = original.output.expect("extension has an output");
+    let source = original.inputs[0];
+
+    loop {
+        let Some(descendant) = data.varnode(output).descendants.iter().next().copied() else {
+            break;
+        };
+        let slot = data
+            .op(descendant)
+            .inputs
+            .iter()
+            .position(|value| *value == output)
+            .expect("extension descendant must read its output");
+        let (space, offset, size, use_unique) = {
+            let value = data.varnode(output);
+            (
+                value.space,
+                value.offset,
+                value.size,
+                value.flags.unique || data.is_addr_tied(output),
+            )
+        };
+        let duplicate = data.new_op(original.opcode, original.seq, vec![source]);
+        // `GraphVarnode` has no recovered type to copy.  Preserve the
+        // original storage when possible, matching `buildVarnodeOut`.
+        let duplicate_output = if use_unique {
+            data.new_unique(size)
+        } else {
+            data.new_varnode(space, offset, size)
+        };
+        data.op_set_output(duplicate, Some(duplicate_output));
+        data.op_set_input(descendant, duplicate_output, slot);
+        data.op_insert_before(duplicate, descendant);
+    }
+    data.op_destroy(id);
+}
+
+/// Push an integer extension into each pointer calculation that uses it.
+///
+/// This is Ghidra's `RuleExtensionPush` (`ruleaction.cc:7428-7470`), a
+/// cleanup-pool rule intentionally not included in [`all`].
+pub struct RuleExtensionPush;
+
+impl Rule for RuleExtensionPush {
+    fn name(&self) -> &'static str {
+        "extensionpush"
+    }
+
+    fn op_list(&self) -> Vec<i32> {
+        vec![op::INT_ZEXT, op::INT_SEXT]
+    }
+
+    fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
+        let operation = data.op(id).clone();
+        if !matches!(operation.opcode, op::INT_ZEXT | op::INT_SEXT) || operation.inputs.len() != 1 {
+            return 0;
+        }
+        let source = operation.inputs[0];
+        let Some(output) = operation.output else {
+            return 0;
+        };
+        if is_constant(data, source) {
+            return 0;
+        }
+        if data.is_addr_force(source) || data.is_addr_tied(source) {
+            return 0;
+        }
+        // Type/name locks are not represented on GraphVarnode; see the
+        // module note above.
+        if data.is_addr_force(output) || data.is_addr_tied(output) {
+            return 0;
+        }
+
+        let descendants: Vec<OpId> = data.varnode(output).descendants.iter().copied().collect();
+        let mut addcount = 0usize;
+        let mut ptrcount = 0usize;
+        for descendant in descendants {
+            let descendant_operation = data.op(descendant);
+            match descendant_operation.opcode {
+                op::PTRADD => ptrcount += 1,
+                op::INT_ADD => {
+                    let Some(add_output) = descendant_operation.output else {
+                        return 0;
+                    };
+                    let Some(ptradd) = data.lone_descend(add_output) else {
+                        return 0;
+                    };
+                    if data.opcode_of(ptradd) != Some(op::PTRADD) {
+                        return 0;
+                    }
+                    addcount += 1;
+                }
+                _ => return 0,
+            }
+        }
+        if addcount + ptrcount <= 1 {
+            return 0;
+        }
+        if addcount > 0 && data.lone_descend(source).is_some() {
+            return 0;
+        }
+
+        duplicate_extension_need(id, data);
+        1
+    }
 }
 
 /// `V & concat(W,X)` can discard the high part when the mask proves that no
@@ -852,6 +969,39 @@ mod tests {
         assert_eq!(data.op(join).opcode, op::PIECE);
         assert_eq!(data.op(join).inputs, vec![high, low]);
         assert_eq!(data.varnode(join_out).size, 4);
+    }
+    /// Ghidra's `RuleExtensionPush::applyOp` (`ruleaction.cc:7435-7470`)
+    /// duplicates an extension for each pointer-calculation descendant.
+    #[test]
+    fn extension_push_duplicates_each_ptradd_use() {
+        let mut data = Funcdata::default();
+        let block = data.new_block(0x1000);
+        let source = data.new_unique(4);
+        let (extension, extended) = unary(&mut data, block, op::INT_ZEXT, source, 8);
+        let first_index = data.new_unique(4);
+        let (first_ptr, _) = binary(&mut data, block, op::PTRADD, extended, first_index, 8);
+        let stride = data.new_constant(4, 4);
+        data.op_set_input(first_ptr, stride, 2);
+        let second_index = data.new_unique(4);
+        let (second_ptr, _) = binary(&mut data, block, op::PTRADD, extended, second_index, 8);
+        data.op_set_input(second_ptr, stride, 2);
+
+        assert_eq!(RuleExtensionPush.apply_op(extension, &mut data), 1);
+        assert_eq!(data.opcode_of(extension), None);
+
+        let first_extension = data.op(first_ptr).inputs[0];
+        let second_extension = data.op(second_ptr).inputs[0];
+        assert_ne!(first_extension, extended);
+        assert_ne!(second_extension, extended);
+        assert_ne!(first_extension, second_extension);
+        for duplicate in [first_extension, second_extension] {
+            let duplicate_def = data.varnode(duplicate).def.expect("duplicate definition");
+            assert_eq!(data.op(duplicate_def).opcode, op::INT_ZEXT);
+            assert_eq!(data.op(duplicate_def).inputs, vec![source]);
+            assert_eq!(data.varnode(duplicate).size, 8);
+        }
+        assert!(data.varnode(extended).def.is_none());
+        assert!(data.varnode(extended).descendants.is_empty());
     }
 
     #[test]

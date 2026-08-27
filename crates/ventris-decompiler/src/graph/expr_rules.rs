@@ -2152,7 +2152,6 @@ pub fn all() -> Vec<Box<dyn Rule>> {
         Box::new(RuleIdentityEl),
         Box::new(RuleShiftBitops),
         Box::new(RuleDoubleShift),
-        Box::new(RuleSubRight),
         Box::new(RuleTrivialShift),
         Box::new(RuleAndDistribute),
         Box::new(RuleOrCollapse),
@@ -2225,11 +2224,32 @@ mod tests {
         (id, output)
     }
 
+    /// Every rule this module implements must be registered somewhere, and the
+    /// count is how that stays true as rules are added.
+    ///
+    /// `all()` is the *expression* pool, so a rule Ghidra registers in the
+    /// cleanup pool is deliberately absent from it and is named here instead.
+    /// Without this second list the test would push a cleanup rule back into the
+    /// main loop just to make a number match, which is the opposite of what it
+    /// is for.
     #[test]
-    fn all_matches_the_number_of_rule_impls() {
+    fn every_rule_impl_is_registered_in_some_pool() {
+        /// Implemented here, registered by `action::default_pipeline` in the
+        /// cleanup pool: `RuleSubRight` at `coreaction.cc:5751`.
+        const CLEANUP_POOL_ROUTED: [&str; 1] = ["subright"];
         let marker = ["impl Rule", " for "].concat();
         let count = include_str!("expr_rules.rs").matches(&marker).count();
-        assert_eq!(all().len(), count);
+        assert_eq!(
+            all().len() + CLEANUP_POOL_ROUTED.len(),
+            count,
+            "a rule impl is in neither the expression pool nor the cleanup list"
+        );
+        assert!(
+            all()
+                .iter()
+                .all(|rule| !CLEANUP_POOL_ROUTED.iter().any(|name| *name == rule.name())),
+            "a cleanup-pool rule is also in the expression pool, so it runs twice"
+        );
     }
 
     #[test]

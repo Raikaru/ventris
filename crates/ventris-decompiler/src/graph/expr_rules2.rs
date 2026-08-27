@@ -13,17 +13,11 @@
 //! `RuleSignForm::{getOpList,applyOp}`, `RuleSignDiv2::{getOpList,applyOp}`,
 //! `RuleSignNearMult::{getOpList,applyOp}`, `RuleModOpt::{getOpList,applyOp}`,
 //! `RuleFloatCast::{getOpList,applyOp}`, `RuleCondNegate::{getOpList,applyOp}`,
-//! and `RuleFuncPtrEncoding::{getOpList,applyOp}`.
+//! `RuleFuncPtrEncoding::{getOpList,applyOp}`, and
+//! `RuleSwitchSingle::{getOpList,applyOp}`.
 //!
-//! Three requested rules remain unported for precise, observable reasons:
+//! Two requested rules remain unported for precise, observable reasons:
 //!
-//! * `RuleSwitchSingle` requires the `Funcdata` jump-table registry: Ghidra
-//!   stores tables in the member `jumpvec` (`funcdata.hh:89`), queries it with
-//!   `findJumpTable` (`ruleaction.cc:5434`), and removes entries with
-//!   `removeJumpTable` (`ruleaction.cc:5472`).  Ventris' recovery pass returns
-//!   a side-channel `Vec<JumpTable>` (`jumptable.rs:508-515`) rather than a
-//!   registry, so an `apply_op` rule cannot see the recovered table without
-//!   adding that `Funcdata` state.
 //! * `RuleSegment` requires the architecture `SegmentOp` registry and emulator;
 //!   its C++ body throws when the lookup is absent (`ruleaction.cc:9016`).
 //!   No supported Ventris lifter emits `SEGMENTOP` (the only match is the
@@ -32,7 +26,6 @@
 //! * `RuleSplitFlow` requires the cross-block `SplitFlow` worklist and
 //!   transform (`subflow.cc:2011-2036`), which is not represented by the local
 //!   graph; its rule entry is at `subflow.cc:2045`.
-//!
 //! `RulePullsubIndirect` uses the graph's exact `is_addr_force` predicate for
 //! Ghidra's `isAddrForce` guard (`ruleaction.cc:976`).  Its IOP annotations,
 //! consume masks, precision flags, indirect creation, and possible-output
@@ -1890,6 +1883,106 @@ impl Rule for RuleModOpt {
     }
 }
 
+/// Convert a recovered computed branch with one destination to an ordinary
+/// branch.
+///
+/// This is Ghidra's `RuleSwitchSingle` (`ruleaction.cc:5420-5474`), registered
+/// in the `actprop` `analysis` pool (`coreaction.cc:5657`).
+pub struct RuleSwitchSingle;
+
+impl Rule for RuleSwitchSingle {
+    fn name(&self) -> &'static str {
+        "switchsingle"
+    }
+
+    fn op_list(&self) -> Vec<i32> {
+        vec![op::BRANCHIND]
+    }
+
+    fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
+        if data.opcode_of(id) != Some(op::BRANCHIND) {
+            return 0;
+        }
+        let Some(parent) = data.op(id).parent else {
+            return 0;
+        };
+        // Ghidra's `sizeOut() != 1` guard. The existing edge is the CFG
+        // destination recovered for this switch; this rule only changes how
+        // the terminator names that already-single destination.
+        if data.block(parent).successors.len() != 1 {
+            return 0;
+        }
+
+        let (target_address, entry_count, all_cases_match) = {
+            let Some(jump_table) = data.find_jump_table(id) else {
+                return 0;
+            };
+            // Ghidra's `numEntries()` is the address-table length, not the
+            // default entry. `cases` stores those indexed (label,target)
+            // pairs; `default_target` is a separate fall-through destination
+            // and therefore is deliberately not counted here.
+            let entry_count = jump_table.cases.len();
+            if entry_count == 0 {
+                return 0;
+            }
+            // There is no separate `isLabelled` bit in Ventris. Every table
+            // returned by recovery carries concrete `(label,target)` pairs in
+            // `cases`, so a nonempty cases vector satisfies that guard.
+            let target_address = jump_table.cases[0].1;
+            let mut all_cases_match = false;
+            if entry_count != 1 {
+                all_cases_match = true;
+                for (_, target) in jump_table.cases.iter().skip(1) {
+                    if *target != target_address {
+                        all_cases_match = false;
+                        break;
+                    }
+                }
+            }
+            (target_address, entry_count, all_cases_match)
+        };
+
+        let Some(switch_value) = data.op(id).inputs.first().copied() else {
+            return 0;
+        };
+        let mut need_warning = entry_count != 1;
+        if !is_constant(data, switch_value) {
+            need_warning = true;
+        }
+        // A nonconstant selector makes this a suspicious one-destination
+        // recovery, while a constant selector is final confirmation.
+        if need_warning {
+            let mut message = format!(
+                "Switch with 1 destination removed at {:#x}",
+                data.op(id).seq.address
+            );
+            if all_cases_match {
+                message.push_str(&format!(
+                    " : {entry_count} cases all go to same destination"
+                ));
+            }
+            // Ventris' deduplicating warning sink is the graph equivalent of
+            // Ghidra's `warningHeader`.
+            data.warning(message);
+        }
+
+        let target_size = data.varnode(switch_value).size.max(1);
+        let code_ref = data.new_varnode(ventris_lifter::RAM_SPACE, target_address, target_size);
+        data.op_set_opcode(id, op::BRANCH);
+        data.op_set_input(id, code_ref, 0);
+        data.remove_jump_table(id);
+        // Ventris does not cache a structure on Funcdata: structuring runs
+        // later from the current graph, so Ghidra's `getStructure().clear()`
+        // has no local equivalent. `op_set_opcode`/`op_set_input` already
+        // invalidate the derived mask cache.
+        //
+        // No edge surgery is needed: the single-out precondition leaves the
+        // recovered destination edge in place, and changing the branch
+        // operand does not alter predecessor/merge slots.
+        1
+    }
+}
+
 // -------------------------------------------------------------------------
 // Floating-point cast composition.
 
@@ -1980,6 +2073,7 @@ pub fn all() -> Vec<Box<dyn Rule>> {
         Box::new(RuleSignDiv2),
         Box::new(RuleSignNearMult),
         Box::new(RuleModOpt),
+        Box::new(RuleSwitchSingle),
         Box::new(RuleFloatCast),
     ]
 }
@@ -2036,6 +2130,44 @@ mod tests {
         );
         data.op_insert_end(id, block);
         id
+    }
+    /// Ghidra's `RuleSwitchSingle` checks a recovered labelled table, warns
+    /// about suspicious one-destination switches, then replaces the
+    /// `BRANCHIND` with a `BRANCH` to its sole target
+    /// (`ruleaction.cc:5428-5474`).
+    #[test]
+    fn switch_single_rewrites_branch_and_removes_jump_table() {
+        let mut data = Funcdata::default();
+        let source = block(&mut data);
+        let destination = data.new_block(0x2000);
+        data.add_edge(source, destination);
+        let switch_value = input_value(&mut data, 4);
+        let branch = no_output(&mut data, source, op::BRANCHIND, vec![switch_value]);
+        data.jump_tables.push(super::super::jumptable::JumpTable {
+            branch,
+            switch_value,
+            cases: vec![(0, 0x2000), (1, 0x2000)],
+            default_target: None,
+        });
+
+        assert_eq!(RuleSwitchSingle.apply_op(branch, &mut data), 1);
+        assert_eq!(data.op(branch).opcode, op::BRANCH);
+        assert_eq!(
+            data.branch_target(branch),
+            Some(destination),
+            "the rewritten branch names the recovered destination"
+        );
+        assert_eq!(
+            data.block(source).successors,
+            vec![destination],
+            "the existing single CFG edge remains valid after the rewrite"
+        );
+        assert!(data.find_jump_table(branch).is_none());
+        assert!(data.jump_tables.is_empty());
+        assert_eq!(
+            data.warnings(),
+            &["Switch with 1 destination removed at 0x1000 : 2 cases all go to same destination"]
+        );
     }
 
     #[test]

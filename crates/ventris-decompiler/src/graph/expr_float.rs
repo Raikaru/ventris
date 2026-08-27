@@ -937,7 +937,6 @@ pub fn all() -> Vec<Box<dyn Rule>> {
     vec![
         Box::new(RuleFloatRange),
         Box::new(RuleFloatSign),
-        Box::new(RuleFloatSignCleanup),
         Box::new(RuleIgnoreNan),
         Box::new(RuleUnsigned2Float),
         Box::new(RuleInt2FloatCollapse),
