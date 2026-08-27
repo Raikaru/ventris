@@ -6,6 +6,104 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- The port's own census was wrong, and fixing it found roughly forty real items.
+  The old check asked whether each Ghidra rule *name appeared anywhere* in the
+  tree; every name did, inside the exclusion comment explaining its absence. A
+  census that asks whether a `struct` exists and whether it is in a registration
+  list found **20 live-registered rules never implemented**, **8 cleanup-pool
+  rules registered in the wrong pool**, and **a whole rule pool missing**.
+  `agrees` is now **31**, its first move past 30.
+- Eleven of those rules are ported: `RuleMultNegOne`, `RuleAddUnsigned`,
+  `RuleLeftRight`, `RuleSubCommute`, `RulePullsubIndirect`, `RuleCondNegate`,
+  `RuleFuncPtrEncoding`, `RuleIgnoreNan`, `RuleConditionalMove`,
+  `RuleDumptyHumpLate`, `RuleEarlyRemoval`; then `RuleSwitchSingle`,
+  `RuleExtensionPush` and `RuleExpandLoad` once the facilities they needed
+  existed. **154 of Ghidra's 160 live-registered rules are now implemented**, and
+  each of the six that are not names its exact missing prerequisite with a
+  `file.cc:line`.
+  Half the old exclusion notes were stale rather than true: `RuleSubCommute` was
+  blocked on precision marks that now exist, `RulePullsubIndirect` on IOP
+  annotations that now exist, and `RuleIgnoreNan` on `nan_ignore_all` - which is
+  not even the arm Ghidra takes by default, because `resetDefaults` leaves
+  `nan_ignore_compare` **true** (`architecture.cc:1427-1428`) and
+  `OptionNanIgnore` disables the rule only when both are false.
+- Ghidra's second rule pool, `oppool2` (`coreaction.cc:5713-5721`), exists here
+  now, and it is what took `agrees` to 31. Its five rules - `RulePushPtr`,
+  `RuleStructOffset0`, `RulePtrArith`, `RuleLoadVarnode`, `RuleStoreVarnode` -
+  were all in the single expression pool, which runs earlier. Ghidra runs them
+  only after the block structure and the constant-pointer marks exist, so that a
+  pointer they synthesise is not re-derived by the arithmetic rules that ran
+  before them. The same boundary argument moved eight rules into the cleanup
+  pool, where Ghidra registers them.
+- Facilities the rules needed, each ported rather than approximated:
+  `PcodeOp::boolean_flip`/`is_cpool_transformed`/`calculated_bool`;
+  `Architecture::funcptr_align` and the `nan_ignore` pair; `Varnode::addrforce`
+  with `ActionDeadCode`'s narrowing of it (`coreaction.cc:3995-3996`), which is
+  what keeps it distinct from `addrtied`; `markIndirectCreation`'s
+  `possibleOutput` argument, which we had been dropping, together with
+  `TransformOp::inheritIndirect` and `Varnode::isIndirectZero`; and
+  `Funcdata::jumpvec` with `findJumpTable`/`removeJumpTable`, populated before
+  the rule pool runs as Ghidra populates it.
+- Sixteen ported actions were registered nowhere and had never run. `ActionStart`,
+  `ActionStartTypes`, `ActionStartCleanUp`, `ActionAssignHigh`,
+  `ActionMarkIndirectOnly`, `ActionStop`, `ActionSwitchNorm` and
+  `ActionNormalizeBranches` now run at their Ghidra positions. The lifecycle ones
+  matter more than they look: `RuleEarlyRemoval` had been gated behind
+  `processing_complete`, which only `ActionStop` sets and Ghidra runs last
+  (`coreaction.cc:5795`), while the rule lives in `actprop` (`5563`) - so the
+  guard could never be true where the rule runs and the rule was decoration.
+  Its real gate is `deadRemovalAllowed`, `pass > deadcodedelay`
+  (`heritage.cc:2829-2834`), and this graph has no delay to compare against.
+- `ActionSwitchNorm` regressed `agrees` to 29 when first registered, and the gate
+  caught it in fifteen seconds. Ghidra folds a switch's normalization only for a
+  table that is **not yet labelled**; ours folded unconditionally, because it had
+  no table registry to consult and re-derived candidates from every `BRANCHIND`.
+  Every table `recover_jump_tables` produces is labelled by construction, so the
+  fold applied to none of them, and doing it anyway cost
+  `dl_G_MOVEWORD__5emu64Fv` its whole structure.
+- The remaining unimplemented actions are accounted for rather than absent.
+  `ActionHeritage`, `ActionSetCasts`, `ActionBlockStructure`,
+  `ActionFinalStructure`, `ActionMergeRequired`, `ActionMarkExplicit` and
+  `ActionMarkImplied` are ported function-shaped instead of as action structs -
+  the last two together as `value::mark_explicit_with`. `ActionConstantPtr`,
+  `ActionNonzeroMask`, `ActionNameVars` and `ActionRestrictLocal` are
+  deliberately unregistered because their `apply` changes nothing: the main loop
+  stops when `changed` reaches zero, so a pure computation reporting a non-zero
+  count buys extra rounds of every other pass and cannot buy a different answer.
+  `ActionLikelyTrash` has no data source - `<likelytrash>` appears only in x86
+  cspecs in the shipped 12.1.3 tree - and `ActionExtraPopSetup` is inert because
+  MIPS and PowerPC both declare `extrapop="0"`.
+- `MAX_TABLE_ENTRIES` is 1024, matching `Architecture::max_jumptable_size`
+  (`architecture.cc:1432`). It was `0x1_0000`, sixty-four times the oracle's
+  bound, so Ghidra would reject a table this accepted. Measured as a performance
+  change it is worth nothing, which is why it is recorded here as an equivalence
+  fix and not as an optimisation.
+- The gate runs in **14 seconds** instead of about 190, which is why the wave
+  above could be measured after every landing instead of at the end.
+  `tools/gate.py` runs build, suite, corpus and census once each, in dependency
+  order, and prints what every stage cost.
+  The build was the whole story and it was a two-line config fix: Cargo disables
+  incremental compilation for `release` by default, correct for a shipped
+  artifact and wrong for a profile rebuilt dozens of times an hour. `cargo build`
+  went 22s -> 1.5s and the suite 70s -> 8.6s; the tests themselves run in half a
+  second, so every remaining second had been compilation, half of it a second
+  `cargo test` run whose only purpose was to total the counts. The corpus gate
+  was serial across 52 subprocesses and now fans out over entries and functions,
+  with the report checked byte-identical to the serial one rather than assumed so.
+- Two performance hypotheses are recorded as refuted, because both looked
+  plausible enough to ship. Hoisting an O(blocks) precondition in front of
+  `return_goto_edges` in the full loop: that call is **134 microseconds**, and the
+  guard was reverted. Narrowing the jump-table bound: **zero** measured change.
+  What the profile actually says is that the gate's residual cost is one
+  function, `animal_crossing_gafe01` `0x8003ea0c`, at about 11 seconds against a
+  0.15-second corpus median, split roughly evenly between `emit_structured` and
+  the post-loop pass region, and flat in `--limit` above 1024 so not size-driven.
+  `VENTRIS_TRACE_ROUNDS` reports per-round, per-stage change counts and is what
+  found that; it also shows `stackptrflow` reporting exactly ten changes every
+  round forever and the rule pool exactly twenty-nine from round two, so the loop
+  runs to its cap and the output depends on the cap rather than on a fixed point.
+  That is a correctness smell with a name attached, not just a slow one.
+
 - `RuleBitFieldIn`'s exclusion is now precise about what it costs. The note said
   "it needs `Datatype::hasBitfields` first", which understated it: the rule's
   whole discovery is `getTypeReadFacing(op)->hasBitfields()` with no structural
