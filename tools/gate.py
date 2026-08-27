@@ -137,6 +137,30 @@ def stage_corpus(image_dir: Path) -> Stage:
     return stage
 
 
+def stage_grading() -> Stage:
+    """Checks the equivalence grading scale still accepts and rejects what it claims.
+
+    The census reports a headline agreement number, and `equivalence.py` reports
+    a stricter one. Both are only worth reading if the scale underneath them has
+    been probed: a comparator that silently starts answering "equivalent" is
+    indistinguishable from real progress. This is cheap and needs no corpus, so
+    it runs on every gate.
+    """
+    stage = Stage("grading")
+    start = time.time()
+    completed = run(
+        [sys.executable, os.fspath(ROOT / "tools" / "equivalence.py"), "--self-test"]
+    )
+    stage.seconds = time.time() - start
+    stage.ok = completed.returncode == 0
+    marker = "equivalence self-test: ok"
+    if marker in completed.stdout:
+        stage.detail = completed.stdout.split(marker)[1].strip().strip("()")
+    else:
+        stage.detail = (completed.stdout + completed.stderr).strip()[-400:]
+        stage.ok = False
+    return stage
+
 def stage_census(image_dir: Path, ghidra: Path, out: Path, reuse: bool) -> Stage:
     stage = Stage("census")
     destination = Path("C:/tmp/census-gate.json")
@@ -208,11 +232,12 @@ def main(argv: list[str] | None = None) -> int:
         stages.append(stage_tests("ventris-decompiler"))
         return report(stages)
 
-    # The suite is independent of both corpora, and the corpora are independent
-    # of each other, so all three run at once. The build had to finish first
-    # because the corpora exercise the binary it produces.
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+    # The suite is independent of both corpora, the corpora are independent of
+    # each other, and the grading self-test needs neither. The build had to
+    # finish first because the corpora exercise the binary it produces.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
         futures = [
+            pool.submit(stage_grading),
             pool.submit(stage_tests, None),
             pool.submit(stage_corpus, args.image_dir),
             pool.submit(

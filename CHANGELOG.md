@@ -6,6 +6,92 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- **The project's headline quality number was measuring far less than it sounded
+  like, and the honest figure is much worse.** `quality_census.py` reports
+  `agrees=31` of 37 - about 84% - but `agrees` means only "none of nine counting
+  tests fired". Every one of those tests is a count or a threshold: more `goto`s
+  than the oracle, fewer `if`s, a call count that differs, casts more than
+  doubled. Two renders can differ in every identifier, every literal, the order
+  of every statement and the spelling of every operator and still agree on all
+  nine. Several tests are one-directional, so emitting *more* loops or *fewer*
+  gotos than Ghidra also scored as agreement.
+  `tools/equivalence.py` answers the stricter question by comparing token
+  streams, graded: `exact` (bytes), `token` (same tokens), `alpha` (same after
+  canonically renaming locals and folding the two type vocabularies together),
+  `skeleton` (same control flow and expression shape, names and constants
+  ignored). Measured over 855 functions - 23x the pinned corpus, and chosen by
+  Ghidra's own function list rather than by hand:
+
+  | level | functions | share |
+  |---|---|---|
+  | `exact` | 0 | 0.0% |
+  | `token` | 1 | 0.1% |
+  | `alpha` | 0 | 0.0% |
+  | `skeleton` | 13 | 1.5% |
+  | fails all four | 841 | 98.4% |
+
+  So **0.1% equivalent modulo local naming, 1.6% even structurally right**, with
+  a median token similarity of 0.347 among the failures. That is the number to
+  quote, and the 84% is not.
+- The larger corpus came from `tools/sweep_oracle.py` and `tools/CensusSweep.java`,
+  which export Ghidra's decompilation of every function it found in an image up
+  to a bound, instead of the functions a human pinned. Removing that selection
+  bias matters: the pinned 37 were chosen partly *because* they were interesting.
+- Three separate confounders had to be removed before the number meant anything,
+  and each one had been quietly inflating or deflating it:
+  * Type vocabulary. Ghidra prints `uint`/`byte`/`ushort`; this port prints C99
+    fixed-width names. Comparing the spellings as unequal made `alpha`
+    unreachable on essentially every function - it measured the vocabulary and
+    buried everything else. `TYPE_CANON` folds each spelling to a width-and-class
+    token. `undefined4` is deliberately *not* folded into `uint32_t`: that is
+    Ghidra declining to type something, and collapsing them would let this port
+    claim agreement exactly where the oracle said "I do not know".
+  * The declaration prologue. Both renderers emit declarations first, so the
+    *first* divergence was nearly always in that block - one function's real
+    defect was a missing `switch`, reported as a type difference. The comparator
+    now splits prologue from statements and grades them apart. The split also
+    refuted the obvious hypothesis: statement-level grades are identical to
+    whole-function grades, and **zero** functions differ only in declarations, so
+    the disagreement is in the statements, not the types alone.
+  * A misleading class name. A single `call-target` class read as "callee
+    symbolisation", which would have aimed the work there. Sampling 40 functions
+    put 535 of its 548 chunks on alpha-renamed local slots and only 13 on real
+    names. Split into `local-slot` and `symbol-name`, the ranking says something
+    quite different.
+- With those fixed, the ranked divergences over 28,847 differing chunks are
+  `local-slot` 49.7%, `type-width-or-sign` 11.0%, `dereference-or-index` 8.1%,
+  `type-unknown` 5.6%, `symbol-name` 4.2%, `cast` 3.4%, `control-keyword` 3.0%,
+  `argument-list` 2.3%. The dominant defect is that the two renderers partition
+  values into different numbers of locals - not naming, and not control flow.
+- One function is worth quoting whole, because it shows three defects at once
+  that the counting census scored as agreement. Ghidra renders
+  `UVar1 = clock(); UVar1 = __udivdi3(UVar1,0x240); return (int)UVar1;`; this
+  port renders `sub_126e80(); sub_1322d8(uVar1, 0x240); return 0;` - the
+  call's return value is never captured, `uVar1` is then read uninitialised, the
+  return is a literal, and the callee names are unresolved.
+- `gate.py` gained a `grading` stage running `equivalence.py --self-test`, 15
+  cases pinning what each level accepts and rejects, at 0.2s. A comparator that
+  silently starts answering "equivalent" is indistinguishable from progress, so
+  the scale is checked on every gate rather than trusted.
+- GBA is measured and deliberately still absent, which is worth recording since
+  the obvious next move is to add it. Ghidra 12.1.3 ships no GBA loader;
+  `pudii/gba-ghidra-loader` 1.1.0 does install into `Ghidra/Extensions` and *is*
+  discovered under 12.1.3 despite declaring 12.0.2 (`tools/ListLoaders.java`
+  confirms - and note headless `-loader` wants the class name `GBALoader`, not
+  the display name "GBA Loader"). It still cannot serve as an oracle: a 16 MB
+  ROM ran 25 minutes and exported *zero* functions while the decompiler logged
+  continuous "Unable to resolve constructor" errors, because GBA code is mostly
+  Thumb and nothing recovers `TMode` per function. Measuring against that would
+  measure Ghidra's ARM/Thumb recovery. Raw `BinaryLoader` is worse: no memory
+  map, so analysis pattern-scans all 16 MB, and it had burned 3498 CPU-seconds
+  without finishing.
+- `equivalence.py` bounds each render (`--render-timeout`, default 60s). One
+  unbounded PS2 function had stalled a whole sweep past an hour; ten now report
+  as "too slow to measure" and stay visible in the report instead of hiding.
+  PS2 addresses are also qualified from the manifest's `address_space`, without
+  which all 400 PS2 functions failed to render as ambiguous between `ram` and
+  `.text`.
+
 - The rule pool did not reach a fixed point, and the reason is now measured. But
   the first thing to record is a correction: **an earlier claim in these notes,
   that the emitted C was therefore decided by the iteration cap, was wrong.**

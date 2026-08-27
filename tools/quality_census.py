@@ -44,6 +44,23 @@ GHIDRA_IMPORT = {
         "-loader-baseAddr",
         "0x80000000",
     ],
+    # GBA is deliberately absent, and the reason is measured rather than assumed.
+    #
+    # Ghidra 12.1.3 ships no GBA loader. `pudii/gba-ghidra-loader` 1.1.0 does
+    # install cleanly into `Ghidra/Extensions` and is discovered under 12.1.3
+    # despite declaring 12.0.2 - `ClassSearcher` finds `gba.GBALoader`, which
+    # `tools/ListLoaders.java` will confirm. Note that headless `-loader` wants
+    # the class simple name (`GBALoader`), not the display name ("GBA Loader");
+    # passing the display name yields "Invalid loader name specified".
+    #
+    # It is still not usable as an oracle. A 16 MB Pokemon ROM ran 25 minutes
+    # with the proper loader and exported *zero* functions, and the decompiler
+    # logged continuous "Unable to resolve constructor" errors - SLEIGH failing
+    # to decode, because GBA code is mostly Thumb and nothing recovers the TMode
+    # register per function. Measuring against that oracle would measure
+    # Ghidra's ARM/Thumb mode recovery, not this decompiler. Raw `BinaryLoader`
+    # is worse again: no memory map, so analysis pattern-scans all 16 MB and had
+    # burned 3498 CPU-seconds without finishing.
 }
 
 
