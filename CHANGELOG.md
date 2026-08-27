@@ -6,6 +6,21 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- The emitter can spell C's comma operator, so a short-circuit no longer has to
+  hoist its second test's work. `Expr::Assign` and `Expr::Comma` are new, with
+  the two lowest precedences C gives them, and `Condition::Sequenced` is how the
+  structurer says "this test is preceded by its own block's work". `ruleBlockOr`
+  now sequences instead of refusing, and `Emem_KillSwMember__Fv` renders
+  `if (!(pVar3 == 0 || (sub_80021320(uVar16), pVar3 == 0)))` - the shape
+  `PrintC` produces. The refusal survives only for work with no expression form
+  at all, a store among it, where folding would drop the statement.
+- One subtlety made that feature look like a regression before it was found. The
+  block a condition sequences is emitted *by the condition*, so
+  `collect_blocks` did not see it, and `finish`'s completeness guard - which
+  exists to catch a rule that drops a block out of the tree - re-emitted the work
+  as its own region after the function's `return`. The call then appeared twice
+  and `call-census` went from one function to three. Counting a sequenced prelude
+  as present fixes it, and the guard keeps doing its job.
 - All thirteen forms `SplitVarnode::applyRuleIn` dispatches to are now ported:
   `AddForm`, `SubForm`, `LogicalForm`, `Equal1Form`, `Equal2Form`,
   `Equal3Form`, `MultForm`, `ShiftForm`, `LessConstForm`, `LessThreeWay`,

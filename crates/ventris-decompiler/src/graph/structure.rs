@@ -42,6 +42,18 @@ pub enum Condition {
     },
     Or(Box<Condition>, Box<Condition>),
     And(Box<Condition>, Box<Condition>),
+    /// A test preceded by the work its own block performs.
+    ///
+    /// A short-circuit's second test may compute something before testing it,
+    /// and that work must stay *inside* the condition: it runs only when the
+    /// first test did not settle the answer. Ghidra prints it as C's comma
+    /// expression - `(iVar2 = FUN(x), iVar2 != 0)` - and this variant is how the
+    /// structurer says so without moving the block's statements out in front of
+    /// the condition, which would run them unconditionally.
+    Sequenced {
+        prelude: GraphBlockId,
+        test: Box<Condition>,
+    },
 }
 
 /// A recovered source construct.
@@ -1220,6 +1232,22 @@ impl<'a> Graph<'a> {
         })
     }
 
+    /// Whether every observable operation in the block has an expression form.
+    ///
+    /// A call is a value in C, with or without a result. A store is not, and
+    /// neither is a branch, so a block holding one cannot move inside a
+    /// condition: the comma expression would drop it. Markers contribute
+    /// nothing and a branch is what the condition itself becomes.
+    fn can_sequence(&self, block: GraphBlockId) -> bool {
+        self.data.block(block).ops.iter().copied().all(|operation| {
+            let opcode = self.data.op(operation).opcode;
+            is_marker_opcode(opcode)
+                || is_call_opcode(opcode)
+                || is_flow_break_opcode(opcode)
+                || self.data.op(operation).output.is_some()
+        })
+    }
+
     /// The condition under which this node transfers to the given successor.
     fn condition_toward(&self, node: NodeId, successor: NodeId) -> Option<Condition> {
         let index = self.nodes[node]
@@ -1300,16 +1328,19 @@ impl<'a> Graph<'a> {
             if self.is_complex(self.nodes[second].entry, 2) {
                 continue;
             }
-            // Concatenating the two bodies puts the second test's statements
-            // *before* the combined condition, so they run whether or not the
-            // first test would have reached them. Ghidra gets away with this
-            // because `PrintC` emits the second block's work inside the
-            // condition as a comma expression - `(iVar2 = FUN_80021320(iVar5),
-            // iVar2 != 0)`. Until the emitter can spell that, a second test
-            // carrying a side effect must not be folded: hoisting a call out of
-            // a short circuit calls it unconditionally, which is a different
-            // program.
-            if self.must_hoist_side_effect(self.nodes[second].entry) {
+            // Concatenating the two bodies would put the second test's
+            // statements *before* the combined condition, so they would run
+            // whether or not the first test reached them. `PrintC` keeps them
+            // inside the condition as a comma expression - `(iVar2 =
+            // FUN_80021320(iVar5), iVar2 != 0)` - so the merge sequences the
+            // second test behind its own block instead of hoisting it, and the
+            // second body is *not* concatenated.
+            //
+            // The refusal still stands for work the emitter cannot spell as a
+            // value: a store has no expression form, and folding it would drop
+            // it entirely.
+            let sequenced = self.must_hoist_side_effect(self.nodes[second].entry);
+            if sequenced && !self.can_sequence(self.nodes[second].entry) {
                 continue;
             }
             if !self.nodes[second].successors.contains(&clause) {
@@ -1330,12 +1361,24 @@ impl<'a> Graph<'a> {
             let Some(second_to_clause) = self.condition_toward(second, clause) else {
                 continue;
             };
+            let second_to_clause = if sequenced {
+                Condition::Sequenced {
+                    prelude: self.nodes[second].entry,
+                    test: Box::new(second_to_clause),
+                }
+            } else {
+                second_to_clause
+            };
             let combined = Condition::Or(Box::new(first_to_clause), Box::new(second_to_clause));
             self.nodes[second].collapsed = true;
-            let body = Structured::List(vec![
-                self.nodes[node].body.clone(),
-                self.nodes[second].body.clone(),
-            ]);
+            let body = if sequenced {
+                self.nodes[node].body.clone()
+            } else {
+                Structured::List(vec![
+                    self.nodes[node].body.clone(),
+                    self.nodes[second].body.clone(),
+                ])
+            };
             // The composite tests both blocks, and reaches the clause first.
             self.nodes[node].body = body;
             self.nodes[node].test = Some(combined);
@@ -1949,6 +1992,11 @@ fn drop_jumps_to(node: &mut Structured, head: GraphBlockId) {
 
 /// Every basic block a construct tree mentions.
 pub(super) fn collect_blocks(node: &Structured, into: &mut BTreeSet<GraphBlockId>) {
+    // A block a condition sequences is emitted *by that condition*, as a comma
+    // expression. Missing it here made the completeness guard below believe the
+    // block had been dropped and re-emit it as its own region, so the work
+    // appeared twice - once inside the condition and once as dead code after the
+    // function's `return`.
     match node {
         Structured::Basic(block) => {
             into.insert(*block);
@@ -1960,23 +2008,30 @@ pub(super) fn collect_blocks(node: &Structured, into: &mut BTreeSet<GraphBlockId
         }
         Structured::IfElse {
             header,
+            test,
             then_body,
             else_body,
             ..
         } => {
             collect_blocks(header, into);
+            collect_condition_blocks(test, into);
             collect_blocks(then_body, into);
             if let Some(body) = else_body {
                 collect_blocks(body, into);
             }
         }
-        Structured::WhileDo { header, body, .. } => {
+        Structured::WhileDo {
+            header, test, body, ..
+        } => {
             collect_blocks(header, into);
+            collect_condition_blocks(test, into);
             collect_blocks(body, into);
         }
-        Structured::DoWhile { body, .. } | Structured::InfLoop { body } => {
-            collect_blocks(body, into)
+        Structured::DoWhile { body, test, .. } => {
+            collect_blocks(body, into);
+            collect_condition_blocks(test, into);
         }
+        Structured::InfLoop { body } => collect_blocks(body, into),
         Structured::Switch { header, cases, .. } => {
             collect_blocks(header, into);
             for (_, case) in cases {
@@ -1985,6 +2040,21 @@ pub(super) fn collect_blocks(node: &Structured, into: &mut BTreeSet<GraphBlockId
         }
         Structured::Break | Structured::IfBreak { .. } => {}
         Structured::Goto { .. } | Structured::IfGoto { .. } => {}
+    }
+}
+
+/// The blocks a condition tree emits itself, as comma expressions.
+fn collect_condition_blocks(test: &Condition, into: &mut BTreeSet<GraphBlockId>) {
+    match test {
+        Condition::Branch { .. } => {}
+        Condition::Or(left, right) | Condition::And(left, right) => {
+            collect_condition_blocks(left, into);
+            collect_condition_blocks(right, into);
+        }
+        Condition::Sequenced { prelude, test } => {
+            into.insert(*prelude);
+            collect_condition_blocks(test, into);
+        }
     }
 }
 
@@ -2065,6 +2135,12 @@ fn negate(condition: Condition) -> Condition {
         Condition::And(left, right) => {
             Condition::Or(Box::new(negate(*left)), Box::new(negate(*right)))
         }
+        // Negating a sequenced test negates the test, not the work before it:
+        // the prelude still has to run.
+        Condition::Sequenced { prelude, test } => Condition::Sequenced {
+            prelude,
+            test: Box::new(negate(*test)),
+        },
     }
 }
 
@@ -2690,6 +2766,67 @@ mod tests {
         assert!(
             !graph.is_complex(simple, 2),
             "one comparison plus the branch is exactly the ceiling"
+        );
+    }
+
+    /// A short-circuit whose second test performs observable work keeps that
+    /// work *inside* the condition, as `PrintC` does with C's comma operator.
+    /// Concatenating the bodies instead would run the call whether or not the
+    /// first test reached it, and the completeness guard has to count the
+    /// sequenced block as present or it re-emits the work as dead code.
+    #[test]
+    fn a_second_test_with_a_call_is_sequenced_rather_than_hoisted() {
+        let mut data = Funcdata::default();
+        data.entry = 0x1000;
+        let head = data.new_block(0x1000);
+        let second = data.new_block(0x1010);
+        let clause = data.new_block(0x1020);
+        let other = data.new_block(0x1030);
+        conditional(&mut data, head, 0x1020);
+        data.add_edge(head, clause);
+        data.add_edge(head, second);
+        // The second test calls something and nothing reads the result, so the
+        // emitter would have to hoist it out of the condition.
+        let call = data.new_op(op::CALL, seq(0x1010), Vec::new());
+        data.op_insert_end(call, second);
+        conditional(&mut data, second, 0x1020);
+        data.add_edge(second, clause);
+        data.add_edge(second, other);
+
+        let mut graph = Graph::of(&data, &[]);
+        let node = graph
+            .nodes
+            .iter()
+            .position(|candidate| candidate.entry == head)
+            .expect("the head node");
+        assert!(
+            graph.rule_block_or(node),
+            "the two tests are a short circuit"
+        );
+        let test = graph.nodes[node].test.clone().expect("a combined test");
+        let Condition::Or(_, right) = test else {
+            panic!("expected a disjunction, got {test:?}");
+        };
+        assert!(
+            matches!(*right, Condition::Sequenced { prelude, .. } if prelude == second),
+            "the second test carries its own block, got {right:?}"
+        );
+        // The second body is not concatenated, so the completeness guard is the
+        // only thing that keeps the block in the tree.
+        let mut present = BTreeSet::new();
+        collect_blocks(&graph.nodes[node].body, &mut present);
+        assert!(
+            !present.contains(&second),
+            "the sequenced block is not in the body"
+        );
+        let mut condition_blocks = BTreeSet::new();
+        collect_condition_blocks(
+            graph.nodes[node].test.as_ref().expect("a test"),
+            &mut condition_blocks,
+        );
+        assert!(
+            condition_blocks.contains(&second),
+            "the condition accounts for it instead"
         );
     }
 

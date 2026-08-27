@@ -210,6 +210,21 @@ pub enum Expr {
         name: &'static str,
         args: Vec<Expr>,
     },
+    /// An assignment used as a value, which C allows.
+    ///
+    /// Ghidra's `PrintC` emits one inside a condition when a short-circuit's
+    /// second test has to compute something first and that result is explicit.
+    Assign {
+        destination: Box<Expr>,
+        source: Box<Expr>,
+    },
+    /// A comma expression: every element is evaluated, the last is the value.
+    ///
+    /// This is what lets a short-circuit condition carry the work its second
+    /// test performs - `(iVar2 = FUN(x), iVar2 != 0)` - instead of hoisting that
+    /// work out of the condition, where it would run whether or not the first
+    /// test reached it.
+    Comma(Vec<Expr>),
 }
 
 impl Expr {
@@ -513,6 +528,19 @@ fn materialize_result_casts_expr(expression: Expr) -> Expr {
             left: Box::new(materialize_result_casts_expr(*left)),
             right: Box::new(materialize_result_casts_expr(*right)),
         },
+        Expr::Assign {
+            destination,
+            source,
+        } => Expr::Assign {
+            destination: Box::new(materialize_result_casts_expr(*destination)),
+            source: Box::new(materialize_result_casts_expr(*source)),
+        },
+        Expr::Comma(members) => Expr::Comma(
+            members
+                .into_iter()
+                .map(materialize_result_casts_expr)
+                .collect(),
+        ),
         Expr::Not(value) => Expr::Not(Box::new(materialize_result_casts_expr(*value))),
         Expr::Neg(value) => Expr::Neg(Box::new(materialize_result_casts_expr(*value))),
         Expr::BitNot(value) => Expr::BitNot(Box::new(materialize_result_casts_expr(*value))),
@@ -726,6 +754,13 @@ fn expression_type(value: &Expr, architecture: Architecture) -> Type {
             Type::from_width(*width)
         }
         Expr::Builtin { .. } => Type::Unsigned(32),
+        // A comma expression has the type of its last element, and an
+        // assignment has the type of what it assigns.
+        Expr::Comma(members) => members
+            .last()
+            .map(|member| expression_type(member, architecture))
+            .unwrap_or(Type::Unknown),
+        Expr::Assign { destination, .. } => expression_type(destination, architecture),
         Expr::Typed { ty, .. } => ty.clone(),
         Expr::Register { width, .. } | Expr::Temporary { width, .. } => Type::from_width(*width),
         Expr::Binary { op, left, right } => {
@@ -1363,6 +1398,18 @@ fn collect_expr_parameters_with_type(
                 .or_insert_with(|| ty.clone());
         }
         Expr::Typed { value, ty } => collect_expr_parameters_with_type(value, Some(ty), used),
+        Expr::Assign {
+            destination,
+            source,
+        } => {
+            collect_expr_parameters(destination, used);
+            collect_expr_parameters(source, used);
+        }
+        Expr::Comma(members) => {
+            for member in members {
+                collect_expr_parameters(member, used);
+            }
+        }
         Expr::Binary { left, right, .. } => {
             collect_expr_parameters(left, used);
             collect_expr_parameters(right, used);
@@ -3391,6 +3438,9 @@ fn is_path_invariant(value: &Expr, stable_registers: &BTreeSet<String>) -> bool 
         Expr::Constant { .. } | Expr::Parameter { .. } | Expr::Global { .. } => true,
         Expr::Register { name, .. } => stable_registers.contains(name),
         Expr::Temporary { .. } => false,
+        // An assignment is an effect, and a comma expression is a sequence of
+        // them; neither is path invariant.
+        Expr::Assign { .. } | Expr::Comma(_) => false,
         Expr::Binary { left, right, .. } => {
             is_path_invariant(left, stable_registers) && is_path_invariant(right, stable_registers)
         }

@@ -63,6 +63,18 @@ fn survey_expr(value: &Expr, frame_registers: &BTreeSet<String>, survey: &mut Su
             None => survey_expr(address, frame_registers, survey),
         },
         Expr::Field { base, .. } => survey_expr(base, frame_registers, survey),
+        Expr::Assign {
+            destination,
+            source,
+        } => {
+            survey_expr(destination, frame_registers, survey);
+            survey_expr(source, frame_registers, survey);
+        }
+        Expr::Comma(members) => {
+            for member in members {
+                survey_expr(member, frame_registers, survey);
+            }
+        }
         Expr::Register { name, .. } if frame_registers.contains(name) => {
             // The frame register reached a position that is not an access
             // address, so a slot's address can leave the function.
@@ -293,6 +305,18 @@ fn rewrite_expr(value: &mut Expr, frame_registers: &BTreeSet<String>, slots: &BT
     match value {
         Expr::Load { address, .. } => rewrite_expr(address, frame_registers, slots),
         Expr::Field { base, .. } => rewrite_expr(base, frame_registers, slots),
+        Expr::Assign {
+            destination,
+            source,
+        } => {
+            rewrite_expr(destination, frame_registers, slots);
+            rewrite_expr(source, frame_registers, slots);
+        }
+        Expr::Comma(members) => {
+            for member in members {
+                rewrite_expr(member, frame_registers, slots);
+            }
+        }
         Expr::Binary { left, right, .. } => {
             rewrite_expr(left, frame_registers, slots);
             rewrite_expr(right, frame_registers, slots);

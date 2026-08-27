@@ -1191,6 +1191,10 @@ pub(super) fn expression_width(value: &Expr) -> u32 {
         Expr::Parameter { ty, .. } | Expr::Cast { ty, .. } | Expr::Typed { ty, .. } => {
             type_width(ty)
         }
+        // A comma expression is as wide as its value, the last element; an
+        // assignment is as wide as what it assigns to.
+        Expr::Comma(members) => members.last().map(expression_width).unwrap_or(0),
+        Expr::Assign { destination, .. } => expression_width(destination),
         Expr::Binary { op, left, right } => {
             if matches!(
                 op,
@@ -1242,6 +1246,9 @@ fn is_pure_expr(value: &Expr) -> bool {
         | Expr::Global { .. } => true,
         // A field read is a memory read, so it is no purer than a load.
         Expr::Field { .. } => false,
+        // An assignment is the definition of impure, and a comma expression
+        // exists to carry one.
+        Expr::Assign { .. } | Expr::Comma(_) => false,
         Expr::Binary { left, right, .. } => is_pure_expr(left) && is_pure_expr(right),
         Expr::Not(inner)
         | Expr::Neg(inner)
@@ -1950,6 +1957,18 @@ fn collect_temporary_uses(value: &Expr, uses: &mut BTreeSet<String>) {
         Expr::Binary { left, right, .. } => {
             collect_temporary_uses(left, uses);
             collect_temporary_uses(right, uses);
+        }
+        Expr::Assign {
+            destination,
+            source,
+        } => {
+            collect_temporary_uses(destination, uses);
+            collect_temporary_uses(source, uses);
+        }
+        Expr::Comma(members) => {
+            for member in members {
+                collect_temporary_uses(member, uses);
+            }
         }
         Expr::Not(inner)
         | Expr::Neg(inner)

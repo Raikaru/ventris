@@ -892,8 +892,14 @@ fn expression_is_pure(value: &Expr) -> bool {
         | Expr::Temporary { .. }
         | Expr::Global { .. } => true,
         // A read touches memory whose contents may change, and a call does
-        // anything at all.
-        Expr::Load { .. } | Expr::Field { .. } | Expr::Call { .. } | Expr::Builtin { .. } => false,
+        // anything at all. An assignment and the comma expression that carries
+        // one are effects by construction.
+        Expr::Load { .. }
+        | Expr::Field { .. }
+        | Expr::Call { .. }
+        | Expr::Builtin { .. }
+        | Expr::Assign { .. }
+        | Expr::Comma(_) => false,
         Expr::Binary { left, right, .. } => expression_is_pure(left) && expression_is_pure(right),
         Expr::Not(inner)
         | Expr::Neg(inner)
@@ -1818,6 +1824,78 @@ impl Emitter<'_> {
                 left: Box::new(self.condition_expr(left)),
                 right: Box::new(self.condition_expr(right)),
             },
+            // `(work, test)`: the prelude's own statements become assignment
+            // expressions inside the condition, which is how `PrintC` keeps a
+            // short-circuit's second test from running unconditionally. Only a
+            // statement the emitter can spell as a value goes in; anything else
+            // would silently vanish, so the condition falls back to the test
+            // alone and the caller's refusal keeps that case correct.
+            Condition::Sequenced { prelude, test } => {
+                let scoped = self.scoped_names();
+                let mut members = Vec::new();
+                for op in self.data.block(*prelude).ops.iter().copied() {
+                    if let Some(value) = self.prelude_expression(op, &scoped) {
+                        members.push(value);
+                    }
+                }
+                let condition = self.condition_expr(test);
+                if members.is_empty() {
+                    return condition;
+                }
+                members.push(condition);
+                Expr::Comma(members)
+            }
+        }
+    }
+
+    /// One prelude operation as a value, or nothing if it cannot be one.
+    ///
+    /// The prelude's *whole* body has to survive the move into the condition,
+    /// not just its calls: a test usually reads something the block computed, so
+    /// dropping an ordinary assignment leaves the condition naming a value
+    /// nothing defines. This therefore reuses the same statement builder the
+    /// block walk uses and converts its result to C's assignment expression;
+    /// a statement with no expression form yields `None`, which is what makes
+    /// the caller's refusal the safe answer rather than a silent omission.
+    fn prelude_expression(&self, op: OpId, scoped: &BTreeSet<String>) -> Option<Expr> {
+        let operation = self.data.op(op);
+        if matches!(operation.opcode, op::MULTIEQUAL | op::INDIRECT) {
+            return None;
+        }
+        if matches!(
+            operation.opcode,
+            op::BRANCH | op::CBRANCH | op::BRANCHIND | op::RETURN
+        ) {
+            return None;
+        }
+        match self.render(op, scoped)? {
+            NativeStatement::Call(call) => Some(call),
+            NativeStatement::Declare { name, value, .. } => Some(Expr::Assign {
+                destination: Box::new(Expr::Temporary {
+                    name,
+                    width: operation
+                        .output
+                        .map(|output| self.data.varnode(output).size)
+                        .unwrap_or(0),
+                }),
+                source: Box::new(value),
+            }),
+            NativeStatement::Assign {
+                destination,
+                source,
+            } => Some(Expr::Assign {
+                destination: Box::new(destination),
+                source: Box::new(source),
+            }),
+            NativeStatement::Copy {
+                destination,
+                source,
+                ..
+            } => Some(Expr::Assign {
+                destination: Box::new(destination),
+                source: Box::new(source),
+            }),
+            _ => None,
         }
     }
 

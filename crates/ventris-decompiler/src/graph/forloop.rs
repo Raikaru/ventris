@@ -90,6 +90,8 @@ fn deciding_block(test: &Condition) -> Option<GraphBlockId> {
     match test {
         Condition::Branch { block, .. } => Some(*block),
         Condition::Or(_, last) | Condition::And(_, last) => deciding_block(last),
+        // The prelude computes; the test still decides.
+        Condition::Sequenced { test, .. } => deciding_block(test),
     }
 }
 

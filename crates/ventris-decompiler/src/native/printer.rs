@@ -6,6 +6,10 @@ use super::*;
 const PREC_CONDITIONAL: u8 = 1;
 const PREC_UNARY: u8 = 11;
 const PREC_POSTFIX: u8 = 12;
+/// C's comma operator, the lowest precedence there is.
+const PREC_COMMA: u8 = 0;
+/// C's assignment, just above the comma operator.
+const PREC_ASSIGN: u8 = 1;
 const PREC_PRIMARY: u8 = 13;
 
 /// Render a complete native document without going through the legacy
@@ -480,6 +484,19 @@ fn render_expr(value: &Expr, parent_precedence: u8) -> String {
         Expr::Parameter { name, .. }
         | Expr::Register { name, .. }
         | Expr::Temporary { name, .. } => escape_identifier(name),
+        Expr::Assign {
+            destination,
+            source,
+        } => format!(
+            "{} = {}",
+            render_expr(destination, PREC_ASSIGN + 1),
+            render_expr(source, PREC_ASSIGN)
+        ),
+        Expr::Comma(members) => members
+            .iter()
+            .map(|member| render_expr(member, PREC_COMMA + 1))
+            .collect::<Vec<_>>()
+            .join(", "),
         Expr::Binary { op, left, right } => {
             let precedence = op.precedence();
             // A folded negative offset reads as a subtraction. Printing
@@ -578,6 +595,11 @@ fn expr_precedence(value: &Expr) -> u8 {
         }
         Expr::Field { .. } => PREC_POSTFIX,
         Expr::Call { .. } | Expr::Builtin { .. } => PREC_POSTFIX,
+        // C gives assignment lower precedence than every operator and the comma
+        // operator lower still, so both are parenthesised wherever they appear
+        // inside a larger expression.
+        Expr::Assign { .. } => PREC_ASSIGN,
+        Expr::Comma(_) => PREC_COMMA,
         Expr::Constant { .. }
         | Expr::Parameter { .. }
         | Expr::Register { .. }

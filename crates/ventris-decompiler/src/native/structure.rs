@@ -1388,6 +1388,8 @@ fn is_pure_expression(expression: &Expr) -> bool {
         | Expr::Global { .. } => true,
         // A field read touches memory, so it is not pure.
         Expr::Field { .. } => false,
+        // An assignment is an effect, and a comma expression carries one.
+        Expr::Assign { .. } | Expr::Comma(_) => false,
         Expr::Binary { left, right, .. } => is_pure_expression(left) && is_pure_expression(right),
         Expr::Not(value)
         | Expr::Neg(value)
@@ -1478,6 +1480,13 @@ fn expression_contains(expression: &Expr, needle: &Expr) -> bool {
         Expr::Binary { left, right, .. } => {
             expression_contains(left, needle) || expression_contains(right, needle)
         }
+        Expr::Assign {
+            destination,
+            source,
+        } => expression_contains(destination, needle) || expression_contains(source, needle),
+        Expr::Comma(members) => members
+            .iter()
+            .any(|member| expression_contains(member, needle)),
         Expr::Not(value)
         | Expr::Neg(value)
         | Expr::BitNot(value)

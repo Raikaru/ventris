@@ -194,6 +194,9 @@ fn test_condition(
             let result = test_flip_operation(data, branch, &mut plan.operations);
             (result != FlipResult::Unsupported).then_some(result)
         }
+        // A sequenced test's prelude is statements, not a branch, so the
+        // complement plan concerns only the test itself.
+        Condition::Sequenced { test, .. } => test_condition(data, test, plan),
         Condition::Or(left, right) | Condition::And(left, right) => {
             let left_result = test_condition(data, left, plan)?;
             let right_result = test_condition(data, right, plan)?;
