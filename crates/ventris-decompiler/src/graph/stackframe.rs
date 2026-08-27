@@ -197,6 +197,9 @@ impl Action for ActionRestrictLocal {
         let Some(local_space) = data.scope_local().map(|scope| scope.space()) else {
             return 0;
         };
+        let Some(stack_pointer) = data.spacebase else {
+            return 0;
+        };
         // `for(;eiter!=endeiter;++eiter)` over the prototype's effect records,
         // skipping `killedbycall` - which is what `Funcdata::unaffected` already
         // holds, since only preserved locations are recorded there.
@@ -209,17 +212,42 @@ impl Action for ActionRestrictLocal {
                         continue;
                     }
                     for reader in data.varnode(*input).descendants.iter().copied() {
-                        if data.opcode_of(reader) != Some(op::COPY) {
-                            continue;
-                        }
-                        let Some(output) = data.op(reader).output else {
-                            continue;
-                        };
-                        // `isUnaffectedStorage(outvn)` is `vn->getSpace() == space`
-                        // (`varmap.hh:244`).
-                        let varnode = data.varnode(output);
-                        if varnode.space == local_space {
-                            parked.push((varnode.offset, varnode.size));
+                        match data.opcode_of(reader) {
+                            // Ghidra's shape: `isUnaffectedStorage(outvn)` is
+                            // `vn->getSpace() == space` (`varmap.hh:244`), and the
+                            // save is a COPY into a stack-space varnode.
+                            Some(op::COPY) => {
+                                let Some(output) = data.op(reader).output else {
+                                    continue;
+                                };
+                                let varnode = data.varnode(output);
+                                if varnode.space == local_space {
+                                    parked.push((varnode.offset, varnode.size));
+                                }
+                            }
+                            // This graph's shape for the same fact. Without
+                            // `IPTR_SPACEBASE` spaces a frame slot is not a
+                            // varnode, so parking a preserved register is a STORE
+                            // whose address is frame-relative and whose value is
+                            // the register. Matching only Ghidra's COPY found
+                            // nothing here - measured as zero slots marked - which
+                            // is why the frame slot stayed a local and the spill
+                            // printed.
+                            Some(op::STORE) => {
+                                let operation = data.op(reader);
+                                if operation.inputs.get(2).copied() != Some(*input) {
+                                    continue;
+                                }
+                                let Some(address) = operation.inputs.get(1).copied() else {
+                                    continue;
+                                };
+                                let Some(offset) = frame_offset(data, address, stack_pointer)
+                                else {
+                                    continue;
+                                };
+                                parked.push((offset as u64, data.varnode(*input).size));
+                            }
+                            _ => continue,
                         }
                     }
                 }

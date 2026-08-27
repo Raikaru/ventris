@@ -6,6 +6,57 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- The pipeline did not reach a fixed point, and now the reason is measured rather
+  than suspected. `VENTRIS_TRACE_ROUNDS` and a per-rule counter in `ActionPool`
+  show `animal_crossing_gafe01`'s largest function alternating between 45 and 33
+  rule firings for every one of its twenty-four iterations, never reporting zero,
+  so the emitted C was decided by the iteration cap instead of by convergence.
+  Two distinct causes, both named:
+  * `ActionStackPtrFlow` reported the same ten rewrites every round. Its
+    canonical form is `spacebase + constant` and the pointer rules Ghidra keeps
+    in `oppool2` legitimately rewrite that back into `PTRSUB`/`PTRADD`, so the two
+    chased each other. It now reports zero: the normalisation is idempotent, not
+    progress, and the work still happens every round so the graph the loop
+    finishes on is canonical. Ghidra's own `analysis_finished` latch was tried in
+    both forms and reverted - latching starves the canonicalisation of the stack
+    arithmetic copy propagation exposes in later rounds, which left
+    `osContGetReadData` printing bare `r1` names with its prologue spills intact.
+  * The **cleanup pool runs inside the main loop**, and in Ghidra it does not:
+    `actcleanup` is added to the universal group after `actfullloop` closes
+    (`coreaction.cc:5769`). That boundary is why Ghidra can register exact
+    inverses - `RuleMultNegOne` (cleanup, `5747`) against `Rule2Comp2Mult`
+    (expression, `5603`), `Rule2Comp2Sub`/`RuleSubRight` against `RuleSub2Add` -
+    without them fighting. Moving the pool out was implemented and measured:
+    the pool converges to one firing a round, and `agrees` drops 31 -> 29.
+- That regression is the honest state of the port, and its cause is a missing
+  facility rather than the placement. `osContGetReadData` and
+  `GameWorld::drawMainMenuOpt` begin printing their prologue register spills,
+  because Ghidra never has to remove those stores: `ActionRestrictLocal`
+  (`coreaction.cc:2036`) marks the frame slot parking a preserved register
+  not-mapped, so it is never a local. That algorithm keys on a `COPY` whose
+  output lands in the stack space - `isUnaffectedStorage` is
+  `vn->getSpace() == space` (`varmap.hh:244`) - which Ghidra has because
+  `IPTR_SPACEBASE` spaces give every frame slot its own varnode. This graph
+  stores to a RAM address computed from the stack-pointer register instead.
+  `ActionRestrictLocal`'s saved-register half is ported anyway, with both Ghidra's
+  COPY shape and this graph's STORE shape, and it does find the four slots on that
+  function; the statement-level pass that retires a spill is still keyed on a
+  matched save/restore pair, and the reload has been dead-code eliminated by then.
+  **The phase boundary is therefore blocked on spacebase varnodes**, and that is
+  the next piece of the port rather than a limitation to live with. The cheaper
+  compensations were tried and removed rather than left in: a scope-aware spill
+  filter that never fired, and an expression-walk helper for slot reads.
+- The remaining six unimplemented rules were re-audited against the current tree
+  rather than trusted. Five blockers are confirmed absent: no bitfield variant or
+  aggregate members or `debug_info` consumer (`RuleBitFieldIn`), no truncated
+  data space (`RulePtrFlow`), no lifter emitting `SEGMENTOP` (`RuleSegment`) or
+  `CPOOLREF` (`RuleTransformCpool`), no char-printing type (`RuleStringStore`).
+  The sixth was overstated: `RuleSplitFlow` targets a `SUBPIECE` of a `PIECE`
+  reaching it through `INDIRECT`s or a `MULTIEQUAL`, and that shape is already
+  split by `graph::splitvarnode`'s `IndirectForm` and `PhiForm`. What it would add
+  is Ghidra's `SplitFlow::traceForward`/`traceBackward` for the cases those two
+  decline, and only that tracing is genuinely missing.
+
 - The port's own census was wrong, and fixing it found roughly forty real items.
   The old check asked whether each Ghidra rule *name appeared anywhere* in the
   tree; every name did, inside the exclusion comment explaining its absence. A

@@ -808,9 +808,8 @@ pub fn default_pipeline() -> Box<dyn Action> {
     if !skip("infer-types-rich") {
         pipeline = pipeline.add(Box::new(super::typefactory::ActionInferTypes));
     }
-    // The cleanup pool belongs *after* the loop, and running it here is a
-    // measured compromise recorded on `cleanup_pipeline`. It is added last so
-    // that within a round it still sees a simplified graph.
+    // Called from here rather than once after the loop: see `cleanup_pipeline`
+    // for the measurement and the blocking prerequisite.
     pipeline = pipeline.add(cleanup_pipeline());
     Box::new(pipeline)
 }

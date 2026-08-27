@@ -23,9 +23,18 @@
 //!   No supported Ventris lifter emits `SEGMENTOP` (the only match is the
 //!   opcode constant `ventris-pcode/src/lib.rs:132`), so this rule is
 //!   proven-inert and is intentionally not registered.
-//! * `RuleSplitFlow` requires the cross-block `SplitFlow` worklist and
-//!   transform (`subflow.cc:2011-2036`), which is not represented by the local
-//!   graph; its rule entry is at `subflow.cc:2045`.
+//! * `RuleSplitFlow` (`subflow.cc:2045`) is not registered, and the earlier note
+//!   citing a missing `SplitFlow` worklist understated what is already here. The
+//!   rule detects a `SUBPIECE` taking the most significant part of a value that a
+//!   `PIECE` reaches through `INDIRECT`s or a `MULTIEQUAL`, and splits the joined
+//!   flow in two. That exact shape is what `graph::splitvarnode`'s `IndirectForm`
+//!   (`splitvarnode.rs:1682`, Ghidra `double.cc:3080-3129`) and `PhiForm`
+//!   (`splitvarnode.rs:1608`, `double.cc:3026-3078`) already split, by
+//!   `SplitVarnode`'s lo/hi reconstruction rather than by a `TransformManager`
+//!   worklist. Registering this rule on top would offer a second mechanism for
+//!   the same rewrite; what it would add is Ghidra's forward/backward tracing
+//!   (`SplitFlow::traceForward`/`traceBackward`) for the cases those two forms
+//!   decline, and that tracing is genuinely absent.
 //! `RulePullsubIndirect` uses the graph's exact `is_addr_force` predicate for
 //! Ghidra's `isAddrForce` guard (`ruleaction.cc:976`).  Its IOP annotations,
 //! consume masks, precision flags, indirect creation, and possible-output
