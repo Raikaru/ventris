@@ -6,6 +6,16 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- All thirteen forms `SplitVarnode::applyRuleIn` dispatches to are now ported:
+  `AddForm`, `SubForm`, `LogicalForm`, `Equal1Form`, `Equal2Form`,
+  `Equal3Form`, `MultForm`, `ShiftForm`, `LessConstForm`, `LessThreeWay`,
+  `PhiForm`, `IndirectForm` and `CopyForceForm`. `LessThreeWay` had been written
+  off as needing "CBRANCH boolean-flip metadata and branch edge-rewrite
+  operations"; reading `LessThreeWay::applyRule` refutes that - the rewrite is
+  `createBoolOp` plus one `opSetInput`, and the C++ comment says "the lolessbool
+  block now becomes unreachable and is eventually removed", so there is no edge
+  surgery at all. What it actually needs is the three-block pattern match, which
+  the graph's block API expresses.
 - `ActionReturnSplit` is registered, driven the way Ghidra drives it. The edges
   come from `gatherReturnGotos`, which reads the *structured* tree, so
   `graph::structure::return_goto_edges` now produces that set and the pipeline
