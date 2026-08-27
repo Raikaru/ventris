@@ -40,10 +40,23 @@
 //! `RuleSplitCopy`, `RuleSplitLoad`, and `RuleSplitStore` are ported and
 //! registered, in `graph::splitdatatype`, which is where the `SplitDatatype`
 //! aggregate layout they need lives.
-//! `RuleStringCopy` and `RuleStringStore` remain unported because they require
-//! `StringSequence`/`HeapSequence` validation and transformation,
-//! character/opaque-string datatypes, `ScopeLocal::queryContainer`, pointer
-//! target types, and user-op construction.
+//! `RuleStringCopy` (`coreaction.cc:5760`) and `RuleStringStore` (`5761`) remain
+//! unported, and the reason is sharper than the list of classes they name. Both
+//! gate on `ptrvn->getTypeReadFacing(op)`'s target being `isCharPrint()`
+//! (`constseq.cc:986-1000`), and that flag lives only on `TypeChar` and
+//! `TypeUnicode` (`type.hh:219`, set at `type.cc:400-402` and `1006`). Those two
+//! are reachable only *by name*, through `TypeFactory::setCoreType`'s `chartp`
+//! argument (`type.cc:3615-3631`) - and Ghidra caches a size-1 `TYPE_INT` that
+//! is deliberately **not** ASCII as `type_nochar` (`type.cc:3656-3658`) for
+//! inference to use instead. So type *inference* never manufactures a char, and
+//! on a binary with no declared types the guard is false everywhere: the rules
+//! are inert in the oracle too. Measured: none of the 36 corpus functions'
+//! Ghidra renders contains `memcpy`, `strncpy`, or `wcsncpy`, the only outputs
+//! `HeapSequence::buildStringCopy` can produce.
+//!
+//! What they would need first is therefore a declared-type import path, the same
+//! prerequisite `graph::bitfield` records for `RuleBitFieldIn` - not
+//! `HeapSequence` itself.
 //!
 //! Source authority: the pinned Ghidra `double.hh`, `double.cc`,
 //! `subflow.cc`, and `constseq.cc`.
@@ -1711,7 +1724,13 @@ fn indirect_form_apply(
     let Some(input_whole) = known_input.find_create_whole(data, Some(affector)) else {
         return false;
     };
-    let mark_creation = data.is_indirect_creation(workop) || data.is_indirect_creation(indlo);
+    // `TransformOp::inheritIndirect` (`transform.cc:273-282`): the transformed
+    // `INDIRECT` inherits the original's flavour, and `possible_out` is false
+    // only when the original's placeholder was an indirect zero. Passing a
+    // constant here would claim every split creation may be the call's result.
+    let creation_source = [workop, indlo]
+        .into_iter()
+        .find(|id| data.is_indirect_creation(*id));
     let mut output_split = SplitVarnode::from_parts_with_size(data, size, reslo, Some(reshi));
     let Some(whole) = create_joined_output_whole(data, &mut output_split) else {
         return false;
@@ -1720,8 +1739,10 @@ fn indirect_form_apply(
     let affector_iop = data.new_iop(affector);
     let newop = data.new_op(op::INDIRECT, affector_seq, vec![input_whole, affector_iop]);
     data.op_set_output(newop, Some(whole));
-    if mark_creation {
-        data.mark_indirect_creation(newop);
+    if let Some(source) = creation_source {
+        let possible_out =
+            !input(data, source, 0).is_some_and(|value| data.is_indirect_zero(value));
+        data.mark_indirect_creation(newop, possible_out);
     }
     data.op_insert_before(newop, affector);
     let high_size = data.varnode(lo).size;

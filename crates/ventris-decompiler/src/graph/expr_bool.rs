@@ -7,11 +7,14 @@
 //! `RulePopcountBoolXor`, `RuleLzcountShiftBool`, and `RuleNegateNegate`.
 //!
 //! `RuleShiftLess` is intentionally omitted because its implementation is
-//! commented out in the pinned C++ source.  `RuleConditionalMove` is omitted
-//! because its real implementation needs `FlowBlock`/CBRANCH condition
-//! metadata, `CloneBlockOps`, address-tied/evaluation-type flags, and the
-//! uninsert/reinsert and boolean-negation helpers absent from this graph.
+//! commented out in the pinned C++ source (`ruleaction.cc:2168-2175`).
+//! `RuleConditionalMove` is ported below.  Its graph-only clone path refuses
+//! storage-backed values and non-UNIQUE cloned outputs because the graph does
+//! not carry Ghidra's complete address-tied/output-flag metadata
+//! (`ruleaction.cc:9312`, `funcdata_block.cc:982-998`); those refusals are
+//! conservative and only lose the corresponding branch-local rewrites.
 
+use std::collections::{BTreeMap, BTreeSet};
 use ventris_pcode::op;
 
 use super::action::Rule;
@@ -331,6 +334,445 @@ fn new_op_before(
     data.op_set_output(new_op, Some(output));
     data.op_insert_before(new_op, before);
     (new_op, output)
+}
+
+fn conditional_bool_producer(code: i32) -> bool {
+    matches!(
+        code,
+        op::INT_EQUAL
+            | op::INT_NOTEQUAL
+            | op::INT_SLESS
+            | op::INT_SLESSEQUAL
+            | op::INT_LESS
+            | op::INT_LESSEQUAL
+            | op::INT_CARRY
+            | op::INT_SCARRY
+            | op::INT_SBORROW
+            | op::BOOL_NEGATE
+            | op::BOOL_XOR
+            | op::BOOL_AND
+            | op::BOOL_OR
+            | op::FLOAT_EQUAL
+            | op::FLOAT_NOTEQUAL
+            | op::FLOAT_LESS
+            | op::FLOAT_LESSEQUAL
+            | op::FLOAT_NAN
+    )
+}
+
+fn conditional_check_boolean(data: &Funcdata, value: VarnodeId) -> Option<VarnodeId> {
+    let definition = def(data, value)?;
+    if conditional_bool_producer(data.op(definition).opcode) {
+        return Some(value);
+    }
+    if data.op(definition).opcode == op::COPY {
+        let constant = input(data, definition, 0)?;
+        if is_constant(data, constant) && data.varnode(constant).offset & !1 == 0 {
+            return Some(constant);
+        }
+    }
+    None
+}
+
+fn conditional_special(code: i32) -> bool {
+    matches!(
+        code,
+        op::LOAD
+            | op::STORE
+            | op::BRANCH
+            | op::CBRANCH
+            | op::BRANCHIND
+            | op::CALL
+            | op::CALLIND
+            | op::CALLOTHER
+            | op::RETURN
+            | op::MULTIEQUAL
+            | op::INDIRECT
+            | op::SEGMENTOP
+            | op::CPOOLREF
+            | op::NEW
+            | op::CAST
+    )
+}
+
+/// `isAddrTied` is represented only for the graph's storage-backed values.
+/// A UNIQUE result is the only value this module can prove safe to pull out
+/// of a branch without Ghidra's mapped/persist/addrforce flags.
+fn conditional_provably_untied(data: &Funcdata, value: VarnodeId) -> bool {
+    let node = data.varnode(value);
+    node.flags.constant || node.flags.unique
+}
+
+fn conditional_gather_expression(
+    data: &Funcdata,
+    value: VarnodeId,
+    ops: &mut Vec<OpId>,
+    root: super::GraphBlockId,
+    branch: super::GraphBlockId,
+) -> bool {
+    if is_constant(data, value) {
+        return true;
+    }
+    if is_free(data, value) {
+        return false;
+    }
+    if !conditional_provably_untied(data, value) {
+        return false;
+    }
+    if root == branch {
+        return true;
+    }
+    if !data.varnode(value).flags.written {
+        return true;
+    }
+    let Some(definition) = def(data, value) else {
+        return true;
+    };
+    if data.op(definition).parent != Some(branch) {
+        return true;
+    }
+    ops.push(definition);
+    let mut position = 0;
+    while position < ops.len() {
+        let operation = ops[position];
+        position += 1;
+        if conditional_special(data.op(operation).opcode) {
+            return false;
+        }
+        let inputs = data.op(operation).inputs.clone();
+        for input_value in inputs {
+            if is_free(data, input_value) && !is_constant(data, input_value) {
+                return false;
+            }
+            let Some(input_definition) = def(data, input_value) else {
+                continue;
+            };
+            if data.op(input_definition).parent != Some(branch) {
+                continue;
+            }
+            if !conditional_provably_untied(data, input_value) {
+                return false;
+            }
+            if data.varnode(input_value).descendants.len() != 1 {
+                return false;
+            }
+            if ops.len() >= 4 {
+                return false;
+            }
+            ops.push(input_definition);
+        }
+    }
+    true
+}
+
+fn conditional_ordered_ops(data: &Funcdata, ops: &[OpId]) -> Vec<OpId> {
+    let mut ordered = ops.to_vec();
+    ordered.sort_by_key(|id| data.op(*id).seq.order);
+    ordered
+}
+
+fn conditional_can_clone(data: &Funcdata, ops: &[OpId]) -> bool {
+    let ordered = conditional_ordered_ops(data, ops);
+    let ids: BTreeSet<OpId> = ordered.iter().copied().collect();
+    if ids.len() != ordered.len() {
+        return false;
+    }
+    for operation in ordered {
+        if conditional_special(data.op(operation).opcode)
+            || data.op(operation).output.is_none()
+            || !data
+                .varnode(data.op(operation).output.expect("checked above"))
+                .flags
+                .unique
+        {
+            return false;
+        }
+        for input_value in data.op(operation).inputs.iter().copied() {
+            if is_constant(data, input_value) {
+                continue;
+            }
+            let input_definition = def(data, input_value);
+            if input_definition.is_some_and(|definition| ids.contains(&definition)) {
+                continue;
+            }
+            if is_free(data, input_value) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn conditional_clone_expression(
+    data: &mut Funcdata,
+    ops: &[OpId],
+    follow: OpId,
+) -> Option<VarnodeId> {
+    if ops.is_empty() || !conditional_can_clone(data, ops) {
+        return None;
+    }
+    let ordered = conditional_ordered_ops(data, ops);
+    let mut cloned_ops = BTreeMap::new();
+    let mut cloned_outputs = BTreeMap::new();
+    for original in ordered.iter().copied() {
+        let original_output = data.op(original).output?;
+        let sequence = data.op(original).seq;
+        let clone = data.new_op(data.op(original).opcode, sequence, Vec::new());
+        let output = data.new_unique(data.varnode(original_output).size);
+        data.op_set_output(clone, Some(output));
+        data.op_insert_before(clone, follow);
+        cloned_ops.insert(original, clone);
+        cloned_outputs.insert(original, output);
+    }
+    for original in ordered.iter().copied() {
+        let clone = cloned_ops[&original];
+        let inputs = data.op(original).inputs.clone();
+        for (slot, input_value) in inputs.into_iter().enumerate() {
+            let replacement = def(data, input_value)
+                .and_then(|definition| cloned_outputs.get(&definition).copied())
+                .unwrap_or(input_value);
+            data.op_set_input(clone, replacement, slot);
+        }
+    }
+    ordered
+        .last()
+        .and_then(|original| cloned_outputs.get(original).copied())
+}
+
+fn conditional_construct_bool(
+    data: &mut Funcdata,
+    value: VarnodeId,
+    follow: OpId,
+    ops: &[OpId],
+) -> VarnodeId {
+    if ops.is_empty() {
+        value
+    } else {
+        conditional_clone_expression(data, ops, follow)
+            .expect("conditional expression was preflighted before mutation")
+    }
+}
+
+/// Port of `RuleConditionalMove` (`ruleaction.cc:9277-9548`).
+pub struct RuleConditionalMove;
+
+impl Rule for RuleConditionalMove {
+    fn name(&self) -> &'static str {
+        "conditionalmove"
+    }
+
+    fn op_list(&self) -> Vec<i32> {
+        vec![op::MULTIEQUAL]
+    }
+
+    fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
+        if data.opcode_of(id) != Some(op::MULTIEQUAL) || data.op(id).inputs.len() != 2 {
+            return 0;
+        }
+        let Some(bool0) = conditional_check_boolean(data, data.op(id).inputs[0]) else {
+            return 0;
+        };
+        let Some(bool1) = conditional_check_boolean(data, data.op(id).inputs[1]) else {
+            return 0;
+        };
+        let Some(bb) = data.op(id).parent else {
+            return 0;
+        };
+        let Some(&inblock0) = data.block(bb).predecessors.first() else {
+            return 0;
+        };
+        let Some(&inblock1) = data.block(bb).predecessors.get(1) else {
+            return 0;
+        };
+        let rootblock0 = if data.block(inblock0).successors.len() == 1 {
+            if data.block(inblock0).predecessors.len() != 1 {
+                return 0;
+            }
+            data.block(inblock0).predecessors[0]
+        } else {
+            inblock0
+        };
+        let rootblock1 = if data.block(inblock1).successors.len() == 1 {
+            if data.block(inblock1).predecessors.len() != 1 {
+                return 0;
+            }
+            data.block(inblock1).predecessors[0]
+        } else {
+            inblock1
+        };
+        if rootblock0 != rootblock1 {
+            return 0;
+        }
+        let Some(&cbranch) = data.block(rootblock0).ops.last() else {
+            return 0;
+        };
+        if data.opcode_of(cbranch) != Some(op::CBRANCH) {
+            return 0;
+        }
+        let mut op_list0 = Vec::new();
+        if !conditional_gather_expression(data, bool0, &mut op_list0, rootblock0, inblock0) {
+            return 0;
+        }
+        let mut op_list1 = Vec::new();
+        if !conditional_gather_expression(data, bool1, &mut op_list1, rootblock0, inblock1) {
+            return 0;
+        }
+        if !conditional_can_clone(data, &op_list0) || !conditional_can_clone(data, &op_list1) {
+            return 0;
+        }
+        let Some(&true_out) = data.block(rootblock0).successors.first() else {
+            return 0;
+        };
+        let mut path0istrue = if rootblock0 != inblock0 {
+            true_out == inblock0
+        } else {
+            true_out != inblock1
+        };
+        if data.is_boolean_flip(cbranch) {
+            path0istrue = !path0istrue;
+        }
+        let Some(boolvn) = input(data, cbranch, 1) else {
+            return 0;
+        };
+        let Some(output) = data.op(id).output else {
+            return 0;
+        };
+        let output_size = data.varnode(output).size;
+
+        if !is_constant(data, bool0) && !is_constant(data, bool1) {
+            if inblock0 == rootblock0 {
+                let mut and_or_select = path0istrue;
+                let Some(first) = input(data, id, 0) else {
+                    return 0;
+                };
+                if boolvn != first {
+                    let Some(negate) = def(data, boolvn) else {
+                        return 0;
+                    };
+                    if data.op(negate).opcode != op::BOOL_NEGATE
+                        || input(data, negate, 0) != Some(first)
+                    {
+                        return 0;
+                    }
+                    and_or_select = !and_or_select;
+                }
+                let opcode = if and_or_select {
+                    op::BOOL_OR
+                } else {
+                    op::BOOL_AND
+                };
+                data.op_uninsert(id);
+                data.op_set_opcode(id, opcode);
+                data.op_insert_begin(id, bb);
+                let first = conditional_construct_bool(data, bool0, id, &op_list0);
+                let second = conditional_construct_bool(data, bool1, id, &op_list1);
+                data.op_set_input(id, first, 0);
+                data.op_set_input(id, second, 1);
+                return 1;
+            }
+            if inblock1 == rootblock0 {
+                let mut and_or_select = !path0istrue;
+                let Some(second) = input(data, id, 1) else {
+                    return 0;
+                };
+                if boolvn != second {
+                    let Some(negate) = def(data, boolvn) else {
+                        return 0;
+                    };
+                    if data.op(negate).opcode != op::BOOL_NEGATE
+                        || input(data, negate, 0) != Some(second)
+                    {
+                        return 0;
+                    }
+                    and_or_select = !and_or_select;
+                }
+                let opcode = if and_or_select {
+                    op::BOOL_OR
+                } else {
+                    op::BOOL_AND
+                };
+                data.op_uninsert(id);
+                data.op_set_opcode(id, opcode);
+                data.op_insert_begin(id, bb);
+                let first = conditional_construct_bool(data, bool1, id, &op_list1);
+                let second = conditional_construct_bool(data, bool0, id, &op_list0);
+                data.op_set_input(id, first, 0);
+                data.op_set_input(id, second, 1);
+                return 1;
+            }
+            return 0;
+        }
+
+        data.op_uninsert(id);
+        if is_constant(data, bool0) && is_constant(data, bool1) {
+            if data.varnode(bool0).offset == data.varnode(bool1).offset {
+                data.op_remove_input(id, 1);
+                data.op_set_opcode(id, op::COPY);
+                let constant = data.new_constant(data.varnode(bool0).offset, output_size);
+                data.op_set_input(id, constant, 0);
+                data.op_insert_begin(id, bb);
+            } else {
+                let need_complement = (data.varnode(bool0).offset == 0) == path0istrue;
+                data.op_remove_input(id, 1);
+                if output_size == 1 {
+                    data.op_set_opcode(
+                        id,
+                        if need_complement {
+                            op::BOOL_NEGATE
+                        } else {
+                            op::COPY
+                        },
+                    );
+                    data.op_insert_begin(id, bb);
+                    data.op_set_input(id, boolvn, 0);
+                } else {
+                    data.op_set_opcode(id, op::INT_ZEXT);
+                    data.op_insert_begin(id, bb);
+                    let boolvn = if need_complement {
+                        insert_bool_negate(data, boolvn, id)
+                    } else {
+                        boolvn
+                    };
+                    data.op_set_input(id, boolvn, 0);
+                }
+            }
+        } else if is_constant(data, bool0) {
+            let need_complement = path0istrue != (data.varnode(bool0).offset != 0);
+            let opcode = if data.varnode(bool0).offset != 0 {
+                op::BOOL_OR
+            } else {
+                op::BOOL_AND
+            };
+            data.op_set_opcode(id, opcode);
+            data.op_insert_begin(id, bb);
+            let boolvn = if need_complement {
+                insert_bool_negate(data, boolvn, id)
+            } else {
+                boolvn
+            };
+            let body1 = conditional_construct_bool(data, bool1, id, &op_list1);
+            data.op_set_input(id, boolvn, 0);
+            data.op_set_input(id, body1, 1);
+        } else {
+            let need_complement = path0istrue == (data.varnode(bool1).offset != 0);
+            let opcode = if data.varnode(bool1).offset != 0 {
+                op::BOOL_OR
+            } else {
+                op::BOOL_AND
+            };
+            data.op_set_opcode(id, opcode);
+            data.op_insert_begin(id, bb);
+            let boolvn = if need_complement {
+                insert_bool_negate(data, boolvn, id)
+            } else {
+                boolvn
+            };
+            let body0 = conditional_construct_bool(data, bool0, id, &op_list0);
+            data.op_set_input(id, boolvn, 0);
+            data.op_set_input(id, body0, 1);
+        }
+        1
+    }
 }
 
 pub struct RuleBooleanUndistribute;
@@ -1859,6 +2301,49 @@ mod tests {
         let (bad, _) = unary(&mut data, block, op::INT_NEGATE, free_first, 4);
         assert_eq!(RuleNegateNegate.apply_op(bad, &mut data), 0);
     }
+    /// Ghidra's `RuleConditionalMove` turns a two-arm conditional move into
+    /// boolean algebra and clones a bounded branch-local expression
+    /// (`ruleaction.cc:9390-9548`).
+    #[test]
+    fn conditional_move_lifts_constant_and_clones_branch_boolean_expression() {
+        let mut data = Funcdata::default();
+        data.entry = 0x1000;
+        let root = data.new_block(0x1000);
+        let true_block = data.new_block(0x1010);
+        let false_block = data.new_block(0x1020);
+        let join = data.new_block(0x1030);
+        data.add_edge(root, true_block);
+        data.add_edge(root, false_block);
+        data.add_edge(true_block, join);
+        data.add_edge(false_block, join);
+
+        let source = input_value(&mut data, 4);
+        let zero = data.new_constant(0, 4);
+        let (_, condition) = binary(&mut data, root, op::INT_EQUAL, source, zero, 1);
+        let branch_target = data.new_constant(data.block(true_block).start, 4);
+        let branch = data.new_op(
+            op::CBRANCH,
+            seq(0x1000 + data.op_count() as u64 * 4),
+            vec![branch_target, condition],
+        );
+        data.op_insert_end(branch, root);
+
+        let one = data.new_constant(1, 1);
+        let (_, true_value) = unary(&mut data, true_block, op::COPY, one, 1);
+        let (_, false_value) = unary(&mut data, false_block, op::BOOL_NEGATE, condition, 1);
+        let merge = data.new_op(op::MULTIEQUAL, seq(0x1030), vec![true_value, false_value]);
+        let merge_output = data.new_unique(1);
+        data.op_set_output(merge, Some(merge_output));
+        data.op_insert_end(merge, join);
+
+        assert_eq!(RuleConditionalMove.apply_op(merge, &mut data), 1);
+        assert_eq!(data.op(merge).opcode, op::BOOL_OR);
+        assert_eq!(data.op(merge).inputs[0], condition);
+        let cloned = data.op(merge).inputs[1];
+        let cloned_def = data.varnode(cloned).def.expect("cloned expression output");
+        assert_eq!(data.op(cloned_def).opcode, op::BOOL_NEGATE);
+        assert_eq!(data.op(cloned_def).parent, Some(join));
+    }
 }
 
 pub fn all() -> Vec<Box<dyn Rule>> {
@@ -1876,5 +2361,6 @@ pub fn all() -> Vec<Box<dyn Rule>> {
         Box::new(RulePopcountBoolXor),
         Box::new(RuleLzcountShiftBool),
         Box::new(RuleNegateNegate),
+        Box::new(RuleConditionalMove),
     ]
 }

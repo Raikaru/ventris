@@ -1,12 +1,12 @@
 //! Floating-point expression rewrites from Ghidra 12.1.3's `ruleaction.cc`.
 //!
 //! The implementations below follow the real `Rule*::applyOp` bodies in the
-//! pinned C++ source.  The graph has no architecture object, so
-//! `RuleIgnoreNan` is intentionally omitted: its first and most important
-//! branch is controlled by `Architecture::nan_ignore_all`, and assuming a
-//! value would change NaN semantics.  `RuleFloatSignCleanup` reconstructs the
-//! one type fact it needs through the graph's bounded type inference rather
-//! than treating every integer bit operation as a float.
+//! pinned C++ source.  `RuleIgnoreNan` honors both `Funcdata::nan_ignore`
+//! settings: the `all` arm replaces every NaN test, while the default
+//! `compare` arm follows the comparison-protection data flow.
+//! `RuleFloatSignCleanup` reconstructs the one type fact it needs through the
+//! graph's bounded type inference rather than treating every integer bit
+//! operation as a float.
 //!
 //! All requested p-code names used here (`BOOL_AND`, `BOOL_OR`, the floating
 //! comparisons/arithmetic/conversions, `FLOAT_NAN`, `INT_AND`, `INT_OR`,
@@ -16,6 +16,7 @@
 use std::collections::BTreeSet;
 
 use super::action::Rule;
+use super::equality::{Equality, functional_equality};
 use super::typefactory::DataType;
 use super::{Funcdata, GraphBlockId, OpId, VarnodeId};
 use ventris_pcode::op;
@@ -92,6 +93,292 @@ fn is_float_bool_output(code: i32) -> bool {
         code,
         op::FLOAT_EQUAL | op::FLOAT_NOTEQUAL | op::FLOAT_LESS | op::FLOAT_LESSEQUAL | op::FLOAT_NAN
     )
+}
+fn is_floating_point_opcode(code: i32) -> bool {
+    matches!(
+        code,
+        op::FLOAT_EQUAL
+            | op::FLOAT_NOTEQUAL
+            | op::FLOAT_LESS
+            | op::FLOAT_LESSEQUAL
+            | op::FLOAT_NAN
+            | op::FLOAT_ADD
+            | op::FLOAT_DIV
+            | op::FLOAT_MULT
+            | op::FLOAT_SUB
+            | op::FLOAT_NEG
+            | op::FLOAT_ABS
+            | op::FLOAT_SQRT
+            | op::FLOAT_INT2FLOAT
+            | op::FLOAT_FLOAT2FLOAT
+            | op::FLOAT_TRUNC
+            | op::FLOAT_CEIL
+            | op::FLOAT_FLOOR
+            | op::FLOAT_ROUND
+    )
+}
+
+fn is_bool_producer(code: i32) -> bool {
+    matches!(
+        code,
+        op::INT_EQUAL
+            | op::INT_NOTEQUAL
+            | op::INT_SLESS
+            | op::INT_SLESSEQUAL
+            | op::INT_LESS
+            | op::INT_LESSEQUAL
+            | op::INT_CARRY
+            | op::INT_SCARRY
+            | op::INT_SBORROW
+            | op::BOOL_NEGATE
+            | op::BOOL_XOR
+            | op::BOOL_AND
+            | op::BOOL_OR
+            | op::FLOAT_EQUAL
+            | op::FLOAT_NOTEQUAL
+            | op::FLOAT_LESS
+            | op::FLOAT_LESSEQUAL
+            | op::FLOAT_NAN
+    )
+}
+
+fn bool_output(data: &Funcdata, value: VarnodeId) -> bool {
+    def(data, value).is_some_and(|id| is_bool_producer(data.op(id).opcode))
+}
+
+fn check_back_for_compare(data: &Funcdata, float_var: VarnodeId, root: VarnodeId) -> bool {
+    if !data.varnode(root).flags.written || !bool_output(data, root) {
+        return false;
+    }
+    let Some(mut definition) = def(data, root) else {
+        return false;
+    };
+    if data.op(definition).opcode == op::BOOL_NEGATE {
+        let Some(inner) = input(data, definition, 0) else {
+            return false;
+        };
+        if !data.varnode(inner).flags.written {
+            return false;
+        }
+        let Some(inner_definition) = def(data, inner) else {
+            return false;
+        };
+        definition = inner_definition;
+    }
+    let operation = data.op(definition);
+    if is_floating_point_opcode(operation.opcode) {
+        if operation.inputs.len() != 2 {
+            return false;
+        }
+        return functional_equality(data, float_var, operation.inputs[0]) == Equality::Same
+            || functional_equality(data, float_var, operation.inputs[1]) == Equality::Same;
+    }
+    if !matches!(operation.opcode, op::BOOL_AND | op::BOOL_OR) {
+        return false;
+    }
+    for value in operation.inputs.iter().copied().take(2) {
+        if !data.varnode(value).flags.written || !bool_output(data, value) {
+            continue;
+        }
+        let Some(inner_definition) = def(data, value) else {
+            continue;
+        };
+        let inner_operation = data.op(inner_definition);
+        if !is_floating_point_opcode(inner_operation.opcode) || inner_operation.inputs.len() != 2 {
+            continue;
+        }
+        if functional_equality(data, float_var, inner_operation.inputs[0]) == Equality::Same
+            || functional_equality(data, float_var, inner_operation.inputs[1]) == Equality::Same
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_another_nan(data: &Funcdata, value: VarnodeId) -> bool {
+    if !data.varnode(value).flags.written {
+        return false;
+    }
+    let Some(mut definition) = def(data, value) else {
+        return false;
+    };
+    if data.op(definition).opcode == op::BOOL_NEGATE {
+        let Some(inner) = input(data, definition, 0) else {
+            return false;
+        };
+        if !data.varnode(inner).flags.written {
+            return false;
+        }
+        let Some(inner_definition) = def(data, inner) else {
+            return false;
+        };
+        definition = inner_definition;
+    }
+    data.op(definition).opcode == op::FLOAT_NAN
+}
+fn test_for_comparison(
+    float_var: VarnodeId,
+    id: OpId,
+    slot: usize,
+    match_code: i32,
+    count: &mut usize,
+    data: &mut Funcdata,
+) -> Option<VarnodeId> {
+    let opcode = data.op(id).opcode;
+    let other_slot = 1usize.checked_sub(slot)?;
+    let other = data.op(id).inputs.get(other_slot).copied()?;
+    if opcode == match_code {
+        if check_back_for_compare(data, float_var, other) {
+            data.op_set_opcode(id, op::COPY);
+            data.op_remove_input(id, 1);
+            data.op_set_input(id, other, 0);
+            *count += 1;
+        } else if is_another_nan(data, other) {
+            return data.op(id).output;
+        }
+    } else if matches!(opcode, op::INT_EQUAL | op::INT_NOTEQUAL) {
+        if check_back_for_compare(data, float_var, other) {
+            let value = if match_code == op::BOOL_OR { 0 } else { 1 };
+            let new_value = data.new_constant(value, 1);
+            data.op_set_input(id, new_value, slot);
+            *count += 1;
+        }
+    } else if opcode == op::CBRANCH {
+        let Some(parent) = data.op(id).parent else {
+            return None;
+        };
+        let out_dir = if match_code == op::BOOL_OR { 0 } else { 1 };
+        let out_dir = if data.is_boolean_flip(id) {
+            1 - out_dir
+        } else {
+            out_dir
+        };
+        let Some(&out_branch) = data.block(parent).successors.get(out_dir) else {
+            return None;
+        };
+        let Some(&other_branch) = data.block(parent).successors.get(1 - out_dir) else {
+            return None;
+        };
+        let Some(&last) = data.block(out_branch).ops.last() else {
+            return None;
+        };
+        if data.opcode_of(last) == Some(op::CBRANCH)
+            && data.block(out_branch).successors.contains(&other_branch)
+            && input(data, last, 1)
+                .is_some_and(|condition| check_back_for_compare(data, float_var, condition))
+        {
+            let value = if match_code == op::BOOL_OR { 0 } else { 1 };
+            let new_value = data.new_constant(value, 1);
+            data.op_set_input(id, new_value, 1);
+            *count += 1;
+        }
+    }
+    None
+}
+
+/// Port of `RuleIgnoreNan` (`ruleaction.cc:9610-9781`).
+///
+/// With `nan_ignore_all`, every `FLOAT_NAN` is replaced by false.  With only
+/// `nan_ignore_compare`, the rule walks up to three boolean readers and removes
+/// NaN tests that protect a matching floating-point comparison.
+pub struct RuleIgnoreNan;
+
+impl Rule for RuleIgnoreNan {
+    fn name(&self) -> &'static str {
+        "ignorenan"
+    }
+
+    fn op_list(&self) -> Vec<i32> {
+        vec![op::FLOAT_NAN]
+    }
+
+    fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
+        if data.opcode_of(id) != Some(op::FLOAT_NAN) {
+            return 0;
+        }
+        if data.nan_ignore.all {
+            data.op_set_opcode(id, op::COPY);
+            let new_value = data.new_constant(0, 1);
+            data.op_set_input(id, new_value, 0);
+            return 1;
+        }
+        if !data.nan_ignore.compare {
+            return 0;
+        }
+        let Some(float_var) = input(data, id, 0) else {
+            return 0;
+        };
+        if is_free(data, float_var) {
+            return 0;
+        }
+        let Some(out1) = output(data, id) else {
+            return 0;
+        };
+        let mut count = 0;
+        let readers1: Vec<OpId> = data.varnode(out1).descendants.iter().copied().collect();
+        for bool_read1 in readers1 {
+            if data.opcode_of(bool_read1).is_none() {
+                continue;
+            }
+            let match_code = if data.op(bool_read1).opcode == op::BOOL_NEGATE {
+                op::BOOL_AND
+            } else {
+                op::BOOL_OR
+            };
+            let out2 = if data.op(bool_read1).opcode == op::BOOL_NEGATE {
+                output(data, bool_read1)
+            } else {
+                let Some(slot) = data
+                    .op(bool_read1)
+                    .inputs
+                    .iter()
+                    .position(|value| *value == out1)
+                else {
+                    continue;
+                };
+                test_for_comparison(float_var, bool_read1, slot, match_code, &mut count, data)
+            };
+            let Some(out2) = out2 else {
+                continue;
+            };
+            let readers2: Vec<OpId> = data.varnode(out2).descendants.iter().copied().collect();
+            for bool_read2 in readers2 {
+                if data.opcode_of(bool_read2).is_none() {
+                    continue;
+                }
+                let Some(slot) = data
+                    .op(bool_read2)
+                    .inputs
+                    .iter()
+                    .position(|value| *value == out2)
+                else {
+                    continue;
+                };
+                let Some(out3) =
+                    test_for_comparison(float_var, bool_read2, slot, match_code, &mut count, data)
+                else {
+                    continue;
+                };
+                let readers3: Vec<OpId> = data.varnode(out3).descendants.iter().copied().collect();
+                for bool_read3 in readers3 {
+                    if data.opcode_of(bool_read3).is_none() {
+                        continue;
+                    }
+                    let Some(slot) = data
+                        .op(bool_read3)
+                        .inputs
+                        .iter()
+                        .position(|value| *value == out3)
+                    else {
+                        continue;
+                    };
+                    test_for_comparison(float_var, bool_read3, slot, match_code, &mut count, data);
+                }
+            }
+        }
+        usize::from(count > 0)
+    }
 }
 
 /// Infer whether a value is floating-point in the same graph state seen by a
@@ -644,14 +931,14 @@ impl Rule for RuleInt2FloatCollapse {
 }
 
 /// Every requested floating rule whose graph dependencies are expressible.
-/// `RuleIgnoreNan` is omitted because `Funcdata` has no architecture handle or
-/// `nan_ignore_all` setting; its comparison-protecting fallback is not a safe
-/// substitute for that gate.
+/// `RuleIgnoreNan` is fully ported; `Funcdata::nan_ignore` carries the
+/// architecture's `nan_ignore_all` and `nan_ignore_compare` settings.
 pub fn all() -> Vec<Box<dyn Rule>> {
     vec![
         Box::new(RuleFloatRange),
         Box::new(RuleFloatSign),
         Box::new(RuleFloatSignCleanup),
+        Box::new(RuleIgnoreNan),
         Box::new(RuleUnsigned2Float),
         Box::new(RuleInt2FloatCollapse),
     ]
@@ -930,5 +1217,52 @@ mod tests {
         let (mut declined, unsigned, multi) = collapse_fixture(1);
         assert_eq!(RuleInt2FloatCollapse.apply_op(unsigned, &mut declined), 0);
         assert_eq!(declined.op(multi).opcode, op::MULTIEQUAL);
+    }
+    /// `RuleIgnoreNan` has two distinct Ghidra modes: `nan_ignore_all` folds
+    /// every NaN test, while the default `nan_ignore_compare` mode removes a
+    /// NaN guard only when its float comparison consumes the same value.
+    #[test]
+    fn ignore_nan_rewrites_all_and_comparison_guarded_nan() {
+        let mut data = Funcdata::default();
+        let block = data.new_block(0xA000);
+        let float_value = input_value(&mut data, 0, 4);
+        let nan = operation(&mut data, block, op::FLOAT_NAN, vec![float_value], 1);
+        let nan_out = output_of(&data, nan);
+        let other = input_value(&mut data, 4, 4);
+        let comparison = operation(
+            &mut data,
+            block,
+            op::FLOAT_EQUAL,
+            vec![float_value, other],
+            1,
+        );
+        let comparison_out = output_of(&data, comparison);
+        let guarded = operation(
+            &mut data,
+            block,
+            op::BOOL_OR,
+            vec![nan_out, comparison_out],
+            1,
+        );
+        assert_eq!(RuleIgnoreNan.apply_op(nan, &mut data), 1);
+        assert_eq!(data.op(guarded).opcode, op::COPY);
+        assert_eq!(data.op(guarded).inputs, vec![comparison_out]);
+
+        let mut all = Funcdata::default();
+        let block = all.new_block(0xB000);
+        let float_value = input_value(&mut all, 0, 4);
+        let nan = operation(&mut all, block, op::FLOAT_NAN, vec![float_value], 1);
+        all.nan_ignore.all = true;
+        assert_eq!(RuleIgnoreNan.apply_op(nan, &mut all), 1);
+        assert_eq!(all.op(nan).opcode, op::COPY);
+        assert_eq!(all.varnode(all.op(nan).inputs[0]).offset, 0);
+
+        let mut disabled = Funcdata::default();
+        let block = disabled.new_block(0xC000);
+        let float_value = input_value(&mut disabled, 0, 4);
+        let nan = operation(&mut disabled, block, op::FLOAT_NAN, vec![float_value], 1);
+        disabled.nan_ignore.compare = false;
+        assert_eq!(RuleIgnoreNan.apply_op(nan, &mut disabled), 0);
+        assert_eq!(disabled.op(nan).opcode, op::FLOAT_NAN);
     }
 }

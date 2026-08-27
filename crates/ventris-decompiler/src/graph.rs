@@ -141,6 +141,17 @@ pub struct VarnodeFlags {
     /// Ghidra's `Varnode::indirect_creation`, set by `newIndirectCreation` for a
     /// location a call destroys.
     pub indirect_creation: bool,
+    /// The value must stay alive because its storage address is observable.
+    ///
+    /// Ghidra's `Varnode::addrforce`. It is narrower than `addrtied` and the
+    /// difference is load-bearing: `Heritage::guardCalls` sets it only on the
+    /// guard output of an address-*tied* location (`heritage.cc:1450`, `1517`),
+    /// and then `ActionDeadCode` clears it again for anything that is not a
+    /// direct write (`coreaction.cc:3995-3996`). So it survives on tied *and*
+    /// directly-written values only. Using `is_addr_tied` in its place makes
+    /// every rule that refuses on it refuse always, which is how
+    /// `RulePullsubIndirect` first came out inert.
+    pub address_force: bool,
 }
 
 /// One value in the data-flow graph.
@@ -211,6 +222,24 @@ pub struct GraphOp {
     /// Set when the operation has been removed from the graph but its slot is
     /// retained so existing identifiers stay valid.
     pub dead: bool,
+    /// The branch's condition means the complement of what its operand computes.
+    ///
+    /// Ghidra's `PcodeOp::boolean_flip`, set on a `CBRANCH` by
+    /// `ActionPreferComplement` when structuring wants the other edge to be the
+    /// taken one. `RuleCondNegate` is what pays for it: it inserts a
+    /// `BOOL_NEGATE` so the operand computes what the branch now claims.
+    pub boolean_flip: bool,
+    /// A `CPOOLREF` this pass has already looked up.
+    ///
+    /// Ghidra's `PcodeOp::is_cpool_transformed`. The lookup is idempotent and
+    /// the rule reports a change either way, so without the mark the rule pool
+    /// never converges.
+    pub cpool_transformed: bool,
+    /// The operation's result is a boolean the operation itself computed.
+    ///
+    /// Ghidra's `PcodeOp::calculated_bool`, which lets the emitter print the
+    /// value as a condition rather than an integer.
+    pub calculated_bool: bool,
 }
 
 /// One basic block, holding its operations in execution order.
@@ -243,12 +272,46 @@ pub struct GraphBlock {
     pub dead: bool,
 }
 
+/// Which `FLOAT_NAN` operations may be replaced by a `false` constant.
+///
+/// Ghidra's `Architecture::nan_ignore_all`/`nan_ignore_compare`, a pair because
+/// `OptionNanIgnore` sets them together and `RuleIgnoreNan` is disabled only
+/// when *both* are false. `resetDefaults` (`architecture.cc:1427-1428`) leaves
+/// `all` false and `compare` **true**, which is why the rule runs on every
+/// function by default - a fact worth carrying, because assuming the whole rule
+/// was gated behind a non-default setting is what kept it unported.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct NanIgnore {
+    /// Every `FLOAT_NAN` becomes `false`.
+    pub all: bool,
+    /// A `FLOAT_NAN` guarding a floating-point comparison becomes `false`.
+    pub compare: bool,
+}
+
+impl Default for NanIgnore {
+    fn default() -> Self {
+        Self {
+            all: false,
+            compare: true,
+        }
+    }
+}
+
 /// A function's mutable p-code graph.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Funcdata {
     pub entry: u64,
     varnodes: Vec<GraphVarnode>,
     ops: Vec<GraphOp>,
+    /// The function's recovered jump tables.
+    ///
+    /// Ghidra's `Funcdata::jumpvec`, reached through `findJumpTable` and
+    /// `removeJumpTable`. Recovery used to hand this back as a side-channel
+    /// `Vec` that only the structuring phase saw, which put it out of reach of
+    /// every rule - and `RuleSwitchSingle` is a rule. Ghidra recovers tables
+    /// during flow-following, long before the rule pool runs, so a rule asking
+    /// "is there a table at this BRANCHIND" gets an answer.
+    pub jump_tables: Vec<jumptable::JumpTable>,
     blocks: Vec<GraphBlock>,
     /// Interning table so one machine location yields one varnode per version.
     located: BTreeMap<(u32, u64, u32), Vec<VarnodeId>>,
@@ -274,6 +337,17 @@ pub struct Funcdata {
     /// so the fact is carried explicitly: which end of a value a piece comes from
     /// decides what every split of an aggregate means.
     pub big_endian: bool,
+    /// How many low bits of a function pointer are known zero.
+    ///
+    /// Ghidra's `Architecture::funcptr_align`, decoded from a pspec's
+    /// `<funcptr align="..."/>` as the position of that alignment's first set
+    /// bit, and `0` when no element appears - which is every processor in the
+    /// pinned 12.1.3 tree, so `RuleFuncPtrEncoding` is registered and inert
+    /// there exactly as it is here. Carried explicitly because the graph has no
+    /// architecture, the same way `big_endian` is.
+    pub funcptr_align: u32,
+    /// Which `FLOAT_NAN` tests may be replaced by `false`.
+    pub nan_ignore: NanIgnore,
     /// The register that holds the frame base, when the caller knows it.
     ///
     /// Ghidra's `Funcdata` reaches its architecture's stack space and
@@ -627,12 +701,42 @@ impl Funcdata {
     /// before this operation, so no rule may collapse the `INDIRECT` into its
     /// first operand: doing so would claim the killed location still holds
     /// whatever it held before.
-    pub fn mark_indirect_creation(&mut self, op: OpId) {
+    ///
+    /// `possible_output` is Ghidra's second parameter, and it decides the
+    /// *placeholder* operand. When the location may genuinely be a call's
+    /// output the zero stays an ordinary constant; otherwise it too is marked
+    /// created, which is what `Varnode::isIndirectZero` then reports. This half
+    /// was missing, so every creation looked like a possible output and
+    /// `isIndirectZero` was unreachable.
+    pub fn mark_indirect_creation(&mut self, op: OpId, possible_output: bool) {
         self.invalidate_masks();
         self.ops[op.0 as usize].indirect_creation = true;
         if let Some(output) = self.ops[op.0 as usize].output {
             self.varnodes[output.0 as usize].flags.indirect_creation = true;
         }
+        // Ghidra throws unless the placeholder is a constant, so a non-constant
+        // first operand means the caller is not describing a creation at all.
+        // The transform path can reach here with a reconstructed whole, so this
+        // reports rather than aborts: the flag simply does not apply.
+        if !possible_output {
+            if let Some(&placeholder) = self.ops[op.0 as usize].inputs.first() {
+                if self.varnodes[placeholder.0 as usize].flags.constant {
+                    self.varnodes[placeholder.0 as usize]
+                        .flags
+                        .indirect_creation = true;
+                }
+            }
+        }
+    }
+
+    /// Whether the value is a created `INDIRECT`'s placeholder zero.
+    ///
+    /// Ghidra's `Varnode::isIndirectZero`: both `indirect_creation` and
+    /// `constant`. A rule reads it to tell "the location is dead here" from
+    /// "the location may be this call's result".
+    pub fn is_indirect_zero(&self, value: VarnodeId) -> bool {
+        let flags = &self.varnodes[value.0 as usize].flags;
+        flags.indirect_creation && flags.constant
     }
 
     /// Whether the operation indirectly creates its output.
@@ -985,6 +1089,9 @@ impl Funcdata {
             non_printing: false,
             input_active: true,
             dead: false,
+            boolean_flip: false,
+            cpool_transformed: false,
+            calculated_bool: false,
         });
         for (slot, input) in inputs.into_iter().enumerate() {
             self.op_set_input(id, input, slot);
@@ -992,7 +1099,37 @@ impl Funcdata {
         id
     }
 
-    /// Sets one operand, maintaining the descendant list on both sides.
+    /// Flips a `CBRANCH`'s claim about which value takes its branch.
+    ///
+    /// Ghidra's `Funcdata::opFlipCondition`, which flips the bit rather than
+    /// setting it: `RuleCondNegate` pays off one flip by negating the operand,
+    /// and structuring may ask for another later.
+    pub fn op_flip_condition(&mut self, op: OpId) {
+        let flag = &mut self.ops[op.0 as usize].boolean_flip;
+        *flag = !*flag;
+    }
+
+    /// Whether the branch's condition means the complement of its operand.
+    ///
+    /// Ghidra's `PcodeOp::isBooleanFlip`.
+    pub fn is_boolean_flip(&self, op: OpId) -> bool {
+        self.ops[op.0 as usize].boolean_flip
+    }
+
+    /// Records that a `CPOOLREF`'s record has been looked up.
+    ///
+    /// Ghidra's `Funcdata::opMarkCpoolTransformed`.
+    pub fn op_mark_cpool_transformed(&mut self, op: OpId) {
+        self.ops[op.0 as usize].cpool_transformed = true;
+    }
+
+    /// Marks the operation's result a boolean it computed itself.
+    ///
+    /// Ghidra's `Funcdata::opMarkCalculatedBool`.
+    pub fn op_mark_calculated_bool(&mut self, op: OpId) {
+        self.ops[op.0 as usize].calculated_bool = true;
+    }
+
     /// The opcode of a live operation, or `None` once it has been destroyed.
     ///
     /// A rule may destroy or retype the operation it is applied to, so callers
@@ -1165,6 +1302,59 @@ impl Funcdata {
     pub fn is_addr_tied(&self, value: VarnodeId) -> bool {
         let flags = self.varnodes[value.0 as usize].flags;
         !flags.unique && !flags.constant
+    }
+
+    /// Whether the value's storage address is observable, so it must stay live.
+    ///
+    /// Ghidra's `Varnode::isAddrForce`.
+    pub fn is_addr_force(&self, value: VarnodeId) -> bool {
+        self.varnodes[value.0 as usize].flags.address_force
+    }
+
+    /// Ghidra's `Varnode::setAddrForce`.
+    pub fn set_addr_force(&mut self, value: VarnodeId) {
+        self.varnodes[value.0 as usize].flags.address_force = true;
+    }
+
+    /// Drops the mark for every value that is not a direct write.
+    ///
+    /// `ActionDeadCode::apply` does this on entry (`coreaction.cc:3995-3996`),
+    /// which is what keeps the flag narrower than `addrtied`: heritage sets it
+    /// on every tied guard output, and this removes it again from the ones no
+    /// legal input can reach.
+    pub fn clear_addr_force_without_direct_write(&mut self) -> usize {
+        let mut cleared = 0;
+        for varnode in &mut self.varnodes {
+            if varnode.flags.address_force && !varnode.flags.direct_write {
+                varnode.flags.address_force = false;
+                cleared += 1;
+            }
+        }
+        cleared
+    }
+
+    /// The jump table attached to the given indirect branch, if any.
+    ///
+    /// Ghidra's `Funcdata::findJumpTable`, which matches on the operation's
+    /// *address* rather than its identity, because a table outlives the
+    /// `BRANCHIND` a rule may have rewritten.
+    pub fn find_jump_table(&self, op: OpId) -> Option<&jumptable::JumpTable> {
+        let address = self.ops[op.0 as usize].seq.address;
+        self.jump_tables
+            .iter()
+            .find(|table| self.ops[table.branch.0 as usize].seq.address == address)
+    }
+
+    /// Drops the jump table attached to the given indirect branch.
+    ///
+    /// Ghidra's `Funcdata::removeJumpTable`.
+    pub fn remove_jump_table(&mut self, op: OpId) -> bool {
+        let address = self.ops[op.0 as usize].seq.address;
+        let before = self.jump_tables.len();
+        let ops = &self.ops;
+        self.jump_tables
+            .retain(|table| ops[table.branch.0 as usize].seq.address != address);
+        self.jump_tables.len() != before
     }
 
     /// Gives one edge a different source, keeping its position.

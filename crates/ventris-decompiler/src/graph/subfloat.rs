@@ -4,18 +4,19 @@
 //! represented by this graph: a precision slice is traced through the
 //! copy/unary/binary floating operations that Ghidra permits, and a successful
 //! trace rewrites those existing operations to the smaller logical varnodes.
-//! The graph has no `TransformManager` placeholders, floating-format encoder,
-//! address-force/type-lock/auto-live flags, or recursive-op destruction helper.
-//! Consequently constants of a different size, wide input varnodes, and
-//! transformations requiring those pieces are conservatively declined.
+//! The graph still has no `TransformManager` placeholders, floating-format
+//! encoder, or address-force/type-lock metadata used by the wider flow
+//! (`subflow.cc:3215-3230`, `subflow.cc:3529-3544`), so transformations requiring
+//! those facts remain conservatively declined.
 //!
-//! `RuleDumptyHumpLate` is intentionally omitted.  The late rule is not a
-//! different operand shape: it recursively backtracks through `PIECE` while
-//! the live `RuleDumptyHump` performs one such step.  Ghidra makes them
-//! disjoint by running the latter in the `analysis` action group and the
-//! former in the later `cleanup` group.  This graph's `Rule` contract carries
-//! no action-group/phase state, so registering both would offer both rules the
-//! same `SUBPIECE(PIECE(...), offset)` operands.
+//! `RuleDumptyHumpLate` is ported for the cleanup pool.  Its exact-size branch
+//! uses `UNIQUE` outputs for the `totalReplace` case and treats other
+//! storage-backed outputs as auto-live, which is conservative because the
+//! graph's `is_addr_tied` fact is narrower than Ghidra's `isAutoLive`
+//! (`subflow.cc:3054-3066`).  Recursive destruction follows only UNIQUE
+//! producers; non-UNIQUE producers are retained because the graph cannot prove
+//! the `!isAutoLive` guard required by `opDestroyRecursive`
+//! (`funcdata_op.cc:228-243`).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -559,6 +560,143 @@ impl Rule for RuleSubfloatConvert {
     }
 }
 
+fn destroy_recursive_unique(data: &mut Funcdata, root: OpId) {
+    let mut pending = vec![root];
+    let mut seen = BTreeSet::new();
+    while let Some(operation) = pending.pop() {
+        if !seen.insert(operation) || data.opcode_of(operation).is_none() {
+            continue;
+        }
+        let inputs = data.op(operation).inputs.clone();
+        for value in inputs {
+            let node = data.varnode(value);
+            if !node.flags.written || !node.flags.unique || node.descendants.len() != 1 {
+                continue;
+            }
+            let Some(definition) = live_def(data, value) else {
+                continue;
+            };
+            if matches!(
+                data.op(definition).opcode,
+                op::CALL | op::CALLIND | op::CALLOTHER | op::INDIRECT
+            ) {
+                continue;
+            }
+            pending.push(definition);
+        }
+        data.op_destroy(operation);
+    }
+}
+
+/// Port of `RuleDumptyHumpLate` (`subflow.cc:3007-3068`).
+pub struct RuleDumptyHumpLate;
+
+impl Rule for RuleDumptyHumpLate {
+    fn name(&self) -> &'static str {
+        "dumptyhumplate"
+    }
+
+    fn op_list(&self) -> Vec<i32> {
+        vec![op::SUBPIECE]
+    }
+
+    fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
+        if data.opcode_of(id) != Some(op::SUBPIECE) {
+            return 0;
+        }
+        let (Some(original), Some(offset_vn), Some(output)) =
+            (input(data, id, 0), input(data, id, 1), output(data, id))
+        else {
+            return 0;
+        };
+        if !is_constant(data, offset_vn) {
+            return 0;
+        }
+        let Some(original_piece) = live_def(data, original) else {
+            return 0;
+        };
+        if data.opcode_of(original_piece) != Some(op::PIECE) {
+            return 0;
+        }
+        let mut current = original;
+        let mut piece = original_piece;
+        let mut trunc = data.varnode(offset_vn).offset;
+        let out_size = data.varnode(output).size;
+        loop {
+            let Some(mut trial) = input(data, piece, 1) else {
+                break;
+            };
+            let mut trial_trunc = trunc;
+            let trial_size = u64::from(data.varnode(trial).size);
+            if trunc >= trial_size {
+                trial_trunc = trunc - trial_size;
+                let Some(high) = input(data, piece, 0) else {
+                    break;
+                };
+                trial = high;
+            }
+            if u64::from(out_size).saturating_add(trial_trunc) > u64::from(data.varnode(trial).size)
+            {
+                break;
+            }
+            current = trial;
+            trunc = trial_trunc;
+            if data.varnode(current).size == out_size {
+                break;
+            }
+            let Some(definition) = live_def(data, current) else {
+                break;
+            };
+            if data.opcode_of(definition) != Some(op::PIECE) {
+                break;
+            }
+            piece = definition;
+        }
+        if current == original {
+            return 0;
+        }
+        if let Some(definition) = live_def(data, current)
+            && data.opcode_of(definition) == Some(op::COPY)
+        {
+            let Some(source) = input(data, definition, 0) else {
+                return 0;
+            };
+            current = source;
+        }
+
+        let remove_op;
+        if out_size != data.varnode(current).size {
+            remove_op = original_piece;
+            if data.varnode(offset_vn).offset != trunc {
+                let new_offset = data.new_constant(trunc, 4);
+                data.op_set_input(id, new_offset, 1);
+            }
+            data.op_set_input(id, current, 0);
+        } else if data.varnode(output).flags.unique {
+            remove_op = id;
+            data.total_replace(output, current);
+        } else if data.is_addr_tied(output) {
+            // A storage-backed output may still be non-auto-live in Ghidra,
+            // but this graph cannot prove that.  Keep the output and preserve
+            // its address by changing SUBPIECE to COPY.
+            remove_op = original_piece;
+            data.op_remove_input(id, 1);
+            data.op_set_opcode(id, op::COPY);
+            data.op_set_input(id, current, 0);
+        } else {
+            return 0;
+        }
+
+        if let Some(remove_output) = data.op(remove_op).output
+            && data.varnode(remove_output).descendants.is_empty()
+            && data.varnode(remove_output).flags.unique
+        {
+            destroy_recursive_unique(data, remove_op);
+        }
+        1
+    }
+}
+
 pub fn all() -> Vec<Box<dyn Rule>> {
     vec![Box::new(RuleSubfloatConvert)]
 }
@@ -627,5 +765,28 @@ mod tests {
 
         assert_eq!(RuleSubfloatConvert.apply_op(convert, &mut data), 0);
         assert_eq!(data.op(convert).opcode, op::FLOAT_FLOAT2FLOAT);
+    }
+    /// `RuleDumptyHumpLate` backtracks through successive `PIECE` operations,
+    /// then removes the dead chain after replacing an exact-size result
+    /// (`subflow.cc:3013-3068`).
+    #[test]
+    fn dumpty_hump_late_backtracks_piece_chain_and_replaces_unique_output() {
+        let mut data = Funcdata::default();
+        let b = block(&mut data);
+        let high = input_value(&mut data, 4);
+        let low = input_value(&mut data, 4);
+        let (inner_op, inner) = op_with_output(&mut data, b, op::PIECE, vec![high, low], 8);
+        let outer_low = input_value(&mut data, 4);
+        let (outer_op, outer) = op_with_output(&mut data, b, op::PIECE, vec![inner, outer_low], 12);
+        let truncation = data.new_constant(4, 4);
+        let (subpiece, subpiece_output) =
+            op_with_output(&mut data, b, op::SUBPIECE, vec![outer, truncation], 4);
+        let (consumer, _) = op_with_output(&mut data, b, op::COPY, vec![subpiece_output], 4);
+
+        assert_eq!(RuleDumptyHumpLate.apply_op(subpiece, &mut data), 1);
+        assert_eq!(data.opcode_of(subpiece), None);
+        assert_eq!(data.opcode_of(inner_op), None);
+        assert_eq!(data.opcode_of(outer_op), None);
+        assert_eq!(data.op(consumer).inputs, vec![low]);
     }
 }

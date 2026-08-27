@@ -283,7 +283,13 @@ mod tests {
         // `guardCalls` appends one candidate operand per parameter location
         // before renaming; the trial values are read back from those operands.
         let candidates = [location(0x10), location(0x20), location(0x30)];
-        guard_calls(&mut data, &locations, &CallEffects::default(), &candidates);
+        guard_calls(
+            &mut data,
+            &locations,
+            &CallEffects::default(),
+            &candidates,
+            &[],
+        );
         heritage(&mut data);
         (data, call)
     }
@@ -338,7 +344,7 @@ mod tests {
         let call = data.new_op(op::CALL, seq(0x1000), vec![target]);
         data.op_insert_end(call, block);
         let locations = BTreeSet::from([location(0x10)]);
-        guard_calls(&mut data, &locations, &CallEffects::default(), &[]);
+        guard_calls(&mut data, &locations, &CallEffects::default(), &[], &[]);
         heritage(&mut data);
 
         assert_eq!(
@@ -375,7 +381,13 @@ mod tests {
 
         let locations = BTreeSet::from([location(0x10)]);
         let candidates = [location(0x10)];
-        guard_calls(&mut data, &locations, &CallEffects::default(), &candidates);
+        guard_calls(
+            &mut data,
+            &locations,
+            &CallEffects::default(),
+            &candidates,
+            &[],
+        );
         heritage(&mut data);
         assert_eq!(
             recover_call_arguments(&mut data, &[vec![location(0x10)]], &|_| None),

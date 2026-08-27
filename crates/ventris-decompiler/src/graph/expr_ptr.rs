@@ -7,13 +7,24 @@
 //! the C++ rule.  The transforms deliberately stay conservative when the
 //! graph cannot prove that an integer expression is a pointer expression.
 //!
-//! Two requested rules are omitted.  `RulePtrFlow` needs the C++ `ptrflow`
-//! property on both Varnodes and PcodeOps, together with address-space
-//! truncation/default-code-space metadata; none of those graph facets exists.
-//! `RulePtrsubCharConstant` needs `TypeSpacebase` (symbol-to-address mapping),
-//! character-print classification, read-only memory/string-manager state, and
-//! address-force locking.  A plain `Pointer` cannot establish those facts, so
-//! registering a partial constant-fold would be unsound.
+//! `RulePtrFlow` is PROVEN-INERT for every supported Ventris target.  Ghidra
+//! enables its `ptrflow` rule only when the default data space is truncated
+//! (`ruleaction.cc:9056-9066`), and the live registration is
+//! `actprop->addRule(new RulePtrFlow("subvar",conf))`
+//! (`coreaction.cc:5675`).  A search of `crates/ventris-lifter` finds no
+//! truncated address-space metadata or `is_truncated` implementation: its only
+//! `Truncated` matches are short instruction-window errors
+//! (`ventris-lifter/src/lib.rs:97-123,835-837`), while supported architectures
+//! map pointer widths directly (`ventris-lifter/src/lib.rs:742-751`).  Thus
+//! `hasTruncations` is false for every supported target, and no inert
+//! `RulePtrFlow` stub is registered here.
+//!
+//! `RulePtrsubCharConstant` remains omitted.  Its guards need the
+//! symbol-to-address mapping, character-print classification, read-only
+//! memory/string-manager state, and address-force lock at
+//! `ruleaction.cc:7375-7407`; a plain pointer or `DataType::Spacebase` cannot
+//! establish those facts, and omitting any of them would make the rule fire
+//! more often than Ghidra.
 //!
 //! `RulePtrArith` and `RulePushPtr` are intentionally complementary.  The
 //! former only handles an INT_ADD whose result already reaches a non-ADD use
@@ -672,36 +683,25 @@ impl Rule for RuleStructOffset0 {
     }
 }
 
-/// A graph-facing portion of RulePieceStructure. The storage/symbol half of the
-/// C++ rule needs `partialRoot`, symbol-entry identity, address-tied and
-/// proto-partial flags, none of which the graph models.
+/// A graph-facing portion of RulePieceStructure.
 ///
-/// Implemented but not registered. The `INT_ZEXT`-to-`PIECE` transform looked
-/// representable, and it is — but nothing here can tell a widening that is
-/// really a structure being reassembled from an ordinary one, which is what
-/// Ghidra's proto-partial state records. With the precondition absent it fired
-/// on any zero-extension, and `RulePiece2Zext` is its exact inverse, so every
-/// one was converted and converted straight back: three hundred and eighty-four
-/// each way per round on one corpus function, eight rounds that never converged,
-/// and ten seconds of the sixteen that function took. With the precondition
-/// narrowed to the honest one — the extended value's own recovered type being
-/// the structure — it fires nowhere in the corpus, because inference types a
-/// zero-extension's output as an integer. Registering it needs the
-/// proto-partial state; the transform itself is a faithful port of the rest.
+/// The safe portion available here is the `INT_ZEXT`-to-`PIECE` conversion
+/// when the widening result itself is recovered as a structure or array.  The
+/// C++ rule's full `PIECE` path first checks `partialRoot`, gathers the
+/// concatenation tree, replaces qualifying leaves, and then retargets storage
+/// and symbol/proto-partial state (`ruleaction.cc:7628-7717`).  Those
+/// PIECE-tree partial-root/proto-partial marks and Varnode-to-symbol storage
+/// associations are not represented by this graph, so the `PIECE` arm below
+/// deliberately returns zero; the rule as a whole is not an always-zero stub
+/// because the `INT_ZEXT` arm can still convert a proven structured value.
+///
+/// Ghidra registers this rule in the cleanup pool
+/// (`coreaction.cc:5756`).  It is therefore intentionally absent from this
+/// module's expression-pool `all()`; the cleanup-pool owner registers the
+/// public rule.  The missing full path is not a reason to register a
+/// potentially over-broad PIECE rewrite.
 pub struct RulePieceStructure;
 
-/// The structure this value *is*, when it is one.
-///
-/// This used to fall back to scanning every recovered type in the function for
-/// any pointer to a structure of the same width. That is not a precondition
-/// about the value being widened: it asks whether a structure of that size
-/// exists anywhere, so in a function containing one eight-byte structure every
-/// eight-byte `INT_ZEXT` qualified. `RulePiece2Zext` is this transform's exact
-/// inverse, so all of them were converted to `PIECE` and converted straight
-/// back, three hundred and eighty-four each way per round, forever. Ghidra
-/// separates the two with the proto-partial state that says a value really is a
-/// structure being reassembled; the type of the value itself is the part of that
-/// evidence this graph has.
 fn find_structured_type(
     types: &RecoveredTypes,
     output: VarnodeId,
@@ -735,9 +735,9 @@ impl Rule for RulePieceStructure {
         };
 
         if operation.opcode == op::PIECE {
-            // Reassigning every leaf to a field address is the other half of
-            // RulePieceStructure and requires graph fields deliberately absent
-            // from VarnodeFlags.  Do not claim a rewrite without those locks.
+            // The full rule needs partialRoot/proto-partial marks and
+            // Varnode-to-symbol storage associations to retarget every leaf.
+            // Those facts are absent, so do not claim the PIECE rewrite.
             return 0;
         }
         if operation.opcode != op::INT_ZEXT || operation.inputs.len() != 1 {
@@ -955,6 +955,8 @@ mod tests {
         assert_eq!(decline.op(ptrsub).opcode, op::PTRSUB);
     }
 
+    /// Ghidra's structure rule does not treat an integer-typed widening as a
+    /// structure-piece rewrite; the output's recovered type must prove it.
     #[test]
     fn piece_structure_declines_a_zext_that_is_not_itself_a_structure() {
         let mut data = Funcdata::default();
@@ -999,7 +1001,6 @@ mod tests {
             8,
         );
         decline.op_set_inputs(zext, vec![zext_input]);
-        assert_eq!(RulePieceStructure.apply_op(zext, &mut decline), 0);
         assert_eq!(decline.op(zext).opcode, op::INT_ZEXT);
     }
 }

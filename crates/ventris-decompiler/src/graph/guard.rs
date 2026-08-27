@@ -143,6 +143,7 @@ pub fn guard_calls(
     locations: &BTreeSet<Location>,
     effects: &CallEffects,
     argument_locations: &[Location],
+    return_locations: &[Location],
 ) -> usize {
     let calls: Vec<OpId> = data
         .live_ops()
@@ -156,9 +157,30 @@ pub fn guard_calls(
                 continue;
             }
             if effects.kills(location) {
-                insert_indirect_creation(data, call, *location);
+                // `Heritage::guardCalls` passes `possibleoutput`, which is true
+                // exactly when the killed range is a candidate *result* that it
+                // has just registered as an output trial (`heritage.cc:1468-1484`,
+                // consumed at `1522`). The killed set is the convention's result
+                // storage plus scratch, so the return locations are the subset
+                // that may carry the call's value; for those the placeholder
+                // zero stays an ordinary constant, and `is_indirect_zero` reads
+                // the difference.
+                let possible_output = return_locations.iter().any(|candidate| {
+                    candidate.space == location.space && candidate.offset == location.offset
+                });
+                insert_indirect_creation(data, call, *location, possible_output);
             } else {
-                insert_indirect(data, call, *location);
+                let guard = insert_indirect(data, call, *location);
+                // `bool holdind = ((fl&Varnode::addrtied)!=0)` at
+                // `heritage.cc:1450`, spent at `1517`: the guard's output is
+                // address-forced when the location it stands for is
+                // address-tied. `ActionDeadCode` narrows the mark again for
+                // anything that is not a direct write.
+                if let Some(output) = data.op(guard).output {
+                    if data.is_addr_tied(output) {
+                        data.set_addr_force(output);
+                    }
+                }
             }
             inserted += 1;
         }
@@ -318,14 +340,19 @@ fn insert_indirect(data: &mut Funcdata, anchor: OpId, location: Location) -> OpI
 /// `insert_indirect` is the whole point: the location's previous value is *not*
 /// an operand, so nothing the caller had in a killed register can reach the code
 /// after the call.
-fn insert_indirect_creation(data: &mut Funcdata, anchor: OpId, location: Location) -> OpId {
+pub(crate) fn insert_indirect_creation(
+    data: &mut Funcdata,
+    anchor: OpId,
+    location: Location,
+    possible_out: bool,
+) -> OpId {
     let seq = data.op(anchor).seq;
     let placeholder = data.new_constant(0, location.size);
     let cause = data.new_iop(anchor);
     let indirect = data.new_op(op::INDIRECT, seq, vec![placeholder, cause]);
     let after = data.new_varnode(location.space, location.offset, location.size);
     data.op_set_output(indirect, Some(after));
-    data.mark_indirect_creation(indirect);
+    data.mark_indirect_creation(indirect, possible_out);
     data.op_insert_before(indirect, anchor);
     indirect
 }
@@ -383,7 +410,7 @@ mod tests {
         let (mut data, _) = graph_with(op::CALL, vec![0x2000]);
         let locations = BTreeSet::from([location(8), location(16)]);
         let effects = CallEffects::default();
-        assert_eq!(guard_calls(&mut data, &locations, &effects, &[]), 2);
+        assert_eq!(guard_calls(&mut data, &locations, &effects, &[], &[]), 2);
         let indirects: Vec<_> = data
             .live_ops()
             .filter(|(_, candidate)| candidate.opcode == op::INDIRECT)
@@ -405,7 +432,7 @@ mod tests {
             killed: BTreeSet::new(),
             preserved: BTreeSet::from([(REGISTER_SPACE, 16)]),
         };
-        assert_eq!(guard_calls(&mut data, &locations, &effects, &[]), 1);
+        assert_eq!(guard_calls(&mut data, &locations, &effects, &[], &[]), 1);
     }
 
     #[test]
@@ -560,6 +587,7 @@ mod tests {
             &mut data,
             &BTreeSet::from([location(8)]),
             &CallEffects::default(),
+            &[],
             &[],
         );
         let block = data.op(call).parent.expect("the call has a block");

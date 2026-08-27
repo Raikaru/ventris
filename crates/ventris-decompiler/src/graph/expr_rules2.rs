@@ -3,42 +3,52 @@
 //! Source authority for this module is the pinned Ghidra tree at commit
 //! `8b4c91d4d5bd1549622bfbade0df199585b98365`.  The C++ symbols used here are
 //! `RuleCollectTerms::{getOpList,applyOp}`, `RulePullsubMulti::{getOpList,applyOp}`,
-//! `RuleTermOrder::{getOpList,applyOp}`, `RuleSelectCse::{getOpList,applyOp}`,
-//! `RuleXorSwap::{getOpList,applyOp}`, `RuleOrPredicate::{getOpList,applyOp}`,
-//! `RuleBooleanNegate::{getOpList,applyOp}`, `RuleDoubleSub::{getOpList,applyOp}`,
-//! `RuleHumptyDumpty::{getOpList,applyOp}`, `RuleDumptyHump::{getOpList,applyOp}`,
-//! `RuleHumptyOr::{getOpList,applyOp}`, `RuleNegateIdentity::{getOpList,applyOp}`,
-//! `RuleSubNormal::{getOpList,applyOp}`, `RulePositiveDiv::{getOpList,applyOp}`,
-//! `RuleDivTermAdd::{getOpList,applyOp}`, `RuleSignForm::{getOpList,applyOp}`,
-//! `RuleSignDiv2::{getOpList,applyOp}`, `RuleSignNearMult::{getOpList,applyOp}`,
-//! `RuleModOpt::{getOpList,applyOp}`, and `RuleFloatCast::{getOpList,applyOp}`.
+//! `RulePullsubIndirect::{getOpList,applyOp}`, `RuleTermOrder::{getOpList,applyOp}`,
+//! `RuleSelectCse::{getOpList,applyOp}`, `RuleXorSwap::{getOpList,applyOp}`,
+//! `RuleOrPredicate::{getOpList,applyOp}`, `RuleBooleanNegate::{getOpList,applyOp}`,
+//! `RuleDoubleSub::{getOpList,applyOp}`, `RuleHumptyDumpty::{getOpList,applyOp}`,
+//! `RuleDumptyHump::{getOpList,applyOp}`, `RuleHumptyOr::{getOpList,applyOp}`,
+//! `RuleNegateIdentity::{getOpList,applyOp}`, `RuleSubNormal::{getOpList,applyOp}`,
+//! `RulePositiveDiv::{getOpList,applyOp}`, `RuleDivTermAdd::{getOpList,applyOp}`,
+//! `RuleSignForm::{getOpList,applyOp}`, `RuleSignDiv2::{getOpList,applyOp}`,
+//! `RuleSignNearMult::{getOpList,applyOp}`, `RuleModOpt::{getOpList,applyOp}`,
+//! `RuleFloatCast::{getOpList,applyOp}`, `RuleCondNegate::{getOpList,applyOp}`,
+//! and `RuleFuncPtrEncoding::{getOpList,applyOp}`.
 //!
-//! The requested rules below are intentionally not half-implemented where the
-//! graph has no faithful input for their preconditions:
+//! Three requested rules remain unported for precise, observable reasons:
 //!
-//! * `RulePullsubIndirect` needs IOP-space operation references, indirect
-//!   creation, address-force flags, and the byte-consumption machinery used by
-//!   `RulePullsubMulti`.
-//! * `RulePushPtr`, `RulePtrArith`, `RuleStructOffset0`, `RulePtraddUndo`, and
-//!   `RulePtrsubUndo` need `TypeFactory`/`Datatype` pointer, struct, and array
-//!   metadata plus type-recovery state and stop-type-propagation controls.
-//! * `RuleSegment` needs the architecture's `SegmentOp` registry and its
-//!   emulator; the graph only stores the raw SEGMENTOP operands.
-//! * `RuleDoubleIn` needs precise-high/precise-low flags and `SplitVarnode`'s
-//!   double-precision whole-value recovery.
-//! * `RuleSplitFlow` needs the `SplitFlow` worklist and cross-block subvariable
-//!   trace, which cannot be represented by a local graph edit.
-//! * `RulePiecePathology` needs `FuncCallSpecs`/`FuncProto` byte-consumption
-//!   state and call-output locking.
-//! * `RuleCondNegate` needs the encoded CBRANCH boolean-flip bit and
-//!   `opFlipCondition`.
-//! * `RuleSwitchSingle` needs the jump-table registry, labelled table entries,
-//!   and CodeRef construction.
-//! * `RuleIgnoreNan` needs the architecture `nan_ignore_all` setting and the
-//!   floating-point comparison/type classification used by `checkBackForCompare`.
-//! * `RuleFuncPtrEncoding` needs the architecture's `funcptr_align` setting.
+//! * `RuleSwitchSingle` requires the `Funcdata` jump-table registry: Ghidra
+//!   stores tables in the member `jumpvec` (`funcdata.hh:89`), queries it with
+//!   `findJumpTable` (`ruleaction.cc:5434`), and removes entries with
+//!   `removeJumpTable` (`ruleaction.cc:5472`).  Ventris' recovery pass returns
+//!   a side-channel `Vec<JumpTable>` (`jumptable.rs:508-515`) rather than a
+//!   registry, so an `apply_op` rule cannot see the recovered table without
+//!   adding that `Funcdata` state.
+//! * `RuleSegment` requires the architecture `SegmentOp` registry and emulator;
+//!   its C++ body throws when the lookup is absent (`ruleaction.cc:9016`).
+//!   No supported Ventris lifter emits `SEGMENTOP` (the only match is the
+//!   opcode constant `ventris-pcode/src/lib.rs:132`), so this rule is
+//!   proven-inert and is intentionally not registered.
+//! * `RuleSplitFlow` requires the cross-block `SplitFlow` worklist and
+//!   transform (`subflow.cc:2011-2036`), which is not represented by the local
+//!   graph; its rule entry is at `subflow.cc:2045`.
 //!
-//! A few implemented rules are conservative because the graph deliberately
+//! `RulePullsubIndirect` uses the graph's exact `is_addr_force` predicate for
+//! Ghidra's `isAddrForce` guard (`ruleaction.cc:976`).  Its IOP annotations,
+//! consume masks, precision flags, indirect creation, and possible-output
+//! marker are otherwise used directly.
+//! `RuleCondNegate` is registered but currently inert in the normal Ventris
+//! pipeline: Ghidra's `ActionPreferComplement` (`blockaction.cc:2140`) reaches
+//! the `boolean_flip` write in `block.cc:2355`, while no in-tree action calls
+//! `Funcdata::op_flip_condition`.  Its direct fixture test sets the bit
+//! explicitly.
+//!
+//! `RuleFuncPtrEncoding` is registered but inert for the pinned architectures:
+//! `Funcdata::funcptr_align` is zero everywhere, matching the absence of a
+//! `<funcptr align=...>` declaration in the pinned processor specifications.
+//!
+//!
+//! A few implemented rules remain conservative because the graph deliberately
 //! lacks a Ghidra side table.  They decline more often (a stronger precondition,
 //! never an eager rewrite): `RuleCollectTerms` accepts the direct two-multiply
 //! form rather than the full `TermOrder` tree; `RulePullsubMulti` accepts one
@@ -47,13 +57,8 @@
 //! graph has no type lock; and `RuleDivTermAdd` limits its constant arithmetic
 //! to the graph's 64-bit constant representation.
 //!
-//! Four preconditions are necessarily weaker because the graph omits metadata
-//! that Ghidra tests: `RulePullsubMulti` and `RuleSubNormal` cannot inspect
-//! precise-high/precise-low flags, `RuleOrPredicate` cannot inspect the
-//! CBRANCH boolean-flip bit, and `RuleSelectCse` cannot inspect Ghidra's CSE
-//! hash/side tables.  Those forms may fire where the C++ rule declines; the
-//! implementations otherwise use structural guards and do not pretend the
-//! metadata exists.
+//! `RuleSelectCse` still cannot inspect Ghidra's CSE hash/side tables, so its
+//! structural equality check is intentionally narrower than the C++ search.
 //!
 
 use super::action::Rule;
@@ -260,6 +265,180 @@ impl Rule for RuleCollectTerms {
         1
     }
 }
+/// Return the least and greatest byte read by immediate descendants.
+///
+/// This is Ghidra's `RulePullsubMulti::minMaxUse` (`ruleaction.cc:676-709`).
+/// A non-`SUBPIECE` descendant means the complete value is observed.
+fn min_max_use(data: &Funcdata, value: VarnodeId) -> (Option<u64>, u64) {
+    let input_size = u64::from(data.varnode(value).size);
+    let mut max_byte = None;
+    let mut min_byte = input_size;
+    for descendant in data.varnode(value).descendants.iter().copied() {
+        if data.opcode_of(descendant) != Some(op::SUBPIECE) {
+            return (input_size.checked_sub(1), 0);
+        }
+        let Some(offset_vn) = input(data, descendant, 1) else {
+            return (input_size.checked_sub(1), 0);
+        };
+        if !is_constant(data, offset_vn) {
+            return (input_size.checked_sub(1), 0);
+        }
+        let Some(out) = output(data, descendant) else {
+            return (input_size.checked_sub(1), 0);
+        };
+        let offset = data.varnode(offset_vn).offset;
+        let end = offset.saturating_add(u64::from(data.varnode(out).size));
+        min_byte = min_byte.min(offset);
+        max_byte = Some(max_byte.unwrap_or(0).max(end.saturating_sub(1)));
+    }
+    (max_byte, min_byte)
+}
+
+/// Return whether a truncated value has one of Ghidra's suitable sizes.
+fn acceptable_size(size: u32) -> bool {
+    size != 0 && (size >= 8 || size == 1 || size == 2 || size == 4)
+}
+
+/// Find an existing SUBPIECE of `base` in the same block as its definition.
+fn find_subpiece(data: &Funcdata, base: VarnodeId, out_size: u32, shift: u64) -> Option<VarnodeId> {
+    let base_def = def(data, base)?;
+    for descendant in data.varnode(base).descendants.iter().copied() {
+        if data.opcode_of(descendant) != Some(op::SUBPIECE) {
+            continue;
+        }
+        let Some(parent) = data.op(descendant).parent else {
+            continue;
+        };
+        if data.varnode(base).flags.input && parent != GraphBlockId(0) {
+            continue;
+        }
+        if data.op(base_def).parent != Some(parent) {
+            continue;
+        }
+        if input(data, descendant, 0) != Some(base) {
+            continue;
+        }
+        let (Some(offset_vn), Some(out)) = (input(data, descendant, 1), output(data, descendant))
+        else {
+            continue;
+        };
+        if is_constant(data, offset_vn)
+            && data.varnode(offset_vn).offset == shift
+            && data.varnode(out).size == out_size
+        {
+            return Some(out);
+        }
+    }
+    None
+}
+
+/// Build a SUBPIECE near the definition of `base`.
+///
+/// Join-address records are not part of the graph, so a split of a joined
+/// value uses the base storage address directly.  This is conservative for
+/// the only cases this graph can represent.
+fn build_subpiece(
+    data: &mut Funcdata,
+    base: VarnodeId,
+    out_size: u32,
+    shift: u64,
+) -> Option<VarnodeId> {
+    let base_node = data.varnode(base).clone();
+    let (seq_num, block, insert_at_front, base_def) = if base_node.flags.input {
+        let (block, _) = data.blocks().next()?;
+        (
+            SeqNum {
+                address: data.block(block).start,
+                order: 0,
+            },
+            block,
+            true,
+            None,
+        )
+    } else {
+        let base_def = base_node.def?;
+        let block = data.op(base_def).parent?;
+        (data.op(base_def).seq, block, false, Some(base_def))
+    };
+    let offset = if data.big_endian {
+        u64::from(base_node.size).checked_sub(shift.saturating_add(u64::from(out_size)))?
+    } else {
+        shift
+    };
+    let offset_vn = data.new_constant(shift, 4);
+    let sub = data.new_op(op::SUBPIECE, seq_num, vec![base, offset_vn]);
+    let out = data.new_varnode(
+        base_node.space,
+        base_node.offset.wrapping_add(offset),
+        out_size,
+    );
+    data.op_set_output(sub, Some(out));
+    if insert_at_front {
+        data.op_insert_begin(sub, block);
+    } else {
+        data.op_insert_after(sub, base_def?);
+    }
+    Some(out)
+}
+
+/// Replace all immediate SUBPIECE descendants with a smaller value.
+fn replace_descendants(
+    data: &mut Funcdata,
+    original: VarnodeId,
+    replacement: VarnodeId,
+    max_byte: u64,
+    min_byte: u64,
+) -> bool {
+    let descendants: Vec<OpId> = data.varnode(original).descendants.iter().copied().collect();
+    let replacement_size = data.varnode(replacement).size;
+    let mut updates = Vec::with_capacity(descendants.len());
+    for descendant in descendants.iter().copied() {
+        if data.opcode_of(descendant) != Some(op::SUBPIECE) {
+            return false;
+        }
+        let Some(offset_vn) = input(data, descendant, 1) else {
+            return false;
+        };
+        if !is_constant(data, offset_vn) {
+            return false;
+        }
+        let Some(out) = output(data, descendant) else {
+            return false;
+        };
+        let out_size = data.varnode(out).size;
+        let truncation = data.varnode(offset_vn).offset;
+        if replacement_size < out_size {
+            return false;
+        }
+        if replacement_size == out_size {
+            if truncation != min_byte {
+                return false;
+            }
+            updates.push((descendant, truncation, None));
+        } else {
+            let Some(new_truncation) = truncation.checked_sub(min_byte) else {
+                return false;
+            };
+            if new_truncation > max_byte.saturating_sub(min_byte) {
+                return false;
+            }
+            updates.push((descendant, truncation, Some(new_truncation)));
+        }
+    }
+    for (descendant, truncation, new_truncation) in updates {
+        data.op_set_input(descendant, replacement, 0);
+        if let Some(new_truncation) = new_truncation {
+            if new_truncation != truncation {
+                let offset_vn = data.new_constant(new_truncation, 4);
+                data.op_set_input(descendant, offset_vn, 1);
+            }
+        } else {
+            data.op_set_opcode(descendant, op::COPY);
+            data.op_remove_input(descendant, 1);
+        }
+    }
+    true
+}
 
 // -------------------------------------------------------------------------
 // SSA truncation: pull one partial SUBPIECE through a MULTIEQUAL.
@@ -304,23 +483,38 @@ impl Rule for RulePullsubMulti {
             return 0;
         }
         let out_size = data.varnode(out).size;
+        if data.varnode(out).flags.precis_lo || data.varnode(out).flags.precis_hi {
+            return 0;
+        }
         let in_size = data.varnode(vn).size;
         if offset.saturating_add(u64::from(out_size)) > u64::from(in_size)
             || out_size == 0
-            || !(out_size == 1 || out_size == 2 || out_size == 4 || out_size == 8 || out_size >= 8)
+            || !acceptable_size(out_size)
             || out_size >= in_size
         {
             return 0;
         }
+        let (max_byte, min_byte) = min_max_use(data, vn);
+        let Some(max_byte) = max_byte else { return 0 };
+        let Some(new_size) = max_byte
+            .checked_sub(min_byte)
+            .and_then(|size| size.checked_add(1))
+            .and_then(|size| u32::try_from(size).ok())
+        else {
+            return 0;
+        };
+        if min_byte != offset || new_size != out_size || max_byte < min_byte {
+            return 0;
+        }
         let old_inputs = data.op(phi).inputs.clone();
-        let selected_end = offset.saturating_add(u64::from(out_size));
+        let selected_end = min_byte.saturating_add(u64::from(new_size));
         if old_inputs.iter().any(|value| {
-            data.varnode(*value).size < selected_end as u32 || !heritage_known(data, *value)
+            u64::from(data.varnode(*value).size) < selected_end || !heritage_known(data, *value)
         }) {
             return 0;
         }
-        // Ghidra's `minMaxUse`/consume check protects bytes still observed
-        // by immediate descendants.  The graph has no consume mask, so reject
+        // The graph has no consume mask in this older rule's conservative
+        // implementation; reject any descendant that observes another range.
         for value in &old_inputs {
             for descendant in data.varnode(*value).descendants.iter().copied() {
                 if descendant == phi {
@@ -337,27 +531,234 @@ impl Rule for RulePullsubMulti {
                 };
                 let desc_end = desc_offset.saturating_add(u64::from(data.varnode(desc_out).size));
                 if data.opcode_of(descendant) != Some(op::SUBPIECE)
-                    || desc_offset < offset
+                    || desc_offset < min_byte
                     || desc_end > selected_end
                 {
                     return 0;
                 }
             }
         }
-        let new_phi = data.new_op(op::MULTIEQUAL, seq(data, phi), Vec::new());
-        let new_out = data.new_unique(out_size);
+        let mut params = Vec::with_capacity(old_inputs.len());
+        for value in old_inputs.iter().copied() {
+            let Some(sub) = find_subpiece(data, value, new_size, min_byte)
+                .or_else(|| build_subpiece(data, value, new_size, min_byte))
+            else {
+                return 0;
+            };
+            params.push(sub);
+        }
+        let new_phi = data.new_op(op::MULTIEQUAL, seq(data, phi), params);
+        let new_out = data.new_unique(new_size);
         data.op_set_output(new_phi, Some(new_out));
         data.op_insert_front(new_phi, parent);
-        for (slot, value) in old_inputs.iter().copied().enumerate() {
-            let sub = data.new_op(op::SUBPIECE, seq(data, phi), vec![value, offset_vn]);
-            let sub_out = data.new_unique(out_size);
-            data.op_set_output(sub, Some(sub_out));
-            data.op_insert_before(sub, new_phi);
-            data.op_set_input(new_phi, sub_out, slot);
+        if !replace_descendants(data, vn, new_out, max_byte, min_byte) {
+            return 0;
         }
-        data.op_set_opcode(id, op::COPY);
-        data.op_set_inputs(id, vec![new_out]);
         data.op_destroy(phi);
+        1
+    }
+}
+
+// -------------------------------------------------------------------------
+// SSA truncation: pull one partial SUBPIECE through an INDIRECT.
+
+pub struct RulePullsubIndirect;
+
+impl Rule for RulePullsubIndirect {
+    fn name(&self) -> &'static str {
+        "pullsubindirect"
+    }
+
+    fn op_list(&self) -> Vec<i32> {
+        vec![op::SUBPIECE]
+    }
+
+    fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
+        if data.opcode_of(id) != Some(op::SUBPIECE) {
+            return 0;
+        }
+        let (Some(vn), Some(offset_vn), Some(out)) =
+            (input(data, id, 0), input(data, id, 1), output(data, id))
+        else {
+            return 0;
+        };
+        let Some(offset) = is_constant(data, offset_vn).then(|| data.varnode(offset_vn).offset)
+        else {
+            return 0;
+        };
+        let node = data.varnode(vn).clone();
+        if !node.flags.written || node.size > 8 {
+            return 0;
+        }
+        let Some(indir) = node.def else { return 0 };
+        if data.opcode_of(indir) != Some(op::INDIRECT) {
+            return 0;
+        }
+        let (Some(indir_input), Some(indir_target)) =
+            (input(data, indir, 0), input(data, indir, 1))
+        else {
+            return 0;
+        };
+        let Some(target_op) = data.iop_target(indir_target) else {
+            return 0;
+        };
+        if !data.varnode(indir_target).flags.constant || data.opcode_of(target_op).is_none() {
+            return 0;
+        }
+        if data.is_addr_force(vn) {
+            return 0;
+        }
+        let (max_byte, min_byte) = min_max_use(data, vn);
+        let Some(max_byte) = max_byte else { return 0 };
+        let Some(new_size) = max_byte
+            .checked_sub(min_byte)
+            .and_then(|size| size.checked_add(1))
+            .and_then(|size| u32::try_from(size).ok())
+        else {
+            return 0;
+        };
+        if max_byte < min_byte || new_size >= node.size || !acceptable_size(new_size) {
+            return 0;
+        }
+        if data.varnode(out).flags.precis_lo || data.varnode(out).flags.precis_hi {
+            return 0;
+        }
+        let kept = if min_byte >= 8 {
+            0
+        } else {
+            mask(new_size)
+                .checked_shl(u32::try_from(min_byte.saturating_mul(8)).unwrap_or(u32::MAX))
+                .unwrap_or(0)
+        };
+        let consume = !kept;
+        let consumed = super::consume::consume_masks(data)
+            .get(&indir_input)
+            .copied()
+            .unwrap_or(0);
+        if consume & consumed != 0 {
+            return 0;
+        }
+        let small_offset = if data.big_endian {
+            u64::from(node.size).checked_sub(max_byte.saturating_add(1))
+        } else {
+            Some(min_byte)
+        };
+        let Some(small_offset) = small_offset else {
+            return 0;
+        };
+        let small_address = super::guard::Location {
+            space: node.space,
+            offset: node.offset.wrapping_add(small_offset),
+            size: new_size,
+        };
+        let (new_ind, small2) = if data.is_indirect_creation(indir) {
+            let possible_out = !data.is_indirect_zero(indir_input);
+            let new_ind = super::guard::insert_indirect_creation(
+                data,
+                target_op,
+                small_address,
+                possible_out,
+            );
+            let Some(small2) = output(data, new_ind) else {
+                return 0;
+            };
+            (new_ind, small2)
+        } else {
+            let Some(small1) = find_subpiece(data, indir_input, new_size, offset)
+                .or_else(|| build_subpiece(data, indir_input, new_size, offset))
+            else {
+                return 0;
+            };
+            let target_ref = data.new_iop(target_op);
+            let indir_seq = seq(data, indir);
+            let new_ind = data.new_op(op::INDIRECT, indir_seq, vec![small1, target_ref]);
+            let small2 =
+                data.new_varnode(node.space, node.offset.wrapping_add(small_offset), new_size);
+            data.op_set_output(new_ind, Some(small2));
+            data.op_insert_before(new_ind, indir);
+            (new_ind, small2)
+        };
+        if !replace_descendants(data, vn, small2, max_byte, min_byte) {
+            data.op_destroy(new_ind);
+            return 0;
+        }
+        1
+    }
+}
+// -------------------------------------------------------------------------
+// Branch condition normalization.
+
+/// Negate a branch operand when structuring marked its meaning as flipped.
+pub struct RuleCondNegate;
+
+impl Rule for RuleCondNegate {
+    fn name(&self) -> &'static str {
+        "condnegate"
+    }
+
+    fn op_list(&self) -> Vec<i32> {
+        vec![op::CBRANCH]
+    }
+
+    fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
+        if data.opcode_of(id) != Some(op::CBRANCH) || !data.is_boolean_flip(id) {
+            return 0;
+        }
+        let Some(value) = input(data, id, 1) else {
+            return 0;
+        };
+        let new_op = data.new_op(op::BOOL_NEGATE, seq(data, id), vec![value]);
+        let new_out = data.new_unique(1);
+        data.op_set_output(new_op, Some(new_out));
+        data.op_set_input(id, new_out, 1);
+        data.op_insert_before(new_op, id);
+        data.op_flip_condition(id);
+        1
+    }
+}
+
+// -------------------------------------------------------------------------
+// Function-pointer low-bit encoding.
+
+/// Remove a known low-bit mask from an indirect function pointer.
+pub struct RuleFuncPtrEncoding;
+
+impl Rule for RuleFuncPtrEncoding {
+    fn name(&self) -> &'static str {
+        "funcptrencoding"
+    }
+
+    fn op_list(&self) -> Vec<i32> {
+        vec![op::CALLIND]
+    }
+
+    fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
+        let align = data.funcptr_align;
+        if data.opcode_of(id) != Some(op::CALLIND) || align == 0 || align >= 64 {
+            return 0;
+        }
+        let Some(value) = input(data, id, 0) else {
+            return 0;
+        };
+        let Some(and_op) = def(data, value) else {
+            return 0;
+        };
+        if data.opcode_of(and_op) != Some(op::INT_AND) {
+            return 0;
+        }
+        let Some(mask_vn) = input(data, and_op, 1) else {
+            return 0;
+        };
+        if !is_constant(data, mask_vn) {
+            return 0;
+        }
+        let test_mask = mask(data.varnode(mask_vn).size);
+        let slide = u64::MAX << align;
+        if test_mask & slide != data.varnode(mask_vn).offset {
+            return 0;
+        }
+        data.op_remove_input(and_op, 1);
+        data.op_set_opcode(and_op, op::COPY);
         1
     }
 }
@@ -573,11 +974,14 @@ fn discover_predicate(data: &Funcdata, value: VarnodeId) -> Option<PredicateShap
     if !is_constant(data, zero) || data.varnode(zero).offset != 0 {
         return None;
     }
-    let zero_path_true = if compare_code == op::INT_NOTEQUAL {
+    let mut zero_path_true = if compare_code == op::INT_NOTEQUAL {
         !zero_path_true
     } else {
         zero_path_true
     };
+    if data.is_boolean_flip(cbranch) {
+        zero_path_true = !zero_path_true;
+    }
     Some(PredicateShape {
         multi,
         zero_slot,
@@ -950,13 +1354,15 @@ impl Rule for RuleSubNormal {
     fn op_list(&self) -> Vec<i32> {
         vec![op::SUBPIECE]
     }
-
     fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
         let (Some(shift_out), Some(c_vn), Some(out)) =
             (input(data, id, 0), input(data, id, 1), output(data, id))
         else {
             return 0;
         };
+        if data.varnode(out).flags.precis_hi || data.varnode(out).flags.precis_lo {
+            return 0;
+        }
         let Some(shift_op) = def(data, shift_out) else {
             return 0;
         };
@@ -1553,10 +1959,13 @@ pub fn all() -> Vec<Box<dyn Rule>> {
     vec![
         Box::new(RuleCollectTerms),
         Box::new(RulePullsubMulti),
+        Box::new(RulePullsubIndirect),
         Box::new(RuleTermOrder),
         Box::new(RuleSelectCse),
         Box::new(RuleXorSwap),
         Box::new(RuleOrPredicate),
+        Box::new(RuleCondNegate),
+        Box::new(RuleFuncPtrEncoding),
         Box::new(RuleBooleanNegate),
         Box::new(super::nodejoin::RulePushMulti),
         Box::new(RuleDoubleSub),
@@ -2016,6 +2425,90 @@ mod tests {
 
         let (unrelated, _) = op_with_output(&mut data, merge, op::INT_OR, vec![x, y], 1);
         assert_eq!(RuleOrPredicate.apply_op(unrelated, &mut data), 0);
+    }
+
+    /// Ghidra's `RulePullsubIndirect` requires a live IOP target, a partial
+    /// SUBPIECE use, and a non-consumed/non-forced result before rebuilding the
+    /// INDIRECT (`ruleaction.cc:962-1019`).
+    #[test]
+    fn pullsub_indirect_fires_and_declines() {
+        let mut data = Funcdata::default();
+        let b = block(&mut data);
+        let source = input_value(&mut data, 4);
+        let (_, base) = op_with_output(&mut data, b, op::COPY, vec![source], 4);
+        let target = no_output(&mut data, b, op::CALL, Vec::new());
+        let cause = data.new_iop(target);
+        let indir = data.new_op(
+            op::INDIRECT,
+            SeqNum {
+                address: 0x1008,
+                order: 0,
+            },
+            vec![base, cause],
+        );
+        let whole = data.new_unique(4);
+        data.op_set_output(indir, Some(whole));
+        data.op_insert_before(indir, target);
+        let offset = data.new_constant(1, 4);
+        let (sub, _) = op_with_output(&mut data, b, op::SUBPIECE, vec![whole, offset], 2);
+        assert_eq!(RulePullsubIndirect.apply_op(sub, &mut data), 1);
+        assert_eq!(data.op(sub).opcode, op::COPY);
+        assert_ne!(data.op(sub).inputs[0], whole);
+
+        let tied = data.new_varnode(REGISTER_SPACE, 0x900, 4);
+        let tied_cause = data.new_iop(target);
+        let tied_indir = data.new_op(
+            op::INDIRECT,
+            SeqNum {
+                address: 0x1010,
+                order: 0,
+            },
+            vec![tied, tied_cause],
+        );
+        let tied_out = data.new_varnode(REGISTER_SPACE, 0x900, 4);
+        data.op_set_output(tied_indir, Some(tied_out));
+        data.op_insert_before(tied_indir, target);
+        let tied_offset = data.new_constant(1, 4);
+        let (tied_sub, _) =
+            op_with_output(&mut data, b, op::SUBPIECE, vec![tied_out, tied_offset], 2);
+        assert_eq!(RulePullsubIndirect.apply_op(tied_sub, &mut data), 0);
+    }
+
+    /// Ghidra's `RuleCondNegate` pays a CBRANCH `boolean_flip` mark by
+    /// inserting BOOL_NEGATE and clearing the mark (`ruleaction.cc:5484-5507`).
+    #[test]
+    fn cond_negate_pays_boolean_flip() {
+        let mut data = Funcdata::default();
+        let b = block(&mut data);
+        let target = data.new_constant(0x1200, 4);
+        let condition = input_value(&mut data, 1);
+        let branch = no_output(&mut data, b, op::CBRANCH, vec![target, condition]);
+        assert_eq!(RuleCondNegate.apply_op(branch, &mut data), 0);
+        data.op_flip_condition(branch);
+        assert_eq!(RuleCondNegate.apply_op(branch, &mut data), 1);
+        assert!(!data.is_boolean_flip(branch));
+        let negate = data.block(b).ops[0];
+        assert_eq!(data.opcode_of(negate), Some(op::BOOL_NEGATE));
+        assert_eq!(data.op(branch).inputs[1], data.op(negate).output.unwrap());
+    }
+
+    /// Ghidra's `RuleFuncPtrEncoding` removes an alignment mask only when
+    /// `funcptr_align` is nonzero and all low alignment bits are masked
+    /// (`ruleaction.cc:9920-9946`).
+    #[test]
+    fn funcptr_encoding_strips_alignment_mask() {
+        let mut data = Funcdata::default();
+        let b = block(&mut data);
+        let pointer = input_value(&mut data, 4);
+        let alignment_mask = data.new_constant(0xffff_fffc, 4);
+        let (masked_op, masked) =
+            op_with_output(&mut data, b, op::INT_AND, vec![pointer, alignment_mask], 4);
+        let call = no_output(&mut data, b, op::CALLIND, vec![masked]);
+        assert_eq!(RuleFuncPtrEncoding.apply_op(call, &mut data), 0);
+        data.funcptr_align = 2;
+        assert_eq!(RuleFuncPtrEncoding.apply_op(call, &mut data), 1);
+        assert_eq!(data.op(masked_op).opcode, op::COPY);
+        assert_eq!(data.op(masked_op).inputs, vec![pointer]);
     }
 
     #[test]

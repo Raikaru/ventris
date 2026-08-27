@@ -22,6 +22,14 @@
 //! and in reach - `dungeon_game.elf`'s `.debug_abbrev` declares both attributes
 //! - so this is a missing declared-type import path, not a missing rule.
 //!
+//! The oracle is inert here for the same reason, and it is measurable: none of
+//! the 36 corpus functions' Ghidra renders contains a `ZPULL` or `SPULL`, the
+//! ops the bitfield rules produce. `graph::splitvarnode` records the same
+//! prerequisite for `RuleStringCopy`/`RuleStringStore`, whose `isCharPrint`
+//! guard is unreachable by inference for the identical reason: Ghidra keeps a
+//! size-1 `TYPE_INT` that is deliberately *not* ASCII as `type_nochar`
+//! (`type.cc:3656-3658`) so inference never manufactures a character type.
+//!
 //! Registering it unguarded was measured and reverted: it fires on ordinary
 //! masked arithmetic, breaking `vm_boot`'s call recovery and `TRK_fill_mem`'s
 //! parameters for a net loss of one agreeing function.

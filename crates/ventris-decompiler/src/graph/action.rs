@@ -722,14 +722,22 @@ pub fn default_pipeline() -> Box<dyn Action> {
     if !skip("expression") {
         pipeline = pipeline.add(Box::new(FixedPoint::new(Box::new(expression))));
     }
-    // Ghidra registers the bitfield rules in the `cleanup` pool, group
-    // `bitfields`, which runs after the full loop rather than inside it: they
-    // rewrite a mask-and-shift into a single ZPULL, so running them earlier
-    // would remove the shapes the expression rules match on.
+    // Ghidra's `cleanup` pool, which runs after the full loop rather than inside
+    // it. The bitfield rules rewrite a mask-and-shift into a single ZPULL, so
+    // running them earlier would remove the shapes the expression rules match
+    // on; the same ordering argument is why `RuleMultNegOne` and
+    // `RuleAddUnsigned` belong here and not in the expression pool - they
+    // rewrite an addition of a large constant into a subtraction, which is a
+    // presentation choice the arithmetic rules must not see.
+    //
+    // Registration order follows `coreaction.cc:5745-5767`.
     if !skip("cleanup") {
         let mut cleanup = ActionPool::new("cleanup");
         for rule in [
-            Box::new(super::bitfield::RuleBitFieldOut) as Box<dyn Rule>,
+            Box::new(super::expr_arith::RuleMultNegOne) as Box<dyn Rule>,
+            Box::new(super::expr_arith::RuleAddUnsigned),
+            Box::new(super::subfloat::RuleDumptyHumpLate),
+            Box::new(super::bitfield::RuleBitFieldOut),
             Box::new(super::bitfield::RuleBitFieldLoad),
             Box::new(super::bitfield::RuleBitFieldStore),
             Box::new(super::bitfield::RulePullAbsorb),

@@ -2134,7 +2134,28 @@ impl NativeDecompiler {
             .unwrap_or_default();
         let argument_locations: Vec<graph::guard::Location> =
             argument_sections.iter().flatten().copied().collect();
-        graph::guard::guard_calls(&mut data, &call_locations, &effects, &argument_locations);
+        // `Heritage::guardCalls` needs the candidate *result* locations to
+        // decide `possibleoutput` for each killed range (`heritage.cc:1468-1484`),
+        // so they are computed here rather than only for the return guards.
+        let return_locations: Vec<graph::guard::Location> = abi
+            .map(|abi| {
+                abi_primary_return_vnodes(architecture, abi)
+                    .into_iter()
+                    .map(|vnode| graph::guard::Location {
+                        space: vnode.space,
+                        offset: vnode.offset,
+                        size: vnode.size,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        graph::guard::guard_calls(
+            &mut data,
+            &call_locations,
+            &effects,
+            &argument_locations,
+            &return_locations,
+        );
         // A return reads the convention's result storage. Without this the
         // returned value has no reader, dead code removes the computation, and
         // the function reports `void`. With no convention the architecture's
@@ -2215,6 +2236,18 @@ impl NativeDecompiler {
             // them had ever run.
             graph::action::Action::apply(action.as_ref(), &mut data);
         }
+        // Ghidra recovers jump tables during flow-following, long before the
+        // rule pool runs, and keeps them on `Funcdata::jumpvec` so any pass can
+        // ask. Recovering them here rather than only in the structuring phase is
+        // what lets `RuleSwitchSingle` see a table at all; the structuring phase
+        // reads the same registry instead of its own side-channel list.
+        data.jump_tables = memory
+            .map(|memory| {
+                graph::jumptable::recover_jump_tables(&data, &|address, width| {
+                    (memory.read)(address, width)
+                })
+            })
+            .unwrap_or_default();
         let pipeline = graph::action::default_pipeline();
         // `ActionDirectWrite` is registered twice in Ghidra's main loop, once
         // propagating through a call's `INDIRECT` and once not
@@ -2548,13 +2581,18 @@ impl NativeDecompiler {
         // be read. Without memory the branch keeps its edges and each becomes a
         // `goto`, exactly as before: inventing labels would print alternatives
         // as though they were a sequence.
-        let tables = memory
+        // Re-recovered here because the rule pool has since rewritten the
+        // destination computations, so the early registry's operation ids may
+        // name destroyed operations. The registry is the single source of truth,
+        // and the structuring phase reads it rather than a private list.
+        data.jump_tables = memory
             .map(|memory| {
                 graph::jumptable::recover_jump_tables(&data, &|address, width| {
                     (memory.read)(address, width)
                 })
             })
             .unwrap_or_default();
+        let tables = data.jump_tables.clone();
         // An indirect jump whose table could not be read is a call, not a
         // branch to nowhere. Ghidra converts it before anything structures the
         // graph, so the constructs are built over the call.

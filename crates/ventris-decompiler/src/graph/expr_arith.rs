@@ -3,28 +3,11 @@
 //!
 //! Source authority for every implementation below is the corresponding
 //! `Rule*::applyOp` in
-//! `C:/Tools/ghidra_12.1.3_PUBLIC/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc`.
-//! The graph deliberately exposes only SSA structure, constants, locations,
-//! and the cached non-zero mask table, so the rules that require Ghidra's type,
-//! address, or precision side tables are omitted rather than approximated.
-//!
-//! Omitted requested rules:
-//!
-//! * `RuleAddUnsigned` requires `Datatype::getMetatype`, character-printing
-//!   classification, enum named-value lookup, and equate-symbol lock state.
-//! * `RuleLeftRight` requires address endianness, address renormalization, and
-//!   `Funcdata::newVarnodeOut`'s location-aware allocator. `GraphVarnode` stores
-//!   a location but `Funcdata` does not expose the architecture endianness that
-//!   selects the SUBPIECE offset.
-//! * `RuleSubCommute` requires precise-low/precise-high flags, spacebase
-//!   classification, and the C++ `shortenExtension`/location-aware partial
-//!   commute machinery.
-//! * `RuleMultNegOne` is the exact inverse of the implemented
-//!   `Rule2Comp2Mult`. The graph has no provenance bit with which to make the
-//!   two guards disjoint, so registering both would make the fixed-point pool
-//!   alternate forever. It is intentionally omitted; `Rule2Comp2Mult` is the
-//!   canonical direction in this module.
-//!
+//! `C:/tmp/ghidra-cpp-full/ruleaction.cc`.
+//! The graph exposes SSA structure, constants, locations, endianness,
+//! recovered integer signedness, and the precision flags needed by these
+//! rewrites. Cleanup rules are implemented here but are registered by the
+//! cleanup pool rather than this module's expression-rule list.
 //! `RuleBitUndistribute` is not an inverse of the live `RuleAndDistribute` on
 //! any accepted shape here: `RuleAndDistribute` is offered only an outer
 //! `INT_AND` with an inner `INT_OR`, while this rule requires equal inner
@@ -35,6 +18,7 @@
 //! mask transfer here would let inverse rules disagree and oscillate.
 
 use super::action::Rule;
+use super::typefactory::DataType;
 use super::{Funcdata, OpId, VarnodeId};
 use ventris_pcode::op;
 
@@ -65,6 +49,122 @@ fn is_constant(data: &Funcdata, value: VarnodeId) -> bool {
     data.varnode(value).flags.constant
 }
 
+/// The graph's location equivalent of Ghidra's `Varnode::isSpacebase`.
+fn is_spacebase(data: &Funcdata, value: VarnodeId) -> bool {
+    let Some(spacebase) = data.spacebase else {
+        return false;
+    };
+    let node = data.varnode(value);
+    node.space == spacebase.space && node.offset == spacebase.offset && node.size == spacebase.size
+}
+
+/// Sign-extend a value between byte-sized integer containers.
+fn sign_extend_bytes(value: u64, input_size: u32, output_size: u32) -> u64 {
+    if input_size == 0 {
+        return 0;
+    }
+    let input_mask = mask(input_size);
+    let sign_bit = if input_size >= 8 {
+        1u64 << 63
+    } else {
+        1u64 << (input_size * 8 - 1)
+    };
+    let value = value & input_mask;
+    let extended = if value & sign_bit != 0 {
+        value | !input_mask
+    } else {
+        value
+    };
+    extended & mask(output_size)
+}
+
+/// Shrink an extension's output while preserving its storage location.
+fn shorten_extension(data: &mut Funcdata, ext_op: OpId, max_size: u32) -> Option<VarnodeId> {
+    let original = output(data, ext_op)?;
+    let location = data.varnode(original).clone();
+    if max_size == 0 || max_size > location.size {
+        return None;
+    }
+    let offset = if data.big_endian {
+        location
+            .offset
+            .wrapping_add(u64::from(location.size - max_size))
+    } else {
+        location.offset
+    };
+    data.op_set_output(ext_op, None);
+    let replacement = data.new_varnode(location.space, offset, max_size);
+    data.op_set_output(ext_op, Some(replacement));
+    Some(replacement)
+}
+
+/// Cancel extensions around a binary operation, leaving a partial SUBPIECE.
+fn cancel_extensions(
+    data: &mut Funcdata,
+    longform: OpId,
+    sub_op: OpId,
+    mut ext0_in: VarnodeId,
+    mut ext1_in: VarnodeId,
+) -> bool {
+    let Some(longform_out) = output(data, longform) else {
+        return false;
+    };
+    if data.lone_descend(longform_out) != Some(sub_op) {
+        return false;
+    }
+
+    let max_size;
+    if data.varnode(ext0_in).size == data.varnode(ext1_in).size {
+        max_size = data.varnode(ext0_in).size;
+        if is_free(data, ext0_in) || is_free(data, ext1_in) {
+            return false;
+        }
+    } else if data.varnode(ext0_in).size < data.varnode(ext1_in).size {
+        max_size = data.varnode(ext1_in).size;
+        if is_free(data, ext1_in) {
+            return false;
+        }
+        let Some(longform_in0) = input(data, longform, 0) else {
+            return false;
+        };
+        if data.lone_descend(longform_in0) != Some(longform) {
+            return false;
+        }
+        let Some(ext0_op) = definition(data, longform_in0) else {
+            return false;
+        };
+        let Some(shortened) = shorten_extension(data, ext0_op, max_size) else {
+            return false;
+        };
+        ext0_in = shortened;
+    } else {
+        max_size = data.varnode(ext0_in).size;
+        if is_free(data, ext0_in) {
+            return false;
+        }
+        let Some(longform_in1) = input(data, longform, 1) else {
+            return false;
+        };
+        if data.lone_descend(longform_in1) != Some(longform) {
+            return false;
+        }
+        let Some(ext1_op) = definition(data, longform_in1) else {
+            return false;
+        };
+        let Some(shortened) = shorten_extension(data, ext1_op, max_size) else {
+            return false;
+        };
+        ext1_in = shortened;
+    }
+
+    data.op_set_output(longform, None);
+    let new_output = data.new_unique(max_size);
+    data.op_set_output(longform, Some(new_output));
+    data.op_set_input(longform, ext0_in, 0);
+    data.op_set_input(longform, ext1_in, 1);
+    data.op_set_input(sub_op, new_output, 0);
+    true
+}
 /// Exact graph equivalent of Ghidra's `Varnode::isFree`.
 fn is_free(data: &Funcdata, value: VarnodeId) -> bool {
     let node = data.varnode(value);
@@ -96,6 +196,89 @@ impl Rule for Rule2Comp2Mult {
         let neg_one = data.new_constant(mask(size), size);
         data.op_set_opcode(id, op::INT_MULT);
         data.op_set_inputs(id, vec![value, neg_one]);
+        1
+    }
+}
+
+/// `V * -1 -> -V`.
+///
+/// Ghidra registers this rule in the cleanup pool at `coreaction.cc:5747`.
+pub struct RuleMultNegOne;
+
+impl Rule for RuleMultNegOne {
+    fn name(&self) -> &'static str {
+        "multnegone"
+    }
+
+    fn op_list(&self) -> Vec<i32> {
+        vec![op::INT_MULT]
+    }
+
+    fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
+        let Some(constant) = input(data, id, 1) else {
+            return 0;
+        };
+        if !is_constant(data, constant) {
+            return 0;
+        }
+        let node = data.varnode(constant);
+        if node.offset != mask(node.size) {
+            return 0;
+        }
+        data.op_set_opcode(id, op::INT_2COMP);
+        data.op_remove_input(id, 1);
+        1
+    }
+}
+
+/// `V + 0xff... -> V - 0x00...` for unsigned integer constants.
+///
+/// Ghidra registers this rule in the cleanup pool at `coreaction.cc:5748`;
+/// the character, enum, and named-equate refusals are vacuous because this
+/// graph's `DataType` has no such metadata.
+pub struct RuleAddUnsigned;
+
+impl Rule for RuleAddUnsigned {
+    fn name(&self) -> &'static str {
+        "addunsigned"
+    }
+
+    fn op_list(&self) -> Vec<i32> {
+        vec![op::INT_ADD]
+    }
+
+    fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
+        let Some(constant) = input(data, id, 1) else {
+            return 0;
+        };
+        if !is_constant(data, constant) {
+            return 0;
+        }
+        let is_unsigned = {
+            let recovered = data.recovered_types();
+            matches!(
+                recovered.1.get(constant),
+                Some(DataType::Int { signed: false, .. })
+            )
+        };
+        if !is_unsigned {
+            return 0;
+        }
+        let node = data.varnode(constant).clone();
+        let value = node.offset;
+        let full_mask = mask(node.size);
+        let quarter_shift = node.size.saturating_mul(6);
+        if quarter_shift >= 64 {
+            return 0;
+        }
+        let quarter = (full_mask >> quarter_shift) << quarter_shift;
+        if value & quarter != quarter {
+            return 0;
+        }
+        let negated = value.wrapping_neg() & full_mask;
+        data.op_set_opcode(id, op::INT_SUB);
+        let replacement = data.new_constant(negated, node.size);
+        data.op_set_input(id, replacement, 1);
         1
     }
 }
@@ -132,6 +315,321 @@ impl Rule for RuleSub2Add {
     }
 }
 
+/// `(V << c) >> c -> ZEXT(SUBPIECE(V, 0))`.
+///
+/// `INT_SRIGHT` produces `SEXT` instead. The source rule is
+/// `ruleaction.cc:2028`; its opcode list is the two right-shift forms at
+/// `ruleaction.cc:2021-2026`.
+pub struct RuleLeftRight;
+
+impl Rule for RuleLeftRight {
+    fn name(&self) -> &'static str {
+        "leftright"
+    }
+
+    fn op_list(&self) -> Vec<i32> {
+        vec![op::INT_RIGHT, op::INT_SRIGHT]
+    }
+
+    fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
+        let Some(right_amount) = input(data, id, 1) else {
+            return 0;
+        };
+        if !is_constant(data, right_amount) {
+            return 0;
+        }
+        let Some(shiftin) = input(data, id, 0) else {
+            return 0;
+        };
+        let Some(leftshift) = definition(data, shiftin) else {
+            return 0;
+        };
+        if data.opcode_of(leftshift) != Some(op::INT_LEFT) {
+            return 0;
+        }
+        let Some(left_amount) = input(data, leftshift, 1) else {
+            return 0;
+        };
+        if !is_constant(data, left_amount) {
+            return 0;
+        }
+        let shift = data.varnode(right_amount).offset;
+        if data.varnode(left_amount).offset != shift || shift & 7 != 0 {
+            return 0;
+        }
+        let isa = shift / 8;
+        let shiftin_size = data.varnode(shiftin).size;
+        let Some(tsz) = shiftin_size.checked_sub(isa as u32) else {
+            return 0;
+        };
+        if !matches!(tsz, 1 | 2 | 4 | 8) {
+            return 0;
+        }
+        if data.lone_descend(shiftin) != Some(id) {
+            return 0;
+        }
+
+        let location = data.varnode(shiftin).clone();
+        let offset = if data.big_endian {
+            location.offset.wrapping_add(isa)
+        } else {
+            location.offset
+        };
+        let left_amount_size = data.varnode(left_amount).size;
+        let right_opcode = data.op(id).opcode;
+
+        data.op_set_output(leftshift, None);
+        let newvn = data.new_varnode(location.space, offset, tsz);
+        data.op_set_output(leftshift, Some(newvn));
+        data.op_set_opcode(leftshift, op::SUBPIECE);
+        let zero = data.new_constant(0, left_amount_size);
+        data.op_set_input(leftshift, zero, 1);
+        data.op_set_input(id, newvn, 0);
+        data.op_remove_input(id, 1);
+        data.op_set_opcode(
+            id,
+            if right_opcode == op::INT_SRIGHT {
+                op::INT_SEXT
+            } else {
+                op::INT_ZEXT
+            },
+        );
+        1
+    }
+}
+
+/// Commute `SUBPIECE` inward through compatible integer operations.
+///
+/// This is Ghidra's `RuleSubCommute::applyOp` at `ruleaction.cc:4532`, with
+/// `cancelExtensions` and `shortenExtension` above porting the partial
+/// extension case.
+pub struct RuleSubCommute;
+
+impl Rule for RuleSubCommute {
+    fn name(&self) -> &'static str {
+        "subcommute"
+    }
+
+    fn op_list(&self) -> Vec<i32> {
+        vec![op::SUBPIECE]
+    }
+
+    fn apply_op(&self, id: OpId, data: &mut Funcdata) -> usize {
+        let Some(base) = input(data, id, 0) else {
+            return 0;
+        };
+        if !data.varnode(base).flags.written {
+            return 0;
+        }
+        let Some(offset_value) = input(data, id, 1) else {
+            return 0;
+        };
+        let offset = data.varnode(offset_value).offset;
+        let Some(outvn) = output(data, id) else {
+            return 0;
+        };
+        let out_flags = data.varnode(outvn).flags;
+        if out_flags.precis_lo || out_flags.precis_hi {
+            return 0;
+        }
+        let insize = data.varnode(base).size;
+        let Some(longform) = definition(data, base) else {
+            return 0;
+        };
+        let Some(longform_opcode) = data.opcode_of(longform) else {
+            return 0;
+        };
+        let out_size = data.varnode(outvn).size;
+        let mut shift_slot = None;
+
+        match longform_opcode {
+            op::INT_LEFT => {
+                shift_slot = Some(1);
+                if offset != 0 {
+                    return 0;
+                }
+                let Some(longform_input) = input(data, longform, 0) else {
+                    return 0;
+                };
+                if !data.varnode(longform_input).flags.written {
+                    return 0;
+                }
+                let Some(inner) = definition(data, longform_input) else {
+                    return 0;
+                };
+                if !matches!(data.opcode_of(inner), Some(op::INT_ZEXT) | Some(op::PIECE)) {
+                    return 0;
+                }
+            }
+            op::INT_REM | op::INT_DIV => {
+                if offset != 0 {
+                    return 0;
+                }
+                let Some(longform_input0) = input(data, longform, 0) else {
+                    return 0;
+                };
+                if !data.varnode(longform_input0).flags.written {
+                    return 0;
+                }
+                let Some(zext0) = definition(data, longform_input0) else {
+                    return 0;
+                };
+                if data.opcode_of(zext0) != Some(op::INT_ZEXT) {
+                    return 0;
+                }
+                let Some(zext0_in) = input(data, zext0, 0) else {
+                    return 0;
+                };
+                let Some(longform_input1) = input(data, longform, 1) else {
+                    return 0;
+                };
+                if data.varnode(longform_input1).flags.written {
+                    let Some(zext1) = definition(data, longform_input1) else {
+                        return 0;
+                    };
+                    if data.opcode_of(zext1) != Some(op::INT_ZEXT) {
+                        return 0;
+                    }
+                    let Some(zext1_in) = input(data, zext1, 0) else {
+                        return 0;
+                    };
+                    if data.varnode(zext1_in).size > out_size
+                        || data.varnode(zext0_in).size > out_size
+                    {
+                        return if cancel_extensions(data, longform, id, zext0_in, zext1_in) {
+                            1
+                        } else {
+                            0
+                        };
+                    }
+                } else if is_constant(data, longform_input1)
+                    && data.varnode(zext0_in).size <= out_size
+                {
+                    let value = data.varnode(longform_input1).offset;
+                    let small_value = value & mask(out_size);
+                    if value != small_value {
+                        return 0;
+                    }
+                } else {
+                    return 0;
+                }
+            }
+            op::INT_SREM | op::INT_SDIV => {
+                if offset != 0 {
+                    return 0;
+                }
+                let Some(longform_input0) = input(data, longform, 0) else {
+                    return 0;
+                };
+                if !data.varnode(longform_input0).flags.written {
+                    return 0;
+                }
+                let Some(sext0) = definition(data, longform_input0) else {
+                    return 0;
+                };
+                if data.opcode_of(sext0) != Some(op::INT_SEXT) {
+                    return 0;
+                }
+                let Some(sext0_in) = input(data, sext0, 0) else {
+                    return 0;
+                };
+                let Some(longform_input1) = input(data, longform, 1) else {
+                    return 0;
+                };
+                if data.varnode(longform_input1).flags.written {
+                    let Some(sext1) = definition(data, longform_input1) else {
+                        return 0;
+                    };
+                    if data.opcode_of(sext1) != Some(op::INT_SEXT) {
+                        return 0;
+                    }
+                    let Some(sext1_in) = input(data, sext1, 0) else {
+                        return 0;
+                    };
+                    if data.varnode(sext1_in).size > out_size
+                        || data.varnode(sext0_in).size > out_size
+                    {
+                        return if cancel_extensions(data, longform, id, sext0_in, sext1_in) {
+                            1
+                        } else {
+                            0
+                        };
+                    }
+                } else if is_constant(data, longform_input1)
+                    && data.varnode(sext0_in).size <= out_size
+                {
+                    let value = data.varnode(longform_input1).offset;
+                    let small_value = value & mask(out_size);
+                    let extended = sign_extend_bytes(small_value, out_size, insize);
+                    if value != extended {
+                        return 0;
+                    }
+                } else {
+                    return 0;
+                }
+            }
+            op::INT_ADD => {
+                if offset != 0 {
+                    return 0;
+                }
+                let Some(longform_input0) = input(data, longform, 0) else {
+                    return 0;
+                };
+                if is_spacebase(data, longform_input0) {
+                    return 0;
+                }
+            }
+            op::INT_MULT => {
+                if offset != 0 {
+                    return 0;
+                }
+            }
+            op::INT_NEGATE | op::INT_XOR | op::INT_AND | op::INT_OR => {}
+            _ => return 0,
+        }
+
+        if data.lone_descend(base) != Some(id) {
+            return 0;
+        }
+        if offset == 0 {
+            if let Some(nextop) = data.lone_descend(outvn) {
+                if data.opcode_of(nextop) == Some(op::INT_ZEXT) {
+                    if let Some(next_output) = output(data, nextop)
+                        && data.varnode(next_output).size == insize
+                    {
+                        return 0;
+                    }
+                }
+            }
+        }
+
+        let longform_inputs = data.op(longform).inputs.clone();
+        let sequence = data.op(id).seq;
+        let mut last_input = None;
+        let mut new_vn = None;
+        for (index, value) in longform_inputs.into_iter().enumerate() {
+            if shift_slot != Some(index) {
+                if last_input != Some(value) || new_vn.is_none() {
+                    let newsub = data.new_op(op::SUBPIECE, sequence, Vec::new());
+                    let sub_output = data.new_unique(out_size);
+                    data.op_set_output(newsub, Some(sub_output));
+                    data.op_set_input(longform, sub_output, index);
+                    data.op_set_input(newsub, value, 0);
+                    let sub_offset = data.new_constant(offset, 4);
+                    data.op_set_input(newsub, sub_offset, 1);
+                    data.op_insert_before(newsub, longform);
+                    new_vn = Some(sub_output);
+                } else if let Some(new_vn) = new_vn {
+                    data.op_set_input(longform, new_vn, index);
+                }
+            }
+            last_input = Some(value);
+        }
+        data.op_set_output(longform, Some(outvn));
+        data.op_destroy(id);
+        1
+    }
+}
 /// `-W` feeding `V + -W` is printed as `V - W`.
 pub struct Rule2Comp2Sub;
 
@@ -881,6 +1379,147 @@ mod tests {
         (id, output)
     }
 
+    /// Ghidra's `RuleMultNegOne` at `ruleaction.cc:7179` retags a multiply by
+    /// an all-ones constant as `INT_2COMP`.
+    #[test]
+    fn mult_neg_one_rewrites_all_ones_constant() {
+        let mut data = Funcdata::default();
+        let block = data.new_block(0x1000);
+        let value = input_value(&mut data, 4);
+        let all_ones = data.new_constant(0xffff_ffff, 4);
+        let (multiply, _) = binary(&mut data, block, op::INT_MULT, value, all_ones, 4);
+
+        assert_eq!(RuleMultNegOne.apply_op(multiply, &mut data), 1);
+        assert_eq!(data.op(multiply).opcode, op::INT_2COMP);
+        assert_eq!(data.op(multiply).inputs, vec![value]);
+    }
+
+    /// Ghidra's `RuleAddUnsigned` at `ruleaction.cc:7200` requires an unsigned
+    /// constant whose high quarter is all ones before forming `INT_SUB`.
+    #[test]
+    fn add_unsigned_rewrites_high_quarter_constant() {
+        let mut data = Funcdata::default();
+        let block = data.new_block(0x1000);
+        let value = input_value(&mut data, 4);
+        let constant = data.new_constant(0xffff_ff00, 4);
+        let (add, _) = binary(&mut data, block, op::INT_ADD, value, constant, 4);
+
+        assert_eq!(RuleAddUnsigned.apply_op(add, &mut data), 1);
+        assert_eq!(data.op(add).opcode, op::INT_SUB);
+        let replacement = data.op(add).inputs[1];
+        assert_eq!(data.varnode(replacement).offset, 0x100);
+    }
+
+    /// Ghidra's `RuleLeftRight` at `ruleaction.cc:2028` retypes the existing
+    /// shift operations and selects the SUBPIECE offset according to endian.
+    #[test]
+    fn left_right_retypes_existing_shifts_and_honors_endian() {
+        for (big_endian, right_opcode, extension) in [
+            (false, op::INT_RIGHT, op::INT_ZEXT),
+            (true, op::INT_SRIGHT, op::INT_SEXT),
+        ] {
+            let mut data = Funcdata::default();
+            data.big_endian = big_endian;
+            let block = data.new_block(0x1000);
+            let value = input_value(&mut data, 4);
+            let amount = data.new_constant(16, 4);
+            let shifted = data.new_varnode(REGISTER_SPACE, 0x80, 4);
+            let left = data.new_op(op::INT_LEFT, seq(0x1000), vec![value, amount]);
+            data.op_set_output(left, Some(shifted));
+            data.op_insert_end(left, block);
+            let right = data.new_op(right_opcode, seq(0x1004), vec![shifted, amount]);
+            let right_output = data.new_unique(4);
+            data.op_set_output(right, Some(right_output));
+            data.op_insert_end(right, block);
+
+            assert_eq!(RuleLeftRight.apply_op(right, &mut data), 1);
+            assert_eq!(data.op(left).opcode, op::SUBPIECE);
+            assert_eq!(data.op(left).inputs[0], value);
+            let zero = data.op(left).inputs[1];
+            assert!(is_constant(&data, zero));
+            assert_eq!(data.varnode(zero).offset, 0);
+            let piece = data.op(left).output.expect("SUBPIECE output");
+            assert_eq!(data.varnode(piece).size, 2);
+            assert_eq!(
+                data.varnode(piece).offset,
+                if big_endian { 0x82 } else { 0x80 }
+            );
+            assert_eq!(data.op(right).opcode, extension);
+            assert_eq!(data.op(right).inputs, vec![piece]);
+        }
+    }
+
+    /// Ghidra's `RuleSubCommute` at `ruleaction.cc:4532` pushes a SUBPIECE
+    /// through a unary integer operation by reusing the existing output.
+    #[test]
+    fn sub_commute_pushes_piece_through_negate() {
+        let mut data = Funcdata::default();
+        let block = data.new_block(0x1000);
+        let value = input_value(&mut data, 4);
+        let (negate, negated) = unary(&mut data, block, op::INT_NEGATE, value, 4);
+        let offset = data.new_constant(0, 4);
+        let (subpiece, piece) = binary(&mut data, block, op::SUBPIECE, negated, offset, 2);
+
+        assert_eq!(RuleSubCommute.apply_op(subpiece, &mut data), 1);
+        assert!(data.opcode_of(subpiece).is_none());
+        assert_eq!(data.op(negate).opcode, op::INT_NEGATE);
+        assert_eq!(data.op(negate).output, Some(piece));
+        let inner = data.op(negate).inputs[0];
+        let inner_def = data.varnode(inner).def.expect("commuted SUBPIECE");
+        assert_eq!(data.op(inner_def).opcode, op::SUBPIECE);
+        assert_eq!(data.varnode(inner).size, 2);
+        assert_eq!(data.op(inner_def).inputs[0], value);
+        // Ghidra mints a *fresh* four-byte constant for the commuted offset -
+        // `data.opSetInput(newsub,data.newConstant(4,offset),1)` - rather than
+        // reusing the original operand, so the identity differs and only the
+        // value is the contract.
+        let commuted_offset = data.op(inner_def).inputs[1];
+        assert!(is_constant(&data, commuted_offset));
+        assert_eq!(data.varnode(commuted_offset).offset, 0);
+        assert_eq!(data.varnode(commuted_offset).size, 4);
+    }
+
+    /// `cancelExtensions` at `ruleaction.cc:4501` shrinks both extensions to the
+    /// wider operand's size and truncates the operation's own output to match.
+    ///
+    /// The reachable arm matters: only `INT_DIV`/`INT_REM` and their signed
+    /// counterparts call `cancelExtensions`, because only there does the
+    /// SUBPIECE cancel the extensions rather than commute through them. An
+    /// `INT_ADD` fixture takes the generic commute path instead and proves
+    /// nothing about this helper.
+    #[test]
+    fn sub_commute_cancels_mismatched_extensions() {
+        let mut data = Funcdata::default();
+        let block = data.new_block(0x1000);
+        let narrow = input_value(&mut data, 1);
+        let wide = input_value(&mut data, 2);
+        let (narrow_ext_op, narrow_ext) = unary(&mut data, block, op::INT_ZEXT, narrow, 4);
+        let (_, wide_ext) = unary(&mut data, block, op::INT_ZEXT, wide, 4);
+        let (divide, quotient) = binary(&mut data, block, op::INT_DIV, narrow_ext, wide_ext, 4);
+        let offset = data.new_constant(0, 4);
+        let (subpiece, _) = binary(&mut data, block, op::SUBPIECE, quotient, offset, 1);
+
+        assert_eq!(RuleSubCommute.apply_op(subpiece, &mut data), 1);
+        assert_eq!(data.op(divide).opcode, op::INT_DIV);
+        // `maxSize` is the *wider* pre-extension operand, so both the shortened
+        // extension and the truncated output are two bytes, not one.
+        let divide_output = data.op(divide).output.expect("shortened output");
+        assert_eq!(data.varnode(divide_output).size, 2);
+        assert_eq!(
+            data.varnode(data.op(narrow_ext_op).output.expect("shortened extension"))
+                .size,
+            2
+        );
+        assert_eq!(data.op(subpiece).inputs[0], divide_output);
+        // The SUBPIECE itself survives: it still truncates to one byte.
+        assert_eq!(data.op(subpiece).inputs[1], offset);
+        assert_eq!(
+            data.varnode(data.op(subpiece).output.expect("surviving truncation"))
+                .size,
+            1
+        );
+    }
+
     #[test]
     fn two_comp_to_mult_fires() {
         let mut data = Funcdata::default();
@@ -1103,12 +1742,15 @@ mod tests {
     }
 }
 
-/// Every requested rule with a faithful graph implementation.
+/// Expression/analysis rules from this module; cleanup rules are wired into
+/// the separate cleanup pool by the action pipeline.
 pub fn all() -> Vec<Box<dyn Rule>> {
     vec![
         Box::new(Rule2Comp2Mult),
+        Box::new(RuleLeftRight),
         Box::new(Rule2Comp2Sub),
         Box::new(RuleSub2Add),
+        Box::new(RuleSubCommute),
         Box::new(RuleAndOrLump),
         Box::new(RuleShiftAnd),
         Box::new(RuleRightShiftAnd),

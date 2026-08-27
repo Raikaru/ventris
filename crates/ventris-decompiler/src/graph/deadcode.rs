@@ -53,6 +53,12 @@ fn covering_mask(mask: u64) -> u64 {
 /// Returns the number of operations destroyed. A call keeps its side effect and
 /// loses only its unread output, matching `opUnsetOutput`.
 pub fn eliminate_dead_code(data: &mut Funcdata) -> usize {
+    // `ActionDeadCode::apply` clears `addrforce` for every value that is not a
+    // direct write before it computes anything (`coreaction.cc:3995-3996`).
+    // Heritage marks every address-tied guard output; this is what narrows the
+    // set again to the ones a legal input can actually reach, and without it the
+    // flag would be indistinguishable from `addrtied`.
+    data.clear_addr_force_without_direct_write();
     let consumed = propagate(data);
     let mut removed = 0;
     let candidates: Vec<(OpId, VarnodeId, i32)> = data

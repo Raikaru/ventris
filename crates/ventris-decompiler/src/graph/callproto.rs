@@ -1163,7 +1163,7 @@ mod tests {
         let call = data.new_op(op::CALL, seq(0x1000, 0), vec![target]);
         data.op_insert_end(call, block);
         let set = locations.iter().copied().collect::<BTreeSet<_>>();
-        guard_calls(&mut data, &set, &CallEffects::default(), &[]);
+        guard_calls(&mut data, &set, &CallEffects::default(), &[], &[]);
         if with_heritage {
             heritage(&mut data);
         }
@@ -1243,6 +1243,7 @@ mod tests {
             &BTreeSet::from([loc_lo, loc_hi]),
             &CallEffects::default(),
             &[],
+            &[],
         );
         heritage(&mut data);
         let arguments = call_arguments(&data, &[loc_lo, loc_hi]);
@@ -1286,6 +1287,7 @@ mod tests {
             &mut data,
             &BTreeSet::from([first, gap, later]),
             &CallEffects::default(),
+            &[],
             &[],
         );
         heritage(&mut data);

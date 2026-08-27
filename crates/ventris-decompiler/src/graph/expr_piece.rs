@@ -4,15 +4,17 @@
 //! `RuleAndPiece`, `RuleConcatCommute`, `RuleConcatLeftShift`, `RuleConcatZero`,
 //! `RuleConcatZext`, `RulePiece2Sext`, `RuleShiftPiece`, and `RuleOrMask`.
 //!
-//! Three requested rules are intentionally omitted because the graph does not
-//! carry the state their guards and rewrites require:
+//! One requested rule remains omitted:
 //!
-//! * `RuleOrConsume` needs `Varnode::getConsume` byte-consumption state.
-//! * `RuleExtensionPush` needs address-force/address-tied and type/name-lock
-//!   flags, plus `RulePushPtr::duplicateNeed`'s pointer/type machinery.
-//! * `RulePushMulti` needs `functionalEqualityLevel`, earliest-use analysis,
-//!   operation uninsertion, and the storage/spacebase metadata used by the
-//!   original merge rewrite.
+//! * `RuleExtensionPush` is registered in Ghidra's cleanup pool
+//!   (`coreaction.cc:5755`), not this module's expression pool.  Its input and
+//!   output address-force guards (`ruleaction.cc:7440,7444`) have no graph
+//!   flag; `Funcdata::is_addr_tied` covers only the separate address-tied
+//!   guard.  The output type-lock and name-lock guards are also absent
+//!   (`ruleaction.cc:7443`).  Omitting any of these guards would make the rule
+//!   fire more often than Ghidra, and `RulePushPtr::duplicateNeed`'s required
+//!   pointer/type duplication machinery is likewise not available
+//!   (`ruleaction.cc:7467-7469`).
 //!
 //! Source authority: `Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc`
 //! in the pinned Ghidra 12.1.3 tree.
