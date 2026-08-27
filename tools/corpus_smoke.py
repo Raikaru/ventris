@@ -9,6 +9,7 @@ and runs bounded native decompilation for each selected target.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 from dataclasses import dataclass
 import hashlib
 import json
@@ -953,7 +954,12 @@ def smoke_entry(
     function_results: list[dict[str, object]] = []
     warnings: list[str] = []
 
-    for function in entry.functions:
+    # Every function is independent and each one spawns several `ventris`
+    # subprocesses, so the gate was spawn-bound and serial: process creation, not
+    # analysis, was the whole cost. A thread pool is the right tool because the
+    # work happens in child processes, and `map` preserves order so the report is
+    # byte-identical to the serial one.
+    def run_function(function: Function) -> tuple[dict[str, object], list[str]]:
         address = function_address(entry, function)
         command_errors: dict[str, str] = {}
         command_warnings: list[str] = []
@@ -993,8 +999,7 @@ def smoke_entry(
             }
             if semantic_report is not None:
                 function_result["semantic"] = semantic_report
-            function_results.append(function_result)
-            continue
+            return function_result, []
 
         analysis_args = [
             os.fspath(image),
@@ -1048,7 +1053,6 @@ def smoke_entry(
             )
 
         function_warnings = [line for line in command_warnings if line.strip()]
-        warnings.extend(function_warnings)
         problems: list[str] = []
         if decompile_result is None:
             problems.append(command_errors["decompile-native"])
@@ -1072,7 +1076,18 @@ def smoke_entry(
             function_result["error"] = (
                 f"{entry.id}/{function.name}: " + "; ".join(problems)
             )
+        return function_result, function_warnings
+
+    if len(entry.functions) > 1:
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(len(entry.functions), (os.cpu_count() or 4) * 2)
+        ) as pool:
+            produced = list(pool.map(run_function, entry.functions))
+    else:
+        produced = [run_function(function) for function in entry.functions]
+    for function_result, function_warnings in produced:
         function_results.append(function_result)
+        warnings.extend(function_warnings)
 
     failed = [result for result in function_results if result["status"] != "pass"]
     result: dict[str, object] = {
@@ -1116,26 +1131,39 @@ def run_smoke(
     if not selected_ids:
         raise SmokeError("at least one --id is required")
 
-    results: list[dict[str, object]] = []
-    for entry_id in selected_ids:
+    # Entries are independent as well - each writes only its own
+    # `<id>.metadata.json` - so the whole gate is one wave of subprocesses
+    # rather than three serial ones. `map` keeps the report order fixed.
+    def smoke_one(entry_id: str) -> dict[str, object]:
         entry = entries.get(entry_id)
         if entry is None:
-            results.append({"id": entry_id, "status": "fail", "error": "unknown corpus id"})
-            continue
+            return {"id": entry_id, "status": "fail", "error": "unknown corpus id"}
         try:
-            results.append(
-                smoke_entry(
-                    entry,
-                    image_dir,
-                    command,
-                    limit=limit,
-                    require_hashes=require_hashes,
-                    command_runner=command_runner,
-                    metadata_dir=metadata_dir,
-                )
+            return smoke_entry(
+                entry,
+                image_dir,
+                command,
+                limit=limit,
+                require_hashes=require_hashes,
+                command_runner=command_runner,
+                metadata_dir=metadata_dir,
             )
         except SmokeError as error:
-            results.append({"id": entry.id, "title": entry.title, "target": entry.target, "status": "fail", "error": str(error)})
+            return {
+                "id": entry.id,
+                "title": entry.title,
+                "target": entry.target,
+                "status": "fail",
+                "error": str(error),
+            }
+
+    if len(selected_ids) > 1:
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(len(selected_ids), (os.cpu_count() or 4) * 2)
+        ) as pool:
+            results: list[dict[str, object]] = list(pool.map(smoke_one, selected_ids))
+    else:
+        results = [smoke_one(entry_id) for entry_id in selected_ids]
 
     metadata_temp.cleanup()
     return {

@@ -26,3 +26,17 @@ repository = "https://github.com/Raikaru/ventris"
 # Third-party crates stay behind the stage that owns them. `ventris-sleigh`
 # depends on pure-Rust `miniz_oxide` solely for Ghidra's zlib-compressed SLA
 # container; higher analysis and public facade crates do not inherit it.
+
+# The gate runs `cargo test` and `cargo build` after every change, and the
+# tests themselves take under a second - the entire cost is compilation, twice
+# over, because `cargo test` rebuilds the library with `cfg(test)`. Cargo
+# disables incremental compilation for `release` by default, which is right for
+# a shipped artifact and wrong for a profile rebuilt dozens of times an hour.
+#
+# `opt-level` stays at 3: the census renders 36 real functions through the
+# optimized binary, and a slower binary would move the cost rather than remove
+# it. `codegen-units` rises to match the machine, since the default 16 leaves
+# cores idle on a 24-thread host.
+[profile.release]
+incremental = true
+codegen-units = 24

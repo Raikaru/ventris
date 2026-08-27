@@ -2241,6 +2241,7 @@ impl NativeDecompiler {
         // ask. Recovering them here rather than only in the structuring phase is
         // what lets `RuleSwitchSingle` see a table at all; the structuring phase
         // reads the same registry instead of its own side-channel list.
+        let at_tables = std::time::Instant::now();
         data.jump_tables = memory
             .map(|memory| {
                 graph::jumptable::recover_jump_tables(&data, &|address, width| {
@@ -2248,6 +2249,9 @@ impl NativeDecompiler {
                 })
             })
             .unwrap_or_default();
+        if std::env::var("VENTRIS_TRACE_ROUNDS").is_ok() {
+            eprintln!("phase early-jump-tables in {:?}", at_tables.elapsed());
+        }
         let pipeline = graph::action::default_pipeline();
         // `ActionDirectWrite` is registered twice in Ghidra's main loop, once
         // propagating through a call's `INDIRECT` and once not
@@ -2346,20 +2350,52 @@ impl NativeDecompiler {
         // ever sees a settled graph.
         for _ in 0..GRAPH_FULL_LOOP_ROUNDS {
             let mut full_loop_changed = 0;
-            for _ in 0..GRAPH_PIPELINE_ROUNDS {
+            for round_index in 0..GRAPH_PIPELINE_ROUNDS {
                 // `ActionInferTypes` is a pass in Ghidra's pool, not a query the
                 // rules make: types are re-derived once per round, and the rules in
                 // that round read what it produced. Re-deriving after every rewrite
                 // instead cost fifty seconds on one corpus function.
                 data.invalidate_types();
+                // `VENTRIS_TRACE_ROUNDS` reports what each stage still changes,
+                // per round. A function whose cost is flat in `--limit` is not
+                // slow because it is big; it is slow because some stage keeps
+                // reporting a change and the loop runs to its cap, which also
+                // means the output depends on the cap rather than on a fixed
+                // point. This is how to find which stage that is.
+                let trace = std::env::var("VENTRIS_TRACE_ROUNDS").is_ok();
+                let stage = std::time::Instant::now();
                 let mut changed = graph::action::Action::apply(pipeline.as_ref(), &mut data);
+                if trace {
+                    eprintln!(
+                        "round {round_index}: rules {changed} in {:?}",
+                        stage.elapsed()
+                    );
+                }
                 for pass in control_flow {
                     if skipped_passes.iter().any(|name| name == pass.name()) {
                         continue;
                     }
+                    let before = changed;
+                    let pass_start = std::time::Instant::now();
                     changed += pass.apply(&mut data);
+                    if trace && (changed != before || pass_start.elapsed().as_millis() > 20) {
+                        eprintln!(
+                            "round {round_index}:   {} {} in {:?}",
+                            pass.name(),
+                            changed - before,
+                            pass_start.elapsed()
+                        );
+                    }
                 }
-                changed += graph::deadcode::eliminate_dead_code(&mut data);
+                let dead_start = std::time::Instant::now();
+                let dead = graph::deadcode::eliminate_dead_code(&mut data);
+                changed += dead;
+                if trace && (dead > 0 || dead_start.elapsed().as_millis() > 20) {
+                    eprintln!(
+                        "round {round_index}:   deadcode {dead} in {:?}",
+                        dead_start.elapsed()
+                    );
+                }
                 if let Some(abi) = abi
                     && let Some(vnode) =
                         abi_register_vnode(architecture, abi.stack_pointer, abi.pointer_bits)
@@ -2585,6 +2621,7 @@ impl NativeDecompiler {
         // destination computations, so the early registry's operation ids may
         // name destroyed operations. The registry is the single source of truth,
         // and the structuring phase reads it rather than a private list.
+        let at_late = std::time::Instant::now();
         data.jump_tables = memory
             .map(|memory| {
                 graph::jumptable::recover_jump_tables(&data, &|address, width| {
@@ -2592,6 +2629,10 @@ impl NativeDecompiler {
                 })
             })
             .unwrap_or_default();
+        if std::env::var("VENTRIS_TRACE_ROUNDS").is_ok() {
+            eprintln!("phase late-tables-only in {:?}", at_late.elapsed());
+            eprintln!("phase loop+everything-before in {:?}", at_tables.elapsed());
+        }
         let tables = data.jump_tables.clone();
         // An indirect jump whose table could not be read is a call, not a
         // branch to nowhere. Ghidra converts it before anything structures the
@@ -2602,7 +2643,14 @@ impl NativeDecompiler {
         // `ruleBlockSwitch` refuses it. Ghidra folds the guard into the switch -
         // after the table is recovered, because the bound comes from the guard.
         graph::jumptable::fold_in_guards(&mut data, &tables);
+        let phase = |name: &str, at: std::time::Instant| {
+            if std::env::var("VENTRIS_TRACE_ROUNDS").is_ok() {
+                eprintln!("phase {name} in {:?}", at.elapsed());
+            }
+        };
+        let at = std::time::Instant::now();
         let recovered = graph::types::infer_types(&data, &BTreeMap::new());
+        phase("infer_types", at);
         // The rich table keeps the structures and arrays that `Type` cannot
         // represent, which is what lets a field read render as `p->field_40`
         // instead of a cast through a computed address.
@@ -2612,7 +2660,10 @@ impl NativeDecompiler {
         let rich = if std::env::var("VENTRIS_NO_RICH").is_ok() {
             Default::default()
         } else {
-            graph::typefactory::infer(&data, &factory, &BTreeMap::new())
+            let at = std::time::Instant::now();
+            let out = graph::typefactory::infer(&data, &factory, &BTreeMap::new());
+            phase("typefactory::infer", at);
+            out
         };
         // Argument locations name themselves as parameters, which is how the
         // recovered prototype gets its arguments.
@@ -2660,6 +2711,7 @@ impl NativeDecompiler {
                 }
             })
         });
+        let at = std::time::Instant::now();
         let statements = graph::emit::emit_structured(
             &tables,
             &data,
@@ -2671,6 +2723,7 @@ impl NativeDecompiler {
             &rich,
             &factory,
         );
+        phase("emit_structured", at);
         // A matched save and restore of a callee-saved register says nothing
         // about what the function computes, and naming provably private stack
         // slots turns spills into locals. Both stages read statements, so they

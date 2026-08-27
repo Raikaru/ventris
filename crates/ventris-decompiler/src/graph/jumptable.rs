@@ -22,7 +22,17 @@ use super::action::Action;
 use super::{Funcdata, GraphBlockId, OpId, VarnodeId};
 use ventris_pcode::op;
 
-pub(crate) const MAX_TABLE_ENTRIES: u64 = 0x1_0000;
+/// The largest table a switch may have, matching Ghidra's
+/// `Architecture::max_jumptable_size`.
+///
+/// `resetDefaults` sets it to **1024** (`architecture.cc:1432`), and
+/// `JumpTable::recoverModel` passes it into every model as the ceiling
+/// (`jumptable.cc:2274`, `2742`). This was `0x1_0000` - sixty-four times the
+/// oracle's bound - which is both a divergence, because Ghidra rejects a larger
+/// table outright, and a performance bug: a guard whose bound is a large
+/// unconstrained value made recovery read up to 65536 entries per candidate
+/// model. One `animal_crossing_gafe01` function spent four seconds there.
+pub(crate) const MAX_TABLE_ENTRIES: u64 = 1024;
 
 /// One recovered switch: the value tested, and each case label with its target address.
 #[derive(Clone, Debug, PartialEq, Eq)]
