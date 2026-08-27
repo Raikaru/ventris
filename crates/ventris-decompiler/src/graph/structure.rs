@@ -152,6 +152,74 @@ pub fn structure(data: &Funcdata, tables: &[super::jumptable::JumpTable]) -> Str
     tree
 }
 
+/// The edges the collapse surrendered as `goto`s into a block that returns.
+///
+/// Ghidra's `ActionReturnSplit::gatherReturnGotos`, which asks the *structured*
+/// tree - not the p-code - whether a predecessor reaches the return block by a
+/// goto that actually prints. That is the only sound source for the question:
+/// an edge the structurer renders as an `if` arm or a loop edge is already
+/// structured, and splitting it changes control flow rather than removing a
+/// jump.
+///
+/// Returning the edges rather than acting on them keeps this module free of
+/// graph mutation, which is what lets the caller run it between rounds.
+pub fn return_goto_edges(
+    data: &Funcdata,
+    tables: &[super::jumptable::JumpTable],
+) -> Vec<(GraphBlockId, GraphBlockId)> {
+    let tree = structure(data, tables);
+    let mut edges = Vec::new();
+    collect_goto_edges(&tree, &mut edges);
+    edges.retain(|(_, target)| {
+        data.block(*target)
+            .ops
+            .iter()
+            .copied()
+            .any(|op| data.opcode_of(op) == Some(ventris_pcode::op::RETURN))
+    });
+    edges
+}
+
+/// Every `goto` the tree prints, as the edge it stands for.
+fn collect_goto_edges(node: &Structured, into: &mut Vec<(GraphBlockId, GraphBlockId)>) {
+    match node {
+        Structured::Goto { from, target } => into.push((*from, *target)),
+        Structured::IfGoto { .. } => {}
+        Structured::Basic(_) | Structured::Break => {}
+        Structured::List(members) => {
+            for member in members {
+                collect_goto_edges(member, into);
+            }
+        }
+        Structured::IfElse {
+            header,
+            then_body,
+            else_body,
+            ..
+        } => {
+            collect_goto_edges(header, into);
+            collect_goto_edges(then_body, into);
+            if let Some(else_body) = else_body {
+                collect_goto_edges(else_body, into);
+            }
+        }
+        Structured::WhileDo { header, body, .. } => {
+            collect_goto_edges(header, into);
+            collect_goto_edges(body, into);
+        }
+        Structured::DoWhile { body, .. } | Structured::InfLoop { body } => {
+            collect_goto_edges(body, into);
+        }
+        Structured::Switch { header, cases, .. } => {
+            collect_goto_edges(header, into);
+            for (_, body) in cases {
+                collect_goto_edges(body, into);
+            }
+        }
+        Structured::IfBreak { .. } => {}
+    }
+}
+
 /// The first basic block a construct enters.
 ///
 /// Ghidra's `FlowBlock::getFrontLeaf`. `scopeBreak` needs it to tell one member

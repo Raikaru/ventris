@@ -6,6 +6,24 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- `ActionReturnSplit` is registered, driven the way Ghidra drives it. The edges
+  come from `gatherReturnGotos`, which reads the *structured* tree, so
+  `graph::structure::return_goto_edges` now produces that set and the pipeline
+  runs the action on the outer loop after `ActionDoNothing` - Ghidra's own
+  arrangement (`coreaction.cc:5737`), with `ActionBlockStructure` in the main
+  loop feeding it. The proxy it used to have accepted any branch naming the
+  return block, `if` arms and loop edges included, which is why enabling it
+  diverged `_ZN9GameWorld12beginFadeOutEv` and failed the gate. It is inert on
+  the present corpus and the reason is now measured rather than assumed: no
+  return block there is splittable.
+- `__osRealloc`'s remaining `goto` is therefore *not* the return-split gap, and
+  the evidence says so. Instrumenting `selectGoto` shows the surrendered edge is
+  `0x8005c5f8 -> 0x8005c744`, nominated by the trace, into a tail six to eight
+  blocks reach - and that tail makes two calls, so `isSplittable` refuses it in
+  Ghidra too. What differs is the collapse itself: Ghidra structures that tail
+  without surrendering an edge. This is the same class of residual already on
+  record for `queryMapAddress_single` and `ksNesDrawBG` - the rules agree, the
+  graphs they run on do not - and it is the last one on this corpus.
 - `RuleDoubleIn` and `RuleDoubleOut` are ported and registered
   (`coreaction.cc:5696-5697`), and with them the `double.cc` machinery they
   drive: `SplitVarnode::wholeList`, `SplitVarnode::applyRuleIn`'s dispatch, and

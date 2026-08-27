@@ -2445,6 +2445,19 @@ impl NativeDecompiler {
                 }
                 full_loop_changed += pass.apply(&mut data);
             }
+            // `ActionReturnSplit` follows `ActionDoNothing` on the full loop
+            // (`coreaction.cc:5737`), and it needs the goto set the structurer
+            // produced - which is exactly why Ghidra structures inside the main
+            // loop and splits on the outer one. No jump table is available here;
+            // `ActionSwitchNorm` is the pass that would have recovered one, and
+            // it sits after this in the same group.
+            if !skipped_passes.iter().any(|name| name == "returnsplit") {
+                let goto_edges = graph::structure::return_goto_edges(&data, &[]);
+                if !goto_edges.is_empty() {
+                    let split = graph::blockaction::ActionReturnSplit { goto_edges };
+                    full_loop_changed += graph::action::Action::apply(&split, &mut data);
+                }
+            }
             if full_loop_changed == 0 {
                 break;
             }

@@ -139,7 +139,20 @@ fn split_return_edge(
 }
 
 /// Split a shared return epilog so an explicit goto path owns a private copy.
-pub struct ActionReturnSplit;
+///
+/// `ActionReturnSplit::apply`. The edges to split come from
+/// `gatherReturnGotos`, which reads the *structured* tree: only a predecessor
+/// whose edge the structurer actually renders as a `goto` is a candidate. That
+/// is why this action carries the set rather than deriving it - a branch whose
+/// target is the return block may well be an `if` arm or a loop edge, and
+/// splitting one of those diverges control flow instead of removing a jump.
+/// `graph::structure::return_goto_edges` produces the set, and Ghidra's
+/// ordering makes that available: `ActionBlockStructure` runs in the main loop
+/// and this action on the full loop afterwards.
+pub struct ActionReturnSplit {
+    /// The `(predecessor, return block)` edges the structurer surrendered.
+    pub goto_edges: Vec<(GraphBlockId, GraphBlockId)>,
+}
 
 impl Action for ActionReturnSplit {
     fn name(&self) -> &'static str {
@@ -166,22 +179,14 @@ impl Action for ActionReturnSplit {
                 continue;
             }
 
-            // `gatherReturnGotos` walks the persistent structure to find only
-            // goto paths.  In this graph a branch whose target is the return
-            // block is the strongest available equivalent; a fallthrough edge
-            // is left alone rather than guessed to be a goto.
             let mut candidates: Vec<(usize, GraphBlockId)> = predecessors
                 .iter()
                 .copied()
                 .enumerate()
-                .filter_map(|(index, predecessor)| {
-                    let branch = last_live_op(data, predecessor)?;
-                    if !matches!(data.op(branch).opcode, op::BRANCH | op::CBRANCH)
-                        || branch_target(data, branch) != Some(parent)
-                    {
-                        return None;
-                    }
-                    Some((index, predecessor))
+                .filter(|(_, predecessor)| {
+                    self.goto_edges
+                        .iter()
+                        .any(|(from, target)| *from == *predecessor && *target == parent)
                 })
                 .collect();
             if candidates.is_empty() {
@@ -441,9 +446,14 @@ mod tests {
 
     #[test]
     fn return_split_clones_the_shared_epilog_for_one_goto_path() {
-        let (mut data, _left, _right, parent) = return_graph();
+        let (mut data, left, right, parent) = return_graph();
         let before = data.blocks().count();
-        assert_eq!(ActionReturnSplit.apply(&mut data), 1);
+        // `gatherReturnGotos` supplies the edges; both arms reach the epilog by
+        // a goto here, and the action keeps one of them on the original block.
+        let split = ActionReturnSplit {
+            goto_edges: vec![(left, parent), (right, parent)],
+        };
+        assert_eq!(split.apply(&mut data), 1);
         assert_eq!(data.blocks().count(), before + 1);
         assert_eq!(data.block(parent).predecessors.len(), 1);
         let duplicate = data
@@ -459,17 +469,33 @@ mod tests {
             data.opcode_of(data.block(duplicate).ops[1]),
             Some(op::RETURN)
         );
-        assert_eq!(ActionReturnSplit.apply(&mut data), 0);
+        assert_eq!(split.apply(&mut data), 0);
+    }
+
+    /// An edge the structurer did not surrender is already structured, and
+    /// splitting it would change control flow rather than remove a jump.
+    #[test]
+    fn return_split_declines_an_edge_the_structurer_kept() {
+        let (mut data, _left, _right, _parent) = return_graph();
+        let before = data.blocks().count();
+        let split = ActionReturnSplit {
+            goto_edges: Vec::new(),
+        };
+        assert_eq!(split.apply(&mut data), 0);
+        assert_eq!(data.blocks().count(), before);
     }
 
     #[test]
     fn return_split_declines_a_return_block_with_substantive_work() {
-        let (mut data, _left, _right, parent) = return_graph();
+        let (mut data, left, right, parent) = return_graph();
         let value = data.new_constant(3, 4);
         let add = data.new_op(op::INT_ADD, seq(0x1020, 2), vec![value, value]);
         data.op_insert_before(add, data.block(parent).ops[0]);
         let before = data.blocks().count();
-        assert_eq!(ActionReturnSplit.apply(&mut data), 0);
+        let split = ActionReturnSplit {
+            goto_edges: vec![(left, parent), (right, parent)],
+        };
+        assert_eq!(split.apply(&mut data), 0);
         assert_eq!(data.blocks().count(), before);
     }
 
@@ -542,21 +568,19 @@ mod tests {
 /// methods, none of which exists on `Funcdata`.
 /// The actions from this module that the pipeline runs.
 ///
-/// `ActionReturnSplit` is excluded, and the reason is now precise rather than
-/// "needs Ghidra's guards". Ghidra selects the edges to split with
-/// `gatherReturnGotos`, which asks the *structured* tree whether a predecessor
-/// is a `goto` block whose goto actually prints, or an if-goto whose target is
-/// this return block (`blockaction.cc`). That set only exists because
-/// `ActionBlockStructure` runs inside the main loop and `ActionReturnSplit` runs
-/// on the full loop afterwards, so it sees a structured graph.
+/// `ActionReturnSplit` is not in this list because it is not driven from here.
+/// It needs the edges `gatherReturnGotos` reads out of the *structured* tree, so
+/// the pipeline runs it on the outer loop with
+/// `graph::structure::return_goto_edges`, which is Ghidra's own arrangement:
+/// `ActionBlockStructure` in the main loop, `ActionReturnSplit` on the full loop
+/// afterwards (`coreaction.cc:5737`).
 ///
-/// This pipeline structures once, at the end. The available proxy - "a
-/// predecessor whose last operation is a branch naming this block" - accepts
-/// edges the structurer will render as ordinary structure, an `if` arm or a loop
-/// edge among them, and splitting one of those diverges control flow: it failed
+/// The proxy it used to have - "a predecessor whose last operation is a branch
+/// naming this block" - is what made it unusable. That accepts edges the
+/// structurer renders as ordinary structure, an `if` arm or a loop edge among
+/// them, and splitting one of those diverges control flow: it failed
 /// `corpus-smoke` on `_ZN9GameWorld12beginFadeOutEv` and `beginFadeInEv` with
-/// `control_flow=diverged`, and bisection showed this pass alone was
-/// responsible. The prerequisite is structuring inside the loop, not a guard.
+/// `control_flow=diverged`.
 pub fn all() -> Vec<Box<dyn Action>> {
     vec![Box::new(ActionNodeJoin)]
 }
