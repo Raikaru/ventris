@@ -6,6 +6,23 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- `RuleDoubleIn` and `RuleDoubleOut` are ported and registered
+  (`coreaction.cc:5696-5697`), and with them the `double.cc` machinery they
+  drive: `SplitVarnode::wholeList`, `SplitVarnode::applyRuleIn`'s dispatch, and
+  the `AddForm`, `SubForm`, `LogicalForm`, `Equal3Form`, `MultForm` and
+  `ShiftForm` rewrites. `Varnode::precislo`/`precishi` live on the varnode as
+  they do in Ghidra - `attemptMarking` sets them from the shape of the graph, so
+  they were never an external input - and `Funcdata::hasUnreachableBlocks` is
+  ported so `RuleDoubleIn`'s guard is honoured rather than skipped.
+  `LessThreeWay` is the one form left out: its three-branch rewrite needs the
+  `CBRANCH` boolean-flip bit and the branch edge rewrite, and `GraphOp` carries
+  neither.
+- Four notes in `graph::splitvarnode` were stale and are now correct.
+  `RuleSplitCopy`, `RuleSplitLoad` and `RuleSplitStore` are ported and
+  registered in `graph::splitdatatype`; the IOP-affector identity
+  `RuleDoubleStore::reassignIndirects` needs exists as `Funcdata::new_iop` and
+  `iop_target`, so what is missing there is the reassignment itself, not a
+  facility.
 - `CircleRange` is ported from `rangeutil.cc`, and with it `RuleRangeMeld`
   (registered at `coreaction.cc:5663`). The class is the modular value-set the
   range rules need: constructors and normalisation, scalar and range

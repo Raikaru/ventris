@@ -126,6 +126,16 @@ pub struct VarnodeFlags {
     /// Ghidra's `Varnode::indirectonly` bit lets merge and variable naming
     /// retain an otherwise illegal input when it has no ordinary data-flow use.
     pub indirect_only: bool,
+    /// The value is the least significant piece of a double-precision whole.
+    ///
+    /// Ghidra's `Varnode::precislo`, set by `RuleDoubleIn::attemptMarking` and
+    /// `RuleDoubleOut::attemptMarking` from the shape of the graph rather than
+    /// supplied from outside.
+    pub precis_lo: bool,
+    /// The value is the most significant piece of a double-precision whole.
+    ///
+    /// Ghidra's `Varnode::precishi`.
+    pub precis_hi: bool,
     /// The value is created by an `INDIRECT` and has no data flow before it.
     ///
     /// Ghidra's `Varnode::indirect_creation`, set by `newIndirectCreation` for a
@@ -635,6 +645,40 @@ impl Funcdata {
     /// Ghidra's `Funcdata::opMarkNonPrinting`.
     pub fn op_mark_non_printing(&mut self, op: OpId) {
         self.ops[op.0 as usize].non_printing = true;
+    }
+
+    /// Marks a value as one piece of a double-precision whole.
+    ///
+    /// Ghidra's `Varnode::setPrecisLo`/`setPrecisHi`. The marks are set by the
+    /// double-precision rules themselves, from the shape of the graph.
+    pub fn mark_precision(&mut self, value: VarnodeId, high: bool) {
+        self.invalidate_masks();
+        if high {
+            self.varnodes[value.0 as usize].flags.precis_hi = true;
+        } else {
+            self.varnodes[value.0 as usize].flags.precis_lo = true;
+        }
+    }
+
+    /// Whether the graph still holds a block the entry cannot reach.
+    ///
+    /// Ghidra's `Funcdata::hasUnreachableBlocks`, which the double-precision
+    /// rules consult before rewriting: an unreachable block's data flow is not
+    /// trustworthy evidence about how a value is pieced together.
+    pub fn has_unreachable_blocks(&self) -> bool {
+        let Some(entry) = self.entry_block() else {
+            return false;
+        };
+        let mut reachable = BTreeSet::from([entry]);
+        let mut pending = vec![entry];
+        while let Some(id) = pending.pop() {
+            for successor in self.blocks[id.0 as usize].successors.iter().copied() {
+                if reachable.insert(successor) {
+                    pending.push(successor);
+                }
+            }
+        }
+        self.blocks().any(|(id, _)| !reachable.contains(&id))
     }
 
     /// Whether an input value sits at a location every callee preserves.
