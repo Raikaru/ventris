@@ -8,14 +8,23 @@
 //! contiguous-mask forms and decline patterns whose field range cannot be
 //! proven from p-code. The two absorb rules do not need type metadata and are
 //! direct graph rewrites.
-
 //!
-//! `RuleBitFieldIn` is **not** ported. Ghidra's version guards on
-//! `Datatype::hasBitfields` and traces from input 0 only; without bit-range type
-//! metadata there is no guard, so the rule fires on ordinary masked arithmetic.
-//! Measured on the corpus it cost one agreeing function - it broke `vm_boot`'s
-//! call recovery and `TRK_fill_mem`'s parameters - so it is absent rather than
-//! registered and wrong. It needs `Datatype::hasBitfields` first.
+//! `RuleBitFieldIn` is **not** ported, and the prerequisite is larger than one
+//! accessor. Its whole discovery is `invn->getTypeReadFacing(op)->hasBitfields()`
+//! - there is no structural fallback - so it needs a varnode to carry a
+//! *declared* aggregate type with bit ranges. Five links stand between the
+//! image and that: the DWARF reader would have to extract `DW_TAG_member` with
+//! `DW_AT_bit_size`/`DW_AT_bit_offset`, `debuginfo::DebugType::Aggregate` would
+//! have to grow a member list (it records a name and a byte size today), the
+//! decompiler would have to consume `Image::debug_info` at all (nothing does),
+//! declared types would have to be applied to varnodes, and `DataType` would
+//! need a `TypeBitField` and the `has_bitfields` flag. The bit ranges are real
+//! and in reach - `dungeon_game.elf`'s `.debug_abbrev` declares both attributes
+//! - so this is a missing declared-type import path, not a missing rule.
+//!
+//! Registering it unguarded was measured and reverted: it fires on ordinary
+//! masked arithmetic, breaking `vm_boot`'s call recovery and `TRK_fill_mem`'s
+//! parameters for a net loss of one agreeing function.
 
 use std::collections::BTreeSet;
 

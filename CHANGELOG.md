@@ -6,6 +6,16 @@ All notable Ventris changes are documented here.
 
 ### Added
 
+- `RuleBitFieldIn`'s exclusion is now precise about what it costs. The note said
+  "it needs `Datatype::hasBitfields` first", which understated it: the rule's
+  whole discovery is `getTypeReadFacing(op)->hasBitfields()` with no structural
+  fallback, so it needs a varnode carrying a *declared* aggregate type with bit
+  ranges - and five links are missing between the image and that, starting with
+  the DWARF reader, which does not extract `DW_TAG_member`, and ending with the
+  fact that nothing in the decompiler consumes `Image::debug_info` at all. The
+  ranges themselves are real: `dungeon_game.elf`'s `.debug_abbrev` declares both
+  `DW_AT_bit_size` and `DW_AT_bit_offset`. This is a missing declared-type
+  import path, not a missing rule.
 - `RuleDoubleStore` is ported whole. It had been combining the two stores and
   walking away from the `INDIRECT`s that guarded them, leaving annotations
   pointing at destroyed operations and the combined store's own indirect effect
