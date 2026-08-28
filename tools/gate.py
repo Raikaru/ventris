@@ -59,9 +59,13 @@ DEFAULT_IMAGE_DIR = _default(
 DEFAULT_GHIDRA = _default(
     "VENTRIS_GHIDRA", "C:/tools/ghidra_12.1.3_PUBLIC", "~/ghidra_12.1.3_PUBLIC"
 )
-DEFAULT_CENSUS_OUT = _default("VENTRIS_CENSUS_OUT", "C:/tmp/census-cur", "~/.cache/ventris-census")
+# Not `~/.cache/...`: the census directory also holds the Ghidra project, and
+# Ghidra rejects any project path containing a dot-prefixed element with
+# "Path element starting with '.' is not permitted". That surfaces only on the
+# first fresh-oracle run, well after the directory looks fine.
+DEFAULT_CENSUS_OUT = _default("VENTRIS_CENSUS_OUT", "C:/tmp/census-cur", "~/ventris-census")
 DEFAULT_CENSUS_REPORT = _default(
-    "VENTRIS_CENSUS_REPORT", "C:/tmp/census-gate.json", "~/.cache/ventris-census-gate.json"
+    "VENTRIS_CENSUS_REPORT", "C:/tmp/census-gate.json", "~/ventris-census/gate-report.json"
 )
 
 TEST_RESULT = re.compile(r"^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed", re.M)

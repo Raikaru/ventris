@@ -16,7 +16,7 @@ set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 : "${VENTRIS_IMAGE_DIR:=$HOME/ventris-corpus}"
 : "${VENTRIS_GHIDRA:=$HOME/ghidra_12.1.3_PUBLIC}"
-: "${VENTRIS_CENSUS_OUT:=$HOME/.cache/ventris-census}"
+: "${VENTRIS_CENSUS_OUT:=$HOME/ventris-census}"
 
 fail=0
 note() { printf '  %-22s %s\n' "$1" "$2"; }
