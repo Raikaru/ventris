@@ -30,6 +30,46 @@ The real-image corpus smoke gate is opt-in because the images are not
 redistributed by this repository. Follow the acquisition and hash instructions
 in `README.md` and `RELEASING.md`.
 
+## Setting up a second machine
+
+The gate needs three things that are not in the repository: the pinned Rust
+toolchain, a Ghidra installation carrying this project's loader extensions, and
+the corpus images. Locations come from the environment, so nothing needs editing
+per machine:
+
+```text
+export VENTRIS_IMAGE_DIR=$HOME/ventris-corpus         # corpus images
+export VENTRIS_GHIDRA=$HOME/ghidra_12.1.3_PUBLIC      # Ghidra + Ghidra/Extensions
+export VENTRIS_CENSUS_OUT=$HOME/ventris-census        # oracle cache and project
+```
+
+`tools/setup_workspace.sh` checks all of it and installs the pinned toolchain
+through `rustup` if that is missing. It reports what is absent rather than
+failing later inside a build. Then:
+
+```text
+cargo build --release
+python3 tools/gate.py --fresh-oracle   # first run only: the oracle cache is cold
+python3 tools/gate.py                  # subsequent runs reuse it
+```
+
+`tools/sync_workspace.py` copies Ghidra and the corpus to another host over SSH.
+It is resumable and idempotent, which matters on a link that drops - it sends
+only files whose size differs and works in bounded batches. Copying **from
+Windows requires `--fix-exec-bits`**: NTFS has no executable bit, so both
+`support/analyzeHeadless` and the native
+`Ghidra/Features/Decompiler/os/*/decompile` arrive non-executable, and the
+second failure appears only once a decompilation is attempted.
+
+Two constraints worth knowing before debugging them again:
+
+* Ghidra rejects any project path containing a dot-prefixed element, so the
+  census directory cannot live under `~/.cache`.
+* Headless `-loader` takes the loader's *class* name (`BinaryLoader`,
+  `GBALoader`), not its display name ("Raw Binary", "GBA Loader").
+  `tools/ListLoaders.java` prints every loader Ghidra actually discovered, which
+  distinguishes a missing extension from a mistyped name.
+
 ## Licensing and provenance
 
 Do not commit commercial game images, copied game source, generated artifacts,
