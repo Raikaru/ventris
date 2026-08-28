@@ -32,9 +32,37 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_IMAGE_DIR = Path("C:/tmp/plinth-real-corpus")
-DEFAULT_GHIDRA = Path("C:/tools/ghidra_12.1.3_PUBLIC")
-DEFAULT_CENSUS_OUT = Path("C:/tmp/census-cur")
+
+
+def _default(env: str, windows: str, posix: str) -> Path:
+    """Resolves a machine-specific location: environment first, then platform.
+
+    These three paths are the only things tying the gate to one machine. Keeping
+    them overridable by environment is what lets a second checkout - a different
+    OS, a different corpus directory - run the same gate without editing it.
+    """
+    override = os.environ.get(env)
+    if override:
+        return Path(override).expanduser()
+    return Path(windows if os.name == "nt" else posix).expanduser()
+
+
+def ventris_binary() -> Path:
+    """The built executable, named as the host platform names it."""
+    name = "ventris.exe" if os.name == "nt" else "ventris"
+    return ROOT / "target" / "release" / name
+
+
+DEFAULT_IMAGE_DIR = _default(
+    "VENTRIS_IMAGE_DIR", "C:/tmp/plinth-real-corpus", "~/ventris-corpus"
+)
+DEFAULT_GHIDRA = _default(
+    "VENTRIS_GHIDRA", "C:/tools/ghidra_12.1.3_PUBLIC", "~/ghidra_12.1.3_PUBLIC"
+)
+DEFAULT_CENSUS_OUT = _default("VENTRIS_CENSUS_OUT", "C:/tmp/census-cur", "~/.cache/ventris-census")
+DEFAULT_CENSUS_REPORT = _default(
+    "VENTRIS_CENSUS_REPORT", "C:/tmp/census-gate.json", "~/.cache/ventris-census-gate.json"
+)
 
 TEST_RESULT = re.compile(r"^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed", re.M)
 
@@ -112,7 +140,7 @@ def stage_corpus(image_dir: Path) -> Stage:
             "--image-dir",
             os.fspath(image_dir),
             "--ventris",
-            os.fspath(ROOT / "target" / "release" / "ventris.exe"),
+            os.fspath(ventris_binary()),
             "--json",
         ]
     )
@@ -163,14 +191,14 @@ def stage_grading() -> Stage:
 
 def stage_census(image_dir: Path, ghidra: Path, out: Path, reuse: bool) -> Stage:
     stage = Stage("census")
-    destination = Path("C:/tmp/census-gate.json")
+    destination = DEFAULT_CENSUS_REPORT
     args = [
         sys.executable,
         os.fspath(ROOT / "tools" / "quality_census.py"),
         "--image-dir",
         os.fspath(image_dir),
         "--ventris",
-        os.fspath(ROOT / "target" / "release" / "ventris.exe"),
+        os.fspath(ventris_binary()),
         "--ghidra",
         os.fspath(ghidra),
         "--out",

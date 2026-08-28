@@ -331,7 +331,13 @@ def find_ventris(explicit: str | None) -> list[str]:
     if explicit:
         return [explicit]
     root = repo_root()
-    for candidate in (root / "target" / "debug" / "ventris.exe", root / "target" / "release" / "ventris.exe"):
+    # The executable is `ventris.exe` on Windows and `ventris` elsewhere; look
+    # for both so a POSIX checkout does not silently fall back to `cargo run`.
+    names = ("ventris.exe", "ventris") if os.name == "nt" else ("ventris", "ventris.exe")
+    candidates = [
+        root / "target" / profile / name for profile in ("debug", "release") for name in names
+    ]
+    for candidate in candidates:
         if candidate.is_file():
             return [str(candidate)]
     cargo = shutil.which("cargo")
