@@ -1,0 +1,33 @@
+{
+  "component": "stock-ghidra-analyzeHeadless",
+  "ghidra": "/home/raikaru/ghidra_12.1.3_PUBLIC",
+  "host": {
+    "kernel": "7.1.12-200.fc44.x86_64",
+    "machine": "x86_64",
+    "cpu": 12
+  },
+  "runs": [
+    {
+      "run": 1,
+      "exit": 0,
+      "wall_s": 12.32,
+      "maxrss_kb": 384088
+    },
+    {
+      "run": 2,
+      "exit": 0,
+      "wall_s": 10.77,
+      "maxrss_kb": 408260
+    },
+    {
+      "run": 3,
+      "exit": 0,
+      "wall_s": 10.83,
+      "maxrss_kb": 372276
+    }
+  ],
+  "median_wall_s": 10.83,
+  "median_maxrss_kb": 384088,
+  "maxrss_is_tree_peak": true,
+  "note": "maxrss from /usr/bin/time -v covers the launcher process tree (ru_maxrss of waited children), i.e. JVM peak RSS including the decompiler child."
+}
