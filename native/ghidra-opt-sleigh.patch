@@ -1,0 +1,60 @@
+--- decompiler/ghidra_arch.cc
++++ b/decompiler/ghidra_arch.cc
+@@ -22,4 +22,5 @@
+ #include "string_ghidra.hh"
+ #include "cpool_ghidra.hh"
++#include "sleigh.hh"
+ #include "inject_ghidra.hh"
+ 
+@@ -296,4 +297,19 @@
+ 
+ {
++  const char *slafile = getenv("VENTRIS_SLA");
++  if ((slafile != (const char *)0) && (slafile[0] != '\0')) {
++    // Raw-SLEIGH mode (spike): register the <sleigh> tag whose CONTENT is
++    // the compiled .sla path (same handshake as
++    // SleighArchitecture::buildSpecFile, sleigh_arch.cc:410-418), then
++    // build a self-disassembling Sleigh translator instead of the
++    // client-driven GhidraTranslate. The slave instruction bytes come from
++    // the client via getBytes (LoadImageGhidra), so the worker's
++    // program-provider serves both bytes and pcode generation.
++    istringstream s(string("<sleigh>") + slafile + "</sleigh>");
++    Document *doc = store.parseDocument(s);
++    store.registerTag(doc->getRoot());
++    Sleigh *trans = new Sleigh(loader, context);
++    return trans;
++  }
+   return new GhidraTranslate(this);
+ }
+@@ -370,5 +386,13 @@
+ 
+ {
+-  context = new ContextGhidra(this);
++  const char *slafile = getenv("VENTRIS_SLA");
++  if ((slafile != (const char *)0) && (slafile[0] != '\0')) {
++    // Raw-SLEIGH mode: the Sleigh self-disassembler needs a real context
++    // database (ContextGhidra blocks registerVariable).
++    context = new ContextInternal();
++  }
++  else {
++    context = new ContextGhidra(this);
++  }
+ }
+ 
+--- decompiler/Makefile
++++ b/decompiler/Makefile
+@@ -261,9 +261,9 @@
+ 	./decomp_test_dbg
+ 
+-ghidra_dbg:	$(GHIDRA_DBG_OBJS)
+-	$(CXX) $(DBG_CXXFLAGS) $(ADDITIONAL_FLAGS) $(MAKE_STATIC) $(ARCH_TYPE) -o ghidra_dbg $(GHIDRA_DBG_OBJS)
+-
+-ghidra_opt:	$(GHIDRA_OPT_OBJS)
+-	$(CXX) $(OPT_CXXFLAGS) $(ADDITIONAL_FLAGS) $(MAKE_STATIC) $(ARCH_TYPE)  -o ghidra_opt $(GHIDRA_OPT_OBJS)
++ghidra_dbg:	$(GHIDRA_DBG_OBJS) $(SLEIGH:%=ghi_opt/%.o) ghi_opt/inject_sleigh.o
++	$(CXX) $(DBG_CXXFLAGS) $(ADDITIONAL_FLAGS) $(MAKE_STATIC) $(ARCH_TYPE) -o ghidra_dbg $(GHIDRA_DBG_OBJS) $(SLEIGH:%=ghi_opt/%.o) ghi_opt/inject_sleigh.o -lz
++
++ghidra_opt:	$(GHIDRA_OPT_OBJS) $(SLEIGH:%=ghi_opt/%.o) ghi_opt/inject_sleigh.o
++	$(CXX) $(OPT_CXXFLAGS) $(ADDITIONAL_FLAGS) $(MAKE_STATIC) $(ARCH_TYPE)  -o ghidra_opt $(GHIDRA_OPT_OBJS) $(SLEIGH:%=ghi_opt/%.o) ghi_opt/inject_sleigh.o -lz
+ 
+ sleigh_dbg:	$(SLEIGH_DBG_OBJS)

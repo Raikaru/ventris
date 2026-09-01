@@ -411,6 +411,13 @@ mod tests {
 /// output) plus registers.txt; the program and its functions come from the
 /// project store so the worker is the store-backed no-JVM decompiler.
 fn main() {
+    // Raw-SLEIGH mode: when VENTRIS_SLA points at a compiled .sla, the
+    // patched (out-of-tree) ghidra_opt self-disassembles instead of asking
+    // the client for pcode (see crates docs / upstream-ghidra.md).
+    if let Ok(sla) = std::env::var("VENTRIS_SLA") {
+        // SAFETY: set before any thread spawns; single-threaded main start.
+        unsafe { std::env::set_var("VENTRIS_SLA", sla) };
+    }
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 6 {
         eprintln!(

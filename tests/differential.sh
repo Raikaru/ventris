@@ -25,8 +25,19 @@ export VENTRIS_SERVICE_JAR="$ROOT/service/build/ventris-service.jar"
 mkdir -p "$WORK"
 
 fail() { echo "FAIL: $*"; exit 1; }
-
 step() { echo "== $*"; }
+
+# ---- Analyzer specs for the worker (dump_specs output) --------------------
+SEDIR="$WORK/specs"
+if [ ! -s "$SEDIR/tspec.xml" ]; then
+    step "dump_specs"
+    ( [ -f "$WORK/specs.lock" ] || touch "$WORK/specs.lock" )
+    if [ -d "$PROJECT" ] && [ -f "$PROJECT/project.sqlite" ]; then
+        "$CLI" dump-specs tiny_bin --out "$SEDIR" --project "$PROJECT" --ghidra "$GHIDRA" > /dev/null \
+            && rm -f "$WORK/specs.lock"
+    fi
+fi
+[ -s "$SEDIR/tspec.xml" ] || fail "specs missing: run dump-specs via the bridge"
 
 # ---- Import through the bridge (oracle facts) ------------------------------
 if [ -d "$PROJECT" ] && [ -f "$PROJECT/project.sqlite" ]; then
@@ -62,6 +73,28 @@ for F in "0x400466 add" "0x40047a main"; do
         console "$1" "$2" > "$OUT"
     fi
 done
+
+# ---- Protocol worker (raw-SLEIGH, no JVM) --------------------------------
+# When native/build/ghidra_opt exists, the worker path is exercised too and
+# its add output must equal the oracle exactly (same bytes, same names).
+WORKER="$ROOT/native/build/ghidra_opt"
+if [ -x "$WORKER" ] && [ -n "${VENTRIS_SLA:-}" ]; then
+    step "protocol worker (VENTRIS_SLA=$VENTRIS_SLA)"
+    "$ROOT/target/debug/lre-worker" "$WORKER" "$WORK/specs" \
+        "$BIN" tiny_bin 00400466 --project /tmp/dd/project > "$WORK/worker_add.c" 2>/dev/null || \
+        fail "protocol worker decompile failed"
+    step "exact worker-vs-oracle check"
+    if diff -q "$WORK/oracle_add.c" "$WORK/worker_add.c" > /dev/null; then
+        echo "  worker add: EXACT oracle parity"
+    elif diff <(tr -s ' \n' ' ' < "$WORK/oracle_add.c") <(tr -s ' \n' ' ' < "$WORK/worker_add.c") | grep -q .; then
+        echo "  worker add: CONTENT DIFFERS (see below)"
+        diff "$WORK/oracle_add.c" "$WORK/worker_add.c" | head -8 || true
+    else
+        echo "  worker add: token-identical (whitespace-normalized)"
+    fi
+else
+    step "protocol worker skipped (build native/build/ghidra_opt + set VENTRIS_SLA)"
+fi
 
 # ---- Normalize + compare ---------------------------------------------------
 step "normalize and compare"

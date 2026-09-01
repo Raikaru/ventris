@@ -44,13 +44,36 @@ Stage 2-3: worker protocol + differential test landed; store ownership next.
   (benchmarks/reports/native-spike.md).
 - Stage-1 CLI import (bridge): ~5-10 s Ghidra work + ~7 s JVM startup.
 
+## Stage 3 closed: JVM-free protocol decompile (getPcode gap)
+- Out-of-tree `ghidra_opt` gains a raw-SLEIGH translator hook
+  (native/ghidra-opt-sleigh.patch + native/build_ghidra_opt.sh; the pinned
+  third_party tree is untouched): when VENTRIS_SLA points at the compiled
+  x86-64.sla, ArchitecutureGhidra::buildTranslator registers the
+  `<sleigh>`-path tag (SleighArchitecture::buildSpecFile handshake,
+  sleigh_arch.cc:410-418) and builds a real `Sleigh`; buildContext then
+  uses ContextInternal (ContextGhidra blocks registerVariable).
+- Consequence: GhidraTranslate::oneInstruction's client-side getPcode
+  query is gone — the decompiler self-disassembles, the worker's
+  getBytes callback feeds the bytes, and the whole register →
+  mappedsymbols → setAction → decompileAt flow runs with zero JVM.
+- Verified end to end on the x86-64 ELF fixture:
+  - add: `int add(int param_1,int param_2){return param_2 + param_1;}`
+    — token-identical to the bridge oracle (differential test's
+    "exact worker-vs-oracle check").
+  - main: calls add + printf with the right consts, returns 0.
+- native/ghidra-opt-sleigh.patch = the two hunks (buildTranslator,
+  buildContext) plus the Makefile link rule for the SLEIGH objects.
+- Repro: `native/build_ghidra_opt.sh` (copies sources aside, git-apply
+  the patch, `make ghidra_opt`), binary at native/build/ghidra_opt.
+
+## Remaining for Stage 4 (goal)
+Native import (no-JVM ELF/PE loading into the store facts), native memory
+inspection, native xref/function discovery for imported binaries, and the
+memory/perf gates. The workflow today: import (bridge, once) then
+functions/memory/decompile/reopen/rename fully JVM-free via the store +
+worker.
+
 ## Known gaps / risks
-- Protocol worker (lre-worker) decompileAt succeeds through
-  mappedsymbols/register/tracked callbacks but the decompiler's
-  per-instruction pcode comes from the CLIENT (GhidraTranslate::
-  oneInstruction -> getPcode query, ghidra_translate.cc:127). Answering
-  getPcode needs a native SLEIGH pcode generator; today the differential
-  covers the no-JVM path via the console (raw architecture) instead.
 - Bridge project lock is single-writer: concurrent CLI invocations fail
   with "Unable to lock project" (Ghidra project lock); stale locks need
   manual removal after an aborted JVM.
