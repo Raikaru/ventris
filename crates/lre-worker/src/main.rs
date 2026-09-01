@@ -43,8 +43,8 @@ pub type Result<T, E = WorkerError> = std::result::Result<T, E>;
 
 /// A running `ghidra_opt` child with one registered program.
 pub struct NativeWorker {
-    child: Child,
-    pub(crate) stdin: ChildStdin,
+    child: Option<Child>,
+    pub(crate) stdin: Option<ChildStdin>,
     pub(crate) stdout: ChildStdout,
     pub(crate) out_buf: Vec<u8>,
     /// Path passed to ghidra_opt for diagnostics.
@@ -69,89 +69,92 @@ impl NativeWorker {
             .take()
             .ok_or_else(|| WorkerError::Process("no stdout".into()))?;
         Ok(Self {
-            child,
-            stdin,
+            child: Some(child),
+            stdin: Some(stdin),
             stdout,
             out_buf: Vec::new(),
             binary: ghidra_opt.to_path_buf(),
         })
     }
 
+    /// Writes one complete frame to the child's stdin.
+    pub(crate) fn write_frame(&mut self, buf: &[u8]) -> Result<()> {
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| WorkerError::Process("stdin closed".into()))?;
+        stdin.write_all(buf).map_err(WorkerError::Io)?;
+        stdin.flush().map_err(WorkerError::Io)?;
+        if let Ok(log) = std::env::var("WORKER_LOG") {
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log)
+                .unwrap();
+            use std::io::Write as _;
+            let _ = writeln!(
+                f,
+                "--> {}",
+                buf.iter().map(|b| format!("{b:02x}")).collect::<String>()
+            );
+        }
+        Ok(())
+    }
+
     /// Sends `registerProgram` with the four spec XML documents the pinned
     /// ArchitectureGhidra::buildSpecFile expects (pspec, cspec, tspec,
     /// corespec, in that order — see RegisterProgram::loadParameters).
+    ///
+    /// The native program queries are answered by `provider` during
+    /// registration (getBytes, getRegister, ...) exactly as during any
+    /// other command.
     pub fn register_program(
         &mut self,
+        provider: &mut ProgramProvider,
         pspec: &str,
         cspec: &str,
         tspec: &str,
         corespec: &str,
     ) -> Result<()> {
-        let mut buf = Vec::new();
-        encode_burst(&mut buf, burst::COMMAND_OPEN);
-        encode_string_stream(&mut buf, b"registerProgram");
-        encode_string_stream(&mut buf, pspec.as_bytes());
-        encode_string_stream(&mut buf, cspec.as_bytes());
-        encode_string_stream(&mut buf, tspec.as_bytes());
-        encode_string_stream(&mut buf, corespec.as_bytes());
-        encode_burst(&mut buf, burst::COMMAND_CLOSE);
-        self.stdin
-            .write_all(&buf)
-            .map_err(WorkerError::Io)?;
-        self.stdin.flush().map_err(WorkerError::Io)?;
-        self.read_command_response()
+        let _ = self.run_command(
+            provider,
+            "registerProgram",
+            &[pspec.as_bytes(), cspec.as_bytes(), tspec.as_bytes(), corespec.as_bytes()],
+        )?;
+        Ok(())
     }
 
-    /// Sends `decompileAt` for `space:offset` and returns the C text.
-    /// The address arrives as the packed-encoded `<addr>` element the
-    /// pinned DecompileAt::loadParameters reads (space index + offset).
-    pub fn decompile_at(&mut self, space_index: u32, offset: u64) -> Result<String> {
-        let mut buf = Vec::new();
-        encode_burst(&mut buf, burst::COMMAND_OPEN);
-        encode_string_stream(&mut buf, b"decompileAt");
-        // PackedEncode <addr> element: element id for ELEM_ADDR_ADDR family
-        // is resolved by the decompiler; the Java side encodes the address
-        // with AttributeId space + offset inside an <addr> element. We emit
-        // element id 1 (addr) with SPACE and UNSIGNED_INT attributes; the
-        // exact ids are wired to the decompiler's ElementId table, which
-        // assigns them deterministically at startup.
-        encode_addr_element(&mut buf, space_index, offset);
-        encode_burst(&mut buf, burst::COMMAND_CLOSE);
-        self.stdin.write_all(&buf).map_err(WorkerError::Io)?;
-        self.stdin.flush().map_err(WorkerError::Io)?;
+    /// Frame shape per DecompileProcess.sendCommandTimeout (Java client):
+    /// command name, then the arch id as a string stream, then the packed
+    /// `<addr>` parameter, then command close. The C++ base
+    /// GhidraCommand::loadParameters (ghidra_process.cc:82-97) reads that
+    /// arch-id frame first, so omitting it kills the command.
+    pub fn decompile_at(
+        &mut self,
+        provider: &mut ProgramProvider,
+        space_index: u32,
+        offset: u64,
+    ) -> Result<Vec<u8>> {
+        let mut addr = Vec::new();
+        wire::encode_addr_element(&mut addr, space_index, offset);
+        self.run_command(provider, "decompileAt", &[b"0", &addr])
+    }
 
-        // The decompiler will interleave queries (getBytes, symbols, ...).
-        // This loop answers each one from the store until the command
-        // response completes. The store-backed callbacks are the next task;
-        // for now the loop only recognizes the response/exception frames and
-        // fails loudly on anything else.
-        loop {
-            let code = self.next_burst()?;
-            match code {
-                burst::RESPONSE_OPEN => {
-                    let text = self.read_string_stream()?;
-                    let _ = self.expect_burst(burst::RESPONSE_CLOSE)?;
-                    return Ok(String::from_utf8_lossy(&text).into_owned());
-                }
-                burst::EXCEP_OPEN => {
-                    let msg = self.read_string_stream()?;
-                    let _ = self.expect_burst(burst::EXCEP_CLOSE)?;
-                    return Err(WorkerError::Decompiler(
-                        String::from_utf8_lossy(&msg).into_owned(),
-                    ));
-                }
-                burst::QUERY_OPEN => {
-                    return Err(WorkerError::Protocol(
-                        "program queries not yet wired (next task)".into(),
-                    ));
-                }
-                other => {
-                    return Err(WorkerError::Protocol(format!(
-                        "unexpected burst 0x{other:x} waiting for response"
-                    )));
-                }
-            }
-        }
+    /// Selects the decompiler action root (Java: `setAction "decompile" ""`),
+    /// which also enables C-code printing on the result. Without it the
+    /// default action name leaves the raw C out of the response.
+    pub fn set_action(
+        &mut self,
+        provider: &mut ProgramProvider,
+        action: &str,
+        print: &str,
+    ) -> Result<()> {
+        let _ = self.run_command(
+            provider,
+            "setAction",
+            &[b"0", action.as_bytes(), print.as_bytes()],
+        )?;
+        Ok(())
     }
 
     pub(crate) fn next_burst(&mut self) -> Result<u8> {
@@ -167,6 +170,19 @@ impl NativeWorker {
             if n == 0 {
                 return Err(WorkerError::Process("decompiler died".into()));
             }
+            if let Ok(log) = std::env::var("WORKER_LOG") {
+                let mut f = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log)
+                    .unwrap();
+                use std::io::Write as _;
+                let _ = writeln!(
+                    f,
+                    "<-- {}",
+                    chunk[..n].iter().map(|b| format!("{b:02x}")).collect::<String>()
+                );
+            }
             self.out_buf.extend_from_slice(&chunk[..n]);
         }
     }
@@ -181,73 +197,150 @@ impl NativeWorker {
         Ok(())
     }
 
-    /// Reads one string stream into a Vec, expecting `STRINGSTREAM_OPEN`.
-    pub(crate) fn read_string_stream(&mut self) -> Result<Vec<u8>> {
-        self.expect_burst(burst::STRINGSTREAM_OPEN)?;
-        // Streams end at the close burst; NULs inside payload are possible
-        // in byte streams but string payloads here are text or packed.
+    /// Reads the payload of a string stream whose 0x0e open burst was
+    /// already consumed, up to the close burst (0x0f), answering any
+    /// query the decompiler interleaves mid-stream. This mirrors the Java
+    /// readResponse loop: the C++ encodes the result via packed element
+    /// writes that themselves trigger client queries (e.g. namespaces),
+    /// which arrive as 0x04 frames between result bytes.
+    pub(crate) fn read_string_payload(&mut self, provider: &mut ProgramProvider) -> Result<Vec<u8>> {
         let mut out = Vec::new();
         loop {
-            let code = self.next_burst()?;
-            if code == burst::STRINGSTREAM_CLOSE {
-                return Ok(out);
+            let byte = self.raw_byte()?;
+            if byte == 0 {
+                // Structural burst: skip NULs, expect 0x01 then a code.
+                let code = loop {
+                    let b = self.raw_byte()?;
+                    if b == 0 {
+                        continue;
+                    }
+                    if b != 1 {
+                        return Err(WorkerError::Protocol(format!(
+                            "malformed burst under payload (got 0x{b:x})"
+                        )));
+                    }
+                    break self.raw_byte()?;
+                };
+                match code {
+                    burst::STRINGSTREAM_CLOSE => return Ok(out),
+                    burst::QUERY_OPEN => {
+                        // Queries inside the result stream are answered and
+                        // the ingest continues (Java readResponse, same).
+                        self.answer_query(provider)?;
+                    }
+                    other => {
+                        let tail: Vec<String> = out
+                            .iter()
+                            .rev()
+                            .take(24)
+                            .rev()
+                            .map(|b| format!("{b:02x}"))
+                            .collect();
+                        return Err(WorkerError::Protocol(format!(
+                            "unexpected burst 0x{other:x} in payload (tail: {})",
+                            tail.join("")
+                        )));
+                    }
+                }
+            } else {
+                out.push(byte);
             }
-            // Payload bytes arrive as raw stream content; burst decoder
-            // surfaces them one byte at a time (see decode_burst leniency).
-            out.push(code);
         }
     }
 
-    fn read_command_response(&mut self) -> Result<()> {
+    /// Reads one raw byte from the child's stdout, blocking until data.
+    pub(crate) fn raw_byte(&mut self) -> Result<u8> {
         loop {
-            let code = self.next_burst()?;
-            match code {
-                burst::RESPONSE_OPEN => {
-                    let _ = self.read_string_stream()?; // warnings stream
-                    self.expect_burst(burst::RESPONSE_CLOSE)?;
-                    return Ok(());
-                }
-                burst::EXCEP_OPEN => {
-                    let msg = self.read_string_stream()?;
-                    let _ = self.expect_burst(burst::EXCEP_CLOSE)?;
-                    return Err(WorkerError::Decompiler(
-                        String::from_utf8_lossy(&msg).into_owned(),
-                    ));
-                }
-                other => {
-                    return Err(WorkerError::Protocol(format!(
-                        "unexpected burst 0x{other:x} in registerProgram response"
-                    )));
-                }
+            if let Some(b) = self.out_buf.first().copied() {
+                self.out_buf.drain(..1);
+                return Ok(b);
             }
+            let mut chunk = [0u8; 4096];
+            let n = self.stdout.read(&mut chunk).map_err(WorkerError::Io)?;
+            if n == 0 {
+                return Err(WorkerError::Process("decompiler died".into()));
+            }
+            if let Ok(log) = std::env::var("WORKER_LOG") {
+                let mut f = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log)
+                    .unwrap();
+                use std::io::Write as _;
+                let _ = writeln!(
+                    f,
+                    "<-- {}",
+                    chunk[..n].iter().map(|b| format!("{b:02x}")).collect::<String>()
+                );
+            }
+            self.out_buf.extend_from_slice(&chunk[..n]);
         }
     }
+
+    pub(crate) fn read_string_stream(&mut self) -> Result<Vec<u8>> {
+        self.expect_burst(burst::STRINGSTREAM_OPEN)?;
+        // Query answers need the provider for interleaved queries; the
+        // plain read_string_stream is only used by answer paths, where the
+        // payload is the query's own data (no nested queries to expect).
+        self.read_payload_plain()
+    }
+
+    /// Payload read without provider support (query payloads).
+    pub(crate) fn read_payload_plain(&mut self) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        loop {
+            let byte = self.raw_byte()?;
+            if byte == 0 {
+                let code = loop {
+                    let b = self.raw_byte()?;
+                    if b == 0 {
+                        continue;
+                    }
+                    if b != 1 {
+                        return Err(WorkerError::Protocol(format!(
+                            "malformed burst under payload (got 0x{b:x})"
+                        )));
+                    }
+                    break self.raw_byte()?;
+                };
+                if code == burst::STRINGSTREAM_CLOSE {
+                    return Ok(out);
+                }
+                return Err(WorkerError::Protocol(format!(
+                    "unexpected burst 0x{code:x} in plain payload"
+                )));
+            }
+            out.push(byte);
+        }
+    }
+
+    /// Reads raw payload bytes until a burst with the given code. Used for
+    /// the warnings frame (ghidra_process.cc:146-148) which carries the
+    /// text unwrapped between the 0x10 and 0x11 markers.
+    pub(crate) fn read_until(&mut self, code: u8) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        loop {
+            let got = self.next_burst()?;
+            if got == code {
+                return Ok(out);
+            }
+            out.push(got);
+        }
+    }
+
 }
 
 impl Drop for NativeWorker {
     fn drop(&mut self) {
-        // ghidra_opt exits when its stdin closes (readToAnyBurst exits on
-        // EOF); take() drops the pipe, then we reap the child.
-        // stdin is a ChildStdin (not Option): dropping it closes the pipe,
-        // and ghidra_opt exits on EOF (readToAnyBurst).
-        let _ = self.child.wait();
+        // Closing our side of the stdin pipe makes ghidra_opt exit on EOF
+        // (readToAnyBurst, ghidra_arch.cc:96), so wait() cannot block on a
+        // live child holding the pipe. The child may be mid-query with
+        // nothing to answer; closing stdin is the only guaranteed exit.
+        drop(self.stdin.take());
+        if let Some(mut child) = self.child.take() {
+            let _ = child.wait();
+        }
     }
-}
-
-/// Encodes the `<addr>` element in PackedFormat. Element/attribute ids here
-/// must match the decompiler's ElementId/AttributeId tables; the spike
-/// validates them before any store wiring.
-fn encode_addr_element(out: &mut Vec<u8>, space_index: u32, offset: u64) {
-    // ELEM_ADDR_ADDR id comes from the decompiler's AttributeId table; the
-    // provisional value is validated by the differential test task.
-    const ELEM_ADDR: u32 = 1;
-    wire::encode_attribute_header(out, ELEM_ADDR, wire::attr_type::SPACE, if space_index == 0 { 0 } else { 1 });
-    if space_index != 0 {
-        wire::encode_packed_int(out, space_index as u64);
-    }
-    wire::encode_attribute_header(out, ELEM_ADDR, wire::attr_type::UNSIGNED_INT, 1);
-    wire::encode_packed_int(out, offset);
-    out.push(wire::ELEMENT_END | (ELEM_ADDR as u8 & 0x1f));
 }
 
 /// Verifies the pinned build is present; called before launch.
@@ -268,8 +361,8 @@ pub fn load_specs(lang_dir: &Path) -> Result<(String, String, String, String)> {
             .map_err(|e| WorkerError::Setup(format!("{name}: {e}")))
     };
     Ok((
-        read("x86-64.pspec")?,
-        read("x86-64-gcc.cspec")?,
+        read("pspec.xml")?,
+        read("cspec.xml")?,
         read("tspec.xml")?,
         read("coretypes.xml")?,
     ))
@@ -309,33 +402,112 @@ mod tests {
     }
 }
 
-/// Smoke entry: launches the pinned ghidra_opt, registers the program from
-/// the spec dir, and decompiles one address passed as args.
+/// the spec dir, and decompiles one function of a program in the store.
+///
+/// Usage:
+///   lre-worker <ghidra_opt> <lang-dir> <binary> <program> <addr-hex> [--project DIR]
+///
+/// The language dir must contain the four spec documents (`dump_specs`
+/// output) plus registers.txt; the program and its functions come from the
+/// project store so the worker is the store-backed no-JVM decompiler.
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 4 {
-        eprintln!("usage: lre-worker <ghidra_opt> <lang-dir> <addr-hex>");
+    if args.len() < 6 {
+        eprintln!(
+            "usage: lre-worker <ghidra_opt> <lang-dir> <binary> <program> <addr-hex> [--project DIR]"
+        );
         std::process::exit(2);
     }
-    if let Err(e) = run(&args[1], &args[2], &args[3]) {
+    let project = std::env::args()
+        .position(|a| a == "--project")
+        .and_then(|i| std::env::args().nth(i + 1))
+        .unwrap_or_else(|| ".lre".into());
+    if let Err(e) = run(&args[1], &args[2], &args[3], &args[4], &args[5], &project) {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
 }
 
-fn run(ghidra_opt: &str, lang_dir: &str, addr: &str) -> Result<()> {
-    let (pspec, cspec) = {
-        let read = |n: &str| -> Result<String> {
-            std::fs::read_to_string(Path::new(lang_dir).join(n))
-                .map_err(|e| WorkerError::Setup(format!("{n}: {e}")))
-        };
-        (read("x86-64.pspec")?, read("x86-64-gcc.cspec")?)
-    };
-    let mut worker = NativeWorker::launch(Path::new(ghidra_opt))?;
-    let _ = worker.register_program(&pspec, &cspec, "", "")?;
+fn run(
+    ghidra_opt: &str,
+    lang_dir: &str,
+    binary: &str,
+    program: &str,
+    addr: &str,
+    project: &str,
+) -> Result<()> {
+    let mut provider = provider::ProgramProvider::new(
+        provider::BinaryBacking::from_file(Path::new(binary))?,
+        0x400000, // image base; taken from the store when the importer records it
+        Vec::new(),
+    );
+    provider.load_language_info(Path::new(lang_dir))?;
+
+    // Function entries from the project store.
+    let db = open_store(Path::new(project))?;
+    let pid = db.program_id(program)?;
+    for f in db.functions(pid)? {
+        if let Ok(off) = u64::from_str_radix(f.entry.trim_start_matches("0x"), 16) {
+            provider.functions.push(off);
+            provider.function_names.insert(off, f.name);
+            provider.function_sizes.insert(off, f.size as u64);
+        }
+    }
+
     let offset = u64::from_str_radix(addr.trim_start_matches("0x"), 16)
         .map_err(|e| WorkerError::Setup(e.to_string()))?;
-    let text = worker.decompile_at(0, offset)?;
-    println!("{text}");
+    let specs = load_specs(Path::new(lang_dir))?;
+    let mut worker = NativeWorker::launch(Path::new(ghidra_opt))?;
+    worker.register_program(&mut provider, &specs.0, &specs.1, &specs.2, &specs.3)?;
+    worker.set_action(&mut provider, "decompile", "")?;
+    let ram = provider.ram_space_index as u32;
+    let raw = worker.decompile_at(&mut provider, ram, offset)?;
+    // The C text is printed by the C++ as <syntax> markup: every printable
+    // token is an ATTRIB_CONTENT string (EmitMarkup::print, prettyprint.cc:
+    // 311-317) in stream order. Concatenate them; the packed doc only wraps.
+    let c_text = {
+        let mut out = String::new();
+        let mut p = 0usize;
+        while p < raw.len() {
+            let h = raw[p];
+            p += 1;
+            let k = h & 0xc0;
+            if k == 0xc0 {
+                let mut aid = (h & 0x1f) as u64;
+                if h & 0x20 != 0 {
+                    aid = (aid << 7) | (raw[p] & 0x7f) as u64;
+                    p += 1;
+                }
+                let tb = raw[p];
+                p += 1;
+                let tc = tb >> 4;
+                let ln = (tb & 0xf) as usize;
+                let mut v = 0u64;
+                for _ in 0..ln {
+                    v = (v << 7) | (raw[p] & 0x7f) as u64;
+                    p += 1;
+                }
+                if tc == 7 && aid == 1 && p + v as usize <= raw.len() {
+                    out.push_str(&String::from_utf8_lossy(&raw[p..p + v as usize]));
+                    p += v as usize;
+                } else if tc == 7 {
+                    p += v as usize;
+                }
+            } else if k == 0x40 || k == 0x80 {
+                if h & 0x20 != 0 {
+                    p += 1;
+                }
+            } else {
+                p += 1;
+            }
+        }
+        out
+    };
+    if std::env::var_os("WORKER_DUMP").is_some() {
+        let mut f = std::fs::File::create("/tmp/ctext_dump.txt").unwrap();
+        use std::io::Write as _;
+        let _ = f.write_all(c_text.as_bytes());
+    }
+    println!("{c_text}");
     Ok(())
 }

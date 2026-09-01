@@ -30,10 +30,11 @@ fn usage() {
   lre-cli functions <program> [--project DIR]
   lre-cli symbols <program> [--project DIR]
   lre-cli xrefs <program> (--to | --from) <address> [--project DIR]
-  lre-cli rename <program> <address> <new-name> [--project DIR]
+    lre-cli rename <program> <address> <new-name> [--project DIR]
   lre-cli decompile <program> <address> [--ghidra DIR]
-  lre-cli disasm <program> <address> [-n N] [--ghidra DIR]"
-    );
+  lre-cli disasm <program> <address> [-n N] [--ghidra DIR]
+  lre-cli dump-specs <program> --out <dir> [--ghidra DIR]"
+        );
     std::process::exit(2);
 }
 
@@ -235,6 +236,20 @@ fn run_inner(args: &[String]) -> Result<(), String> {
             core.rename_function(&program, &address, &name)
                 .map_err(|e| e.to_string())?;
             println!("renamed {} -> {}", address, name);
+        }
+        "dump-specs" => {
+            let program = args.get(2).ok_or("dump-specs needs a program name")?.clone();
+            let out = flag(args, "--out").ok_or("dump-specs needs --out DIR")?;
+            let mut bridge = launch_bridge(args)?;
+            let session = format!("cli-{program}");
+            bridge
+                .open(&session, &program)
+                .map_err(|e| e.to_string())?;
+            bridge
+                .dump_specs(&session, &out)
+                .map_err(|e| e.to_string())?;
+            println!("specs written to {out}");
+            bridge.shutdown().map_err(|e| e.to_string())?;
         }
         "decompile" | "disasm" => {
             let program = args.get(2).ok_or("command needs a program name")?.clone();

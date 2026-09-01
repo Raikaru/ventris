@@ -215,11 +215,19 @@ impl Bridge {
         Self::parse(v)
     }
 
+    /// Writes the four analyzer spec documents + registers.txt to `outdir`
+    /// (bridge `dump_specs`: the exact documents DecompInterface passes to
+    /// registerProgram), so the native worker can replay them JVM-free.
+    pub fn dump_specs(&mut self, session: &str, outdir: &str) -> Result<()> {
+        let v = self.call("dump_specs", json!({"session": session, "outdir": outdir}))?;
+        match v.get("ok").and_then(Value::as_bool) {
+            Some(true) => Ok(()),
+            _ => Err(BridgeError::Shape(format!("dump_specs: {v}"))),
+        }
+    }
+
     /// Batched export: functions plus all body xrefs in one round-trip.
-    pub fn export_facts(
-        &mut self,
-        session: &str,
-    ) -> Result<(Vec<FunctionRow>, Vec<XrefRow>)> {
+    pub fn export_facts(&mut self, session: &str) -> Result<(Vec<FunctionRow>, Vec<XrefRow>)> {
         let v = self.call("export_facts", json!({"session": session}))?;
         let functions: Vec<FunctionRow> = Self::parse(
             v.get("functions").cloned().unwrap_or(Value::Null),

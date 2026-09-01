@@ -22,7 +22,9 @@ import com.google.gson.JsonObject;
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.program.model.address.Address;
+import ghidra.app.plugin.processors.sleigh.UniqueLayout;
 import ghidra.program.model.listing.Function;
+import ghidra.program.model.listing.Program;
 import ghidra.program.model.listing.Instruction;
 import ghidra.program.model.listing.InstructionIterator;
 import ghidra.program.model.mem.MemoryAccessException;
@@ -71,6 +73,7 @@ final class Dispatcher {
             case "rename" -> rename(params);
             case "decompile" -> decompile(params);
             case "disassemble" -> disassemble(params);
+            case "dump_specs" -> dumpSpecs(params);
             case "ping" -> ping();
             default -> throw new Main.RpcError(-32601, "unknown method: " + method);
         };
@@ -361,5 +364,69 @@ final class Dispatcher {
             throw new Main.RpcError(-32602, "missing int param: " + key);
         }
         return el.getAsInt();
+    }
+
+    /**
+     * Captures the four spec documents exactly as DecompInterface.registerProgram
+     * sends them (pspec, cspec, tspec, coretypes) and writes them under outdir so
+     * the native worker can replay them without a JVM. A migration aid, not part
+     * of the supported surface.
+     */
+    private JsonElement dumpSpecs(JsonObject params) {
+        Session session = ghidra.session(requireString(params, "session"));
+        String outDir = requireString(params, "outdir");
+        try {
+            java.nio.file.Files.createDirectories(java.nio.file.Path.of(outDir));
+            Program program = session.program();
+            ghidra.app.plugin.processors.sleigh.SleighLanguage lang =
+                (ghidra.app.plugin.processors.sleigh.SleighLanguage) program.getLanguage();
+            ghidra.program.model.lang.CompilerSpec cspec = program.getCompilerSpec();
+            long uniqueBase =
+                UniqueLayout.SLEIGH_BASE.getOffset(lang);
+
+            ghidra.program.model.lang.SleighLanguageDescription desc =
+                (ghidra.program.model.lang.SleighLanguageDescription) lang.getLanguageDescription();
+            java.nio.file.Files.writeString(
+                java.nio.file.Path.of(outDir, "pspec.xml"),
+                java.nio.file.Files.readString(java.nio.file.Path.of(desc.getSpecFile().getAbsolutePath())));
+
+            ghidra.program.model.pcode.XmlEncode xe =
+                new ghidra.program.model.pcode.XmlEncode(false);
+            cspec.encode(xe);
+            java.nio.file.Files.writeString(
+                java.nio.file.Path.of(outDir, "cspec.xml"), xe.toString());
+
+            ghidra.program.model.pcode.XmlEncode te =
+                new ghidra.program.model.pcode.XmlEncode(false);
+            lang.encodeTranslator(te, program.getAddressFactory(), uniqueBase);
+            java.nio.file.Files.writeString(
+                java.nio.file.Path.of(outDir, "tspec.xml"), te.toString());
+
+            ghidra.program.model.pcode.XmlEncode ce =
+                new ghidra.program.model.pcode.XmlEncode(false);
+            ghidra.program.model.pcode.PcodeDataTypeManager cdtm =
+                new ghidra.program.model.pcode.PcodeDataTypeManager(program, null);
+            cdtm.encodeCoreTypes(ce);
+            java.nio.file.Files.writeString(
+                java.nio.file.Path.of(outDir, "coretypes.xml"), ce.toString());
+
+            // Register table: name -> (space index, offset, size) for the
+            // worker's getregister callback.
+            StringBuilder regs = new StringBuilder();
+            for (ghidra.program.model.lang.Register reg : program.getLanguage().getRegisters()) {
+                regs.append(reg.getName()).append('\t')
+                    .append(reg.getAddress().getOffset())
+                    .append('\t').append(reg.getMinimumByteSize()).append('\n');
+            }
+            java.nio.file.Files.writeString(
+                java.nio.file.Path.of(outDir, "registers.txt"), regs.toString());
+
+            JsonObject out = new JsonObject();
+            out.addProperty("ok", true);
+            out.addProperty("outdir", outDir);
+            return out;
+        } catch (Exception e) {
+            throw new Main.RpcError(-32011, "dump_specs failed: " + e);
+        }
     }
 }
