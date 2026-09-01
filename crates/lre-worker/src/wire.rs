@@ -6,6 +6,12 @@
 //! (`PackedFormat` namespace constants). A mismatch here is a hung worker,
 //! so every constant cites its source line semantics.
 
+/// Header-mask comparisons for provider.rs (PackedFormat constants).
+pub const HEADER_MASK_EQ: u8 = 0xc0;
+pub const ELEMENT_START_EQ: u8 = 0x40;
+pub const ELEMENT_END_EQ: u8 = 0x80;
+pub const ATTRIBUTE_EQ: u8 = 0xc0;
+
 /// Burst codes (ghidra_arch.cc: open alignment is even, close is odd).
 pub mod burst {
     /// Command stream from the client (us) to the decompiler.

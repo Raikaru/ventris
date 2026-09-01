@@ -5,12 +5,14 @@
 //! (`lre-db`) plus the raw binary via a read-only file mapping. This is the
 //! no-JVM replacement for the Stage-1 bridge, per ADR-0001.
 
+mod provider;
 mod wire;
 
 use lre_db::ProjectDb;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+pub use provider::{decode_addr_element, spec_dir, ProgramProvider};
 use wire::{burst, decode_burst, encode_burst, encode_string_stream};
 
 /// Worker failure.
@@ -42,9 +44,9 @@ pub type Result<T, E = WorkerError> = std::result::Result<T, E>;
 /// A running `ghidra_opt` child with one registered program.
 pub struct NativeWorker {
     child: Child,
-    stdin: ChildStdin,
-    stdout: ChildStdout,
-    out_buf: Vec<u8>,
+    pub(crate) stdin: ChildStdin,
+    pub(crate) stdout: ChildStdout,
+    pub(crate) out_buf: Vec<u8>,
     /// Path passed to ghidra_opt for diagnostics.
     pub binary: PathBuf,
 }
@@ -152,7 +154,7 @@ impl NativeWorker {
         }
     }
 
-    fn next_burst(&mut self) -> Result<u8> {
+    pub(crate) fn next_burst(&mut self) -> Result<u8> {
         let mut pos = 0usize;
         loop {
             if let Some(code) = decode_burst(&self.out_buf, &mut pos) {
@@ -169,7 +171,7 @@ impl NativeWorker {
         }
     }
 
-    fn expect_burst(&mut self, want: u8) -> Result<()> {
+    pub(crate) fn expect_burst(&mut self, want: u8) -> Result<()> {
         let got = self.next_burst()?;
         if got != want {
             return Err(WorkerError::Protocol(format!(
@@ -180,7 +182,7 @@ impl NativeWorker {
     }
 
     /// Reads one string stream into a Vec, expecting `STRINGSTREAM_OPEN`.
-    fn read_string_stream(&mut self) -> Result<Vec<u8>> {
+    pub(crate) fn read_string_stream(&mut self) -> Result<Vec<u8>> {
         self.expect_burst(burst::STRINGSTREAM_OPEN)?;
         // Streams end at the close burst; NULs inside payload are possible
         // in byte streams but string payloads here are text or packed.
@@ -305,4 +307,35 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, WorkerError::Setup(_)));
     }
+}
+
+/// Smoke entry: launches the pinned ghidra_opt, registers the program from
+/// the spec dir, and decompiles one address passed as args.
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() < 4 {
+        eprintln!("usage: lre-worker <ghidra_opt> <lang-dir> <addr-hex>");
+        std::process::exit(2);
+    }
+    if let Err(e) = run(&args[1], &args[2], &args[3]) {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    }
+}
+
+fn run(ghidra_opt: &str, lang_dir: &str, addr: &str) -> Result<()> {
+    let (pspec, cspec) = {
+        let read = |n: &str| -> Result<String> {
+            std::fs::read_to_string(Path::new(lang_dir).join(n))
+                .map_err(|e| WorkerError::Setup(format!("{n}: {e}")))
+        };
+        (read("x86-64.pspec")?, read("x86-64-gcc.cspec")?)
+    };
+    let mut worker = NativeWorker::launch(Path::new(ghidra_opt))?;
+    let _ = worker.register_program(&pspec, &cspec, "", "")?;
+    let offset = u64::from_str_radix(addr.trim_start_matches("0x"), 16)
+        .map_err(|e| WorkerError::Setup(e.to_string()))?;
+    let text = worker.decompile_at(0, offset)?;
+    println!("{text}");
+    Ok(())
 }
