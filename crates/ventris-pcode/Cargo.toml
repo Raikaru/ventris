@@ -1,9 +1,0 @@
-[package]
-name = "ventris-pcode"
-edition.workspace = true
-version.workspace = true
-license.workspace = true
-repository.workspace = true
-description = "Typed p-code representation for Ventris"
-
-[dependencies]

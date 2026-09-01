@@ -1,54 +1,30 @@
-# Rust build output
-/desktop/ventris-gpui/target/
+# Build output
+/build/
+/dist/
 /target/
 
-# Python build and cache output
-__pycache__/
-*.py[cod]
-*.egg-info/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.venv/
-venv/
-env/
-/integrations/vscode/node_modules/
-build/
-dist/
+# Java
+*.class
+*.jar
+!third_party/**/*.jar
 
-# Integration build output
-/integrations/vscode/dist/
-/integrations/vscode/.acceptance-user/
-/integrations/vscode/.acceptance-extensions/
-/integrations/vscode/.vscode-test/
-
-# Local analysis and debug output
-.ventris-cache/
+# Local analysis output
+.ventris/
 *.log
 *.tmp
-*.trace
-wire.log
-probe.log
-stage0_out.txt
-decomp_stderr.txt
 err
-/.release/
-/capsule/
-/.acceptance-gpui.vproj
-/specs/
-/init.json
-/vm.json
-/decomp_debug.xml
-/gdb_cmd.txt
-/gdb_attach.py
-/run_stage0.py
-/opcodes.json
-/protocol_ids.json
+
+# Test artifacts
+/test-out/
+/test-projects/
 
 # IDE and OS files
-.vscode/settings.json
+.vscode/
 .idea/
 *.user
 *.suo
 .DS_Store
 Thumbs.db
+
+# Extracted Ghidra Java sources, a local reference (tools/java_sources.py)
+.ghidra-java/
