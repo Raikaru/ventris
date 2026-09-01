@@ -1,7 +1,7 @@
 # STATUS
 
 ## Current phase/generation
-Stage 1 complete (Phase 1 + the store-ownership half of Phase 3 exit).
+Stage 1.5 complete (Phase 0 leftovers closed: baseline + spike + ADR-0001).
 
 ## Completed and verified
 - Scrap of the old partial-decompiler-port architecture; pinned Ghidra
@@ -20,9 +20,13 @@ Stage 1 complete (Phase 1 + the store-ownership half of Phase 3 exit).
   - rename persists in store, revision bump verified in unit tests
   - decompile + disasm through bridge against saved program
 
-## Measured
-- Import+analysis ~5–10 s of Ghidra work; JVM startup dominates (~7 s).
-- No memory measurements yet (spec 21 baselines pending).
+## Measured (benchmarks/reports/)
+- Stock Ghidra (analyzeHeadless, tiny ELF fixture, 3 runs): median wall
+  10.83 s, median peak process-tree RSS 375 MiB.
+- Native spike: pinned C++ decompiler + sleigh_opt compiled x86-64.sla;
+  `add` and `main` decompiled with zero JVM in the process tree
+  (benchmarks/reports/native-spike.md).
+- Stage-1 CLI import (bridge): ~5-10 s Ghidra work + ~7 s JVM startup.
 
 ## Known gaps / risks
 - Bridge project lock is single-writer: concurrent CLI invocations fail
@@ -37,6 +41,6 @@ Stage 1 complete (Phase 1 + the store-ownership half of Phase 3 exit).
   dedupe is a Stage 2 store concern.
 
 ## Next bounded task
-Phase 2: native loaders for ELF facts (17.1 order), or Phase 0 leftovers:
-stock-Ghidra baseline benchmarks and the native-worker feasibility spike
-(15.1) — the spike should come first since it gates the whole Stage 3 path.
+Stage 2: extend native store ownership (comments, types, PE import) and
+launch the native worker shell (protocol + program-provider callbacks per
+spec 15.2), differential-tested against the bridge as oracle.
