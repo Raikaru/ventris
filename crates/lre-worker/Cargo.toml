@@ -1,0 +1,17 @@
+[package]
+name = "lre-worker"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Native decompiler worker: burst/packed protocol client for ghidra_opt"
+
+[[bin]]
+name = "lre-worker"
+path = "src/main.rs"
+
+[dependencies]
+lre-model = { path = "../lre-model" }
+lre-db = { path = "../lre-db" }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

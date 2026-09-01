@@ -5,6 +5,7 @@ members = [
     "crates/lre-db",
     "crates/lre-core",
     "crates/lre-cli",
+    "crates/lre-worker",
 ]
 
 [workspace.package]
