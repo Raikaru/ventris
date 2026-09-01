@@ -25,7 +25,7 @@ import ghidra.program.model.address.Address;
 import ghidra.app.plugin.processors.sleigh.UniqueLayout;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Program;
-import ghidra.program.model.listing.Instruction;
+import ghidra.program.model.listing.*;
 import ghidra.program.model.listing.InstructionIterator;
 import ghidra.program.model.mem.MemoryAccessException;
 import ghidra.program.model.symbol.RefType;
@@ -185,6 +185,55 @@ final class Dispatcher {
             }
         }
         out.add("xrefs", xrefs);
+
+        JsonArray comments = new JsonArray();
+        ghidra.program.model.listing.Listing listing =
+            session.program().getListing();
+        java.util.Set<Integer> commentKinds = new java.util.LinkedHashSet<>();
+        commentKinds.add(CodeUnit.EOL_COMMENT);
+        commentKinds.add(CodeUnit.PRE_COMMENT);
+        commentKinds.add(CodeUnit.PLATE_COMMENT);
+        for (Address entry : session.functionEntries()) {
+            Function f = session.functionAt(entry);
+            ghidra.program.model.address.AddressIterator cit =
+                listing.getCommentAddressIterator(f.getBody(), true);
+            while (cit.hasNext()) {
+                CodeUnit cu = listing.getCodeUnitAt(cit.next());
+                for (int kind : commentKinds) {
+                    String text = cu.getComment(kind);
+                    if (text != null && text.length() != 0) {
+                        JsonObject o = new JsonObject();
+                        String typeName = "eol";
+                        if (kind == CodeUnit.PRE_COMMENT) {
+                            typeName = "pre";
+                        }
+                        o.addProperty("address", cu.getAddress().toString());
+                        o.addProperty("function", entry.toString());
+                        o.addProperty("kind", typeName);
+                        o.addProperty("text", text);
+                        comments.add(o);
+                    }
+                }
+            }
+        }
+        out.add("comments", comments);
+
+        JsonArray types = new JsonArray();
+        ghidra.program.model.data.DataTypeManager dtm =
+            session.program().getDataTypeManager();
+        java.util.Iterator<ghidra.program.model.data.DataType> typeIt =
+            dtm.getAllDataTypes();
+        while (typeIt.hasNext()) {
+            ghidra.program.model.data.DataType dt = typeIt.next();
+            if (dt instanceof ghidra.program.model.data.Pointer) {
+                continue;
+            }
+            JsonObject o = new JsonObject();
+            o.addProperty("name", dt.getName());
+            o.addProperty("definition", dt.getDescription());
+            types.add(o);
+        }
+        out.add("types", types);
         return out;
     }
 

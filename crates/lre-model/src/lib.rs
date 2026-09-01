@@ -119,7 +119,6 @@ pub struct ProgramSummary {
     pub language: String,
 }
 
-/// Provenance stamped on every bridge-produced record (spec 14.4).
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Provenance {
     /// Producing component: always `ghidra-bridge` in Stage 1.
@@ -127,6 +126,28 @@ pub struct Provenance {
     /// Pinned upstream version.
     pub upstream_version: String,
 }
+
+/// A stored comment (from the bridge export).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct CommentRow {
+    /// Code unit address (hex string as Ghidra reports it).
+    pub address: String,
+    /// Owning function entry (hex string).
+    pub function: String,
+    /// Comment kind: "eol" | "pre" | "plate" (bridge reports its kind).
+    pub kind: String,
+    /// Comment text.
+    pub text: String,
+}
+
+/// A stored data type (from the bridge export; name + free text definition).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct DataTypeRow {
+    pub name: String,
+    pub definition: String,
+}
+
+
 
 #[cfg(test)]
 mod tests {

@@ -5,12 +5,14 @@
 //! runs in a transaction and bumps the program revision; bridge exports carry
 //! producer + upstream version so reopening never depends on the bridge.
 
-use lre_model::{FunctionRow, ProgramId, Provenance, SymbolRow, XrefRow};
+use lre_model::{
+    CommentRow, DataTypeRow, FunctionRow, ProgramId, Provenance, SymbolRow, XrefRow,
+};
 use rusqlite::{params, Connection, Row};
 use std::path::Path;
 
 /// Schema version; bump on any incompatible change and add a migration.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Database open or query failure.
 #[derive(Debug, thiserror::Error)]
@@ -60,7 +62,7 @@ impl ProjectDb {
                  key TEXT PRIMARY KEY,
                  value TEXT NOT NULL
              );
-             INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '1');
+             INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '2');
 
              CREATE TABLE IF NOT EXISTS programs (
                  id INTEGER PRIMARY KEY,
@@ -104,6 +106,23 @@ impl ProjectDb {
                  PRIMARY KEY (program_id, src, dst, kind)
              );
              CREATE INDEX IF NOT EXISTS idx_xrefs_dst ON xrefs(program_id, dst);
+
+             CREATE TABLE IF NOT EXISTS comments (
+                 program_id INTEGER NOT NULL REFERENCES programs(id),
+                 address TEXT NOT NULL,
+                 function TEXT NOT NULL,
+                 type TEXT NOT NULL,
+                 text TEXT NOT NULL,
+                 PRIMARY KEY (program_id, address, type)
+             );
+             CREATE INDEX IF NOT EXISTS idx_comments_fn ON comments(program_id, function);
+
+             CREATE TABLE IF NOT EXISTS datatypes (
+                 program_id INTEGER NOT NULL REFERENCES programs(id),
+                 name TEXT NOT NULL,
+                 definition TEXT NOT NULL DEFAULT '',
+                 PRIMARY KEY (program_id, name)
+             );
              COMMIT;",
         )?;
         let v_text: String = self
@@ -270,6 +289,80 @@ impl ProjectDb {
 
 
 
+    /// Replaces the comment set of a program inside one transaction.
+    pub fn replace_comments(&self, program: ProgramId, rows: &[CommentRow]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM comments WHERE program_id = ?1", params![program.0])?;
+        let mut stmt = tx.prepare(
+            "INSERT INTO comments(program_id, address, function, type, text)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )?;
+        for r in rows {
+            stmt.execute(params![
+                program.0,
+                r.address,
+                r.function,
+                r.kind,
+                r.text
+            ])?;
+        }
+        drop(stmt);
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Replaces the datatype set of a program inside one transaction.
+    pub fn replace_datatypes(&self, program: ProgramId, rows: &[DataTypeRow]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM datatypes WHERE program_id = ?1", params![program.0])?;
+        let mut stmt = tx.prepare(
+            "INSERT OR IGNORE INTO datatypes(program_id, name, definition)
+             VALUES (?1, ?2, ?3)",
+        )?;
+        for r in rows {
+            stmt.execute(params![program.0, r.name, r.definition])?;
+        }
+        drop(stmt);
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Lists comments of a program ordered by address.
+    pub fn comments(&self, program: ProgramId) -> Result<Vec<CommentRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT address, function, type, text FROM comments
+             WHERE program_id = ?1 ORDER BY address",
+        )?;
+        let rows = stmt
+            .query_map(params![program.0], |r| {
+                Ok(CommentRow {
+                    address: r.get(0)?,
+                    function: r.get(1)?,
+                    kind: r.get(2)?,
+                    text: r.get(3)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Lists datatypes of a program ordered by name.
+    pub fn datatypes(&self, program: ProgramId) -> Result<Vec<DataTypeRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT name, definition FROM datatypes
+             WHERE program_id = ?1 ORDER BY name",
+        )?;
+        let rows = stmt
+            .query_map(params![program.0], |r| {
+                Ok(DataTypeRow {
+                    name: r.get(0)?,
+                    definition: r.get(1)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// Looks up a program ID by name.
     pub fn program_id(&self, name: &str) -> Result<ProgramId> {
         let id = self
@@ -386,6 +479,28 @@ mod tests {
         db.rename_function(id, "00400000", "main").unwrap();
         assert_eq!(db.revision(id).unwrap(), before + 1);
         assert_eq!(db.functions(id).unwrap()[0].name, "main");
+    }
+
+    #[test]
+    fn comments_and_types_replace_atomically() {
+        let db = ProjectDb::open_in_memory().unwrap();
+        let id = db.upsert_program("p", "x86:LE:64:default", &prov()).unwrap();
+        let cmts = vec![CommentRow {
+            address: "00400488".into(),
+            function: "00400466".into(),
+            kind: "eol".into(),
+            text: "a + b".into(),
+        }];
+        db.replace_comments(id, &cmts).unwrap();
+        assert_eq!(db.comments(id).unwrap().len(), 1);
+        let types = vec![DataTypeRow {
+            name: "int".into(),
+            definition: "4-byte signed".into(),
+        }];
+        db.replace_datatypes(id, &types).unwrap();
+        assert_eq!(db.datatypes(id).unwrap()[0].name, "int");
+        db.replace_comments(id, &[]).unwrap();
+        assert!(db.comments(id).unwrap().is_empty());
     }
 
     #[test]

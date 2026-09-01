@@ -199,6 +199,22 @@ fn run_inner(args: &[String]) -> Result<(), String> {
             }
             println!("-- {} functions", rows.len());
         }
+        "comments" => {
+            let program = args.get(2).ok_or("comments needs a program name")?.clone();
+            let rows = core.comments(&program).map_err(|e| e.to_string())?;
+            for c in &rows {
+                println!("{}  [{:5}]  {}", c.address, c.kind, c.text);
+            }
+            println!("-- {} comments", rows.len());
+        }
+        "types" => {
+            let program = args.get(2).ok_or("types needs a program name")?.clone();
+            let rows = core.datatypes(&program).map_err(|e| e.to_string())?;
+            for t in &rows {
+                println!("{}  {}", t.name, t.definition);
+            }
+            println!("-- {} types", rows.len());
+        }
         "symbols" => {
             let program = args.get(2).ok_or("symbols needs a program name")?.clone();
             let rows = core.symbols(&program).map_err(|e| e.to_string())?;

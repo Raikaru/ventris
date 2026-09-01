@@ -6,7 +6,7 @@
 //! anyway lands on stderr. Requests are serialized; the service dispatches
 //! synchronously, so one in-flight call matches the server's model.
 
-use lre_model::{DisasmRow, FunctionRow, ProgramSummary, Provenance, SymbolRow, XrefRow};
+use lre_model::{CommentRow, DataTypeRow, DisasmRow, FunctionRow, ProgramSummary, Provenance, SymbolRow, XrefRow};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
@@ -225,9 +225,14 @@ impl Bridge {
             _ => Err(BridgeError::Shape(format!("dump_specs: {v}"))),
         }
     }
+    // (dependency-free: dump_specs above kept for the worker spec replay)
 
-    /// Batched export: functions plus all body xrefs in one round-trip.
-    pub fn export_facts(&mut self, session: &str) -> Result<(Vec<FunctionRow>, Vec<XrefRow>)> {
+    /// Batched export: functions, body xrefs, comments, and datatypes in one
+    /// round-trip.
+    pub fn export_facts(
+        &mut self,
+        session: &str,
+    ) -> Result<(Vec<FunctionRow>, Vec<XrefRow>, Vec<CommentRow>, Vec<DataTypeRow>)> {
         let v = self.call("export_facts", json!({"session": session}))?;
         let functions: Vec<FunctionRow> = Self::parse(
             v.get("functions").cloned().unwrap_or(Value::Null),
@@ -235,7 +240,13 @@ impl Bridge {
         let xrefs: Vec<XrefRow> = Self::parse(
             v.get("xrefs").cloned().unwrap_or(Value::Null),
         )?;
-        Ok((functions, xrefs))
+        let comments: Vec<CommentRow> = Self::parse(
+            v.get("comments").cloned().unwrap_or(Value::Null),
+        )?;
+        let datatypes: Vec<DataTypeRow> = Self::parse(
+            v.get("types").cloned().unwrap_or(Value::Null),
+        )?;
+        Ok((functions, xrefs, comments, datatypes))
     }
 
     /// Applies a function rename.

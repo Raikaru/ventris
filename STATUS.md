@@ -60,7 +60,21 @@ Stage 2-3: worker protocol + differential test landed; store ownership next.
   the same binary name creates `.1` duplicates (Ghidra duplicate naming).
 - The CLI's `xrefs --from <entry>` is address-addressed.
 
+## Store ownership (Stage 2-3 remainder)
+- Schema v2 (migration in place): `comments` (address, function, type,
+  text) and `datatypes` (name, definition) tables, revision-stamped by the
+  same replace/upsert path as functions/xrefs.
+- Bridge export_facts now includes comments (eol/pre from the function
+  body via the listing) and datatypes (dtm.getAllDataTypes, pointers
+  skipped, deduped on insert).
+- CLI: `comments <program>` and `types <program>` (store-only, no JVM).
+- Verified: PE import (tests/fixtures-src/tiny_pe.exe, mingw x86-64)
+  stores 138 functions incl. add @ 0x140001450 and main @ 0x140001464,
+  win32 types (BOOL/BYTE/CRITICAL_SECTION/...), and pre-comments.
+- Worker protocol: getComments answered safely (empty response; the C++
+  guards the decode, comment_ghidra.cc:46).
+
 ## Next bounded task
-Stage 2-3 remainder: native getPcode server (SLEIGH pcode generation for
-GhidraTranslate::oneInstruction) and store ownership depth (comments,
-types, PE import into project.sqlite).
+Native getPcode server (SLEIGH pcode generation for
+GhidraTranslate::oneInstruction): the last gap between the protocol
+worker and a fully JVM-free decompile of the supported workflow.

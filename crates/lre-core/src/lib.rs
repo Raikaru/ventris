@@ -7,7 +7,7 @@
 pub mod bridge;
 
 use lre_db::ProjectDb;
-use lre_model::{DisasmRow, FunctionRow, ProgramId, ProgramSummary, SymbolRow, XrefRow};
+use lre_model::{CommentRow, DataTypeRow, DisasmRow, FunctionRow, ProgramId, ProgramSummary, SymbolRow, XrefRow};
 use std::path::{Path, PathBuf};
 
 /// Core facade failure: wraps the layer that actually failed.
@@ -86,6 +86,18 @@ impl Core {
     pub fn functions(&self, program: &str) -> Result<Vec<FunctionRow>> {
         let id = self.db.program_id(program)?;
         Ok(self.db.functions(id)?)
+    }
+
+    /// Lists comments from the project store (no JVM).
+    pub fn comments(&self, program: &str) -> Result<Vec<CommentRow>> {
+        let id = self.db.program_id(program)?;
+        Ok(self.db.comments(id)?)
+    }
+
+    /// Lists datatypes from the project store (no JVM).
+    pub fn datatypes(&self, program: &str) -> Result<Vec<DataTypeRow>> {
+        let id = self.db.program_id(program)?;
+        Ok(self.db.datatypes(id)?)
     }
 
     /// Lists symbols from the project store (no JVM).
@@ -174,9 +186,11 @@ impl Core {
         self.db.replace_functions(id, functions)?;
         // One batched round-trip instead of one RPC per function: the per-call
         // overhead after analysis dominated the import time otherwise.
-        let (functions, xrefs) = bridge.export_facts(session)?;
+        let (functions, xrefs, comments, datatypes) = bridge.export_facts(session)?;
         self.db.replace_functions(id, &functions)?;
         self.db.replace_xrefs(id, &xrefs)?;
+        self.db.replace_comments(id, &comments)?;
+        self.db.replace_datatypes(id, &datatypes)?;
         Ok(())
     }
 }
