@@ -1,0 +1,100 @@
+
+define pcodeop op_setMin;
+define pcodeop op_setMax;
+
+define pcodeop op_clampWord;
+define pcodeop clampLongWordSext;
+define pcodeop op_clampLongWordZext;
+
+define pcodeop op_uSatByte;
+define pcodeop op_uSatHalfWord;
+define pcodeop op_uSatWord;
+define pcodeop op_sSatByte;
+define pcodeop op_sSatHalfWord;
+define pcodeop op_sSatWord;
+define pcodeop op_pEqual;
+define pcodeop op_pGreaterThan;
+define pcodeop op_pack5;
+define pcodeop op_unpack5;
+
+macro setMin(dest,srcRS,srcRT) {
+    dest = op_setMin(srcRS, srcRT);
+}
+
+macro setMax(dest,srcRS,srcRT) {
+    dest = op_setMax(srcRS, srcRT);
+}
+
+macro clampWord(dest, src){
+    dest = op_clampWord(src);
+}
+
+macro clampLongWordZext(dest, src){
+    dest = op_clampLongWordZext(src);
+}
+
+macro multToSignedWord(dest, src1, src2){
+    tmp0:4 = sext(src1);
+    tmp1:4 = sext(src2);
+    dest = tmp0 * tmp1;
+}
+
+macro uSatByte(dest, src){
+    dest = op_uSatByte(src);
+}
+
+macro uSatHalfWord(dest, src){
+    dest = op_uSatHalfWord(src);
+}
+
+macro uSatWord(dest, src){
+    dest = op_uSatWord(src);
+}
+
+macro sSatByte(dest, src){
+    dest = op_uSatByte(src);
+}
+
+macro sSatHalfWord(dest, src){
+    dest = op_sSatHalfWord(src);
+}
+
+macro sSatWord(dest, src){
+    dest = op_sSatWord(src);
+}
+
+macro pEqual(dest, src1, src2){
+    if (src1 == src2) goto <true>;
+    dest = 0;
+    goto <end>;
+    <true>
+    dest = -1;
+    <end>
+}
+
+macro pGreaterThan(dest, src1, src2){
+    if (src1 > src2) goto <true>;
+    dest = 0;
+    goto <end>;
+    <true>
+    dest = -1;
+    <end>
+}
+
+macro pack5(dest, src){
+    tmp:4 = 0;
+    tmp[0,5] = src[3,5];
+    tmp[5,5] = src[11,5];
+    tmp[10,5] = src[19,5];
+    tmp[15,1] = src[31,1];
+    dest = tmp;
+}
+
+macro unpack5(dest, src){
+    tmp:4 = 0;
+    tmp[3,5] = src[0,5];
+    tmp[11,5] = src[5,5];
+    tmp[19,5] = src[10,5];
+    tmp[31,1] = src[15,1];
+    dest = tmp;
+}

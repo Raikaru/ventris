@@ -31,6 +31,35 @@ chaoticgd/ghidra-emotionengine-reloaded release `v2.1.36`, commit
 own MIPS languages do not decode the R5900's multimedia or COP2/VU macro-mode
 instructions.
 
+## Vendored Ghidra decompiler sources and type data
+
+`third_party/ghidra/decompiler/` is Ghidra 12.1.3's
+`Ghidra/Features/Decompiler/src/decompile/cpp` verbatim - 237 source files and
+its `Makefile`, unmodified. `tools/build_native.py` builds two programs from it:
+`ghidra_opt`, which is the same program Ghidra ships as
+`Features/Decompiler/os/<platform>/decompile`, and `sleigh_opt`, the SLEIGH
+compiler. Ventris drives the first over the `ghidra_process` protocol and uses
+the second to compile language data. Neither program is patched, and
+`tools/vendor_ghidra.py --verify` re-hashes every vendored byte against
+`third_party/ghidra/MANIFEST.sha256` so that an edit to Ghidra's C++ is a build
+failure rather than a review comment.
+
+`grammar.cc` and `xml.cc` are the bison and flex outputs Ghidra ships alongside
+their `.y` sources; they are vendored as shipped so a build neither needs those
+tools nor rewrites a vendored file.
+
+`third_party/ghidra/languages/` is language *source* only - `.slaspec`, `.sinc`,
+`.pspec`, `.cspec`, `.ldefs`, `.opinion` - from Ghidra's MIPS processor and from
+the two Apache-2.0 extensions named above. The compiled `.sla` files are build
+products and are not vendored.
+
+`third_party/ghidra/typeinfo/generic_clib.gdt` is Ghidra's C library type
+archive, copied as-is. It is data, not source: Ghidra applies its prototypes to
+functions by name, so reproducing Ghidra's output requires the same data.
+
+Ghidra is licensed under Apache-2.0, which permits this redistribution with
+attribution.
+
 `tools/diff_ghidra.py` optionally compares Ventris output against a separately
 installed Ghidra 12.1.3. The official release archive has SHA-256
 `93a5d11a9ad510622acaaf908c556a7b9b764d338e78a7567f3689bf5081fd54`.

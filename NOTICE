@@ -21,4 +21,14 @@ public projects. Ventris does not bundle their game images or copied source:
   metadata was captured; Ventris preserves that fact and does not redistribute
   its source or ROM.
 
+--------------------------
+Ventris vendors Ghidra 12.1.3's decompiler sources and
+`third_party/ghidra/typeinfo/generic_clib.gdt`, its C library type archive,
+unmodified. It builds the sources into the program it drives; the archive is
+data, not source, and is used as-is. Ghidra applies the archive's prototypes to
+functions by name, so reproducing Ghidra's output requires the same data.
+Ghidra is licensed under Apache-2.0; its own NOTICE attribution follows from
+that licence, and every vendored byte is hashed in
+third_party/ghidra/MANIFEST.sha256 so the "unmodified" claim is checkable.
+
 See THIRD_PARTY_NOTICES.md for the provenance and distribution boundary.
