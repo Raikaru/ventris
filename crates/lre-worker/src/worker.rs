@@ -43,7 +43,9 @@ pub type Result<T, E = WorkerError> = std::result::Result<T, E>;
 
 /// A running `ghidra_opt` child with one registered program.
 pub struct NativeWorker {
-    child: Option<Child>,
+    /// The child, behind a mutex so a watchdog thread can kill it (deadline
+    /// semantics, WORKER-002) while the protocol read is blocked.
+    child: std::sync::Arc<std::sync::Mutex<Option<Child>>>,
     pub(crate) stdin: Option<ChildStdin>,
     pub(crate) stdout: ChildStdout,
     pub(crate) out_buf: Vec<u8>,
@@ -69,7 +71,7 @@ impl NativeWorker {
             .take()
             .ok_or_else(|| WorkerError::Process("no stdout".into()))?;
         Ok(Self {
-            child: Some(child),
+            child: std::sync::Arc::new(std::sync::Mutex::new(Some(child))),
             stdin: Some(stdin),
             stdout,
             out_buf: Vec::new(),
@@ -337,9 +339,38 @@ impl Drop for NativeWorker {
         // live child holding the pipe. The child may be mid-query with
         // nothing to answer; closing stdin is the only guaranteed exit.
         drop(self.stdin.take());
-        if let Some(mut child) = self.child.take() {
-            let _ = child.wait();
+        if let Ok(mut guard) = self.child.lock() {
+            if let Some(mut child) = guard.take() {
+                let _ = child.wait();
+            }
         }
+    }
+}
+
+impl NativeWorker {
+    /// A handle a watchdog can use to kill the child from another thread
+    /// (deadline semantics).
+    pub fn kill_handle(&self) -> std::sync::Arc<std::sync::Mutex<Option<Child>>> {
+        self.child.clone()
+    }
+
+    /// Kills the child immediately (used when a deadline was exceeded).
+    pub fn kill(&mut self) -> Result<()> {
+        if let Ok(mut guard) = self.child.lock() {
+            if let Some(mut c) = guard.take() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+        }
+        Ok(())
+    }
+
+    /// The child's process id, when alive (diagnostics/tests).
+    pub fn pid(&self) -> Option<u32> {
+        self.child
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|c| c.id()))
     }
 }
 

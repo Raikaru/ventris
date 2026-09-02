@@ -146,6 +146,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "lre-worker-client"
+version = "0.4.0"
+dependencies = [
+ "lre-core",
+ "lre-db",
+ "lre-model",
+ "lre-worker",
+ "thiserror",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

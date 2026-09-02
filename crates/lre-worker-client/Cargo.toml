@@ -1,0 +1,13 @@
+[package]
+name = "lre-worker-client"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Supervised persistent decompiler worker client: pool, leases, deadlines, restart"
+
+[dependencies]
+lre-model = { path = "../lre-model" }
+lre-db = { path = "../lre-db" }
+lre-worker = { path = "../lre-worker" }
+lre-core = { path = "../lre-core" }
+thiserror = { workspace = true }
