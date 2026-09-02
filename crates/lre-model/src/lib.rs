@@ -175,6 +175,28 @@ pub struct DisasmRow {
     pub text: String,
 }
 
+/// One listing row (CORE-007): stable id (= instruction address),
+/// typed address, and the rendered text a virtualized view shows.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ListingRow {
+    /// Stable row identity: the instruction address offset.
+    pub stable_id: u64,
+    pub address: Address,
+    /// Rendered mnemonic + operands.
+    pub text: String,
+}
+
+/// One listing window (CORE-007): bounded rows + overscan for a
+/// virtualized view.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ListingWindow {
+    pub rows: Vec<ListingRow>,
+    pub start: Address,
+    pub count: u32,
+    /// Rows fetched beyond the window (above+below the visible set).
+    pub overscan: u64,
+}
+
 /// One recorded command (CORE-006): the undoable mutation journal entry.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct JournalEntry {

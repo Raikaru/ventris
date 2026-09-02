@@ -6,6 +6,7 @@
 
 pub mod bridge;
 pub mod disasm;
+pub mod listing;
 pub mod native;
 pub mod native_runtime;
 pub mod session;
@@ -126,6 +127,20 @@ impl Core {
         let id = self.db.program_id(program)?;
         Ok(self.db.functions(id)?)
     }
+    /// One listing window (CORE-007): SLEIGH console rows when configured,
+    /// bounded + overscan, stable ids. Errors honestly when the console is
+    /// not available (needs binutils-devel to build; see RuntimeConfig).
+    pub fn listing_window(
+        &self,
+        binary: &std::path::Path,
+        start: &lre_model::Address,
+        count: u32,
+        overscan_fraction: f32,
+    ) -> Result<lre_model::ListingWindow> {
+        let source = listing::ConsoleListingSource::new(self.config.clone(), binary);
+        Ok(listing::window(&source, start, count, overscan_fraction)?)
+    }
+
     /// Revision events after `since` for the program (CORE-005).
     pub fn events_since(&self, program: &str, since: u64) -> Result<Vec<lre_model::RevisionEvent>> {
         let id = self.db.program_id(program)?;
