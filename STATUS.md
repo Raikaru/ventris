@@ -1,7 +1,8 @@
 # STATUS
 
 ## Current phase/generation
-Stage 2-3: worker protocol + differential test landed; store ownership next.
+Stage 4: JVM-free supported workflow closed and gated (39.6 MB peak vs 375 MiB stock;
+see gate numbers below and benchmarks/reports/stage4-gate.json).
 
 ## Completed and verified
 - Scrap of the old partial-decompiler-port architecture; pinned Ghidra
@@ -66,12 +67,45 @@ Stage 2-3: worker protocol + differential test landed; store ownership next.
 - Repro: `native/build_ghidra_opt.sh` (copies sources aside, git-apply
   the patch, `make ghidra_opt`), binary at native/build/ghidra_opt.
 
-## Remaining for Stage 4 (goal)
-Native import (no-JVM ELF/PE loading into the store facts), native memory
-inspection, native xref/function discovery for imported binaries, and the
-memory/perf gates. The workflow today: import (bridge, once) then
-functions/memory/decompile/reopen/rename fully JVM-free via the store +
-worker.
+## Stage 4 closed (this phase)
+- CLI `decompile-native <binary> <addr> [--name P] [--project DIR] [--base HEX]`:
+  the supported no-JVM decompile route. Spawns `lre-worker` against the
+  patched ghidra_opt (env VENTRIS_GHIDRA_OPT, default native/build/ghidra_opt)
+  with vendored specs (native/specs) and the store project. Verified
+  token-identical to the bridge oracle (`int add(int param_1,int param_2){
+  return param_2 + param_1;}`) — differential step "CLI decompile-native".
+- `native/build_console.sh`: reproducible SLEIGH console build (needs
+  binutils-devel/bfd.h, Ghidra's own native-build prerequisite; the bfd-less
+  spike binary predates the pinned tree). Console env defaults now derive
+  from the Ghidra install (VENTRIS_GHIDRA) instead of /tmp/spike.
+- `benchmarks/gate.sh`: full JVM-free workflow gate (import-native ->
+  functions/xrefs/rename/open -> disasm-native -> decompile-native),
+  per-phase peak RSS + total wall; asserts < 100 MB and < 120 s.
+  Result on the tiny ELF fixture: peak 39 920 KB, median wall 0.32 s (3 runs) —
+  9.5x under the 375 MiB stock baseline (benchmarks/reports/stage4-gate.json).
+- Bridge robustness: null CodeUnit guard in export_facts comments
+  (Dispatcher.getCommentAddressIterator can yield addresses with no code
+  unit; the NPE aborted bridge imports).
+- Bridge lifecycle fixes (service/ + bridge.rs):
+  - `shutdown` method in the service (the CLI's shutdown RPC used to hit
+    "unknown method", then child.wait() blocked on a JVM whose read loop
+    never saw EOF — the import CLI hung >120 s at exit).
+  - The bridge closes its stdin pipe before waiting, so an unresponsive
+    service can't stall the CLI.
+  - Session.close releases only import-flow programs (open-flow programs
+    are released by GhidraProject.close; releasing them first threw
+    "unknown consumer" at every shutdown).
+  - GhidraBootstrap.shutdown skips GhidraProject.close: import-flow
+    programs register the bootstrap consumer, so the project's own
+    release throws; the process exit releases the project lock anyway.
+- Differential fixes: dump_specs now runs after the import (ordering bug
+  on fresh runs), stale project locks are removed at the start, and the
+  CLI decompile-native check compares token-identical content (the
+  worker's C text carries no layout whitespace).
+- Final differential (2026-09-02): PASS — protocol worker and CLI
+  decompile-native token-identical to the oracle; native import parity
+  11/11; stripped CLI discovery 7/7 subsets of the oracle; add/main
+  semantic parity.
 
 ## Native import (no-JVM) landed
 - `lre-core::native`: ELF64 + PE32+ parsers (sections -> memory map,
@@ -109,9 +143,19 @@ worker.
   main semantically identical (__main, add(2,0x28), printf+format addr,
   return 0). The differential's PE step checks add.
 
-## Open items for the final gate
-- Stripped-binary function discovery (the importer is symtab + entry +
-  call closure; no flow-based discovery yet).
+## Stripped-binary discovery (closed)
+- In-Rust flow discovery: seed walk (symtab/dynsym, entry, externals) with
+  direct call/branch closure, the ELF `_start` -> `__libc_start_main` RDI
+  convention (mov rdi imm64/imm32, lea rdi [rip+disp32] scan), and
+  init/fini-array function-pointer seeds.
+- Fixed a pre-existing decoder bug: ModRM index for prefixed instructions
+  (`m = p + len` read the wrong byte; REX-prefixed memory operands
+  misaligned every walk) — regression test `prefixed_memory_lengths`.
+- tiny_stripped (no symbols, no JVM): 7 functions recovered (__gmon_start__,
+  _entry, frame_dummy, __do_global_dtors_aux, deregister_tm_clones, add,
+  main) — every one in the Ghidra oracle's 15; the oracle-only remainder is
+  indirect-only CRT and PLT shims (`register_tm_clones`, `_init`/`_fini`,
+  0x404000+), outside the call-closure model by construction.
 ## Known gaps / risks
 - Bridge project lock is single-writer: concurrent CLI invocations fail
   with "Unable to lock project" (Ghidra project lock); stale locks need

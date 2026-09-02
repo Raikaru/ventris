@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Builds the pinned SLEIGH console (`decomp_opt` in the decompiler Makefile;
+# EXECS line): the interactive console behind `disasm-native` and
+# `import-native --discover`.
+#
+# The pinned third_party/ghidra tree is NEVER modified in place; this script
+# copies the decompiler sources aside and builds. Unlike ghidra_opt the
+# console needs no patch: it loads languages via `-s DIR` + SLEIGHHOME.
+#
+# Prerequisite: binutils-devel (bfd.h) — the console links the BFD load
+# image, matching Ghidra's own native-build requirement (see AGENTS.md).
+#
+# Usage: native/build_console.sh [--jobs N] [OUTDIR]
+#   OUTDIR default: native/build; produces OUTDIR/decomp_native
+#   runtime: VENTRIS_CONSOLE=$OUTDIR/decomp_native
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+if [ ! -r /usr/include/bfd.h ]; then
+    echo "missing bfd.h — the console links the BFD load image." >&2
+    echo "install binutils-devel (dnf: 'sudo dnf install binutils-devel';" >&2
+    echo "apt: 'sudo apt install binutils-dev'), then re-run." >&2
+    exit 1
+fi
+
+JOBS=1
+OUT="$ROOT/native/build"
+while [ "${1:-}" != "" ]; do
+    case "$1" in
+        --jobs) JOBS="$2"; shift 2 ;;
+        *) OUT="$1"; shift ;;
+    esac
+done
+
+BUILD=$(mktemp -d /tmp/ghidra-console-build.XXXXXX)
+trap 'rm -rf "$BUILD"' EXIT
+cp -r "$ROOT/third_party/ghidra/decompiler" "$BUILD/decompiler"
+
+cd "$BUILD/decompiler"
+make decomp_opt -j"$JOBS" > /tmp/ghidra-console-build.log 2>&1
+mkdir -p "$OUT"
+cp decomp_opt "$OUT/decomp_native"
+echo "built: $OUT/decomp_native"
+echo "runtime: VENTRIS_CONSOLE=$OUT/decomp_native"

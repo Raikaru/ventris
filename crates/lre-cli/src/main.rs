@@ -33,6 +33,7 @@ fn usage() {
     lre-cli rename <program> <address> <new-name> [--project DIR]
   lre-cli decompile <program> <address> [--ghidra DIR]
   lre-cli disasm <program> <address> [-n N] [--ghidra DIR]
+  lre-cli decompile-native <binary> <address> [--name NAME] [--project DIR] [--base HEX]
   lre-cli dump-specs <program> --out <dir> [--ghidra DIR]"
         );
     std::process::exit(2);
@@ -170,11 +171,11 @@ fn console_discover(
 ) -> Result<(Vec<(u64, u64)>, Vec<(u64, u64)>), String> {
     use std::io::{BufRead, BufReader, Write as _};
     let console = std::env::var("VENTRIS_CONSOLE")
-        .unwrap_or_else(|_| "/tmp/spike/decomp_native".into());
+        .unwrap_or_else(|_| "native/build/decomp_native".into());
     let ghroot = std::env::var("VENTRIS_GHROOT")
-        .unwrap_or_else(|_| "/tmp/spike/ghroot".into());
+        .unwrap_or_else(|_| ghidra_dir(&[]).to_string_lossy().into_owned());
     let langs = std::env::var("VENTRIS_LANGS")
-        .unwrap_or_else(|_| "/tmp/spike/langs".into());
+        .unwrap_or_else(|_| ghidra_dir(&[]).join("Ghidra/Processors/x86/data/languages").to_string_lossy().into_owned());
     let mut child = std::process::Command::new(&console)
         .arg("-s")
         .arg(&langs)
@@ -308,11 +309,11 @@ fn run_inner(args: &[String]) -> Result<(), String> {
             let binary = args.get(2).ok_or("disasm-native needs a binary path")?.clone();
             let addr = args.get(3).ok_or("disasm-native needs a vaddr (hex)")?.clone();
             let console = std::env::var("VENTRIS_CONSOLE")
-                .unwrap_or_else(|_| "/tmp/spike/decomp_native".into());
+                .unwrap_or_else(|_| "native/build/decomp_native".into());
             let ghroot = std::env::var("VENTRIS_GHROOT")
-                .unwrap_or_else(|_| "/tmp/spike/ghroot".into());
+                .unwrap_or_else(|_| ghidra_dir(&[]).to_string_lossy().into_owned().into());
             let langs = std::env::var("VENTRIS_LANGS")
-                .unwrap_or_else(|_| "/tmp/spike/langs".into());
+                .unwrap_or_else(|_| ghidra_dir(&[]).join("Ghidra/Processors/x86/data/languages").to_string_lossy().into_owned().into());
             use std::io::Write as _;
             let mut child = std::process::Command::new(&console)
                 .arg("-s")
@@ -323,8 +324,13 @@ fn run_inner(args: &[String]) -> Result<(), String> {
                 .spawn()
                 .map_err(|e| e.to_string())?;
             let mut stdin = child.stdin.take().unwrap();
+            let hex_addr = if addr.starts_with("0x") {
+                addr.clone()
+            } else {
+                format!("0x{addr}")
+            };
             let script = format!(
-                "load file x86:LE:64:default {binary}\nadjust vma 0x400000\nmap function {addr} func\nload function func\ndisassemble\n"
+                "load file x86:LE:64:default {binary}\nadjust vma 0x400000\nmap function {hex_addr} func\nload function func\ndisassemble\n"
             );
             stdin.write_all(script.as_bytes()).map_err(|e| e.to_string())?;
             drop(stdin);
@@ -558,6 +564,74 @@ fn run_inner(args: &[String]) -> Result<(), String> {
                 }
             }
             bridge.shutdown().map_err(|e| e.to_string())?;
+        }
+        "decompile-native" => {
+            let binary = args
+                .get(2)
+                .ok_or("decompile-native needs a binary path")?
+                .clone();
+            let address = args
+                .get(3)
+                .ok_or("decompile-native needs a vaddr (hex)")?
+                .clone();
+            let program = flag(args, "--name").unwrap_or_else(|| {
+                Path::new(&binary)
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "program".into())
+            });
+            let opt = std::env::var("VENTRIS_GHIDRA_OPT")
+                .unwrap_or_else(|_| "native/build/ghidra_opt".into());
+            let specs = std::env::var("VENTRIS_SPECS")
+                .unwrap_or_else(|_| "native/specs".into());
+            let worker = std::env::var("VENTRIS_WORKER")
+                .unwrap_or_else(|_| "target/debug/lre-worker".into());
+            // The patched ghidra_opt self-disassembles only when VENTRIS_SLA
+            // names a compiled .sla (see native/build_ghidra_opt.sh).
+            std::env::var("VENTRIS_SLA").map_err(|_| {
+                "VENTRIS_SLA must point at the compiled x86-64.sla \
+                (build with native/build_ghidra_opt.sh)"
+                    .to_string()
+            })?;
+            if !Path::new(&opt).is_file() {
+                return Err(format!(
+                    "native decompiler missing: {opt} — build it via native/build_ghidra_opt.sh"
+                ));
+            }
+            if !Path::new(&specs).join("tspec.xml").is_file() {
+                return Err(format!(
+                    "spec dir incomplete: {specs} (needs tspec.xml; use native/specs)"
+                ));
+            }
+            let base = match flag(args, "--base") {
+                Some(b) => u64::from_str_radix(b.trim_start_matches("0x"), 16)
+                    .map_err(|e| e.to_string())?,
+                None => {
+                    let data = std::fs::read(&binary).map_err(|e| e.to_string())?;
+                    lre_core::native::pe_image_base(&data).unwrap_or(0x400000)
+                }
+            };
+            let proj = project_dir(args);
+            let out = std::process::Command::new(&worker)
+                .arg(&opt)
+                .arg(&specs)
+                .arg(&binary)
+                .arg(&program)
+                .arg(&address)
+                .arg("--project")
+                .arg(&proj)
+                .arg("--base")
+                .arg(format!("{base:#x}"))
+                .output()
+                .map_err(|e| format!("worker: {e}"))?;
+            if !out.status.success() {
+                return Err(format!(
+                    "worker failed ({}): {}",
+                    out.status,
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ));
+            }
+            print!("{}", String::from_utf8_lossy(&out.stdout));
         }
         _ => return Err(format!("unknown command: {cmd}")),
     }

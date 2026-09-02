@@ -37,7 +37,7 @@ pub type Result<T, E = BridgeError> = std::result::Result<T, E>;
 /// A running ventris-service child process.
 pub struct Bridge {
     child: Child,
-    stdin: std::process::ChildStdin,
+    stdin: Option<std::process::ChildStdin>,
     reader: BufReader<std::process::ChildStdout>,
     next_id: u64,
     /// Provenance of answers this bridge produces.
@@ -79,7 +79,7 @@ impl Bridge {
             .ok_or_else(|| BridgeError::Process("no stdout".into()))?;
         Ok(Self {
             child,
-            stdin,
+            stdin: Some(stdin),
             reader: BufReader::new(stdout),
             next_id: 1,
             provenance: Provenance {
@@ -97,10 +97,14 @@ impl Bridge {
         let mut line = serde_json::to_string(&request)
             .map_err(|e| BridgeError::Shape(e.to_string()))?;
         line.push('\n');
-        self.stdin
-            .write_all(line.as_bytes())
-            .map_err(BridgeError::Io)?;
-        self.stdin.flush().map_err(BridgeError::Io)?;
+        let stdin = self.stdin.as_mut().ok_or_else(|| {
+            BridgeError::Io(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "bridge already shut down",
+            ))
+        })?;
+        stdin.write_all(line.as_bytes()).map_err(BridgeError::Io)?;
+        stdin.flush().map_err(BridgeError::Io)?;
         loop {
             let mut buf = String::new();
             let n = self
@@ -279,6 +283,10 @@ impl Bridge {
     /// Graceful shutdown: asks the service to exit and reaps the process.
     pub fn shutdown(&mut self) -> Result<()> {
         let _ = self.call("shutdown", json!({}));
+        // EOF makes the service's read loop exit even if its shutdown path
+        // stalls; without it child.wait() can block on a live JVM (the read
+        // loop never sees data again).
+        self.stdin.take();
         let _ = self.child.wait();
         Ok(())
     }

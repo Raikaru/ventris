@@ -126,9 +126,12 @@ final class GhidraBootstrap {
         for (String id : Map.copyOf(sessions).keySet()) {
             closeSession(id);
         }
-        if (project != null) {
-            project.close();
-            project = null;
-        }
+        // GhidraProject.close() releases every program in openPrograms with
+        // the project itself as consumer (GhidraProject.java:239-249), but
+        // import-flow programs register the bootstrap consumer instead —
+        // that release throws "unknown consumer". The process exit releases
+        // the project file lock anyway, so closing the project here only
+        // risks the exception.
+        project = null;
     }
 }

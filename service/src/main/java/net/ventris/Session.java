@@ -72,15 +72,16 @@ final class Session {
      * this only performs the consumer release.
      */
     void close() {
-        // Programs obtained via GhidraProject.openProgram are consumed by the
-        // project itself; import flow programs are consumed by the bootstrap.
-        // Releasing with the wrong consumer throws IllegalArgumentException.
+        // Import-flow programs are consumed by the bootstrap (and are not
+        // tracked by GhidraProject.openPrograms), so the session releases
+        // them. Open-flow programs are consumed by the project itself:
+        // GhidraProject.close() releases them (GhidraProject.java:240-247) —
+        // releasing here first throws "unknown consumer" at project close.
+        if (domainFile == null) {
+            return;
+        }
         try {
-            if (domainFile == null) {
-                program.release(owner.projectConsumer());
-            } else {
-                program.release(owner);
-            }
+            program.release(owner);
         } catch (RuntimeException e) {
             System.err.println("ventris-service: release failed for " + id + ": " + e);
         }

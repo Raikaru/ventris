@@ -1,0 +1,44 @@
+{
+  "workflow": [
+    "import-native",
+    "functions",
+    "xrefs",
+    "rename",
+    "open",
+    "disasm-native",
+    "decompile-native"
+  ],
+  "runs": [
+    {
+      "run": 1,
+      "wall_s": 0.34,
+      "import_kb": 5608,
+      "disasm_kb": 39552,
+      "decompile_kb": 39264
+    },
+    {
+      "run": 2,
+      "wall_s": 0.3,
+      "import_kb": 5636,
+      "disasm_kb": 39780,
+      "decompile_kb": 39296
+    },
+    {
+      "run": 3,
+      "wall_s": 0.32,
+      "import_kb": 5640,
+      "disasm_kb": 39920,
+      "decompile_kb": 38960
+    }
+  ],
+  "median_wall_s": 0.32,
+  "peak_import_kb": 5640,
+  "peak_disasm_kb": 39920,
+  "peak_decompile_kb": 39296,
+  "gates": {
+    "peak_kb": 100000,
+    "wall_s": 120.0,
+    "stock_ghidra_baseline_kb": 384000
+  },
+  "pass": true
+}

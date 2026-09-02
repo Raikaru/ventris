@@ -309,6 +309,24 @@ pub fn import_elf(data: &[u8]) -> Result<NativeImport> {
             }
         }
     }
+    // init/fini array function pointers (frame_dummy, __do_global_dtors_aux
+    // and friends): non-PIE executables carry absolute addresses here, so
+    // the CRT helpers become seeds exactly like the entry point.
+    for s in sections.iter().filter(|s| s.typ == 14 || s.typ == 15) {
+        let n = s.size as usize / 8;
+        for i in 0..n {
+            let off = s.off as usize + i * 8;
+            if let Ok(v) = u64_at(data, off) {
+                if v != 0 && !functions.iter().any(|f| f.entry == v) {
+                    functions.push(NativeFunction {
+                        entry: v,
+                        name: format!("FUN_{v:08x}"),
+                        size: 1,
+                    });
+                }
+            }
+        }
+    }
     if entry != 0 && !functions.iter().any(|f| f.entry == entry) {
         functions.push(NativeFunction {
             entry,
@@ -438,12 +456,29 @@ pub fn sweep_calls(imp: &mut NativeImport) {
     imp.xrefs = xrefs;
 }
 
-/// Finds an external's display name for a function entry, if known.
+/// Finds a known external name for a function entry, if any (PLT/GOT named
+/// stubs; FUN_<hex> otherwise).
 pub fn extern_name(imp: &NativeImport, entry: u64) -> Option<String> {
     imp.externals
         .iter()
         .find(|(a, n)| *a == entry && !n.is_empty())
         .map(|(_, n)| n.clone())
+}
+
+/// Image base of a PE binary (the optional-header `ImageBase` field:
+/// `e_lfanew + 24` (optional header start) `+ 24`), or `None` when `data`
+/// is not a PE32+ with a parseable header. Used to default `--base` for
+/// the worker: PE addresses are RVA-based, so byte resolution falls back
+/// to `vaddr - base` when no section mapping covers a request.
+pub fn pe_image_base(data: &[u8]) -> Option<u64> {
+    if data.get(0..2) != Some(b"MZ") {
+        return None;
+    }
+    let pe_off = u32_at(data, 0x3c).ok()? as usize;
+    if data.get(pe_off..pe_off + 4) != Some(b"PE\0\0") {
+        return None;
+    }
+    u64_at(data, pe_off + 48).ok()
 }
 
 /// Loads `<binary>` natively: parses the format, sweeps calls.
@@ -674,5 +709,17 @@ mod tests {
         assert_eq!(f.entry, 0x401000);
         assert_eq!(f.size, 4);
         assert_eq!(imp.mappings[0].vaddr, 0x401000);
+    }
+
+    #[test]
+    fn pe_image_base_reads_header_field() {
+        // Minimal MZ + PE signature + optional header carrying ImageBase.
+        let mut b = vec![0u8; 0x100];
+        b[0..2].copy_from_slice(b"MZ");
+        b[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        b[0x80..0x84].copy_from_slice(b"PE\0\0");
+        b[0xb0..0xb8].copy_from_slice(&0x140000000u64.to_le_bytes());
+        assert_eq!(pe_image_base(&b), Some(0x140000000));
+        assert_eq!(pe_image_base(b"\x7fELF"), None);
     }
 }

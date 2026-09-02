@@ -13,6 +13,9 @@ WORK="${DIFF_WORK:-/tmp/dd-test}"
 # The bridge import is a one-time, JVM-bound step (~5 min); reuse an
 # existing import when present (DIFF_PROJECT), else import fresh.
 PROJECT="${DIFF_PROJECT:-$WORK/project}"
+# Stale Ghidra project lock after an aborted JVM (documented risk: the lock
+# file is only meaningful while its owner JVM lives).
+rm -f "$PROJECT/bridge-projects"/*.lock* 2>/dev/null || true
 SPIKE=/tmp/spike
 DECOMP="$SPIKE/decomp_native"
 LANGDIR="$SPIKE/langs"
@@ -27,6 +30,14 @@ mkdir -p "$WORK"
 fail() { echo "FAIL: $*"; exit 1; }
 step() { echo "== $*"; }
 
+# ---- Import through the bridge (oracle facts) ------------------------------
+if [ -d "$PROJECT" ] && [ -f "$PROJECT/project.sqlite" ]; then
+    step "reusing existing import at $PROJECT"
+else
+    mkdir -p "$PROJECT"
+    step "bridge import"
+    "$CLI" import "$BIN" --project "$PROJECT" --ghidra "$GHIDRA" > /dev/null
+fi
 # ---- Analyzer specs for the worker (dump_specs output) --------------------
 SEDIR="$WORK/specs"
 if [ ! -s "$SEDIR/tspec.xml" ]; then
@@ -39,14 +50,6 @@ if [ ! -s "$SEDIR/tspec.xml" ]; then
 fi
 [ -s "$SEDIR/tspec.xml" ] || fail "specs missing: run dump-specs via the bridge"
 
-# ---- Import through the bridge (oracle facts) ------------------------------
-if [ -d "$PROJECT" ] && [ -f "$PROJECT/project.sqlite" ]; then
-    step "reusing existing import at $PROJECT"
-else
-    mkdir -p "$PROJECT"
-    step "bridge import"
-    "$CLI" import "$BIN" --project "$PROJECT" --ghidra "$GHIDRA" > /dev/null
-fi
 
 if [ ! -s "$WORK/oracle_add.c" ] || [ ! -s "$WORK/oracle_main.c" ]; then
     step "bridge decompile (oracle)"
@@ -117,6 +120,33 @@ else
     echo "  import parity: native-only entries:"
     comm -23 "$WORK/native_entries.txt" "$WORK/oracle_entries.txt" | head -5 || true
 fi
+# ---- CLI decompile-native (the supported JVM-free route) ------------------
+if [ -x "$WORKER" ] && [ -n "${VENTRIS_SLA:-}" ]; then
+    step "CLI decompile-native (bridge-imported project -> exact parity)"
+    "$CLI" decompile-native "$BIN" 00400466 --name tiny_bin --project "$PROJECT" \
+        > "$WORK/cli_native_add.c" 2> "$WORK/cli_native_err.txt" \
+        || { cat "$WORK/cli_native_err.txt" >&2; fail "CLI decompile-native failed"; }
+    # The worker's C text is the token stream in lexical order (no layout
+    # whitespace), so byte-exact comparison against Ghidra's pretty-printed
+    # C is wrong; require token-identical modulo whitespace, like the
+    # protocol-worker check.
+    if diff -q "$WORK/oracle_add.c" "$WORK/cli_native_add.c" > /dev/null; then
+        echo "  CLI decompile-native add: EXACT oracle parity"
+    elif diff <(tr -s ' \n' ' ' < "$WORK/oracle_add.c") \
+             <(tr -s ' \n' ' ' < "$WORK/cli_native_add.c") | grep -q .; then
+        echo "  CLI decompile-native add: CONTENT DIFFERS"
+        diff "$WORK/oracle_add.c" "$WORK/cli_native_add.c" | head -8 || true
+        fail "CLI decompile-native diverged from the oracle"
+    else
+        echo "  CLI decompile-native add: token-identical (whitespace-normalized)"
+    fi
+    step "CLI decompile-native (native-imported project, full JVM-free chain)"
+    "$CLI" decompile-native "$BIN" 00400466 --name tiny_native --project "$NPROJ" \
+        > "$WORK/cli_nativeproj_add.c" 2>/dev/null || fail "CLI decompile-native (native project) failed"
+    grep -q 'return param_2 + param_1' "$WORK/cli_nativeproj_add.c" \
+        && echo "  native project add: OK (return A + B)" \
+        || { echo "  native project add: UNEXPECTED: $(cat "$WORK/cli_nativeproj_add.c")"; fail; }
+fi
 
 # ---- Stripped-binary discovery parity -----------------------------------
 SSTRIP="$ROOT/tests/fixtures-src/tiny_stripped"
@@ -153,6 +183,24 @@ EOF
     done
     if [ "$MISS" -eq 0 ]; then
         echo "  stripped: all native-discovered entries are in the oracle (subset OK)"
+    fi
+fi
+if [ -f "$SSTRIP" ]; then
+    step "stripped CLI import-native discovery (no console, no JVM)"
+    SCLI_PROJ="$WORK/stripped-cli-project"
+    mkdir -p "$SCLI_PROJ"
+    "$CLI" import-native "$SSTRIP" --name strip_cli --project "$SCLI_PROJ" > /dev/null 2>&1 || true
+    "$CLI" functions strip_cli --project "$SCLI_PROJ" \
+        | grep -E '^[0-9a-f]{8}' | awk '{print $1}' | sort > "$WORK/stripped_cli.txt"
+    echo "  pure-Rust discovered entries: $(wc -l < "$WORK/stripped_cli.txt")"
+    MISS=0
+    for e in $(cat "$WORK/stripped_cli.txt"); do
+        grep -q "^$e$" "$WORK/stripped_oracle.txt" || { echo "  stripped cli: native-only $e"; MISS=1; }
+    done
+    if [ "$MISS" -eq 0 ]; then
+        echo "  stripped cli: all entries in the oracle set (subset OK)"
+    else
+        fail "stripped CLI discovery found entries outside the oracle"
     fi
 fi
 

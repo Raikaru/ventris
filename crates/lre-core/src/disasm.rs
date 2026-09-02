@@ -13,7 +13,11 @@ pub enum Flow {
     Jump(u64),
     /// Direct conditional near jump (Jcc rel8/rel32).
     JumpCond(u64),
-    /// Indirect call/jump (register or memory): stops linear walk.
+    /// Indirect call (register or memory): stops the linear walk; the RDI
+    /// setup immediately before it may seed the caller entry (ELF _start
+    /// to __libc_start_main convention).
+    IndirectCall,
+    /// Indirect jump (switch table etc.): stops the linear walk.
     Indirect,
     /// Ret/iret/trap/int3: stops the walk.
     Stop,
@@ -192,12 +196,16 @@ pub fn decode(b: &[u8], addr: u64) -> InstrInfo {
         }
     }
     if info.modrm {
-        let m = p + len;
+        // `len` already includes the prefixes (p), so the ModRM byte is at
+        // index `len`, not `p + len` (a prefixed memory operand read the
+        // wrong byte and misaligned every subsequent walk).
+        let m = len;
         let modrm = b.get(m).copied().unwrap_or(0);
         let flow = if op == 0xff {
             let reg = (modrm >> 3) & 7;
             match reg {
-                2 | 4 => Flow::Indirect,
+                2 => Flow::IndirectCall,
+                4 => Flow::Indirect,
                 6 => Flow::Stop,
                 3 | 5 | 0 | 1 | 7 => Flow::Next,
                 _ => Flow::Next,
@@ -300,6 +308,10 @@ pub fn discover(maps: &[(u64, u64, u64, &[u8])], seeds: &[u64]) -> Discovery {
                         addr += info.len as u64;
                     }
                 }
+                Flow::IndirectCall => {
+                    maybe_seed_entry(bytes, *sv, off, &mut entries, &mut queue);
+                    addr += info.len as u64;
+                }
                 Flow::Indirect | Flow::Stop | Flow::Bad => break,
                 Flow::Next => addr += info.len as u64,
             }
@@ -324,6 +336,64 @@ pub fn discover(maps: &[(u64, u64, u64, &[u8])], seeds: &[u64]) -> Discovery {
         entries,
         sizes,
         calls,
+    }
+}
+
+/// ELF/x86-64 startup convention: the arguments to the indirect
+/// `__libc_start_main` call are set by the instructions just before it —
+/// the first (RDI) is the user entry (`main`). Scanning the preceding
+/// bytes for `mov rdi, imm64` (48 bf), `mov rdi, imm32` (48 c7 c7), or
+/// `lea rdi, [rip+disp32]` (48 8d 3d) seeds that target when it lands
+/// inside the code mapping. Byte-level heuristic scan (backwards,
+/// closest match wins) — the same convention Ghidra's entry-point
+/// recovery uses.
+fn maybe_seed_entry(
+    bytes: &[u8],
+    map_vaddr: u64,
+    off: usize,
+    entries: &mut Vec<u64>,
+    queue: &mut Vec<u64>,
+) {
+    let in_code = |a: u64| a >= map_vaddr && a < map_vaddr + bytes.len() as u64;
+    let mut sp = off;
+    let lo = off.saturating_sub(40);
+    while sp > lo {
+        sp -= 1;
+        let b = bytes;
+        if sp + 10 <= off && b.get(sp) == Some(&0x48) && b.get(sp + 1) == Some(&0xbf) {
+            // mov rdi, imm64
+            if let Some(imm_bytes) = b.get(sp + 2..sp + 10) {
+                let imm = u64::from_le_bytes(imm_bytes.try_into().unwrap());
+                if in_code(imm) && !entries.contains(&imm) {
+                    entries.push(imm);
+                    queue.push(imm);
+                    return;
+                }
+            }
+        }
+        if sp + 7 <= off && b.get(sp..sp + 3) == Some(&[0x48, 0xc7, 0xc7]) {
+            // mov rdi, imm32 (zero-extended)
+            if let Some(imm_bytes) = b.get(sp + 3..sp + 7) {
+                let imm = u32::from_le_bytes(imm_bytes.try_into().unwrap()) as u64;
+                if in_code(imm) && !entries.contains(&imm) {
+                    entries.push(imm);
+                    queue.push(imm);
+                    return;
+                }
+            }
+        }
+        if sp + 7 <= off && b.get(sp..sp + 3) == Some(&[0x48, 0x8d, 0x3d]) {
+            // lea rdi, [rip+disp32]
+            if let Some(disp_bytes) = b.get(sp + 3..sp + 7) {
+                let disp = i32::from_le_bytes(disp_bytes.try_into().unwrap());
+                let t = (map_vaddr + sp as u64).wrapping_add(7).wrapping_add(disp as u64);
+                if in_code(t) && !entries.contains(&t) {
+                    entries.push(t);
+                    queue.push(t);
+                    return;
+                }
+            }
+        }
     }
 }
 
@@ -366,5 +436,40 @@ mod tests {
         let d = discover(&maps, &[0x400000, 0x40000b]);
         assert_eq!(d.entries, vec![0x400000, 0x40000b]);
         assert_eq!(d.calls, vec![(0x40000f, 0x400000)]);
+    }
+
+    #[test]
+    fn prefixed_memory_lengths() {
+        // ENDBR64 (f3 0f 1e fa) = 4; mov rax,[rip+0x12345678] (48 8b 05
+        // 78 56 34 12) = 7; lea rdi,[rip+disp32] (48 8d 3d ...) = 7. The
+        // ModRM index bug decoded the prefixed memory form as 9+ bytes.
+        let bytes = [
+            0xf3, 0x0f, 0x1e, 0xfa, // endbr64
+            0x48, 0x8b, 0x05, 0x78, 0x56, 0x34, 0x12, // mov rax,[rip+..]
+            0x48, 0x8d, 0x3d, 0x7a, 0x04, 0x40, 0x00, // lea rdi,[rip+..]
+        ];
+        let info = decode(&bytes, 0x400380);
+        assert_eq!(info.len, 4);
+        let info = decode(&bytes[4..], 0x400384);
+        assert_eq!(info.len, 7);
+        let info = decode(&bytes[11..], 0x40038b);
+        assert_eq!(info.len, 7);
+    }
+
+    #[test]
+    fn indirect_call_seeds_rdi_entry() {
+        // _start convention: mov rdi, 0x4000a0; call [rip+0]
+        let mut code = vec![0x90u8; 0x100];
+        code[0x20] = 0x48;
+        code[0x21] = 0xbf;
+        code[0x22..0x2a].copy_from_slice(&0x4000a0u64.to_le_bytes());
+        code[0x2a] = 0xff;
+        code[0x2b] = 0x15;
+        code[0x2c..0x30].copy_from_slice(&0i32.to_le_bytes());
+        let maps = vec![(0x400000u64, code.len() as u64, 0u64, code.as_slice())];
+        let d = discover(&maps, &[0x400020]);
+        // The walk's seed is the start; the RDI imm64 before the indirect
+        // call seeds the caller entry even though no direct call reaches it.
+        assert_eq!(d.entries, vec![0x400020, 0x4000a0]);
     }
 }

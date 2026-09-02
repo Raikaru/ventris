@@ -75,8 +75,16 @@ final class Dispatcher {
             case "disassemble" -> disassemble(params);
             case "dump_specs" -> dumpSpecs(params);
             case "ping" -> ping();
+            case "shutdown" -> shutdownNow();
             default -> throw new Main.RpcError(-32601, "unknown method: " + method);
         };
+    }
+
+    /** Closes every session, then exits the JVM (EOF path does the same). */
+    private JsonElement shutdownNow() {
+        ghidra.shutdown();
+        System.exit(0);
+        return null; // unreachable
     }
 
     void shutdown() {
@@ -199,6 +207,12 @@ final class Dispatcher {
                 listing.getCommentAddressIterator(f.getBody(), true);
             while (cit.hasNext()) {
                 CodeUnit cu = listing.getCodeUnitAt(cit.next());
+                if (cu == null) {
+                    // Iterator can yield addresses with no code unit (e.g.
+                    // data chunks inside a function body); skipping is the
+                    // honest behavior — the NPE used to abort the import.
+                    continue;
+                }
                 for (int kind : commentKinds) {
                     String text = cu.getComment(kind);
                     if (text != null && text.length() != 0) {
