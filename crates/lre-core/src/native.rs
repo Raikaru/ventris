@@ -468,10 +468,19 @@ pub fn flow_discover(imp: &mut NativeImport) {
     if imp.mappings.is_empty() {
         return;
     }
-    let mut seeds: Vec<u64> = imp.functions.iter().map(|f| f.entry).collect();
-    // PLT stubs/externs are seeds too.
+    let code = code_ranges(imp);
+    let in_code = |a: u64| code.iter().any(|(v, e)| a >= *v && a < *e);
+    let mut seeds: Vec<u64> = imp
+        .functions
+        .iter()
+        .map(|f| f.entry)
+        .filter(|a| *a != 0 && in_code(*a))
+        .collect();
+    // PLT stubs/externals are seeds only when inside executable mappings.
     for (a, _) in &imp.externals {
-        seeds.push(*a);
+        if *a != 0 && in_code(*a) {
+            seeds.push(*a);
+        }
     }
     // The entry seed is guaranteed by import_elf/pe.
     let maps_owned: Vec<(u64, u64, u64, &[u8])> = imp

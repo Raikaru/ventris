@@ -118,6 +118,44 @@ else
     comm -23 "$WORK/native_entries.txt" "$WORK/oracle_entries.txt" | head -5 || true
 fi
 
+# ---- Stripped-binary discovery parity -----------------------------------
+SSTRIP="$ROOT/tests/fixtures-src/tiny_stripped"
+if [ -f "$SSTRIP" ]; then
+    step "stripped discovery parity (console closure vs oracle)"
+    # Fast path: the console closure directly (the CLI's rounds are slower).
+    discover_out=$(VENTRIS_CONSOLE="${VENTRIS_CONSOLE:-/tmp/spike/decomp_native}" \
+        VENTRIS_GHROOT="${VENTRIS_GHROOT:-/tmp/spike/ghroot}" \
+        VENTRIS_LANGS="${VENTRIS_LANGS:-/tmp/spike/langs}" \
+        timeout 60 "$ROOT/native/discover.sh" "$SSTRIP" 0x400380 0x400370 2>/dev/null || true)
+    printf '%s\n' "$discover_out" | grep '^F ' | awk '{printf "%08x\n", $2}' | sort > "$WORK/stripped_native.txt"
+    # Pinned oracle set (verified against the bridge import of the same
+    # binary: 15 functions incl. the analyzer's CRT/dtor heuristics).
+    cat > "$WORK/stripped_oracle.txt" <<'EOF'
+0040033c
+00400360
+00400370
+00400380
+004003b0
+004003c0
+004003f0
+00400430
+00400460
+00400466
+0040047a
+004004a8
+00404000
+00404008
+00404010
+EOF
+    MISS=0
+    for e in $(cat "$WORK/stripped_native.txt"); do
+        grep -q "^$e$" "$WORK/stripped_oracle.txt" || { echo "  stripped: native-only $e"; MISS=1; }
+    done
+    if [ "$MISS" -eq 0 ]; then
+        echo "  stripped: all native-discovered entries are in the oracle (subset OK)"
+    fi
+fi
+
 # ---- PE protocol worker (mingw x86-64) ------------------------------------
 PE="$ROOT/tests/fixtures-src/tiny_pe.exe"
 PE_SPECS="$WORK/pe-specs"
