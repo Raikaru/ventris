@@ -44,6 +44,9 @@ add_executable(ventris-qt
     src/main.cpp
     src/core_bridge.h
     src/core_bridge.cpp
+    src/function_table_model.h
+    src/function_table_model.cpp
+    src/json_util.h
 )
 add_dependencies(ventris-qt ventris-rust-bridge)
 target_include_directories(ventris-qt PRIVATE
