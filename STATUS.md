@@ -123,6 +123,22 @@ see gate numbers below and benchmarks/reports/stage4-gate.json).
   "next entry" — capping proven bodies at 16 bytes for the final function
   of a section; now uses the end of the current map.
 
+## CORE-001: typed address migration
+- Model rows now carry `Address { space, offset }` (FunctionRow/SymbolRow/
+  XrefRow/CommentRow/DisasmRow); strings exist only at serialization edges:
+  lre-db (hex TEXT columns, `addr_cell`/`addr_from_cell`), the JSON-RPC
+  bridge (tolerant `parse_rows`: rows with unsupported-space addresses
+  — e.g. Ghidra stack comments `Stack[-0x10]` — are skipped with a count,
+  not silently mangled or import-aborting), and the CLI (argument parsing).
+- `Address` has a custom `Deserialize` (hex string OR `{space, offset}`;
+  last-colon split for overlay names like `.annobin.notes::00000000`) and
+  `Display`/`hex()`.
+- API: `Core::{xrefs_to, xrefs_from, rename_function}` take typed
+  `&Address`; `lre-db` same; the worker consumes `f.entry.offset` directly.
+- Verification: 34 workspace tests; differential RC=0 (bridge boundary
+  exercised through import + oracle steps); CLI e2e (functions/xrefs/rename)
+  clean; corpus 5/5.
+
 ## Phase 1 correctness closure (review batch)
 - CORE-008 shape: SLEIGH-first discovery — with the pinned console present,
   its disassembly is the primary flow source (unioned with the in-Rust

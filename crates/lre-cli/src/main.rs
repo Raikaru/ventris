@@ -314,9 +314,12 @@ fn run_inner(args: &[String]) -> Result<(), String> {
         }
         "xrefs" => {
             let program = args.get(2).ok_or("xrefs needs a program name")?.clone();
-            let address = flag(args, "--to")
+
+            let addr_arg = flag(args, "--to")
                 .or_else(|| flag(args, "--from"))
                 .ok_or("xrefs needs --to or --from ADDRESS")?;
+            let address = lre_model::Address::parse_ram_hex(&addr_arg)
+                .ok_or_else(|| format!("bad address: {addr_arg}"))?;
             let rows = if args.iter().any(|a| a == "--to") {
                 core.xrefs_to(&program, &address)
             } else {
@@ -330,8 +333,10 @@ fn run_inner(args: &[String]) -> Result<(), String> {
         }
         "rename" => {
             let program = args.get(2).ok_or("rename needs a program name")?.clone();
-            let address = args.get(3).ok_or("rename needs an address")?.clone();
+            let addr_arg = args.get(3).ok_or("rename needs an address")?.clone();
             let name = args.get(4).ok_or("rename needs a new name")?.clone();
+            let address = lre_model::Address::parse_ram_hex(&addr_arg)
+                .ok_or_else(|| format!("bad address: {addr_arg}"))?;
             core.rename_function(&program, &address, &name)
                 .map_err(|e| e.to_string())?;
             println!("renamed {} -> {}", address, name);

@@ -186,7 +186,7 @@ impl ProjectDb {
             }
             stmt.execute(params![
                 program.0,
-                r.entry,
+                addr_cell(&r.entry),
                 r.name,
                 r.size,
                 r.signature,
@@ -214,7 +214,7 @@ impl ProjectDb {
             if !seen.insert((r.address.clone(), r.name.clone())) {
                 continue;
             }
-            stmt.execute(params![program.0, r.address, r.name, r.external as i64, r.source])?;
+            stmt.execute(params![program.0, addr_cell(&r.address), r.name, r.external as i64, r.source])?;
         }
         drop(stmt);
         tx.commit()?;
@@ -232,7 +232,7 @@ impl ProjectDb {
             if !seen.insert((r.from.clone(), r.to.clone(), r.kind.clone())) {
                 continue;
             }
-            stmt.execute(params![program.0, r.from, r.to, r.kind])?;
+            stmt.execute(params![program.0, addr_cell(&r.from), addr_cell(&r.to), r.kind])?;
         }
         drop(stmt);
         tx.commit()?;
@@ -241,10 +241,10 @@ impl ProjectDb {
 
     /// Applies an analyst rename: bumps the program revision and rewrites the
     /// function name. Fails when the function is unknown.
-    pub fn rename_function(&self, program: ProgramId, entry: &str, name: &str) -> Result<()> {
+    pub fn rename_function(&self, program: ProgramId, entry: &lre_model::Address, name: &str) -> Result<()> {
         let n = self.conn.execute(
             "UPDATE functions SET name = ?3 WHERE program_id = ?1 AND entry = ?2",
-            params![program.0, entry, name],
+            params![program.0, addr_cell(entry), name],
         )?;
         if n == 0 {
             return Err(DbError::ProgramNotFound(program.0));
@@ -269,23 +269,23 @@ impl ProjectDb {
     }
 
     /// Lists xrefs pointing at `address`.
-    pub fn xrefs_to(&self, program: ProgramId, address: &str) -> Result<Vec<XrefRow>> {
+    pub fn xrefs_to(&self, program: ProgramId, address: &lre_model::Address) -> Result<Vec<XrefRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT src, dst, kind FROM xrefs WHERE program_id = ?1 AND dst = ?2 ORDER BY src",
         )?;
         let rows = stmt
-            .query_map(params![program.0, address], map_xref)?
+            .query_map(params![program.0, addr_cell(address)], map_xref)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
 
     /// Lists xrefs leaving `address`.
-    pub fn xrefs_from(&self, program: ProgramId, address: &str) -> Result<Vec<XrefRow>> {
+    pub fn xrefs_from(&self, program: ProgramId, address: &lre_model::Address) -> Result<Vec<XrefRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT src, dst, kind FROM xrefs WHERE program_id = ?1 AND src = ?2 ORDER BY dst",
         )?;
         let rows = stmt
-            .query_map(params![program.0, address], map_xref)?
+            .query_map(params![program.0, addr_cell(address)], map_xref)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -315,8 +315,8 @@ impl ProjectDb {
         for r in rows {
             stmt.execute(params![
                 program.0,
-                r.address,
-                r.function,
+                addr_cell(&r.address),
+                addr_cell(&r.function),
                 r.kind,
                 r.text
             ])?;
@@ -351,8 +351,8 @@ impl ProjectDb {
         let rows = stmt
             .query_map(params![program.0], |r| {
                 Ok(CommentRow {
-                    address: r.get(0)?,
-                    function: r.get(1)?,
+                    address: addr_from_cell(r.get(0)?),
+                    function: addr_from_cell(r.get(1)?),
                     kind: r.get(2)?,
                     text: r.get(3)?,
                 })
@@ -417,16 +417,27 @@ impl ProjectDb {
 
 fn map_symbol(r: &Row<'_>) -> rusqlite::Result<SymbolRow> {
     Ok(SymbolRow {
-        address: r.get(0)?,
+        address: addr_from_cell(r.get(0)?),
         name: r.get(1)?,
         external: r.get::<_, i64>(2)? != 0,
         source: r.get(3)?,
     })
 }
 
+/// Store-side address mapping: the schema persists canonical hex string
+/// offsets (single-space contract: the store holds `ram` addresses). This is
+/// the one serialization edge where rendered text is allowed — the model
+/// contract is typed above it.
+fn addr_cell(a: &lre_model::Address) -> String {
+    format!("{:08x}", a.offset)
+}
+fn addr_from_cell(s: String) -> lre_model::Address {
+    lre_model::Address::parse_ram_hex(&s).unwrap_or_default()
+}
+
 fn map_function(r: &Row<'_>) -> rusqlite::Result<FunctionRow> {
     Ok(FunctionRow {
-        entry: r.get(0)?,
+        entry: addr_from_cell(r.get(0)?),
         name: r.get(1)?,
         size: r.get(2)?,
         signature: r.get(3)?,
@@ -436,8 +447,8 @@ fn map_function(r: &Row<'_>) -> rusqlite::Result<FunctionRow> {
 
 fn map_xref(r: &Row<'_>) -> rusqlite::Result<XrefRow> {
     Ok(XrefRow {
-        from: r.get(0)?,
-        to: r.get(1)?,
+        from: addr_from_cell(r.get(0)?),
+        to: addr_from_cell(r.get(1)?),
         kind: r.get(2)?,
     })
 }
@@ -467,7 +478,7 @@ mod tests {
         let db = ProjectDb::open_in_memory().unwrap();
         let id = db.upsert_program("p", "x86:LE:64:default", &prov()).unwrap();
         let rows = vec![FunctionRow {
-            entry: "00400466".into(),
+            entry: lre_model::Address::ram(0x400466),
             name: "add".into(),
             size: 20,
             signature: None,
@@ -483,7 +494,7 @@ mod tests {
         let db = ProjectDb::open_in_memory().unwrap();
         let id = db.upsert_program("p", "x86:LE:64:default", &prov()).unwrap();
         let rows = vec![FunctionRow {
-            entry: "00400000".into(),
+            entry: lre_model::Address::ram(0x400000),
             name: "FUN_00400000".into(),
             size: 4,
             signature: None,
@@ -491,7 +502,7 @@ mod tests {
         }];
         db.replace_functions(id, &rows).unwrap();
         let before = db.revision(id).unwrap();
-        db.rename_function(id, "00400000", "main").unwrap();
+        db.rename_function(id, &lre_model::Address::ram(0x400000), "main").unwrap();
         assert_eq!(db.revision(id).unwrap(), before + 1);
         assert_eq!(db.functions(id).unwrap()[0].name, "main");
     }
@@ -501,8 +512,8 @@ mod tests {
         let db = ProjectDb::open_in_memory().unwrap();
         let id = db.upsert_program("p", "x86:LE:64:default", &prov()).unwrap();
         let cmts = vec![CommentRow {
-            address: "00400488".into(),
-            function: "00400466".into(),
+            address: lre_model::Address::ram(0x400488),
+            function: lre_model::Address::ram(0x400466),
             kind: "eol".into(),
             text: "a + b".into(),
         }];
@@ -523,13 +534,13 @@ mod tests {
         let db = ProjectDb::open_in_memory().unwrap();
         let id = db.upsert_program("p", "x86:LE:64:default", &prov()).unwrap();
         let rows = vec![XrefRow {
-            from: "00400488".into(),
-            to: "00400466".into(),
+            from: lre_model::Address::ram(0x400488),
+            to: lre_model::Address::ram(0x400466),
             kind: "UNCONDITIONAL_CALL".into(),
         }];
         db.replace_xrefs(id, &rows).unwrap();
-        assert_eq!(db.xrefs_to(id, "00400466").unwrap().len(), 1);
-        assert_eq!(db.xrefs_from(id, "00400488").unwrap().len(), 1);
-        assert!(db.xrefs_to(id, "00400488").unwrap().is_empty());
+        assert_eq!(db.xrefs_to(id, &lre_model::Address::ram(0x400466)).unwrap().len(), 1);
+        assert_eq!(db.xrefs_from(id, &lre_model::Address::ram(0x400488)).unwrap().len(), 1);
+        assert!(db.xrefs_to(id, &lre_model::Address::ram(0x400488)).unwrap().is_empty());
     }
 }

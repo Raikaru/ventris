@@ -614,7 +614,7 @@ pub fn store_import(
     let rows: Vec<FunctionRow> = functions
         .iter()
         .map(|f| FunctionRow {
-            entry: format!("{:08x}", f.entry),
+            entry: lre_model::Address::ram(f.entry),
             name: f.name.clone(),
             size: f.size.max(1),
             signature: None,
@@ -626,8 +626,8 @@ pub fn store_import(
         .xrefs
         .iter()
         .map(|x| XrefRow {
-            from: format!("{:08x}", x.from),
-            to: format!("{:08x}", x.to),
+            from: lre_model::Address::ram(x.from),
+            to: lre_model::Address::ram(x.to),
             kind: x.kind.clone(),
         })
         .collect();

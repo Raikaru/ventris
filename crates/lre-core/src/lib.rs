@@ -146,19 +146,19 @@ impl Core {
     }
 
     /// Incoming xrefs from the project store (no JVM).
-    pub fn xrefs_to(&self, program: &str, address: &str) -> Result<Vec<XrefRow>> {
+    pub fn xrefs_to(&self, program: &str, address: &lre_model::Address) -> Result<Vec<XrefRow>> {
         let id = self.db.program_id(program)?;
         Ok(self.db.xrefs_to(id, address)?)
     }
 
     /// Outgoing xrefs from the project store (no JVM).
-    pub fn xrefs_from(&self, program: &str, address: &str) -> Result<Vec<XrefRow>> {
+    pub fn xrefs_from(&self, program: &str, address: &lre_model::Address) -> Result<Vec<XrefRow>> {
         let id = self.db.program_id(program)?;
         Ok(self.db.xrefs_from(id, address)?)
     }
 
     /// Applies an analyst rename in the project store and bumps the revision.
-    pub fn rename_function(&self, program: &str, entry: &str, name: &str) -> Result<()> {
+    pub fn rename_function(&self, program: &str, entry: &lre_model::Address, name: &str) -> Result<()> {
         let id = self.db.program_id(program)?;
         self.db.rename_function(id, entry, name)?;
         Ok(())

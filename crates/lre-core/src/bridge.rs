@@ -151,6 +151,31 @@ impl Bridge {
         serde_json::from_value(value).map_err(|e| BridgeError::Shape(e.to_string()))
     }
 
+    /// Row lists from the bridge may contain addresses our RAM-only store
+    /// cannot represent (stack/overlay/register spaces, e.g. Ghidra's
+    /// `Stack[-0x10]` for a comment). Each row is parsed individually and
+    /// unsupported rows are skipped — a fact we cannot represent honestly
+    /// must not abort the import wall.
+    fn parse_rows<T>(value: Value) -> Result<Vec<T>>
+    where
+        T: DeserializeOwned,
+    {
+        let arr: Vec<Value> =
+            serde_json::from_value(value).map_err(|e| BridgeError::Shape(e.to_string()))?;
+        let mut out = Vec::new();
+        let mut skipped = 0usize;
+        for row in arr {
+            match serde_json::from_value::<T>(row) {
+                Ok(r) => out.push(r),
+                Err(_) => skipped += 1,
+            }
+        }
+        if skipped > 0 {
+            eprintln!("bridge: skipped {skipped} row(s) with unsupported addresses");
+        }
+        Ok(out)
+    }
+
     /// Imports and analyzes a binary, returning its summary.
     pub fn import(&mut self, session: &str, path: &Path) -> Result<ProgramSummary> {
         let v = self.call(
@@ -201,13 +226,13 @@ impl Bridge {
     /// Incoming xrefs to `address`.
     pub fn xrefs_to(&mut self, session: &str, address: &str) -> Result<Vec<XrefRow>> {
         let v = self.call("xrefs_to", json!({"session": session, "address": address}))?;
-        Self::parse(v)
+        Self::parse_rows(v)
     }
 
     /// Outgoing xrefs from `address`.
     pub fn xrefs_from(&mut self, session: &str, address: &str) -> Result<Vec<XrefRow>> {
         let v = self.call("xrefs_from", json!({"session": session, "address": address}))?;
-        Self::parse(v)
+        Self::parse_rows(v)
     }
 
     /// All outgoing references from a function body (mid-body calls included).
@@ -216,7 +241,7 @@ impl Bridge {
             "function_xrefs_from",
             json!({"session": session, "address": address}),
         )?;
-        Self::parse(v)
+        Self::parse_rows(v)
     }
 
     /// Writes the four analyzer spec documents + registers.txt to `outdir`
@@ -238,13 +263,13 @@ impl Bridge {
         session: &str,
     ) -> Result<(Vec<FunctionRow>, Vec<XrefRow>, Vec<CommentRow>, Vec<DataTypeRow>)> {
         let v = self.call("export_facts", json!({"session": session}))?;
-        let functions: Vec<FunctionRow> = Self::parse(
+        let functions: Vec<FunctionRow> = Self::parse_rows(
             v.get("functions").cloned().unwrap_or(Value::Null),
         )?;
-        let xrefs: Vec<XrefRow> = Self::parse(
+        let xrefs: Vec<XrefRow> = Self::parse_rows(
             v.get("xrefs").cloned().unwrap_or(Value::Null),
         )?;
-        let comments: Vec<CommentRow> = Self::parse(
+        let comments: Vec<CommentRow> = Self::parse_rows(
             v.get("comments").cloned().unwrap_or(Value::Null),
         )?;
         let datatypes: Vec<DataTypeRow> = Self::parse(

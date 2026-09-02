@@ -469,11 +469,10 @@ fn run(
     let db = open_store(Path::new(project))?;
     let pid = db.program_id(program)?;
     for f in db.functions(pid)? {
-        if let Ok(off) = u64::from_str_radix(f.entry.trim_start_matches("0x"), 16) {
-            provider.functions.push(off);
-            provider.function_names.insert(off, f.name);
-            provider.function_sizes.insert(off, f.size as u64);
-        }
+        let off = f.entry.offset;
+        provider.functions.push(off);
+        provider.function_names.insert(off, f.name);
+        provider.function_sizes.insert(off, f.size as u64);
     }
 
     let offset = u64::from_str_radix(addr.trim_start_matches("0x"), 16)

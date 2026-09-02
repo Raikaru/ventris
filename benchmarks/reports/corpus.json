@@ -4,7 +4,7 @@
       "fixture": "plain_o0",
       "rc": 0,
       "functions": 12,
-      "wall_s": 0.012,
+      "wall_s": 0.007,
       "output": "imported plain_o0 natively (12 functions, x86:LE:64:default)"
     },
     {
@@ -18,7 +18,7 @@
       "fixture": "plain_pie",
       "rc": 0,
       "functions": 7,
-      "wall_s": 0.011,
+      "wall_s": 0.007,
       "output": "imported plain_pie natively (7 functions, x86:LE:64:default)"
     },
     {

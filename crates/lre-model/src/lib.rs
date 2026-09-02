@@ -18,7 +18,7 @@ pub struct SymbolId(pub u32);
 
 /// Which address space an offset lives in. Stage 1 only ever materializes
 /// `ram`, but the enum exists so callers cannot silently assume flat memory.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub enum AddressSpace {
     /// Main loaded memory.
     #[default]
@@ -43,7 +43,7 @@ impl AddressSpace {
 }
 
 /// A resolved address: space identity plus offset.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Default, serde::Serialize)]
 pub struct Address {
     /// Address space the offset is relative to.
     pub space: AddressSpace,
@@ -73,11 +73,63 @@ impl Address {
     }
 }
 
+impl std::fmt::Display for Address {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.hex())
+    }
+}
+
+// The wire/storage serialization edge: Ghidra-style hex strings
+// ("00400466", "ram:00400466") and the structured form both deserialize.
+// Serde's derive accepts only the structured form; the JSON-RPC bridge and
+// older consumers talk in strings, so this visitor keeps them compatible.
+impl<'de> serde::Deserialize<'de> for Address {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct AddrVisitor;
+        impl<'de> serde::de::Visitor<'de> for AddrVisitor {
+            type Value = Address;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a hex address string or {space, offset} object")
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Address, E> {
+                // LAST colon: Ghidra overlay/space names can contain
+                // colons (".annobin.notes::00000000").
+                let (space, offset_part) = match v.rsplit_once(':') {
+                    Some((sp, off)) => (AddressSpace::from_ghidra_str(sp), off),
+                    None => (AddressSpace::Ram, v),
+                };
+                let hex = offset_part.trim_start_matches("0x");
+                let offset = u64::from_str_radix(hex, 16)
+                    .map_err(|_| E::custom(format!("bad hex address: {v}")))?;
+                Ok(Address { space, offset })
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Address, A::Error> {
+                let mut space = AddressSpace::Ram;
+                let mut offset = 0u64;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "space" => space = map.next_value::<AddressSpace>()?,
+                        "offset" => offset = map.next_value::<u64>()?,
+                        _ => {
+                            map.next_value::<serde_json::Value>()?;
+                        }
+                    }
+                }
+                Ok(Address { space, offset })
+            }
+        }
+        deserializer.deserialize_any(AddrVisitor)
+    }
+}
+
 /// One function row as the Core API returns it.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct FunctionRow {
-    /// Entry address as a canonical hex string (`"00400466"`).
-    pub entry: String,
+    /// Entry address (typed; formatted only at serialization edges).
+    pub entry: Address,
     /// Display name, primary symbol.
     pub name: String,
     /// Number of bytes in the function body footprint.
@@ -90,31 +142,13 @@ pub struct FunctionRow {
     pub calling_convention: Option<String>,
 }
 
-impl FunctionRow {
-    /// The entry as a typed RAM address (canonical-hex storage helper).
-    pub fn entry_addr(&self) -> Option<Address> {
-        Address::parse_ram_hex(&self.entry)
-    }
-}
 /// One cross-reference record.
-impl XrefRow {
-    /// The destination as a typed RAM address.
-    pub fn to_addr(&self) -> Option<Address> {
-        Address::parse_ram_hex(&self.to)
-    }
-
-    /// The source as a typed RAM address.
-    pub fn from_addr(&self) -> Option<Address> {
-        Address::parse_ram_hex(&self.from)
-    }
-}
-
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct XrefRow {
-    /// Source (incoming) address, canonical hex.
-    pub from: String,
-    /// Destination address, canonical hex.
-    pub to: String,
+    /// Source (incoming) address (typed).
+    pub from: Address,
+    /// Destination address (typed).
+    pub to: Address,
     /// Ghidra reference type name (`UNCONDITIONAL_CALL`, `DATA`, ...).
     pub kind: String,
 }
@@ -124,8 +158,8 @@ pub struct XrefRow {
 pub struct SymbolRow {
     /// Symbol name.
     pub name: String,
-    /// Address it anchors, canonical hex.
-    pub address: String,
+    /// Address it anchors (typed).
+    pub address: Address,
     /// True for symbols naming external/library functions.
     pub external: bool,
     /// Ghidra source type: USER_DEFINED, ANALYSIS, IMPORTED, DEFAULT, ...
@@ -135,8 +169,8 @@ pub struct SymbolRow {
 /// Disassembly line: address plus rendered text.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct DisasmRow {
-    /// Instruction address, canonical hex.
-    pub address: String,
+    /// Instruction address (typed).
+    pub address: Address,
     /// Rendered mnemonic + operands, Ghidra style.
     pub text: String,
 }
@@ -163,10 +197,10 @@ pub struct Provenance {
 /// A stored comment (from the bridge export).
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct CommentRow {
-    /// Code unit address (hex string as Ghidra reports it).
-    pub address: String,
-    /// Owning function entry (hex string).
-    pub function: String,
+    /// Code unit address (typed).
+    pub address: Address,
+    /// Owning function entry (typed).
+    pub function: Address,
     /// Comment kind: "eol" | "pre" | "plate" (bridge reports its kind).
     pub kind: String,
     /// Comment text.
