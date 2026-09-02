@@ -6,16 +6,14 @@
 //! lre-cli/main.rs). They now live behind the Core facade so every consumer
 //! (CLI, GUI, agents) speaks only Core API methods.
 //!
-//! Env knobs (all optional; defaults are repo/install-relative):
-//! - `VENTRIS_SLA`     compiled x86-64.sla (raw-SLEIGH worker mode; required)
-//! - `VENTRIS_GHIDRA`  Ghidra 12.1.3 install root (console languages)
-//! - `VENTRIS_GHIDRA_OPT` patched `ghidra_opt` (default native/build/ghidra_opt)
-//! - `VENTRIS_CONSOLE` SLEIGH console (default native/build/decomp_native)
-//! - `VENTRIS_WORKER`  lre-worker binary (default target/debug/lre-worker)
-//! - `VENTRIS_SPECS`   worker spec dir (pspec/cspec/tspec/coretypes + registers;
-//!                      default native/specs)
+//! The runtime contract is `RuntimeConfig` (crate::session): services take
+//! an explicit value — never read process-wide env vars. The environment is
+//! consulted only when the config is BUILT (`RuntimeConfig::from_env`), so
+//! the CLI's env surface is preserved while everything below it is honest
+//! about its inputs.
 
 use crate::native::{pe_image_base, NativeImport};
+use crate::session::RuntimeConfig;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -52,21 +50,22 @@ pub fn ghidra_dir() -> PathBuf {
 
 /// Performat `disasm-native`: one function mapped + disassembled by the
 /// SLEIGH console, returned as the console's listing text.
-pub fn disasm_native(binary: &Path, address: &str, count: u32) -> Result<String> {
-    let console = std::env::var("VENTRIS_CONSOLE")
-        .unwrap_or_else(|_| "native/build/decomp_native".into());
-    let ghroot = std::env::var("VENTRIS_GHROOT")
-        .unwrap_or_else(|_| ghidra_dir().to_string_lossy().into_owned());
-    let langs = std::env::var("VENTRIS_LANGS").unwrap_or_else(|_| {
-        ghidra_dir()
-            .join("Ghidra/Processors/x86/data/languages")
-            .to_string_lossy()
-            .into_owned()
-    });
-    if !Path::new(&console).is_file() {
+pub fn disasm_native(cfg: &RuntimeConfig, binary: &Path, address: &str, count: u32) -> Result<String> {
+    let console = cfg
+        .console_path
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("native/build/decomp_native"));
+    let ghroot = cfg.ghidra_install.to_string_lossy().into_owned();
+    let langs = cfg
+        .ghidra_install
+        .join("Ghidra/Processors/x86/data/languages")
+        .to_string_lossy()
+        .into_owned();
+    if !console.is_file() {
         return err(format!(
-            "SLEIGH console missing: {console} — build native/build_console.sh \
-             (needs binutils-devel) or set VENTRIS_CONSOLE"
+            "SLEIGH console missing: {} — build native/build_console.sh \
+             (needs binutils-devel) or configure console_path",
+            console.display()
         ));
     }
     let hex_addr = if address.starts_with("0x") {
@@ -117,41 +116,42 @@ pub fn disasm_native(binary: &Path, address: &str, count: u32) -> Result<String>
 /// Performant `decompile-native`: one address decompiled by the patched
 /// `ghidra_opt` through `lre-worker` (raw-SLEIGH, no JVM).
 pub fn decompile_native(
+    cfg: &RuntimeConfig,
     binary: &Path,
     address: &str,
     program: &str,
     project_dir: &Path,
     base: Option<u64>,
 ) -> Result<String> {
-    let opt = std::env::var("VENTRIS_GHIDRA_OPT")
-        .unwrap_or_else(|_| "native/build/ghidra_opt".into());
-    let specs = std::env::var("VENTRIS_SPECS")
-        .unwrap_or_else(|_| "native/specs".into());
-    let worker = std::env::var("VENTRIS_WORKER")
-        .unwrap_or_else(|_| "target/debug/lre-worker".into());
-    // The patched ghidra_opt self-disassembles only when VENTRIS_SLA names a
-    // compiled .sla (see native/build_ghidra_opt.sh).
-    let sla = std::env::var("VENTRIS_SLA").map_err(|_| {
+    let opt = &cfg.decompiler_path;
+    let specs = &cfg.spec_root;
+    let worker = &cfg.worker_path;
+    // The patched ghidra_opt self-disassembles only when a compiled .sla is
+    // configured (see native/build_ghidra_opt.sh).
+    let sla = cfg.sla_path.as_ref().ok_or_else(|| {
         NativeRuntimeError(
-            "VENTRIS_SLA must point at the compiled x86-64.sla \
-             (build with native/build_ghidra_opt.sh)"
+            "no SLA configured: point VENTRIS_SLA (or RuntimeConfig::sla_path) \
+             at the compiled x86-64.sla"
                 .into(),
         )
     })?;
-    if !Path::new(&sla).is_file() {
+    if !sla.is_file() {
         return err(format!(
-            "VENTRIS_SLA does not exist: {sla} — the decompiler silently fails \
-             (\"no architecture registered\") without a readable .sla"
+            "configured SLA does not exist: {} — the decompiler silently fails \
+             (\"no architecture registered\") without a readable .sla",
+            sla.display()
         ));
     }
-    if !Path::new(&opt).is_file() {
+    if !opt.is_file() {
         return err(format!(
-            "native decompiler missing: {opt} — build it via native/build_ghidra_opt.sh"
+            "native decompiler missing: {} — build it via native/build_ghidra_opt.sh",
+            opt.display()
         ));
     }
-    if !Path::new(&specs).join("tspec.xml").is_file() {
+    if !specs.join("tspec.xml").is_file() {
         return err(format!(
-            "spec dir incomplete: {specs} (needs tspec.xml; use native/specs)"
+            "spec dir incomplete: {} (needs tspec.xml; use native/specs)",
+            specs.display()
         ));
     }
     let base = match base {
@@ -162,9 +162,9 @@ pub fn decompile_native(
             pe_image_base(&data).unwrap_or(0x400000)
         }
     };
-    let out = Command::new(&worker)
-        .arg(&opt)
-        .arg(&specs)
+    let out = Command::new(worker)
+        .arg(opt)
+        .arg(specs)
         .arg(binary)
         .arg(program)
         .arg(address)
@@ -193,20 +193,28 @@ pub fn decompile_native(
 /// in `disasm::discover` handles the direct-call closure; the console adds
 /// the ELF `_start` RDI convention and SLEIGH-exact disconnections.
 pub fn console_discover(
+    cfg: &RuntimeConfig,
     binary: &Path,
     seeds: &[u64],
 ) -> Result<(Vec<(u64, u64)>, Vec<(u64, u64)>)> {
     use std::io::{BufRead, BufReader, Write as _};
-    let console = std::env::var("VENTRIS_CONSOLE")
-        .unwrap_or_else(|_| "native/build/decomp_native".into());
-    let ghroot = std::env::var("VENTRIS_GHROOT")
-        .unwrap_or_else(|_| ghidra_dir().to_string_lossy().into_owned());
-    let langs = std::env::var("VENTRIS_LANGS").unwrap_or_else(|_| {
-        ghidra_dir()
-            .join("Ghidra/Processors/x86/data/languages")
-            .to_string_lossy()
-            .into_owned()
-    });
+    let console = cfg
+        .console_path
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("native/build/decomp_native"));
+    let ghroot = cfg.ghidra_install.to_string_lossy().into_owned();
+    let langs = cfg
+        .ghidra_install
+        .join("Ghidra/Processors/x86/data/languages")
+        .to_string_lossy()
+        .into_owned();
+    if !console.is_file() {
+        return err(format!(
+            "SLEIGH console missing: {} — build native/build_console.sh or \
+             configure console_path",
+            console.display()
+        ));
+    }
     let mut child = Command::new(&console)
         .arg("-s")
         .arg(&langs)

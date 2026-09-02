@@ -49,6 +49,8 @@ pub struct Core {
     /// the CLI's scroll pattern is single-binary; `ProgramSession` (the
     /// sessionful image layer) supersedes it for interactive consumers.
     native_cache: std::cell::RefCell<Option<(PathBuf, std::sync::Arc<session::ProgramImage>)>>,
+    /// Immutable runtime configuration (env-derived by default).
+    config: session::RuntimeConfig,
 }
 
 impl Core {
@@ -60,6 +62,19 @@ impl Core {
             db,
             db_path: project_dir.to_path_buf(),
             native_cache: std::cell::RefCell::new(None),
+            config: session::RuntimeConfig::from_env(),
+        })
+    }
+
+    /// Opens (or creates) a project with an explicit runtime configuration.
+    pub fn open_with_config(project_dir: &Path, config: session::RuntimeConfig) -> Result<Self> {
+        std::fs::create_dir_all(project_dir)?;
+        let db = ProjectDb::open(&project_dir.join("project.sqlite"))?;
+        Ok(Self {
+            db,
+            db_path: project_dir.to_path_buf(),
+            native_cache: std::cell::RefCell::new(None),
+            config,
         })
     }
 
@@ -157,20 +172,15 @@ impl Core {
         // available its disassembly is the primary flow source; the in-Rust
         // two-path walk (already run by load_native) is the fallback /
         // cross-check. Both sets are unioned so nothing available is lost.
-        let console_path = std::env::var("VENTRIS_CONSOLE")
-            .map(PathBuf::from)
-            .ok()
-            .or_else(|| {
-                let p = PathBuf::from("native/build/decomp_native");
-                if p.is_file() {
-                    Some(p)
-                } else {
-                    None
-                }
-            });
-        if console_path.map(|p| p.is_file()).unwrap_or(false) {
+        let console_available = self
+            .config
+            .console_path
+            .as_ref()
+            .map(|p| p.is_file())
+            .unwrap_or(false);
+        if console_available {
             let seeds = native_runtime::console_seeds(&imp);
-            match native_runtime::console_discover(binary, &seeds) {
+            match native_runtime::console_discover(&self.config, binary, &seeds) {
                 Ok((funcs, calls)) => {
                     for (entry, size) in funcs {
                         if !imp.functions.iter().any(|f| f.entry == entry) {
@@ -201,7 +211,7 @@ impl Core {
 
     /// Native disassembly of `count` instructions at `address`.
     pub fn disasm_native(&self, binary: &Path, address: &str, count: u32) -> Result<String> {
-        Ok(native_runtime::disasm_native(binary, address, count)?)
+        Ok(native_runtime::disasm_native(&self.config, binary, address, count)?)
     }
 
     /// Native decompilation of one function at `address` (program must be in
@@ -215,6 +225,7 @@ impl Core {
         base: Option<u64>,
     ) -> Result<String> {
         Ok(native_runtime::decompile_native(
+            &self.config,
             binary,
             address,
             program,
