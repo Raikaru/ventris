@@ -41,6 +41,9 @@ pub struct Mapping {
     /// File offset of the mapping's first byte (ELF: section offset; PE:
     /// section raw offset — the RVA-to-file translation the worker uses).
     pub file_off: u64,
+    /// Section flags: ELF SHF_* (0x4 = executable); PE image characteristics
+    /// (0x60000020 = code).
+    pub flags: u64,
     /// Raw bytes of the mapping.
     pub bytes: Vec<u8>,
 }
@@ -171,6 +174,7 @@ pub fn import_elf(data: &[u8]) -> Result<NativeImport> {
             vaddr: s.addr,
             size: s.size,
             file_off: s.off,
+            flags: s.flags,
             bytes: b.to_vec(),
         });
     }
@@ -355,10 +359,13 @@ pub fn import_pe(data: &[u8]) -> Result<NativeImport> {
         }
         let mut bytes = data.get(raw..raw + raw_size).unwrap_or(&[]).to_vec();
         bytes.resize(size, 0);
+        let sflags = u32_at(data, o + 36)? as u64; // section characteristics
+        let exec = sflags & 0x60000000 != 0;
         mappings.push(Mapping {
             vaddr: image_base + vaddr,
             size: size as u64,
             file_off: raw as u64,
+            flags: if exec { 0x4 } else { 0 },
             bytes,
         });
     }
@@ -378,6 +385,15 @@ pub fn import_pe(data: &[u8]) -> Result<NativeImport> {
         externals: Vec::new(),
         format: "PE".into(),
     })
+}
+
+/// Returns the executable (code) ranges of the import, for seed filtering.
+pub fn code_ranges(imp: &NativeImport) -> Vec<(u64, u64)> {
+    imp.mappings
+        .iter()
+        .filter(|m| m.flags & 0x4 != 0 && m.size > 0)
+        .map(|m| (m.vaddr, m.vaddr + m.size))
+        .collect()
 }
 
 /// Sweeps mappings for direct call rel32 / jcc rel32 targets (x86-64).
@@ -422,6 +438,14 @@ pub fn sweep_calls(imp: &mut NativeImport) {
     imp.xrefs = xrefs;
 }
 
+/// Finds an external's display name for a function entry, if known.
+pub fn extern_name(imp: &NativeImport, entry: u64) -> Option<String> {
+    imp.externals
+        .iter()
+        .find(|(a, n)| *a == entry && !n.is_empty())
+        .map(|(_, n)| n.clone())
+}
+
 /// Loads `<binary>` natively: parses the format, sweeps calls.
 pub fn load_native(binary: &Path) -> Result<NativeImport> {
     let data = std::fs::read(binary)
@@ -433,9 +457,64 @@ pub fn load_native(binary: &Path) -> Result<NativeImport> {
     } else {
         return err("unsupported format (ELF/PE expected)");
     };
-    sweep_calls(&mut imp);
-    close_call_targets(&mut imp);
+    flow_discover(&mut imp);
     Ok(imp)
+}
+
+/// Flow-based discovery (the main walk for stripped binaries; augments the
+/// symtab set: follows every seed, direct calls and conditionals through
+/// the mapping, records calls as xrefs, and closes the function set).
+pub fn flow_discover(imp: &mut NativeImport) {
+    if imp.mappings.is_empty() {
+        return;
+    }
+    let mut seeds: Vec<u64> = imp.functions.iter().map(|f| f.entry).collect();
+    // PLT stubs/externs are seeds too.
+    for (a, _) in &imp.externals {
+        seeds.push(*a);
+    }
+    // The entry seed is guaranteed by import_elf/pe.
+    let maps_owned: Vec<(u64, u64, u64, &[u8])> = imp
+        .mappings
+        .iter()
+        .map(|m| (m.vaddr, m.size, m.file_off, m.bytes.as_slice()))
+        .collect();
+    let d = crate::disasm::discover(&maps_owned, &seeds);
+    let mut merged = imp.functions.clone();
+    for e in &d.entries {
+        if !merged.iter().any(|f| f.entry == *e) {
+            let name = if let Some((_, n)) = imp.externals.iter().find(|(a, n)| *a == *e && !n.is_empty()) {
+                n.clone()
+            } else {
+                format!("FUN_{:08x}", e)
+            };
+            merged.push(NativeFunction {
+                entry: *e,
+                name,
+                size: 1,
+            });
+        }
+    }
+    merged.sort_by_key(|f| f.entry);
+    merged.dedup_by_key(|f| f.entry);
+    // sizes: distance to the next entry
+    for i in 0..merged.len() {
+        let end = merged.get(i + 1).map(|n| n.entry).unwrap_or(merged[i].entry + 16);
+        merged[i].size = end.saturating_sub(merged[i].entry).max(1);
+    }
+    imp.functions = merged;
+    // discovered calls become xrefs (dedup on (from,to)).
+    let mut xrefs: Vec<NativeXref> = imp.xrefs.clone();
+    for (from, to) in &d.calls {
+        if !xrefs.iter().any(|x| x.from == *from && x.to == *to) {
+            xrefs.push(NativeXref {
+                from: *from,
+                to: *to,
+                kind: "UNCONDITIONAL_CALL".into(),
+            });
+        }
+    }
+    imp.xrefs = xrefs;
 }
 
 /// Adds FUN_<hex> functions for every xref target inside a code mapping
@@ -517,6 +596,7 @@ mod tests {
                 vaddr: 0x1000,
                 size: 16,
                 file_off: 0x100,
+                flags: 0x4,
                 bytes: vec![
                     0xe8, 0x01, 0x00, 0x00, 0x00, // call +1 -> 0x1006
                     0x90, 0x90, 0x90, // nops

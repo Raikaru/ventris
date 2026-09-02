@@ -5,6 +5,7 @@
 //! reopening and browsing never needs the JVM (spec 14.4, Phase 3 exit).
 
 pub mod bridge;
+pub mod disasm;
 pub mod native;
 
 use lre_db::ProjectDb;

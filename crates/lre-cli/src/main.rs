@@ -164,6 +164,142 @@ fn run(args: &[String]) -> i32 {
     }
 }
 
+fn console_discover(
+    binary: &str,
+    seeds: &[u64],
+) -> Result<(Vec<(u64, u64)>, Vec<(u64, u64)>), String> {
+    use std::io::{BufRead, BufReader, Write as _};
+    let console = std::env::var("VENTRIS_CONSOLE")
+        .unwrap_or_else(|_| "/tmp/spike/decomp_native".into());
+    let ghroot = std::env::var("VENTRIS_GHROOT")
+        .unwrap_or_else(|_| "/tmp/spike/ghroot".into());
+    let langs = std::env::var("VENTRIS_LANGS")
+        .unwrap_or_else(|_| "/tmp/spike/langs".into());
+    let mut child = std::process::Command::new(&console)
+        .arg("-s")
+        .arg(&langs)
+        .env("SLEIGHHOME", &ghroot)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let mut reader = BufReader::new(stdout);
+
+    // init the session once (2 extra prompts outside the rounds).
+    let init_script = format!(
+        "load file x86:LE:64:default {binary}\nadjust vma 0x400000\n"
+    );
+    stdin
+        .write_all(init_script.as_bytes())
+        .map_err(|e| e.to_string())?;
+    stdin.flush().map_err(|e| e.to_string())?;
+    let mut line_buf = String::new();
+    for _ in 0..2 {
+        line_buf.clear();
+        let n = reader.read_line(&mut line_buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            return Err("console closed during init".into());
+        }
+    }
+    let mut pending: Vec<String> = Vec::new();
+    let mut pending_seeds: Vec<u64> = seeds.to_vec();
+    let mut all: Vec<(u64, u64)> = Vec::new(); // (entry, size)
+    let mut calls: Vec<(u64, u64)> = Vec::new();
+    let mut seen: Vec<u64> = Vec::new();
+    let mut rounds = 0;
+    while !pending_seeds.is_empty() && rounds < 8 {
+        rounds += 1;
+        let this_round = std::mem::take(&mut pending_seeds);
+        for (i, s) in this_round.iter().enumerate() {
+            pending.push(format!("map function {s:#x} f{i}"));
+            pending.push(format!("load function f{i}"));
+            pending.push("disassemble".into());
+            all.push((*s, 0)); // the mapped function is the function
+        }
+        // write + drain until the round's prompts are exhausted
+        let expected_prompts = this_round.len() * 3;
+        let script = pending.join("\n") + "\n";
+        stdin.write_all(script.as_bytes()).map_err(|e| e.to_string())?;
+        stdin.flush().map_err(|e| e.to_string())?;
+        pending.clear();
+        let mut last_addr: Option<u64> = None;
+        let mut line_buf = String::new();
+        let mut prompts_seen = 0usize;
+        while prompts_seen < expected_prompts {
+            line_buf.clear();
+            let n = reader
+                .read_line(&mut line_buf)
+                .map_err(|e| e.to_string())?;
+            if n == 0 {
+                break;
+            }
+            let line = line_buf.trim_end();
+            if line.ends_with("> ") || line.ends_with("decomp]>") {
+                prompts_seen += 1;
+                continue;
+            }
+            // "0x00400466: PUSH      RBP"
+            if let Some(rest) = line.strip_prefix("0x") {
+                if let Some((addr_s, tail)) = rest.split_once(':') {
+                    if let Ok(addr) = u64::from_str_radix(addr_s.trim(), 16) {
+                        last_addr = Some(addr);
+                        // ELF startup convention: right before the indirect
+                        // __libc_start_main GOT call, RDI holds main.
+                        if tail.contains("MOV") && tail.contains("RDI") {
+                            let after = tail.split(':').next().unwrap_or("");
+                            let mov_line = tail.split(',').nth(1).unwrap_or("");
+                            for tok in mov_line.split_whitespace() {
+                                if let Ok(t) = u64::from_str_radix(
+                                    tok.trim_start_matches("0x").trim_end_matches(','),
+                                    16,
+                                ) {
+                                    if !seen.contains(&t) && t != 0 {
+                                        seen.push(t);
+                                        pending_seeds.push(t);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if line.contains("CALL") && line.contains(":") {
+                let after = line.split(':').last().unwrap_or("");
+                let mut toks = after.split_whitespace();
+                let _ = toks.next();
+                if let Some(op) = toks.next() {
+                    let clean = op.trim_end_matches(';');
+                    if let Ok(t) = u64::from_str_radix(clean.trim_start_matches("0x"), 16) {
+                        let frm = last_addr.unwrap_or(0);
+                        if t != 0 && !calls.iter().any(|(f, c)| *f == frm && *c == t) {
+                            calls.push((frm, t));
+                        }
+                                        if !seen.contains(&t) && !this_round.contains(&t) && pending_seeds.len() < 64 {
+                            seen.push(t);
+                            pending_seeds.push(t);
+                        }
+                    }
+                }
+            }
+        }
+        // close the round: leave the console ready for the next batch
+    }
+    let _ = stdin;
+    let _ = child.wait();
+    // sizes: distance to the next entry
+    let mut funcs: Vec<(u64, u64)> = Vec::new();
+    let mut sorted: Vec<u64> = all.iter().map(|(a, _)| *a).collect();
+    sorted.sort_unstable();
+    sorted.dedup();
+    for (i, a) in sorted.iter().enumerate() {
+        let next = sorted.get(i + 1).copied().unwrap_or(a + 16);
+        funcs.push((*a, next - *a));
+    }
+    Ok((funcs, calls))
+}
+
 fn run_inner(args: &[String]) -> Result<(), String> {
     let core = Core::open(&project_dir(args)).map_err(|e| e.to_string())?;
     let cmd = args[1].as_str();
@@ -229,6 +365,12 @@ fn run_inner(args: &[String]) -> Result<(), String> {
                 return Err(format!("no mapping covers {vaddr:#x}..+{size:#x}"));
             }
         }
+
+/// Console-driven function discovery: the pinned console disassembles each
+/// mapped function with the real SLEIGH translator; direct call targets
+/// become new seeds until closure. Returns (entry->size, calls) as hex
+/// strings. Requires VENTRIS_CONSOLE/VENTRIS_GHROOT/VENTRIS_LANGS env
+/// (defaults mirror the spike layout).
         "import-native" => {
             let binary = args
                 .get(2)
@@ -241,8 +383,48 @@ fn run_inner(args: &[String]) -> Result<(), String> {
                         .map(|s| s.to_string_lossy().into_owned())
                         .unwrap_or_else(|| "program".into())
                 });
-            let imp = lre_core::native::load_native(Path::new(&binary))
+            let mut imp = lre_core::native::load_native(Path::new(&binary))
                 .map_err(|e| e.to_string())?;
+            // Console-driven flow discovery (stripped binaries): env
+            // VENTRIS_CONSOLE/{GHROOT,LANGS} must point at the pinned
+            // console + language dirs.
+            let wants_flow = args.iter().any(|a| a == "--discover")
+                || imp.functions.iter().filter(|f| !f.name.starts_with("_")).count() <= 2;
+            if wants_flow {
+                let code = lre_core::native::code_ranges(&imp);
+                let seeds: Vec<u64> = imp
+                    .functions
+                    .iter()
+                    .map(|f| f.entry)
+                    .chain(imp.externals.iter().map(|(a, _)| *a))
+                    .filter(|a| *a != 0 && code.iter().any(|(v, e)| *a >= *v && *a < *e))
+                    .collect();
+                match console_discover(&binary, &seeds) {
+                    Ok((funcs, calls)) => {
+                        for (entry, size) in funcs {
+                            if !imp.functions.iter().any(|f| f.entry == entry) {
+                                let name = lre_core::native::extern_name(&imp, entry)
+                                    .unwrap_or_else(|| format!("FUN_{entry:08x}"));
+                                imp.functions.push(lre_core::native::NativeFunction {
+                                    entry,
+                                    name,
+                                    size: size.max(1),
+                                });
+                            }
+                        }
+                        for (from, to) in calls {
+                            if !imp.xrefs.iter().any(|x| x.from == from && x.to == to) {
+                                imp.xrefs.push(lre_core::native::NativeXref {
+                                    from,
+                                    to,
+                                    kind: "UNCONDITIONAL_CALL".into(),
+                                });
+                            }
+                        }
+                    }
+                    Err(e) => eprintln!("console discovery skipped: {e}"),
+                }
+            }
             let db = core.store_handle().map_err(|e| e.to_string())?;
             let summary = lre_core::native::store_import(&db, &program, &imp)
                 .map_err(|e| e.to_string())?;
