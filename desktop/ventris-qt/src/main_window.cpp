@@ -4,8 +4,9 @@
 #include "decompiler_view.h"
 #include "function_table_model.h"
 #include "graph_canvas.h"
-#include "json_util.h"
 #include "listing_canvas.h"
+#include "json_util.h"
+#include "views.h"
 
 #include <QDockWidget>
 #include <QGridLayout>
@@ -485,18 +486,18 @@ void MainWindow::decompile() {
                                  finishJob(job, false, error);
                                  return;
                              }
-                             const QJsonObject result = response.value("result").toObject();
-                             const QJsonArray tokens = result.value("tokens").toArray();
-                             QString text;
-                             text.reserve(tokens.size() * 8);
-                             for (const QJsonValue &token : tokens) {
-                                 text += token.toObject().value("text").toString();
-                             }
-                             decompiler_->setPlainText(text);
-                             finishJob(job, true,
-                                       QStringLiteral("%1 tokens, revision %2")
-                                           .arg(tokens.size())
-                                           .arg(result.value("revision").toInteger()));
+                            const QJsonObject result = response.value("result").toObject();
+                            const QJsonArray tokens = result.value("tokens").toArray();
+                            QVector<TokenView> views;
+                            views.reserve(tokens.size());
+                            for (const QJsonValue &token : tokens) {
+                                views.append(TokenView::fromJson(token.toObject()));
+                            }
+                            decompiler_->setTokens(views);
+                            finishJob(job, true,
+                                      QStringLiteral("%1 tokens, revision %2")
+                                          .arg(views.size())
+                                          .arg(result.value("revision").toInteger()));
                          });
     }
 

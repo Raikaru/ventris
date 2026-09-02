@@ -12,7 +12,10 @@ ListingCanvas::ListingCanvas(QWidget *parent) : QWidget(parent) {
 }
 
 void ListingCanvas::setRows(const QJsonArray &rows) {
-    rows_ = rows;
+    rows_.clear();
+    for (const QJsonValue &row : rows) {
+        rows_.append(ListingRowView::fromJson(row.toObject()));
+    }
     top_row_ = 0;
     update();
 }
@@ -28,12 +31,11 @@ void ListingCanvas::paintEvent(QPaintEvent *) {
     int y = metrics.ascent() + 8;
     const int visible = qMax(0, (height() - 8) / line_height);
     for (int i = 0; i < visible && top_row_ + i < rows_.size(); ++i) {
-        const QJsonObject row = rows_.at(top_row_ + i).toObject();
+        const ListingRowView &row = rows_.at(top_row_ + i);
         painter.setPen(QColor("#79b8ff"));
-        const QString address = addressText(row.value("address"));
-        painter.drawText(8, y, address.leftJustified(14, QLatin1Char(' ')));
+        painter.drawText(8, y, row.address.leftJustified(14, QLatin1Char(' ')));
         painter.setPen(QColor("#d6dee8"));
-        painter.drawText(126, y, row.value("text").toString());
+        painter.drawText(126, y, row.text);
         y += line_height;
     }
     if (rows_.isEmpty()) {

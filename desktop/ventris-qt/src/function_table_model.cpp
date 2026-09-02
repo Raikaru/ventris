@@ -28,16 +28,16 @@ QVariant FunctionTableModel::data(const QModelIndex &index, int role) const {
     if (!index.isValid() || index.row() >= rows_.size() || role != Qt::DisplayRole) {
         return {};
     }
-    const QJsonObject row = rows_.at(index.row()).toObject();
+    const FunctionRowView &view = rows_.at(index.row());
     switch (index.column()) {
     case 0:
-        return addressText(row.value("entry"));
+        return view.address;
     case 1:
-        return row.value("name").toString();
+        return view.name;
     case 2:
-        return row.value("size").toVariant().toLongLong();
+        return view.size;
     case 3:
-        return row.value("signature").toString();
+        return view.signature;
     default:
         return {};
     }
@@ -64,7 +64,7 @@ qint64 FunctionTableModel::revision() const { return revision_; }
 
 void FunctionTableModel::refresh() {
     beginResetModel();
-    rows_ = {};
+    rows_.clear();
     total_ = 0;
     revision_ = 0;
     endResetModel();
@@ -95,13 +95,16 @@ void FunctionTableModel::requestPage(bool reset) {
         const QJsonArray incoming = result.value("rows").toArray();
         if (reset) {
             beginResetModel();
-            rows_ = incoming;
+            rows_.clear();
+            for (const QJsonValue &row : incoming) {
+                rows_.append(FunctionRowView::fromJson(row.toObject()));
+            }
             endResetModel();
         } else if (!incoming.isEmpty()) {
             const int first = rows_.size();
             beginInsertRows(QModelIndex(), first, first + incoming.size() - 1);
             for (const QJsonValue &row : incoming) {
-                rows_.append(row);
+                rows_.append(FunctionRowView::fromJson(row.toObject()));
             }
             endInsertRows();
         }

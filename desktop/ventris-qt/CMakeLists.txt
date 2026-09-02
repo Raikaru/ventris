@@ -47,6 +47,7 @@ add_executable(ventris-qt
     src/function_table_model.h
     src/function_table_model.cpp
     src/json_util.h
+    src/views.h
     src/listing_canvas.h
     src/listing_canvas.cpp
     src/graph_canvas.h

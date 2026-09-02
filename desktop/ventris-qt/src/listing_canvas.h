@@ -1,5 +1,6 @@
 #pragma once
 
+#include "views.h"
 #include <QJsonArray>
 #include <QWidget>
 
@@ -21,6 +22,6 @@ protected:
     void wheelEvent(QWheelEvent *event) override;
 
 private:
-    QJsonArray rows_;
+    QVector<ListingRowView> rows_;
     int top_row_ = 0;
 };

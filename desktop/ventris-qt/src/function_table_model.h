@@ -1,6 +1,8 @@
 #pragma once
 
 #include <QAbstractTableModel>
+
+#include "views.h"
 #include <QJsonArray>
 
 #include <QCoreApplication>
@@ -39,9 +41,9 @@ private:
 
     CoreBridge *bridge_;
     QString program_;
-    QJsonArray rows_;
     qint64 total_ = 0;
     qint64 revision_ = 0;
+    QVector<FunctionRowView> rows_;
     bool loading_ = false;
     quint64 generation_ = 0;
     static constexpr qint64 page_size_ = 256;
