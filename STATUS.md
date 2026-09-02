@@ -123,6 +123,19 @@ see gate numbers below and benchmarks/reports/stage4-gate.json).
   "next entry" — capping proven bodies at 16 bytes for the final function
   of a section; now uses the end of the current map.
 
+## CORE-006: command + undo journal
+- `command_journal` table (schema v2, migrate): per-program monotonic seq,
+  kind, JSON payload/undo_payload, done flag.
+- lre-db composes command transactions: `rename_command` (rename + revision
+  bump/event + journal push, one tx) and `undo_rename` (rename back + event
+  + mark done, one tx); `journal_latest`/`journal_push`.
+- Core: `rename_command` (captures prior name for undo) + `undo_last`
+  (dispatches on kind; rename undo verified). `rename` (CLI) now goes
+  through the command path; new CLI `undo <program>`.
+- E2E: rename my_add -> undo -> add; second undo reports "nothing to undo";
+  journal shows (1, rename, done=1, payload).
+- Test `rename_command_undo_roundtrip`. 37 workspace tests.
+
 ## CORE-005: revision/event model
 - `revision_events` table (schema v2, created by migrate): every mutation is
   transactional with a revision bump + an event row (kind/detail).

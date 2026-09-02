@@ -175,6 +175,21 @@ pub struct DisasmRow {
     pub text: String,
 }
 
+/// One recorded command (CORE-006): the undoable mutation journal entry.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct JournalEntry {
+    /// Monotonic sequence within the program.
+    pub seq: u64,
+    /// Command kind: "rename" (the CORE-006 first command).
+    pub kind: String,
+    /// Command payload (JSON; kind-specific).
+    pub payload: String,
+    /// Undo payload (JSON; applied by the undo dispatcher).
+    pub undo_payload: String,
+    /// 1 once undone.
+    pub done: bool,
+}
+
 /// One durable change record: the mutation stream consumers watch
 /// (review CORE-005: every change carries a revision, and revisions are
 /// observable).

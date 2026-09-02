@@ -349,9 +349,14 @@ fn run_inner(args: &[String]) -> Result<(), String> {
             let name = args.get(4).ok_or("rename needs a new name")?.clone();
             let address = lre_model::Address::parse_ram_hex(&addr_arg)
                 .ok_or_else(|| format!("bad address: {addr_arg}"))?;
-            core.rename_function(&program, &address, &name)
+            core.rename_command(&program, &address, &name)
                 .map_err(|e| e.to_string())?;
             println!("renamed {} -> {}", address, name);
+        }
+        "undo" => {
+            let program = args.get(2).ok_or("undo needs a program name")?.clone();
+            let what = core.undo_last(&program).map_err(|e| e.to_string())?;
+            println!("{what}");
         }
         "dump-specs" => {
             let program = args.get(2).ok_or("dump-specs needs a program name")?.clone();

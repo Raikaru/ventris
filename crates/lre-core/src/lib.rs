@@ -201,11 +201,81 @@ impl Core {
     }
 
     /// Applies an analyst rename in the project store and bumps the revision.
+    /// (Direct mutation — no journal entry.)
     pub fn rename_function(&self, program: &str, entry: &lre_model::Address, name: &str) -> Result<()> {
         let id = self.db.program_id(program)?;
         self.db.rename_function(id, entry, name)?;
         Ok(())
     }
+
+    /// UNDOABLE command: rename with journal entry + captured undo state
+    /// (CORE-006). The UI and automation go through this, not raw renames.
+    pub fn rename_command(&self, program: &str, entry: &lre_model::Address, name: &str) -> Result<()> {
+        let id = self.db.program_id(program)?;
+        let old_name = self
+            .db
+            .functions(id)?
+            .into_iter()
+            .find(|f| f.entry == *entry)
+            .map(|f| f.name)
+            .ok_or_else(|| {
+                CoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("no function at {entry}"),
+                ))
+            })?;
+        self.db.rename_command(id, entry, name, &old_name)?;
+        Ok(())
+    }
+
+    /// Undoes the latest undone command, returning what it did (CORE-006).
+    pub fn undo_last(&self, program: &str) -> Result<String> {
+        let id = self.db.program_id(program)?;
+        let entry = self
+            .db
+            .journal_latest(id)?
+            .ok_or_else(|| {
+                CoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "nothing to undo",
+                ))
+            })?;
+        match entry.kind.as_str() {
+            "rename" => {
+                let undo: serde_json::Value =
+                    serde_json::from_str(&entry.undo_payload).map_err(|e| {
+                        CoreError::Io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("bad undo payload: {e}"),
+                        ))
+                    })?;
+                let entry_addr = lre_model::Address::parse_ram_hex(
+                    undo.get("entry").and_then(|v| v.as_str()).unwrap_or_default(),
+                )
+                .ok_or_else(|| {
+                    CoreError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "undo payload has no entry",
+                    ))
+                })?;
+                let old_name = undo
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                self.db.undo_rename(id, &entry_addr, &old_name, entry.seq)?;
+                Ok(format!(
+                    "undid rename seq {} ({} -> {old_name})",
+                    entry.seq, entry_addr
+                ))
+            }
+            other => Err(CoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                format!("unsupported command kind: {other}"),
+            ))),
+        }
+    }
+
     /// Imports `binary` natively (no JVM): format parse, flow discovery
     /// (in-Rust walk + SLEIGH console closure when the binary looks
     /// stripped), and store writes with native provenance.

@@ -6,8 +6,8 @@
 //! producer + upstream version so reopening never depends on the bridge.
 
 use lre_model::{
-    CommentRow, DataTypeRow, FunctionRow, ProgramId, Provenance, RevisionEvent, SymbolRow,
-    XrefRow,
+    CommentRow, DataTypeRow, FunctionRow, JournalEntry, ProgramId, Provenance, RevisionEvent,
+    SymbolRow, XrefRow,
 };
 use rusqlite::{params, Connection, Row};
 use std::path::Path;
@@ -134,6 +134,16 @@ impl ProjectDb {
              );
              CREATE INDEX IF NOT EXISTS idx_rev_events
                  ON revision_events(program_id, revision);
+
+             CREATE TABLE IF NOT EXISTS command_journal (
+                 program_id INTEGER NOT NULL REFERENCES programs(id),
+                 seq INTEGER NOT NULL,
+                 kind TEXT NOT NULL,
+                 payload TEXT NOT NULL DEFAULT '',
+                 undo_payload TEXT NOT NULL DEFAULT '',
+                 done INTEGER NOT NULL DEFAULT 0,
+                 PRIMARY KEY (program_id, seq)
+             );
              COMMIT;",
         )?;
         let v_text: String = self
@@ -510,6 +520,109 @@ impl ProjectDb {
         Ok(rows)
     }
 
+    /// UNDOABLE rename (CORE-006): rename + revision bump/event + journal
+    /// entry, all in one transaction.
+    pub fn rename_command(
+        &self,
+        program: ProgramId,
+        entry: &lre_model::Address,
+        name: &str,
+        undo_name: &str,
+    ) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        let n = tx.execute(
+            "UPDATE functions SET name = ?3 WHERE program_id = ?1 AND entry = ?2",
+            params![program.0, addr_cell(entry), name],
+        )?;
+        if n == 0 {
+            return Err(DbError::ProgramNotFound(program.0));
+        }
+        self.bump_and_record(&tx, program, "rename", name)?;
+        let payload = serde_json::json!({"entry": entry.hex(), "name": name}).to_string();
+        let undo = serde_json::json!({"entry": entry.hex(), "name": undo_name}).to_string();
+        self.journal_push(&tx, program, "rename", &payload, &undo)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Applies the undo for a rename (CORE-006): rename back + event +
+    /// journal marked done, one transaction.
+    pub fn undo_rename(
+        &self,
+        program: ProgramId,
+        entry: &lre_model::Address,
+        name: &str,
+        seq: u64,
+    ) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        let n = tx.execute(
+            "UPDATE functions SET name = ?3 WHERE program_id = ?1 AND entry = ?2",
+            params![program.0, addr_cell(entry), name],
+        )?;
+        if n == 0 {
+            return Err(DbError::ProgramNotFound(program.0));
+        }
+        self.bump_and_record(&tx, program, "rename-undo", name)?;
+        tx.execute(
+            "UPDATE command_journal SET done = 1 WHERE program_id = ?1 AND seq = ?2",
+            params![program.0, seq],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Pushes one command-journal entry (inside a transaction).
+    pub fn journal_push(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        program: ProgramId,
+        kind: &str,
+        payload: &str,
+        undo_payload: &str,
+    ) -> Result<u64> {
+        let seq: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(seq), 0) + 1 FROM command_journal WHERE program_id = ?1",
+            params![program.0],
+            |r| r.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO command_journal(program_id, seq, kind, payload, undo_payload)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![program.0, seq, kind, payload, undo_payload],
+        )?;
+        Ok(seq as u64)
+    }
+
+    /// The latest undone-able entry (done = 0), if any.
+    pub fn journal_latest(&self, program: ProgramId) -> Result<Option<JournalEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT seq, kind, payload, undo_payload, done FROM command_journal
+             WHERE program_id = ?1 AND done = 0
+             ORDER BY seq DESC LIMIT 1",
+        )?;
+        let rows = stmt
+            .query_map(params![program.0], |r| {
+                Ok(JournalEntry {
+                    seq: r.get::<_, i64>(0)? as u64,
+                    kind: r.get(1)?,
+                    payload: r.get(2)?,
+                    undo_payload: r.get(3)?,
+                    done: r.get::<_, i64>(4)? != 0,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows.into_iter().next())
+    }
+
+    /// Marks an entry undone.
+    pub fn journal_mark_done(&self, program: ProgramId, seq: u64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE command_journal SET done = 1 WHERE program_id = ?1 AND seq = ?2",
+            params![program.0, seq],
+        )?;
+        Ok(())
+    }
+
     /// Record one mutation event (inside the caller's transaction).
     fn record_event(
         &self,
@@ -700,6 +813,30 @@ mod tests {
         assert!(p3.is_empty());
         // replace bumps the revision (mutation event model: CORE-005)
         assert!(rev >= 2);
+    }
+
+    #[test]
+    fn rename_command_undo_roundtrip() {
+        let db = ProjectDb::open_in_memory().unwrap();
+        let id = db.upsert_program("p", "x86:LE:64:default", &prov()).unwrap();
+        let rows = vec![FunctionRow {
+            entry: lre_model::Address::ram(0x400000),
+            name: "FUN_00400000".into(),
+            size: 4,
+            signature: None,
+            calling_convention: None,
+        }];
+        db.replace_functions(id, &rows).unwrap();
+        db.rename_command(id, &lre_model::Address::ram(0x400000), "main", "FUN_00400000").unwrap();
+        assert_eq!(db.functions(id).unwrap()[0].name, "main");
+        let latest = db.journal_latest(id).unwrap().unwrap();
+        assert_eq!(latest.kind, "rename");
+        assert!(!latest.done);
+        assert!(latest.undo_payload.contains("FUN_00400000"));
+        db.undo_rename(id, &lre_model::Address::ram(0x400000), "FUN_00400000", latest.seq)
+            .unwrap();
+        assert_eq!(db.functions(id).unwrap()[0].name, "FUN_00400000");
+        assert!(db.journal_latest(id).unwrap().is_none(), "entry marked done");
     }
 
     #[test]
