@@ -42,6 +42,8 @@ add_custom_target(ventris-rust-bridge ALL
 
 add_executable(ventris-qt
     src/main.cpp
+    src/core_bridge.h
+    src/core_bridge.cpp
 )
 add_dependencies(ventris-qt ventris-rust-bridge)
 target_include_directories(ventris-qt PRIVATE
