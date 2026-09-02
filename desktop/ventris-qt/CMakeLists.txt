@@ -51,6 +51,8 @@ add_executable(ventris-qt
     src/listing_canvas.cpp
     src/graph_canvas.h
     src/graph_canvas.cpp
+    src/decompiler_view.h
+    src/decompiler_view.cpp
 )
 add_dependencies(ventris-qt ventris-rust-bridge)
 target_include_directories(ventris-qt PRIVATE

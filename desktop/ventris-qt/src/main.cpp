@@ -35,6 +35,7 @@
 #include "json_util.h"
 #include "listing_canvas.h"
 #include "graph_canvas.h"
+#include "decompiler_view.h"
 
 namespace {
 
@@ -135,10 +136,7 @@ public:
         functions_dock->setWidget(functions_);
         addDockWidget(Qt::LeftDockWidgetArea, functions_dock);
 
-        decompiler_ = new QPlainTextEdit(this);
-        decompiler_->setObjectName(QStringLiteral("decompilerView"));
-        decompiler_->setReadOnly(true);
-        decompiler_->setPlaceholderText(QStringLiteral("Structured decompiler document"));
+        decompiler_ = new DecompilerView(this);
         auto *decompiler_dock = new QDockWidget(QStringLiteral("Decompiler"), this);
         decompiler_dock->setObjectName(QStringLiteral("decompilerDock"));
         decompiler_dock->setWidget(decompiler_);
@@ -1472,7 +1470,7 @@ private:
     QListWidget *jobs_ = nullptr;
     ListingCanvas *listing_canvas_ = nullptr;
     GraphCanvas *graph_canvas_ = nullptr;
-    QPlainTextEdit *decompiler_ = nullptr;
+    DecompilerView *decompiler_ = nullptr;
     QLabel *status_ = nullptr;
     QPlainTextEdit *hex_view_ = nullptr;
     QLineEdit *type_name_edit_ = nullptr;
