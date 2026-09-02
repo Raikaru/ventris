@@ -269,6 +269,9 @@ impl NativeWorker {
             }
             None => {
                 encode_burst(&mut buf, burst::EXCEP_OPEN);
+                // JavaError carries TWO string streams (type, message);
+                // passJavaException writes both (ghidra_arch.cc:241-246).
+                encode_string_stream(&mut buf, b"DataUnavailError");
                 encode_string_stream(
                     &mut buf,
                     format!("GHIDRA has no data in the loadimage at {vaddr:#x}").as_bytes(),
@@ -406,6 +409,7 @@ impl NativeWorker {
             }
             None => {
                 encode_burst(&mut buf, burst::EXCEP_OPEN);
+                encode_string_stream(&mut buf, b"RuntimeException");
                 encode_string_stream(
                     &mut buf,
                     format!("No Register Defined: {name}").as_bytes(),

@@ -101,6 +101,20 @@ worker.
   pinned console (no JVM).
 - `lre-cli comments <program>` / `types <program>` — store-owned facts.
 
+## PE protocol-worker status (next item)
+- The worker decompiles the mingw x86-64 PE end-to-end mechanically
+  (registerProgram -> mappedsymbols -> getBytes -> SLEIGH self-disassembly
+  -> C) via `--base 0x140000000`.
+- Reported output differs from the expected `add(a,b)` body: the mingw
+  register/stack context answer binding is not wired (the worker's
+  getRegister answers the x86-64 table; mingw uses the MS ABI). PE content
+  parity vs the oracle is the open item; ELF parity is exact and pinned by
+  the differential.
+
+## Open items for the final gate
+- PE decompile content parity (mingw ABI register context).
+- Stripped-binary function discovery (the importer is symtab + entry +
+  call closure; no flow-based discovery yet).
 ## Known gaps / risks
 - Bridge project lock is single-writer: concurrent CLI invocations fail
   with "Unable to lock project" (Ghidra project lock); stale locks need

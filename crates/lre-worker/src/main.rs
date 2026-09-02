@@ -421,7 +421,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 6 {
         eprintln!(
-            "usage: lre-worker <ghidra_opt> <lang-dir> <binary> <program> <addr-hex> [--project DIR]"
+            "usage: lre-worker <ghidra_opt> <lang-dir> <binary> <program> <addr-hex> [--project DIR] [--base HEX]"
         );
         std::process::exit(2);
     }
@@ -429,7 +429,12 @@ fn main() {
         .position(|a| a == "--project")
         .and_then(|i| std::env::args().nth(i + 1))
         .unwrap_or_else(|| ".lre".into());
-    if let Err(e) = run(&args[1], &args[2], &args[3], &args[4], &args[5], &project) {
+    let base = std::env::args()
+        .position(|a| a == "--base")
+        .and_then(|i| std::env::args().nth(i + 1))
+        .and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok())
+        .unwrap_or(0x400000);
+    if let Err(e) = run(&args[1], &args[2], &args[3], &args[4], &args[5], &project, base) {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
@@ -442,10 +447,11 @@ fn run(
     program: &str,
     addr: &str,
     project: &str,
+    base: u64,
 ) -> Result<()> {
     let mut provider = provider::ProgramProvider::new(
         provider::BinaryBacking::from_file(Path::new(binary))?,
-        0x400000, // image base; taken from the store when the importer records it
+        base,
         Vec::new(),
     );
     provider.load_language_info(Path::new(lang_dir))?;
