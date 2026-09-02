@@ -5,6 +5,7 @@
 //! reopening and browsing never needs the JVM (spec 14.4, Phase 3 exit).
 
 pub mod bridge;
+pub mod native;
 
 use lre_db::ProjectDb;
 use lre_model::{CommentRow, DataTypeRow, DisasmRow, FunctionRow, ProgramId, ProgramSummary, SymbolRow, XrefRow};
@@ -80,6 +81,11 @@ impl Core {
             functions: functions.len() as u64,
             language: self.db.program_language(id)?,
         })
+    }
+
+    /// Borrows the project store (native-import persistence path).
+    pub fn store_handle(&self) -> Result<&ProjectDb> {
+        Ok(&self.db)
     }
 
     /// Lists functions from the project store (no JVM).

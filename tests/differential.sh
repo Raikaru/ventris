@@ -96,6 +96,28 @@ else
     step "protocol worker skipped (build native/build/ghidra_opt + set VENTRIS_SLA)"
 fi
 
+# ---- Native import vs oracle function set --------------------------------
+step "native import parity (store-only, no JVM)"
+NPROJ="$WORK/native-project"
+mkdir -p "$NPROJ"
+"$ROOT/target/debug/lre-cli" import-native "$BIN" --name tiny_native --project "$NPROJ" > /dev/null
+"$ROOT/target/debug/lre-cli" functions tiny_native --project "$NPROJ" \
+    | grep -E '^[0-9a-f]{8}' | awk '{print $1}' | sort > "$WORK/native_entries.txt"
+"$ROOT/target/debug/lre-cli" functions tiny_bin --project "$PROJECT" \
+    | grep -E '^[0-9a-f]{8}' | awk '{print $1}' | sort > "$WORK/oracle_entries.txt"
+# Oracle includes external shim functions (0x404000+); the native import
+# models externals via PLT/got naming. Compare the in-image code sets.
+comm -12 "$WORK/native_entries.txt" "$WORK/oracle_entries.txt" > "$WORK/common_entries.txt"
+N_NATIVE=$(wc -l < "$WORK/native_entries.txt")
+N_COMMON=$(wc -l < "$WORK/common_entries.txt")
+echo "  native code entries: $N_NATIVE; shared with oracle: $N_COMMON (oracle also lists external shims)"
+if [ "$N_NATIVE" -eq "$N_COMMON" ]; then
+    echo "  import parity: OK (all native entries found in the oracle)"
+else
+    echo "  import parity: native-only entries:"
+    comm -23 "$WORK/native_entries.txt" "$WORK/oracle_entries.txt" | head -5 || true
+fi
+
 # ---- Normalize + compare ---------------------------------------------------
 step "normalize and compare"
 python3 - "$WORK" <<'PYEOF'

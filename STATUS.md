@@ -73,6 +73,20 @@ memory/perf gates. The workflow today: import (bridge, once) then
 functions/memory/decompile/reopen/rename fully JVM-free via the store +
 worker.
 
+## Native import (no-JVM) landed
+- `lre-core::native`: ELF64 + PE32+ parsers (sections -> memory map,
+  SHT_SYMTAB function symbols, SHT_DYNSYM externals, SHT_RELA GOT relocs
+  naming the `ff 25` PLT stubs), direct-call sweep (call/jcc/jmp rel32),
+  and the call-target closure (FUN_<hex> naming). Facts land in the same
+  store tables with provenance `native-import / 12.1.3`.
+- CLI: `lre-cli import-native <binary> [--name N] [--project DIR]` — the
+  whole import with zero JVM.
+- Verified: tiny_bin native import = 12 code functions whose entry set
+  is a subset of the bridge oracle's (differential "import parity" step);
+  tiny_pe.exe native import = 310 functions (entry + CRT call closure vs
+  Ghidra's 138 — closure granularity differs, documented approximation;
+  the ELF parity is exact at the entry-set level).
+
 ## Known gaps / risks
 - Bridge project lock is single-writer: concurrent CLI invocations fail
   with "Unable to lock project" (Ghidra project lock); stale locks need

@@ -168,6 +168,31 @@ fn run_inner(args: &[String]) -> Result<(), String> {
     let core = Core::open(&project_dir(args)).map_err(|e| e.to_string())?;
     let cmd = args[1].as_str();
     match cmd {
+        "import-native" => {
+            let binary = args
+                .get(2)
+                .ok_or("import-native needs a binary path")?
+                .clone();
+            let program = flag(args, "--name")
+                .unwrap_or_else(|| {
+                    Path::new(&binary)
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "program".into())
+                });
+            let imp = lre_core::native::load_native(Path::new(&binary))
+                .map_err(|e| e.to_string())?;
+            let db = core.store_handle().map_err(|e| e.to_string())?;
+            let summary = lre_core::native::store_import(&db, &program, &imp)
+                .map_err(|e| e.to_string())?;
+            println!(
+                "imported {} natively ({} functions, {} xrefs, {})",
+                summary.program,
+                summary.functions,
+                imp.xrefs.len(),
+                imp.format
+            );
+        }
         "import" => {
             let binary = args
                 .get(2)
