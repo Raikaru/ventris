@@ -168,6 +168,67 @@ fn run_inner(args: &[String]) -> Result<(), String> {
     let core = Core::open(&project_dir(args)).map_err(|e| e.to_string())?;
     let cmd = args[1].as_str();
     match cmd {
+        "disasm-native" => {
+            let binary = args.get(2).ok_or("disasm-native needs a binary path")?.clone();
+            let addr = args.get(3).ok_or("disasm-native needs a vaddr (hex)")?.clone();
+            let console = std::env::var("VENTRIS_CONSOLE")
+                .unwrap_or_else(|_| "/tmp/spike/decomp_native".into());
+            let ghroot = std::env::var("VENTRIS_GHROOT")
+                .unwrap_or_else(|_| "/tmp/spike/ghroot".into());
+            let langs = std::env::var("VENTRIS_LANGS")
+                .unwrap_or_else(|_| "/tmp/spike/langs".into());
+            use std::io::Write as _;
+            let mut child = std::process::Command::new(&console)
+                .arg("-s")
+                .arg(&langs)
+                .env("SLEIGHHOME", &ghroot)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .map_err(|e| e.to_string())?;
+            let mut stdin = child.stdin.take().unwrap();
+            let script = format!(
+                "load file x86:LE:64:default {binary}\nadjust vma 0x400000\nmap function {addr} func\nload function func\ndisassemble\n"
+            );
+            stdin.write_all(script.as_bytes()).map_err(|e| e.to_string())?;
+            drop(stdin);
+            let out = child.wait_with_output().map_err(|e| e.to_string())?;
+            let text = String::from_utf8_lossy(&out.stdout);
+            for line in text.lines() {
+                if line.trim_start().starts_with(|c: char| c.is_ascii_hexdigit() || c == ':') {
+                    println!("{line}");
+                }
+            }
+        }
+        "mem" => {
+            let binary = args.get(2).ok_or("mem needs a binary path")?.clone();
+            let vaddr = u64::from_str_radix(
+                args.get(3).ok_or("mem needs a vaddr (hex)")?,
+                16,
+            )
+            .map_err(|e| e.to_string())?;
+            let size: usize = args
+                .get(4)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(32);
+            let imp = lre_core::native::load_native(Path::new(&binary))
+                .map_err(|e| e.to_string())?;
+            let mut found = false;
+            for m in &imp.mappings {
+                if vaddr >= m.vaddr && vaddr + size as u64 <= m.vaddr + m.size {
+                    let off = (vaddr - m.vaddr) as usize;
+                    for b in &m.bytes[off..off + size] {
+                        print!("{b:02x} ");
+                    }
+                    println!();
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                return Err(format!("no mapping covers {vaddr:#x}..+{size:#x}"));
+            }
+        }
         "import-native" => {
             let binary = args
                 .get(2)

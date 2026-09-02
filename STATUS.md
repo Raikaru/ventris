@@ -87,6 +87,20 @@ worker.
   Ghidra's 138 — closure granularity differs, documented approximation;
   the ELF parity is exact at the entry-set level).
 
+## Memory measurement (ADR-0001 target: beat 375 MiB stock)
+- Protocol worker run (register + setAction + decompileAt on the x86-64
+  ELF fixture, VENTRIS_SLA self-disassembling build):
+  peak RSS 39.5 MB — **9.5× under the 375 MiB stock-Ghidra baseline**.
+- The native console path and the store-only workflows stay in the same
+  order of magnitude (no JVM in any no-JVM path).
+
+## JVM-free workflow CLI (added this phase)
+- `lre-cli import-native <binary> [--name N]` — ELF/PE -> store, no JVM.
+- `lre-cli mem <binary> <vaddr> <size>` — mapping-backed memory dump.
+- `lre-cli disasm-native <binary> <addr>` — SLEIGH disassembly via the
+  pinned console (no JVM).
+- `lre-cli comments <program>` / `types <program>` — store-owned facts.
+
 ## Known gaps / risks
 - Bridge project lock is single-writer: concurrent CLI invocations fail
   with "Unable to lock project" (Ghidra project lock); stale locks need
