@@ -183,59 +183,6 @@ MainWindow::MainWindow(const QString &project, const QString &program, const QSt
         analyst_dock->setWidget(analyst_tabs);
         addDockWidget(Qt::LeftDockWidgetArea, analyst_dock);
 
-        trace_events_ = new QTableWidget(0, 7, this);
-        trace_events_->setObjectName(QStringLiteral("traceTimelineView"));
-        trace_events_->setHorizontalHeaderLabels(
-            {QStringLiteral("Seq"), QStringLiteral("At"), QStringLiteral("Thread"),
-             QStringLiteral("Address"), QStringLiteral("Kind"), QStringLiteral("Payload"),
-             QStringLiteral("Provenance")});
-        trace_events_->horizontalHeader()->setStretchLastSection(true);
-        trace_events_->verticalHeader()->setVisible(false);
-        auto *trace_dock = new QDockWidget(QStringLiteral("Trace timeline"), this);
-        trace_dock->setObjectName(QStringLiteral("traceTimelineDock"));
-        trace_dock->setWidget(trace_events_);
-        addDockWidget(Qt::BottomDockWidgetArea, trace_dock);
-
-        auto *collab_panel = new QWidget(this);
-        auto *collab_layout = new QVBoxLayout(collab_panel);
-        auto *collab_editor = new QGridLayout();
-        actor_edit_ = new QLineEdit(QStringLiteral("local"), collab_panel);
-        op_id_edit_ = new QLineEdit(collab_panel);
-        lamport_edit_ = new QLineEdit(QStringLiteral("1"), collab_panel);
-        collab_kind_edit_ = new QLineEdit(QStringLiteral("note"), collab_panel);
-        collab_payload_edit_ = new QLineEdit(QStringLiteral("{}"), collab_panel);
-        collab_editor->addWidget(new QLabel(QStringLiteral("Actor"), collab_panel), 0, 0);
-        collab_editor->addWidget(actor_edit_, 0, 1);
-        collab_editor->addWidget(new QLabel(QStringLiteral("Operation id"), collab_panel), 1, 0);
-        collab_editor->addWidget(op_id_edit_, 1, 1);
-        collab_editor->addWidget(new QLabel(QStringLiteral("Lamport"), collab_panel), 2, 0);
-        collab_editor->addWidget(lamport_edit_, 2, 1);
-        collab_editor->addWidget(new QLabel(QStringLiteral("Kind"), collab_panel), 3, 0);
-        collab_editor->addWidget(collab_kind_edit_, 3, 1);
-        collab_editor->addWidget(new QLabel(QStringLiteral("Payload"), collab_panel), 4, 0);
-        collab_editor->addWidget(collab_payload_edit_, 4, 1);
-        auto *collab_actions = new QHBoxLayout();
-        auto *append_collab = new QPushButton(QStringLiteral("Append operation"), collab_panel);
-        auto *apply_collab = new QPushButton(QStringLiteral("Apply selected"), collab_panel);
-        auto *refresh_collab = new QPushButton(QStringLiteral("Refresh"), collab_panel);
-        collab_actions->addWidget(append_collab);
-        collab_actions->addWidget(apply_collab);
-        collab_actions->addWidget(refresh_collab);
-        collab_ops_ = new QTableWidget(0, 7, collab_panel);
-        collab_ops_->setObjectName(QStringLiteral("collaborationOpsView"));
-        collab_ops_->setHorizontalHeaderLabels(
-            {QStringLiteral("Operation"), QStringLiteral("Actor"), QStringLiteral("Lamport"),
-             QStringLiteral("Kind"), QStringLiteral("Payload"), QStringLiteral("Applied"),
-             QStringLiteral("Provenance")});
-        collab_ops_->horizontalHeader()->setStretchLastSection(true);
-        collab_ops_->verticalHeader()->setVisible(false);
-        collab_layout->addLayout(collab_editor);
-        collab_layout->addLayout(collab_actions);
-        collab_layout->addWidget(collab_ops_, 1);
-        auto *collab_dock = new QDockWidget(QStringLiteral("Collaboration"), this);
-        collab_dock->setObjectName(QStringLiteral("collaborationDock"));
-        collab_dock->setWidget(collab_panel);
-        addDockWidget(Qt::RightDockWidgetArea, collab_dock);
         auto *type_panel = new QWidget(this);
         auto *type_layout = new QVBoxLayout(type_panel);
         auto *type_editor = new QGridLayout();
@@ -387,15 +334,6 @@ MainWindow::MainWindow(const QString &project, const QString &program, const QSt
         connect(save_prototype, &QPushButton::clicked, this, &MainWindow::savePrototype);
         connect(save_stack, &QPushButton::clicked, this, &MainWindow::saveStackVariable);
         connect(propagate, &QPushButton::clicked, this, &MainWindow::propagateTypes);
-        connect(append_collab, &QPushButton::clicked, this, &MainWindow::appendCollaboration);
-        connect(apply_collab, &QPushButton::clicked, this, &MainWindow::applyCollaboration);
-        connect(refresh_collab, &QPushButton::clicked, this, &MainWindow::loadCollaboration);
-        connect(collab_ops_, &QTableWidget::cellClicked, this,
-                [this](int row, int) {
-                    if (auto *item = collab_ops_->item(row, 0)) {
-                        op_id_edit_->setText(item->text());
-                    }
-                });
         connect(forward, &QPushButton::clicked, navigation_, &NavigationController::forward);
         connect(decompile, &QPushButton::clicked, this, &MainWindow::decompile);
         connect(listing, &QPushButton::clicked, this, &MainWindow::loadListing);
@@ -436,8 +374,6 @@ MainWindow::MainWindow(const QString &project, const QString &program, const QSt
             loadGraph();
             loadAnalystData();
             loadTypes();
-            loadTrace();
-            loadCollaboration();
         });
         if (!bridge_->startupError().isEmpty()) {
             setStatus(bridge_->startupError(), true);
@@ -831,155 +767,6 @@ void MainWindow::setPatch() {
             });
     }
 
-void MainWindow::loadTrace() {
-        const int job = beginJob(QStringLiteral("trace timeline"));
-        bridge_->request(QJsonObject{{"method", "trace_events"},
-                                     {"program", program_edit_->text()},
-                                     {"since", 0},
-                                     {"limit", 256}},
-                         [this, job](const QJsonObject &response) {
-                             QString error;
-                             if (!successful(response, &error)) {
-                                 finishJob(job, false, error);
-                                 return;
-                             }
-                             const QJsonArray rows = response.value("result").toArray();
-                             trace_events_->setRowCount(0);
-                             for (const QJsonValue &value : rows) {
-                                 const QJsonObject row = value.toObject();
-                                 const int index = trace_events_->rowCount();
-                                 trace_events_->insertRow(index);
-                                 trace_events_->setItem(
-                                     index, 0,
-                                     new QTableWidgetItem(
-                                         QString::number(row.value("sequence").toInteger())));
-                                 trace_events_->setItem(
-                                     index, 1,
-                                     new QTableWidgetItem(row.value("at").toString()));
-                                 trace_events_->setItem(
-                                     index, 2,
-                                     new QTableWidgetItem(row.value("thread").toString()));
-                                 trace_events_->setItem(
-                                     index, 3,
-                                     new QTableWidgetItem(addressText(row.value("address"))));
-                                 trace_events_->setItem(
-                                     index, 4,
-                                     new QTableWidgetItem(row.value("kind").toString()));
-                                 trace_events_->setItem(
-                                     index, 5,
-                                     new QTableWidgetItem(row.value("payload").toString()));
-                                 trace_events_->setItem(
-                                     index, 6,
-                                     new QTableWidgetItem(row.value("provenance").toString()));
-                             }
-                             finishJob(job, true,
-                                       QStringLiteral("%1 trace events").arg(rows.size()));
-                         });
-    }
-void MainWindow::loadCollaboration() {
-        const int job = beginJob(QStringLiteral("collaboration"));
-        bridge_->request(QJsonObject{{"method", "collab_ops"},
-                                     {"program", program_edit_->text()}},
-                         [this, job](const QJsonObject &response) {
-                             QString error;
-                             if (!successful(response, &error)) {
-                                 finishJob(job, false, error);
-                                 return;
-                             }
-                             const QJsonArray rows = response.value("result").toArray();
-                             collab_ops_->setRowCount(0);
-                             for (const QJsonValue &value : rows) {
-                                 const QJsonObject row = value.toObject();
-                                 const int index = collab_ops_->rowCount();
-                                 collab_ops_->insertRow(index);
-                                 collab_ops_->setItem(
-                                     index, 0,
-                                     new QTableWidgetItem(row.value("op_id").toString()));
-                                 collab_ops_->setItem(
-                                     index, 1,
-                                     new QTableWidgetItem(row.value("actor").toString()));
-                                 collab_ops_->setItem(
-                                     index, 2,
-                                     new QTableWidgetItem(
-                                         QString::number(row.value("lamport").toInteger())));
-                                 collab_ops_->setItem(
-                                     index, 3,
-                                     new QTableWidgetItem(row.value("kind").toString()));
-                                 collab_ops_->setItem(
-                                     index, 4,
-                                     new QTableWidgetItem(row.value("payload").toString()));
-                                 collab_ops_->setItem(
-                                     index, 5,
-                                     new QTableWidgetItem(
-                                         row.value("applied").toBool() ? "yes" : "no"));
-                                 collab_ops_->setItem(
-                                     index, 6,
-                                     new QTableWidgetItem(row.value("provenance").toString()));
-                             }
-                             finishJob(job, true,
-                                       QStringLiteral("%1 collaboration operations")
-                                           .arg(rows.size()));
-                         });
-    }
-
-void MainWindow::appendCollaboration() {
-        if (actor_edit_->text().trimmed().isEmpty() ||
-            op_id_edit_->text().trimmed().isEmpty() ||
-            collab_kind_edit_->text().trimmed().isEmpty()) {
-            setStatus(QStringLiteral("actor, operation id, and kind are required"), true);
-            return;
-        }
-        bool ok = false;
-        const qulonglong lamport = lamport_edit_->text().toULongLong(&ok, 0);
-        if (!ok) {
-            setStatus(QStringLiteral("lamport must be an unsigned integer"), true);
-            return;
-        }
-        const int job = beginJob(QStringLiteral("append collaboration operation"));
-        bridge_->request(
-            QJsonObject{
-                {"method", "append_collab_op"},
-                {"program", program_edit_->text()},
-                {"operation",
-                 QJsonObject{
-                     {"op_id", op_id_edit_->text()},
-                     {"actor", actor_edit_->text()},
-                     {"lamport", static_cast<qint64>(lamport)},
-                     {"kind", collab_kind_edit_->text()},
-                     {"payload", collab_payload_edit_->text()},
-                     {"applied", false},
-                     {"provenance", QStringLiteral("ui:%1").arg(actor_edit_->text())}}}},
-            [this, job](const QJsonObject &response) {
-                QString error;
-                if (!successful(response, &error)) {
-                    finishJob(job, false, error);
-                    return;
-                }
-                loadCollaboration();
-                finishJob(job, true, QStringLiteral("collaboration operation stored"));
-            });
-    }
-
-void MainWindow::applyCollaboration() {
-        const QString op_id = op_id_edit_->text().trimmed();
-        if (op_id.isEmpty()) {
-            setStatus(QStringLiteral("select or enter an operation id"), true);
-            return;
-        }
-        const int job = beginJob(QStringLiteral("apply collaboration operation"));
-        bridge_->request(QJsonObject{{"method", "apply_collab_op"},
-                                     {"program", program_edit_->text()},
-                                     {"op_id", op_id}},
-                         [this, job](const QJsonObject &response) {
-                             QString error;
-                             if (!successful(response, &error)) {
-                                 finishJob(job, false, error);
-                                 return;
-                             }
-                             loadCollaboration();
-                             finishJob(job, true, QStringLiteral("collaboration operation applied"));
-                         });
-    }
 
 void MainWindow::loadTypes() {
         const QString program = program_edit_->text();

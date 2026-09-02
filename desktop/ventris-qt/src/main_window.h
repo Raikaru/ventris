@@ -41,10 +41,6 @@ private slots:
     void loadAnalystData();
     void setBookmark();
     void setPatch();
-    void loadTrace();
-    void loadCollaboration();
-    void appendCollaboration();
-    void applyCollaboration();
     void loadTypes();
     void saveTypeDefinition();
     void saveTypeField();
@@ -78,11 +74,6 @@ private:
     QLineEdit *bookmark_edit_ = nullptr;
     QLineEdit *patch_original_edit_ = nullptr;
     QLineEdit *patch_new_edit_ = nullptr;
-    QLineEdit *actor_edit_ = nullptr;
-    QLineEdit *op_id_edit_ = nullptr;
-    QLineEdit *lamport_edit_ = nullptr;
-    QLineEdit *collab_kind_edit_ = nullptr;
-    QLineEdit *collab_payload_edit_ = nullptr;
     QTableView *functions_ = nullptr;
     FunctionTableModel *function_model_ = nullptr;
     QTableWidget *xrefs_ = nullptr;
@@ -92,8 +83,6 @@ private:
     QTableWidget *memory_regions_ = nullptr;
     QTableWidget *bookmarks_ = nullptr;
     QTableWidget *patches_ = nullptr;
-    QTableWidget *trace_events_ = nullptr;
-    QTableWidget *collab_ops_ = nullptr;
     QListWidget *jobs_ = nullptr;
     ListingCanvas *listing_canvas_ = nullptr;
     GraphCanvas *graph_canvas_ = nullptr;

@@ -73,12 +73,10 @@ Addresses arrive either as hex strings or as `{"offset": <int>}` objects
 
 ## Trace and collaboration (experimental docks)
 
-| Method | Request | Result |
-| --- | --- | --- |
-| `trace_events` | `program`, `since`, `limit` | `[TraceEvent]`: `sequence`, `at`, `thread`, `address?`, `kind`, `payload`, `provenance` |
-| `collab_ops` | `program` | `[CollaborationOp]`: `op_id`, `actor`, `lamport`, `kind`, `payload`, `applied`, `provenance` |
-| `append_collab_op` | `program`, `operation {op_id, actor, lamport, kind, payload, applied, provenance}` | `{"op_id", "inserted"}` |
-| `apply_collab_op` | `program`, `op_id` | `{"op_id", "applied"}` |
+`trace_events`, `collab_ops`, `append_collab_op`, and `apply_collab_op`
+are not called from main: the Trace timeline and Collaboration docks
+live on the `surfaces/experimental` branch and return only with a user
+story and a phase of their own. The bridge methods remain available.
 
 ## Types
 
