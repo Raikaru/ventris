@@ -16,3 +16,7 @@ lre-core = { path = "../lre-core" }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[lib]
+name = "lre_worker"
+path = "src/lib.rs"
