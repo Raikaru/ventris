@@ -8,6 +8,7 @@ class DecompilerView;
 class FunctionTableModel;
 class GraphCanvas;
 class ListingCanvas;
+class NavigationController;
 class QLabel;
 class QLineEdit;
 class QListWidget;
@@ -53,11 +54,8 @@ private slots:
     void renameFunction();
     void applyComment();
     void undoCommand();
-    void goBack();
-    void goForward();
 
 private:
-    void navigate(const QString &address, bool record);
     int beginJob(const QString &label);
     void finishJob(int index, bool ok, const QString &detail);
     void setStatus(const QString &message, bool error = false);
@@ -68,8 +66,7 @@ private:
     QString program_;
     QString binary_;
     QString address_;
-    QStringList history_;
-    int history_index_ = -1;
+    NavigationController *navigation_;
     QLineEdit *project_edit_ = nullptr;
     QLineEdit *program_edit_ = nullptr;
     QLineEdit *binary_edit_ = nullptr;

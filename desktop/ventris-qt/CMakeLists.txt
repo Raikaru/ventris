@@ -54,6 +54,8 @@ add_executable(ventris-qt
     src/graph_canvas.cpp
     src/decompiler_view.h
     src/decompiler_view.cpp
+    src/navigation_controller.h
+    src/navigation_controller.cpp
     src/main_window.h
     src/main_window.cpp
 )

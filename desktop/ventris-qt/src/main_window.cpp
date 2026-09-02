@@ -5,6 +5,7 @@
 #include "function_table_model.h"
 #include "graph_canvas.h"
 #include "listing_canvas.h"
+#include "navigation_controller.h"
 #include "json_util.h"
 #include "views.h"
 
@@ -365,10 +366,22 @@ MainWindow::MainWindow(const QString &project, const QString &program, const QSt
         jobs_dock->setWidget(jobs_);
         addDockWidget(Qt::BottomDockWidgetArea, jobs_dock);
 
+        navigation_ = new NavigationController(this);
+        connect(navigation_, &NavigationController::addressChanged, this,
+                [this](const QString &address) {
+                    address_edit_->setText(address);
+                    this->decompile();
+                    loadListing();
+                    loadXrefs();
+                });
+        connect(navigation_, &NavigationController::historyChanged, back,
+                &QPushButton::setEnabled);
+        connect(navigation_, &NavigationController::historyChanged, forward,
+                &QPushButton::setEnabled);
         connect(import, &QPushButton::clicked, this, &MainWindow::importNative);
         connect(open, &QPushButton::clicked, this, &MainWindow::openProgram);
         connect(refresh, &QPushButton::clicked, function_model_, &FunctionTableModel::refresh);
-        connect(back, &QPushButton::clicked, this, &MainWindow::goBack);
+        connect(back, &QPushButton::clicked, navigation_, &NavigationController::back);
         connect(save_type, &QPushButton::clicked, this, &MainWindow::saveTypeDefinition);
         connect(save_field, &QPushButton::clicked, this, &MainWindow::saveTypeField);
         connect(save_prototype, &QPushButton::clicked, this, &MainWindow::savePrototype);
@@ -383,7 +396,7 @@ MainWindow::MainWindow(const QString &project, const QString &program, const QSt
                         op_id_edit_->setText(item->text());
                     }
                 });
-        connect(forward, &QPushButton::clicked, this, &MainWindow::goForward);
+        connect(forward, &QPushButton::clicked, navigation_, &NavigationController::forward);
         connect(decompile, &QPushButton::clicked, this, &MainWindow::decompile);
         connect(listing, &QPushButton::clicked, this, &MainWindow::loadListing);
         connect(xref, &QPushButton::clicked, this, &MainWindow::loadXrefs);
@@ -396,11 +409,11 @@ MainWindow::MainWindow(const QString &project, const QString &program, const QSt
         connect(memory_regions_, &QTableWidget::cellClicked, this,
                 [this](int row, int) {
                     if (auto *item = memory_regions_->item(row, 1)) {
-                        navigate(item->text(), true);
+                        navigation_->goTo(item->text(), true);
                     }
                 });
         connect(address_edit_, &QLineEdit::returnPressed, this, [this]() {
-            navigate(address_edit_->text(), true);
+            navigation_->goTo(address_edit_->text(), true);
         });
         connect(functions_, &QTableView::clicked, this, [this](const QModelIndex &index) {
             if (!index.isValid()) {
@@ -410,7 +423,7 @@ MainWindow::MainWindow(const QString &project, const QString &program, const QSt
                 function_model_->data(function_model_->index(index.row(), 0)).toString();
             name_edit_->setText(
                 function_model_->data(function_model_->index(index.row(), 1)).toString());
-            navigate(address, true);
+            navigation_->goTo(address, true);
         });
         connect(function_model_, &FunctionTableModel::requestError, this,
                 [this](const QString &message) { setStatus(message, true); });
@@ -430,6 +443,7 @@ MainWindow::MainWindow(const QString &project, const QString &program, const QSt
             setStatus(bridge_->startupError(), true);
         } else if (!program_.isEmpty()) {
             function_model_->setProgram(program_);
+            navigation_->setProgram(program_);
         }
         restoreWorkspace();
     }
@@ -456,6 +470,7 @@ void MainWindow::importNative() {
                              }
                              finishJob(job, true, QStringLiteral("imported %1").arg(program));
                              function_model_->setProgram(program);
+                             navigation_->setProgram(program);
                          });
     }
 
@@ -471,6 +486,7 @@ void MainWindow::openProgram() {
                              }
                              finishJob(job, true, QStringLiteral("opened %1").arg(program));
                              function_model_->setProgram(program);
+                             navigation_->setProgram(program);
                          });
     }
 
@@ -1341,42 +1357,6 @@ void MainWindow::undoCommand() {
                              finishJob(job, true,
                                        response.value("result").toObject().value("message").toString());
                          });
-    }
-
-void MainWindow::goBack() {
-        if (history_index_ <= 0) {
-            return;
-        }
-        --history_index_;
-        navigate(history_.at(history_index_), false);
-    }
-
-void MainWindow::goForward() {
-        if (history_index_ + 1 >= history_.size()) {
-            return;
-        }
-        ++history_index_;
-        navigate(history_.at(history_index_), false);
-    }
-
-// private:
-void MainWindow::navigate(const QString &address, bool record) {
-        if (address.isEmpty()) {
-            return;
-        }
-        if (record) {
-            while (history_.size() > history_index_ + 1) {
-                history_.removeLast();
-            }
-            if (history_.isEmpty() || history_.last() != address) {
-                history_.append(address);
-            }
-            history_index_ = history_.size() - 1;
-        }
-        address_edit_->setText(address);
-        decompile();
-        loadListing();
-        loadXrefs();
     }
 
 int MainWindow::beginJob(const QString &label) {
