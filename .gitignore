@@ -26,5 +26,14 @@ err
 .DS_Store
 Thumbs.db
 
-# Extracted Ghidra Java sources, a local reference (tools/java_sources.py)
-.ghidra-java/
+
+# Native build outputs (regenerable: native/build_ghidra_opt.sh)
+/native/build/
+third_party/ghidra/decompiler/com_opt/
+third_party/ghidra/decompiler/ghi_opt/
+third_party/ghidra/decompiler/sla_opt/
+third_party/ghidra/decompiler/ghidra_opt
+third_party/ghidra/decompiler/sleigh_opt
+
+# Local analysis caches
+.lre/
