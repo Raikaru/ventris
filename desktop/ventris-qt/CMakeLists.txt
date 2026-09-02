@@ -49,6 +49,8 @@ add_executable(ventris-qt
     src/json_util.h
     src/listing_canvas.h
     src/listing_canvas.cpp
+    src/graph_canvas.h
+    src/graph_canvas.cpp
 )
 add_dependencies(ventris-qt ventris-rust-bridge)
 target_include_directories(ventris-qt PRIVATE
