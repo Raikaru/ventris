@@ -107,6 +107,39 @@ see gate numbers below and benchmarks/reports/stage4-gate.json).
   11/11; stripped CLI discovery 7/7 subsets of the oracle; add/main
   semantic parity.
 
+## Post-review hardening (facade contract + real-binary evidence)
+- Native paths moved into the Core facade (review: "a GUI can't reuse the
+  native decompile/disasm without copying lre-cli's spawn logic"): new
+  `lre-core::native_runtime` + `Core::{import_native, disasm_native,
+  decompile_native, mem_native}`; lre-cli is now a thin delegate (same
+  methods a GUI consumes). `decompile-native` validates VENTRIS_SLA
+  existence — a missing .sla used to surface as a silent "no architecture
+  registered" decompiler exception.
+- Typed address accessors on the model rows (FunctionRow::entry_addr,
+  XrefRow::{to_addr, from_addr}, Address::parse_ram_hex/hex) — the storage
+  stays canonical hex strings, consumers get typed values.
+- Durable-store dedupe: replace_functions/symbols/xrefs now dedupe within
+  a batch — libc's versioned exporter aliases (memcpy/__GI_memcpy broke
+  the UNIQUE index on the bridge import of libc.so.6).
+- **Real-binary sample (`/usr/lib64/libc.so.6`, 2.48 MB, stripped)**:
+  native import recovers 3,999 functions in 0.54 s (dynsym exports +
+  init/fini arrays + flow closure; no console rounds); the Ghidra-oracle
+  bridge import recovers 3,987 in ~2 min — count parity within 0.3%.
+  Same-function decompile (`asprintf`): native and oracle both produce
+  the full 1.4 KB C bodystructurally; the delta is naming/type knowledge
+  (oracle: `__ptr`/`__fmt`/`iVar1` from libc type info; native: generic
+  `param_N`/stack names). That is exactly the analysis-depth trade the
+  review called: the native path brings no Ghidra knowledge, only the
+  same decompiler.
+- **Address-base note**: Ghidra rebases ET_DYN imports to image base
+  0x100000 (asprintf at 0x135b40) while the native import is zero-based
+  (0x35b40) — same bytes, different space convention; document for
+  cross-tool comparisons.
+- Environment: the SLEIGH console (native/build_console.sh) needs
+  binutils-devel (bfd.h) which is not installed here; console-dependent
+  test steps are skipped with an explicit note, worker/CLI parity runs
+  unconditionally.
+
 ## Native import (no-JVM) landed
 - `lre-core::native`: ELF64 + PE32+ parsers (sections -> memory map,
   SHT_SYMTAB function symbols, SHT_DYNSYM externals, SHT_RELA GOT relocs

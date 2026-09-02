@@ -179,7 +179,11 @@ impl ProjectDb {
             "INSERT INTO functions(program_id, entry, name, size, signature, calling_convention)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )?;
+        let mut seen = std::collections::HashSet::new();
         for r in rows {
+            if !seen.insert(r.entry.clone()) {
+                continue;
+            }
             stmt.execute(params![
                 program.0,
                 r.entry,
@@ -202,7 +206,14 @@ impl ProjectDb {
             "INSERT INTO symbols(program_id, address, name, external, source)
              VALUES (?1, ?2, ?3, ?4, ?5)",
         )?;
+        // Real binaries (libc) repeat (address, name) pairs — versioned
+        // exporters alias the same entry; dedupe within the batch or the
+        // UNIQUE index aborts the whole replace.
+        let mut seen = std::collections::HashSet::new();
         for r in rows {
+            if !seen.insert((r.address.clone(), r.name.clone())) {
+                continue;
+            }
             stmt.execute(params![program.0, r.address, r.name, r.external as i64, r.source])?;
         }
         drop(stmt);
@@ -216,7 +227,11 @@ impl ProjectDb {
         tx.execute("DELETE FROM xrefs WHERE program_id = ?1", params![program.0])?;
         let mut stmt = tx
             .prepare("INSERT INTO xrefs(program_id, src, dst, kind) VALUES (?1, ?2, ?3, ?4)")?;
+        let mut seen = std::collections::HashSet::new();
         for r in rows {
+            if !seen.insert((r.from.clone(), r.to.clone(), r.kind.clone())) {
+                continue;
+            }
             stmt.execute(params![program.0, r.from, r.to, r.kind])?;
         }
         drop(stmt);

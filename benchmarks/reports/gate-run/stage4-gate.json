@@ -1,0 +1,30 @@
+{
+  "workflow": [
+    "import-native",
+    "functions",
+    "xrefs",
+    "rename",
+    "open",
+    "disasm-native",
+    "decompile-native"
+  ],
+  "runs": [
+    {
+      "run": 1,
+      "wall_s": 0.28,
+      "import_kb": 5448,
+      "disasm_kb": 39632,
+      "decompile_kb": 39020
+    }
+  ],
+  "median_wall_s": 0.28,
+  "peak_import_kb": 5448,
+  "peak_disasm_kb": 39632,
+  "peak_decompile_kb": 39020,
+  "gates": {
+    "peak_kb": 100000,
+    "wall_s": 120.0,
+    "stock_ghidra_baseline_kb": 384000
+  },
+  "pass": true
+}

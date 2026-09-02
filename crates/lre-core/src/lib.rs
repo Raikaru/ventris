@@ -7,6 +7,7 @@
 pub mod bridge;
 pub mod disasm;
 pub mod native;
+pub mod native_runtime;
 
 use lre_db::ProjectDb;
 use lre_model::{CommentRow, DataTypeRow, DisasmRow, FunctionRow, ProgramId, ProgramSummary, SymbolRow, XrefRow};
@@ -24,6 +25,12 @@ pub enum CoreError {
     /// Filesystem or environment problem outside db/bridge.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    /// Native runtime (console, worker) or setup failure.
+    #[error("native runtime: {0}")]
+    NativeRuntime(#[from] native_runtime::NativeRuntimeError),
+    /// Native import/parse failure.
+    #[error("native: {0}")]
+    Native(#[from] native::ImportError),
 }
 
 /// Convenience alias with the error defaulted per project convention.
@@ -130,6 +137,81 @@ impl Core {
         let id = self.db.program_id(program)?;
         self.db.rename_function(id, entry, name)?;
         Ok(())
+    }
+    /// Imports `binary` natively (no JVM): format parse, flow discovery
+    /// (in-Rust walk + SLEIGH console closure when the binary looks
+    /// stripped), and store writes with native provenance.
+    pub fn import_native(&self, binary: &Path, name: &str) -> Result<ProgramSummary> {
+        let mut imp = native::load_native(binary)?;
+        let wants_flow = imp.functions.iter().filter(|f| !f.name.starts_with('_')).count() <= 2;
+        if wants_flow {
+            let seeds = native_runtime::console_seeds(&imp);
+            match native_runtime::console_discover(binary, &seeds) {
+                Ok((funcs, calls)) => {
+                    for (entry, size) in funcs {
+                        if !imp.functions.iter().any(|f| f.entry == entry) {
+                            let fname = native::extern_name(&imp, entry)
+                                .unwrap_or_else(|| format!("FUN_{entry:08x}"));
+                            imp.functions.push(native::NativeFunction {
+                                entry,
+                                name: fname,
+                                size: size.max(1),
+                            });
+                        }
+                    }
+                    for (from, to) in calls {
+                        if !imp.xrefs.iter().any(|x| x.from == from && x.to == to) {
+                            imp.xrefs.push(native::NativeXref {
+                                from,
+                                to,
+                                kind: "UNCONDITIONAL_CALL".into(),
+                            });
+                        }
+                    }
+                }
+                Err(e) => eprintln!("console discovery skipped: {e}"),
+            }
+        }
+        Ok(native::store_import(&self.db, name, &imp)?)
+    }
+
+    /// Native disassembly of `count` instructions at `address`.
+    pub fn disasm_native(&self, binary: &Path, address: &str, count: u32) -> Result<String> {
+        Ok(native_runtime::disasm_native(binary, address, count)?)
+    }
+
+    /// Native decompilation of one function at `address` (program must be in
+    /// `project_dir`'s store; `base` defaults to the PE image base or
+    /// 0x400000).
+    pub fn decompile_native(
+        &self,
+        binary: &Path,
+        address: &str,
+        program: &str,
+        base: Option<u64>,
+    ) -> Result<String> {
+        Ok(native_runtime::decompile_native(
+            binary,
+            address,
+            program,
+            &self.db_path,
+            base,
+        )?)
+    }
+
+    /// Bytes at `vaddr` from the binary's mappings (native memory inspection).
+    pub fn mem_native(&self, binary: &Path, vaddr: u64, size: usize) -> Result<Vec<u8>> {
+        let imp = native::load_native(binary)?;
+        for m in &imp.mappings {
+            if vaddr >= m.vaddr && vaddr + size as u64 <= m.vaddr + m.size {
+                let off = (vaddr - m.vaddr) as usize;
+                return Ok(m.bytes[off..off + size].to_vec());
+            }
+        }
+        Err(CoreError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("no mapping covers {vaddr:#x}..+{size:#x}"),
+        )))
     }
 
     /// Re-exports fresh facts from the bridge after an edit session.

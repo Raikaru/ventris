@@ -1,0 +1,12 @@
+0040033c      52  _init
+00400370      16  __gmon_start__
+00400380      48  _start
+004003b0      16  _dl_relocate_static_pie
+004003c0      48  deregister_tm_clones
+004003f0      64  register_tm_clones
+00400430      48  __do_global_dtors_aux
+00400460       6  frame_dummy
+00400466      20  add
+0040047a      46  main
+004004a8      16  _fini
+-- 11 functions

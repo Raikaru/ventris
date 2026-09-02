@@ -1,0 +1,11 @@
+Function func: 0x00400466
+Assembly listing for func
+0x00400466: PUSH      RBP
+0x00400467: MOV       RBP,RSP
+0x0040046a: MOV       dword ptr [RBP + -0x4],EDI
+0x0040046d: MOV       dword ptr [RBP + -0x8],ESI
+0x00400470: MOV       EDX,dword ptr [RBP + -0x4]
+0x00400473: MOV       EAX,dword ptr [RBP + -0x8]
+0x00400476: ADD       EAX,EDX
+0x00400478: POP       RBP
+0x00400479: RET       

@@ -56,6 +56,21 @@ impl Address {
     pub fn ram(offset: u64) -> Self {
         Self { space: AddressSpace::Ram, offset }
     }
+
+    /// Parses a canonical hex string (`"00400466"`, `"0x400466"`) as a RAM
+    /// address, the storage convention of every row in the project store.
+    pub fn parse_ram_hex(s: &str) -> Option<Self> {
+        let hex = s.trim().trim_start_matches("0x");
+        if hex.is_empty() {
+            return None;
+        }
+        u64::from_str_radix(hex, 16).ok().map(Self::ram)
+    }
+
+    /// The canonical hex form the store writes (`"00400466"`).
+    pub fn hex(&self) -> String {
+        format!("{:08x}", self.offset)
+    }
 }
 
 /// One function row as the Core API returns it.
@@ -75,7 +90,25 @@ pub struct FunctionRow {
     pub calling_convention: Option<String>,
 }
 
+impl FunctionRow {
+    /// The entry as a typed RAM address (canonical-hex storage helper).
+    pub fn entry_addr(&self) -> Option<Address> {
+        Address::parse_ram_hex(&self.entry)
+    }
+}
 /// One cross-reference record.
+impl XrefRow {
+    /// The destination as a typed RAM address.
+    pub fn to_addr(&self) -> Option<Address> {
+        Address::parse_ram_hex(&self.to)
+    }
+
+    /// The source as a typed RAM address.
+    pub fn from_addr(&self) -> Option<Address> {
+        Address::parse_ram_hex(&self.from)
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct XrefRow {
     /// Source (incoming) address, canonical hex.

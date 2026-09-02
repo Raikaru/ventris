@@ -93,9 +93,20 @@ RUNS=3 VENTRIS_SLA=... ./benchmarks/gate.sh # memory/perf gates
   decompilation via the raw-SLEIGH worker — token-identical to the Ghidra
   bridge oracle on the pinned fixtures (differential test).
 - **Gate numbers (tiny ELF fixture, this machine)**: Stage-4 workflow peak
-  RSS 39.9 MB (3-run median) vs the 375 MiB stock-Ghidra baseline (9.5× under); median
+  RSS 39.9 MB (3-run median) vs the 375 MiB stock-Ghidra baseline; median
   end-to-end wall 0.32 s vs 10.83 s stock. See
   `benchmarks/reports/stage4-gate.json`.
+  **Honest comparison caveat**: this is not an apples-to-apples throughput
+  benchmark. The native pipeline performs **no auto-analysis** (import is
+  structural discovery; analysis facts come from symbols, flow walking, and
+  the SLEIGH console) while the stock baseline runs Ghidra's full analyzer.
+  Speed/memory win is real but is *at the price of analysis depth* — a trade
+  against Ghidra, not a replacement.
+- **Real-binary sample (`/usr/lib64/libc.so.6`, 2.48 MB, stripped, this
+  machine)**: native import recovers 3,999 functions in 0.54 s (exported
+  symbols, init/fini arrays, flow closure); a real 192-byte varargs function
+  (`__GI___asprintf`) decompiles natively in 0.9 s. Function-set parity
+  against the Ghidra oracle on this binary is reported in STATUS.md.
 - **Known limits (support matrix)**: non-PIE executables only (PIE/ASLR
   binaries work via the bridge); indirect-only CRT helpers (`_init`,
   `register_tm_clones`, PLT shims) are not recovered by native discovery;
