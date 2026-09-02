@@ -38,6 +38,9 @@ pub fn native_provenance() -> Provenance {
 pub struct Mapping {
     pub vaddr: u64,
     pub size: u64,
+    /// File offset of the mapping's first byte (ELF: section offset; PE:
+    /// section raw offset — the RVA-to-file translation the worker uses).
+    pub file_off: u64,
     /// Raw bytes of the mapping.
     pub bytes: Vec<u8>,
 }
@@ -167,6 +170,7 @@ pub fn import_elf(data: &[u8]) -> Result<NativeImport> {
         mappings.push(Mapping {
             vaddr: s.addr,
             size: s.size,
+            file_off: s.off,
             bytes: b.to_vec(),
         });
     }
@@ -337,7 +341,7 @@ pub fn import_pe(data: &[u8]) -> Result<NativeImport> {
     let num_sections = u16_at(data, pe_off + 6)? as usize;
     let opt_size = u16_at(data, pe_off + 20)? as usize;
     let opt = pe_off + 24;
-    let image_base = u64_at(data, opt + 28)?;
+    let image_base = u64_at(data, opt + 24)?; // PE32+: no BaseOfData; ImageBase at +24
     let sec_table = opt + opt_size;
     let mut mappings = Vec::new();
     for i in 0..num_sections {
@@ -354,6 +358,7 @@ pub fn import_pe(data: &[u8]) -> Result<NativeImport> {
         mappings.push(Mapping {
             vaddr: image_base + vaddr,
             size: size as u64,
+            file_off: raw as u64,
             bytes,
         });
     }
@@ -511,6 +516,7 @@ mod tests {
             mappings: vec![Mapping {
                 vaddr: 0x1000,
                 size: 16,
+                file_off: 0x100,
                 bytes: vec![
                     0xe8, 0x01, 0x00, 0x00, 0x00, // call +1 -> 0x1006
                     0x90, 0x90, 0x90, // nops

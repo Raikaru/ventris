@@ -13,9 +13,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Read-only bytes of the analyzed binary, resolved at file offsets.
+///
+/// `maps` carries the section map (vaddr -> file offset) so ELF and PE both
+/// resolve their addresses correctly (PE RVAs are NOT base-relative).
 #[derive(Clone)]
 pub struct BinaryBacking {
     data: Arc<Vec<u8>>,
+    /// (vaddr, size, file_off) per allocated section, ascending vaddr.
+    pub maps: Vec<(u64, u64, u64)>,
 }
 
 impl BinaryBacking {
@@ -25,11 +30,22 @@ impl BinaryBacking {
     pub fn from_file(path: &Path) -> Result<Self> {
         let data = std::fs::read(path)
             .map_err(|e| WorkerError::Setup(format!("{}: {e}", path.display())))?;
-        Ok(Self { data: Arc::new(data) })
+        Ok(Self {
+            data: Arc::new(data),
+            maps: Vec::new(),
+        })
     }
 
-    /// Bytes at `vaddr` honoring the raw image base the worker registered.
+    /// Bytes at `vaddr` via the section map; falls back to base-relative
+    /// when no section covers it (ELF loaded-at-base fixtures).
     pub fn slice_at(&self, vaddr: u64, size: u64, base: u64) -> Option<&[u8]> {
+        for (sv, ss, sf) in &self.maps {
+            if vaddr >= *sv && vaddr.checked_add(size)? <= sv + ss {
+                let start = (vaddr - sv) as usize + *sf as usize;
+                let end = start.checked_add(size as usize)?;
+                return self.data.get(start..end);
+            }
+        }
         let start = usize::try_from(vaddr.checked_sub(base)?).ok()?;
         let end = start.checked_add(usize::try_from(size).ok()?)?;
         self.data.get(start..end)
@@ -76,6 +92,11 @@ impl ProgramProvider {
     /// Name of the function at `vaddr`, if known.
     pub fn function_name(&self, vaddr: u64) -> Option<String> {
         self.function_names.get(&vaddr).cloned()
+    }
+
+    /// Installs the section map for section-aware byte resolution.
+    pub fn set_mappings(&mut self, maps: Vec<(u64, u64, u64)>) {
+        self.backing.maps = maps;
     }
 
     /// Loads registers.txt (name<TAB>offset<TAB>size) and the ram/register

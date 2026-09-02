@@ -101,18 +101,15 @@ worker.
   pinned console (no JVM).
 - `lre-cli comments <program>` / `types <program>` — store-owned facts.
 
-## PE protocol-worker status (next item)
-- The worker decompiles the mingw x86-64 PE end-to-end mechanically
-  (registerProgram -> mappedsymbols -> getBytes -> SLEIGH self-disassembly
-  -> C) via `--base 0x140000000`.
-- Reported output differs from the expected `add(a,b)` body: the mingw
-  register/stack context answer binding is not wired (the worker's
-  getRegister answers the x86-64 table; mingw uses the MS ABI). PE content
-  parity vs the oracle is the open item; ELF parity is exact and pinned by
-  the differential.
+## PE parity closed
+- PE32+ ImageBase fixed (PE32+ has no BaseOfData: ImageBase at optional+24,
+  not +28) — the mingw fixture parses to the true base 0x140000000; worker
+  --base matches; the section map (RVA -> raw) now feeds byte resolution.
+- PE protocol worker: add == oracle exactly (`return param_2 + param_1`);
+  main semantically identical (__main, add(2,0x28), printf+format addr,
+  return 0). The differential's PE step checks add.
 
 ## Open items for the final gate
-- PE decompile content parity (mingw ABI register context).
 - Stripped-binary function discovery (the importer is symtab + entry +
   call closure; no flow-based discovery yet).
 ## Known gaps / risks
