@@ -153,8 +153,22 @@ impl Core {
     /// stripped), and store writes with native provenance.
     pub fn import_native(&self, binary: &Path, name: &str) -> Result<ProgramSummary> {
         let mut imp = native::load_native(binary)?;
-        let wants_flow = imp.functions.iter().filter(|f| !f.name.starts_with('_')).count() <= 2;
-        if wants_flow {
+        // SLEIGH-first (review CORE-008): when the pinned console is
+        // available its disassembly is the primary flow source; the in-Rust
+        // two-path walk (already run by load_native) is the fallback /
+        // cross-check. Both sets are unioned so nothing available is lost.
+        let console_path = std::env::var("VENTRIS_CONSOLE")
+            .map(PathBuf::from)
+            .ok()
+            .or_else(|| {
+                let p = PathBuf::from("native/build/decomp_native");
+                if p.is_file() {
+                    Some(p)
+                } else {
+                    None
+                }
+            });
+        if console_path.map(|p| p.is_file()).unwrap_or(false) {
             let seeds = native_runtime::console_seeds(&imp);
             match native_runtime::console_discover(binary, &seeds) {
                 Ok((funcs, calls)) => {

@@ -548,10 +548,13 @@ pub fn flow_discover(imp: &mut NativeImport) {
     }
     merged.sort_by_key(|f| f.entry);
     merged.dedup_by_key(|f| f.entry);
-    // sizes: distance to the next entry
-    for i in 0..merged.len() {
-        let end = merged.get(i + 1).map(|n| n.entry).unwrap_or(merged[i].entry + 16);
-        merged[i].size = end.saturating_sub(merged[i].entry).max(1);
+    // Sizes from the walk's proven extent (stop-based, capped at the next
+    // entry); fall back to the next-entry distance when the discovery did
+    // not record a body for an entry.
+    for f in merged.iter_mut() {
+        if let Some(pos) = d.entries.iter().position(|e| *e == f.entry) {
+            f.size = d.sizes.get(pos).copied().unwrap_or(16).max(1);
+        }
     }
     imp.functions = merged;
     // discovered calls become xrefs (dedup on (from,to)).
@@ -747,6 +750,46 @@ mod tests {
         assert!(import_elf(b"\x7fELF").is_err());
         assert!(import_elf(b"\x7fELF\x02\x01").is_err());
         assert!(import_elf(b"\x7fELF\x02\x01\x00\x00").is_err());
+    }
+
+    #[test]
+    fn malformed_inputs_never_panic() {
+        // Deterministic PRNG (xorshift64) fuzz smoke: truncated headers,
+        // magic-only files, and arbitrary byte soups must return typed
+        // errors (or a parse) — never panic or OOM (review QA-002).
+        let mut state: u64 = 0x9e3779b97f4a7c15;
+        let mut rand = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for len in 1..=64usize {
+            for _ in 0..64 {
+                let mut bytes = vec![0u8; len];
+                for b in bytes.iter_mut() {
+                    *b = (rand() & 0xff) as u8;
+                }
+                let _ = import_elf(&bytes);
+                let _ = import_pe(&bytes);
+                if len >= 4 {
+                    let _ = crate::disasm::decode(&bytes, 0x400000);
+                }
+                // magic-only truncated variants
+                let _ = import_elf(&b"\x7fELF"[..len.min(4)]);
+                let _ = import_pe(&b"MZ"[..len.min(2)]);
+            }
+        }
+        // Structured but corrupted: valid ELF header with bogus section
+        // table offsets/counts.
+        let mut b = vec![0u8; 0x100];
+        b[0..4].copy_from_slice(b"\x7fELF");
+        b[4] = 2;
+        b[5] = 1;
+        b[40..48].copy_from_slice(&(0x100000000u64).to_le_bytes()); // absurd shoff
+        b[58..60].copy_from_slice(&0xffffu16.to_le_bytes()); // shentsize
+        b[60..62].copy_from_slice(&0xffffu16.to_le_bytes()); // shnum
+        let _ = import_elf(&b);
     }
 
     #[test]

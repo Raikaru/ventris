@@ -294,6 +294,7 @@ pub fn discover(maps: &[(u64, u64, u64, &[u8])], seeds: &[u64]) -> Discovery {
     let mut queue: Vec<u64> = entries.clone();
     let mut processed: Vec<u64> = Vec::new();
     let mut calls = Vec::new();
+    let mut proven_bodies: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
 
     while let Some(start) = queue.pop() {
         if processed.contains(&start) {
@@ -312,6 +313,7 @@ pub fn discover(maps: &[(u64, u64, u64, &[u8])], seeds: &[u64]) -> Discovery {
         let mut paths: Vec<u64> = Vec::new();
         let mut visited: std::collections::HashSet<u64> = std::collections::HashSet::new();
         let mut addr = start;
+        let mut span_end: u64 = start;
         let mut walked = 0u32;
         loop {
             let in_map = |a: u64| maps.iter().any(|(v, s, _, _)| a >= *v && a < v + s);
@@ -334,6 +336,7 @@ pub fn discover(maps: &[(u64, u64, u64, &[u8])], seeds: &[u64]) -> Discovery {
             }
             let win = &bytes[off..];
             let info = decode(win, addr);
+            span_end = span_end.max(addr + info.len as u64);
             match info.flow {
                 Flow::Call(t) => {
                     calls.push((addr, t));
@@ -377,17 +380,24 @@ pub fn discover(maps: &[(u64, u64, u64, &[u8])], seeds: &[u64]) -> Discovery {
                 break;
             }
         }
+        // Conservative proven body: the walk's trailing extent when one
+        // exists, capped by the distance to the next entry (a fall-through
+        // path must never make a body overlap the following function).
+        // The old size-always-distance-to-next fiction is gone.
+        let next = entries
+            .iter()
+            .filter(|e| **e > start)
+            .min()
+            .copied()
+            .unwrap_or(start + 16);
+        let proven = span_end.saturating_sub(start).max(1);
+        proven_bodies.insert(start, proven.min(next - start).max(1));
     }
     entries.sort_unstable();
     entries.dedup();
-    let sizes = (0..entries.len())
-        .map(|i| {
-            entries
-                .get(i + 1)
-                .copied()
-                .unwrap_or(entries[i] + 16)
-                - entries[i]
-        })
+    let sizes = entries
+        .iter()
+        .map(|e| proven_bodies.get(e).copied().unwrap_or(16))
         .collect();
     Discovery {
         entries,

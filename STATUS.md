@@ -107,6 +107,29 @@ see gate numbers below and benchmarks/reports/stage4-gate.json).
   11/11; stripped CLI discovery 7/7 subsets of the oracle; add/main
   semantic parity.
 
+## Phase 1 correctness closure (review batch)
+- CORE-008 shape: SLEIGH-first discovery — with the pinned console present,
+  its disassembly is the primary flow source (unioned with the in-Rust
+  two-path walk, which is now explicitly the fallback/cross-check; the
+  handwritten decoder is no longer the sole production source).
+- Conservative function bodies: the walk records each function's proven
+  extent (span of decoded instructions, stop-based) capped at the next
+  entry's distance; flow_discover uses those sizes instead of the
+  always-distance-to-next fiction. tiny_stripped: `_entry` 38 (was 64),
+  `0x4003c0` 33 (was 112), `0x400430` 33 (was 48) — walk-verified bodies.
+- QA-002 fuzz smoke: deterministic malformed-input loop (truncated/
+  magic-only/absurd-section-table ELF+PE + decode over byte soups) — no
+  panic, typed errors (19 lre-core tests incl. this).
+- PIE evidence: gcc `-fPIE -pie -O2 -s` executable imports natively
+  (11 functions; entries include `_entry` 0x800 with the RDI convention;
+  zero-based vaddrs like ET_DYN). Remaining (QA-003 corpus): oracle
+  differential on PIE binaries is part of the matrix work.
+- Differential policy (QA-004): comparisons are categorized —
+  exact (byte/whitespace-normalized token identity: worker + CLI
+  decompile-native), semantic (add/main A+B and call targets), subset
+  (native entries ⊆ oracle), skipped (console-dependent, explicit note).
+  No claim mixes categories.
+
 ## Sessionful runtime foundation (review Phase 2 start)
 - `lre-core::session`: `RuntimeConfig` (immutable; env-derived defaults, the
   internal contract services take — native_runtime migration continues),
