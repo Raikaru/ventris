@@ -127,6 +127,81 @@ MainWindow::MainWindow(const QString &project, const QString &program, const QSt
                 [this](const QString &address, bool record) {
                     navigation_->goTo(address, record);
                 });
+        auto *go_to_address = new QShortcut(QKeySequence(Qt::Key_G), listing_canvas_);
+        go_to_address->setContext(Qt::WidgetWithChildrenShortcut);
+        connect(go_to_address, &QShortcut::activated, this, [this]() {
+            QInputDialog dialog(this);
+            dialog.setWindowTitle(QStringLiteral("Go to address"));
+            dialog.setLabelText(QStringLiteral("Address (hex):"));
+            dialog.setTextValue(address_edit_->text());
+            if (dialog.exec() == QDialog::Accepted && !dialog.textValue().trimmed().isEmpty()) {
+                navigation_->goTo(dialog.textValue().trimmed(), true);
+            }
+        });
+        auto *go_to_function = new QShortcut(QKeySequence(QStringLiteral("Ctrl+P")), this);
+        connect(go_to_function, &QShortcut::activated, this, [this]() {
+            QDialog dialog(this);
+            dialog.setWindowTitle(QStringLiteral("Go to function"));
+            auto *layout = new QVBoxLayout(&dialog);
+            auto *filter_edit = new QLineEdit(&dialog);
+            filter_edit->setPlaceholderText(QStringLiteral("Fuzzy function name"));
+            auto *list = new QListWidget(&dialog);
+            layout->addWidget(filter_edit);
+            layout->addWidget(list, 1);
+            bridge_->request(
+                QJsonObject{{"method", "functions_page"},
+                            {"program", program_edit_->text()},
+                            {"offset", 0},
+                            {"limit", 4096}},
+                [this, &dialog, list](const QJsonObject &response) {
+                    if (!dialog.isVisible()) {
+                        return;
+                    }
+                    const QJsonArray rows =
+                        response.value("result").toObject().value("rows").toArray();
+                    for (const QJsonValue &value : rows) {
+                        const QJsonObject row = value.toObject();
+                        auto *item = new QListWidgetItem(
+                            QStringLiteral("%1  %2")
+                                .arg(row.value("name").toString())
+                                .arg(addressText(row.value("entry"))));
+                        item->setData(Qt::UserRole, addressText(row.value("entry")));
+                        list->addItem(item);
+                    }
+                });
+            // Subsequence fuzzy match, case-insensitive.
+            connect(filter_edit, &QLineEdit::textChanged, list, [list](const QString &text) {
+                const QString needle = text.toLower();
+                for (int i = 0; i < list->count(); ++i) {
+                    const QString name = list->item(i)->text().toLower();
+                    int pos = 0;
+                    bool matched = true;
+                    for (const QChar c : needle) {
+                        pos = name.indexOf(c, pos);
+                        if (pos < 0) {
+                            matched = false;
+                            break;
+                        }
+                        ++pos;
+                    }
+                    list->item(i)->setHidden(!matched);
+                }
+                for (int i = 0; i < list->count(); ++i) {
+                    if (!list->item(i)->isHidden()) {
+                        list->setCurrentRow(i);
+                        break;
+                    }
+                }
+            });
+            connect(list, &QListWidget::itemActivated, this,
+                    [this, &dialog](QListWidgetItem *item) {
+                        dialog.accept();
+                        navigation_->goTo(item->data(Qt::UserRole).toString(), true);
+                    });
+            filter_edit->setFocus();
+            dialog.resize(420, 480);
+            dialog.exec();
+        });
         connect(decompiler_, &DecompilerView::renameRequested, this,
                 [this](const QString &address, const QString &current_name) {
                     QInputDialog dialog(this);
@@ -393,6 +468,7 @@ MainWindow::MainWindow(const QString &project, const QString &program, const QSt
                     this->decompile();
                     loadListing();
                     loadXrefs();
+                    saveWorkspace();
                 });
         connect(navigation_, &NavigationController::historyChanged, back,
                 &QPushButton::setEnabled);
@@ -1337,19 +1413,46 @@ void MainWindow::setStatus(const QString &message, bool error) {
     }
 
 void MainWindow::restoreWorkspace() {
-        QSettings settings(QStringLiteral("Ventris"), QStringLiteral("Ventris"));
-        const QByteArray geometry = settings.value(QStringLiteral("geometry")).toByteArray();
-        const QByteArray state = settings.value(QStringLiteral("state")).toByteArray();
-        if (!geometry.isEmpty()) {
-            restoreGeometry(geometry);
-        }
-        if (!state.isEmpty()) {
-            restoreState(state);
+    QSettings settings(QStringLiteral("Ventris"), QStringLiteral("Ventris"));
+    const QString scope = project_edit_->text() + QLatin1Char('/');
+    const QByteArray geometry =
+        settings.value(scope + QStringLiteral("geometry")).toByteArray();
+    const QByteArray state =
+        settings.value(scope + QStringLiteral("state")).toByteArray();
+    if (!geometry.isEmpty()) {
+        restoreGeometry(geometry);
+    }
+    if (!state.isEmpty()) {
+        restoreState(state);
+    }
+    // Reopen workflow: without an explicit --name, resume the project's
+    // last program/address (the binary path persists alongside them).
+    if (program_edit_->text().isEmpty()) {
+        const QString last_program =
+            settings.value(scope + QStringLiteral("lastProgram")).toString();
+        const QString last_binary =
+            settings.value(scope + QStringLiteral("lastBinary")).toString();
+        const QString last_address =
+            settings.value(scope + QStringLiteral("lastAddress")).toString();
+        if (!last_program.isEmpty()) {
+            program_edit_->setText(last_program);
+            binary_edit_->setText(last_binary);
+            function_model_->setProgram(last_program);
+            navigation_->setProgram(last_program);
+            if (!last_address.isEmpty()) {
+                address_edit_->setText(last_address);
+                navigation_->goTo(last_address, false);
+            }
         }
     }
+}
 
 void MainWindow::saveWorkspace() {
-        QSettings settings(QStringLiteral("Ventris"), QStringLiteral("Ventris"));
-        settings.setValue(QStringLiteral("geometry"), saveGeometry());
-        settings.setValue(QStringLiteral("state"), saveState());
-    }
+    QSettings settings(QStringLiteral("Ventris"), QStringLiteral("Ventris"));
+    const QString scope = project_edit_->text() + QLatin1Char('/');
+    settings.setValue(scope + QStringLiteral("geometry"), saveGeometry());
+    settings.setValue(scope + QStringLiteral("state"), saveState());
+    settings.setValue(scope + QStringLiteral("lastProgram"), program_edit_->text());
+    settings.setValue(scope + QStringLiteral("lastBinary"), binary_edit_->text());
+    settings.setValue(scope + QStringLiteral("lastAddress"), address_edit_->text());
+}
