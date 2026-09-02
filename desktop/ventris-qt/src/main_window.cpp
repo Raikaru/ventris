@@ -12,6 +12,7 @@
 #include <QGridLayout>
 #include <QHeaderView>
 #include <QKeySequence>
+#include <QInputDialog>
 #include <QShortcut>
 #include <QMenu>
 #include <QTimer>
@@ -122,6 +123,21 @@ MainWindow::MainWindow(const QString &project, const QString &program, const QSt
         connect(bytes_toggle, &QShortcut::activated, this, [this]() {
             listing_canvas_->setBytesVisible(!listing_canvas_->bytesVisible());
         });
+        connect(decompiler_, &DecompilerView::addressSelected, this,
+                [this](const QString &address, bool record) {
+                    navigation_->goTo(address, record);
+                });
+        connect(decompiler_, &DecompilerView::renameRequested, this,
+                [this](const QString &address, const QString &current_name) {
+                    QInputDialog dialog(this);
+                    dialog.setWindowTitle(QStringLiteral("Rename function"));
+                    dialog.setLabelText(
+                        QStringLiteral("Rename %1 to:").arg(current_name));
+                    dialog.setTextValue(current_name);
+                    if (dialog.exec() == QDialog::Accepted && !dialog.textValue().trimmed().isEmpty()) {
+                        renameFunctionAt(address, dialog.textValue().trimmed());
+                    }
+                });
         status_ = new QLabel(this);
         root->addWidget(status_);
         setCentralWidget(central);
@@ -476,31 +492,50 @@ void MainWindow::openProgram() {
     }
 
 void MainWindow::decompile() {
-        const int job = beginJob(QStringLiteral("decompile %1").arg(address_edit_->text()));
-        bridge_->request(QJsonObject{{"method", "decompile_doc"},
-                                     {"binary", binary_edit_->text()},
-                                     {"program", program_edit_->text()},
-                                     {"address", address_edit_->text()}},
-                         [this, job](const QJsonObject &response) {
-                             QString error;
-                             if (!successful(response, &error)) {
-                                 finishJob(job, false, error);
-                                 return;
-                             }
-                            const QJsonObject result = response.value("result").toObject();
-                            const QJsonArray tokens = result.value("tokens").toArray();
-                            QVector<TokenView> views;
-                            views.reserve(tokens.size());
-                            for (const QJsonValue &token : tokens) {
-                                views.append(TokenView::fromJson(token.toObject()));
-                            }
-                            decompiler_->setTokens(views);
-                            finishJob(job, true,
-                                      QStringLiteral("%1 tokens, revision %2")
-                                          .arg(views.size())
-                                          .arg(result.value("revision").toInteger()));
-                         });
+    const QString address = address_edit_->text();
+    const QString key = program_edit_->text() + QLatin1Char('|') + address;
+    // Revision-keyed cache: a hit at the current revision renders instantly;
+    // mutations bump the revision and refetch.
+    if (decompile_cache_.contains(key)) {
+        const auto cached = decompile_cache_.value(key);
+        if (cached.first == function_model_->revision()) {
+            decompiler_->setTokens(cached.second);
+            return;
+        }
+        decompile_cache_.remove(key);
     }
+    const quint64 generation = ++decompile_generation_;
+    decompiler_->setPending(QStringLiteral("decompiling %1…").arg(address));
+    const int job = beginJob(QStringLiteral("decompile %1").arg(address));
+    bridge_->request(QJsonObject{{"method", "decompile_doc"},
+                                 {"binary", binary_edit_->text()},
+                                 {"program", program_edit_->text()},
+                                 {"address", address}},
+                     [this, job, key, generation](const QJsonObject &response) {
+                         if (generation != decompile_generation_) {
+                             return;  // a newer request superseded this one
+                         }
+                         QString error;
+                         if (!successful(response, &error)) {
+                             finishJob(job, false, error);
+                             return;
+                         }
+                         const QJsonObject result = response.value("result").toObject();
+                         const QJsonArray tokens = result.value("tokens").toArray();
+                         QVector<TokenView> views;
+                         views.reserve(tokens.size());
+                         for (const QJsonValue &token : tokens) {
+                             views.append(TokenView::fromJson(token.toObject()));
+                         }
+                         const qint64 revision = result.value("revision").toInteger();
+                         decompile_cache_.insert(key, {revision, views});
+                         decompiler_->setTokens(views);
+                         finishJob(job, true,
+                                   QStringLiteral("%1 tokens, revision %2")
+                                       .arg(views.size())
+                                       .arg(revision));
+                     });
+}
 
 void MainWindow::loadListing() {
     loadListingAt(address_edit_->text());

@@ -1,6 +1,8 @@
 #pragma once
 
 #include <QMainWindow>
+
+#include "views.h"
 #include <QStringList>
 
 class CoreBridge;
@@ -9,6 +11,7 @@ class FunctionTableModel;
 class GraphCanvas;
 class ListingCanvas;
 class NavigationController;
+class QInputDialog;
 class QLabel;
 class QTimer;
 class QLineEdit;
@@ -67,6 +70,8 @@ private:
     QString binary_;
     QString address_;
     NavigationController *navigation_;
+    QHash<QString, QPair<qint64, QVector<TokenView>>> decompile_cache_;
+    quint64 decompile_generation_ = 0;
     QLineEdit *project_edit_ = nullptr;
     QLineEdit *program_edit_ = nullptr;
     QLineEdit *binary_edit_ = nullptr;

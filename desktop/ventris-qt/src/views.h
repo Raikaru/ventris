@@ -50,12 +50,15 @@ struct ListingRowView {
 };
 
 /// One decompiler token (WORKER-004): text, token kind, and the entity
-/// address when the packed document carried one. Phase 1.3 adds hit
-/// testing over these; the text rendering is already token-driven.
+/// address when the packed document carried one. Break tokens end a line
+/// and carry the next line's indent.
 struct TokenView {
     QString text;
     QString kind;
     QString address;
+    quint64 indent = 0;
+
+    bool isBreak() const { return kind == QStringLiteral("Break"); }
 
     static TokenView fromJson(const QJsonObject &token) {
         TokenView view;
@@ -65,6 +68,7 @@ struct TokenView {
         view.address = address.isNull() || address.isUndefined()
                            ? QString()
                            : addressText(address);
+        view.indent = token.value("indent").toVariant().toULongLong();
         return view;
     }
 };
