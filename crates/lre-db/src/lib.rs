@@ -29,6 +29,9 @@ pub enum DbError {
     /// Stored patch data was not valid hexadecimal.
     #[error("invalid hexadecimal patch data: {0}")]
     InvalidHex(String),
+    /// Function filter could not be parsed (bad `re:` regex).
+    #[error("invalid function filter: {0}")]
+    InvalidFilter(String),
     /// Stored collaboration operation was not present.
     #[error("collaboration operation not found: {0}")]
     OperationNotFound(String),
@@ -36,6 +39,75 @@ pub enum DbError {
 }
 /// Convenience alias with the error defaulted per project convention.
 pub type Result<T, E = DbError> = std::result::Result<T, E>;
+
+/// Sort key for paged functions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FunctionSort {
+    Entry,
+    Name,
+    Size,
+}
+
+impl FunctionSort {
+    /// SQL ORDER BY fragment. Fixed whitelist: never built from user text.
+    pub fn sql_column(self) -> &'static str {
+        match self {
+            FunctionSort::Entry => "entry",
+            FunctionSort::Name => "name COLLATE NOCASE",
+            FunctionSort::Size => "size",
+        }
+    }
+
+    fn compare(self, a: &FunctionRow, b: &FunctionRow) -> std::cmp::Ordering {
+        match self {
+            FunctionSort::Entry => a.entry.offset.cmp(&b.entry.offset),
+            FunctionSort::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+            FunctionSort::Size => a.size.cmp(&b.size),
+        }
+    }
+
+    /// Parses a sort key name ("entry" | "name" | "size").
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "entry" => Some(FunctionSort::Entry),
+            "name" => Some(FunctionSort::Name),
+            "size" => Some(FunctionSort::Size),
+            _ => None,
+        }
+    }
+}
+
+/// Function-name filter for paged queries: case-insensitive substring, or
+/// a regex when the text carries a `re:` prefix.
+#[derive(Clone, Debug)]
+pub enum FunctionsFilter {
+    Substring(String),
+    Regex(regex::Regex),
+}
+
+impl FunctionsFilter {
+    /// Parses user filter text; empty text means no filter.
+    pub fn parse(text: &str) -> Result<Option<Self>> {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        if let Some(pattern) = trimmed.strip_prefix("re:") {
+            let regex = regex::Regex::new(pattern)
+                .map_err(|error| DbError::InvalidFilter(error.to_string()))?;
+            Ok(Some(FunctionsFilter::Regex(regex)))
+        } else {
+            Ok(Some(FunctionsFilter::Substring(trimmed.to_lowercase())))
+        }
+    }
+
+    fn matches(&self, name: &str) -> bool {
+        match self {
+            FunctionsFilter::Substring(needle) => name.to_lowercase().contains(needle),
+            FunctionsFilter::Regex(regex) => regex.is_match(name),
+        }
+    }
+}
 
 /// Opened project database.
 pub struct ProjectDb {
@@ -515,24 +587,60 @@ impl ProjectDb {
     }
 
     /// Paged functions (review CORE-004): a bounded window + total + the
-    /// revision the window was read at. Views never preload.
+    /// revision the window was read at. Views never preload. `filter`
+    /// narrows by function name (case-insensitive substring, or a regex
+    /// when the text carries a `re:` prefix); `sort` orders the window.
     pub fn functions_page(
         &self,
         program: ProgramId,
         offset: u64,
         limit: u64,
+        filter: Option<&FunctionsFilter>,
+        sort: Option<(FunctionSort, bool)>,
     ) -> Result<(Vec<FunctionRow>, Option<u64>, u64)> {
-        let total: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM functions WHERE program_id = ?1", params![program.0], |r| r.get(0))?;
-        let mut stmt = self.conn.prepare(
-            "SELECT entry, name, size, signature, calling_convention
-             FROM functions WHERE program_id = ?1 ORDER BY entry LIMIT ?2 OFFSET ?3",
-        )?;
-        let rows = stmt
-            .query_map(params![program.0, limit, offset], map_function)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok((rows, Some(total as u64), self.revision(program)?))
+        let (sort_key, ascending) = sort.unwrap_or((FunctionSort::Entry, true));
+        match filter {
+            None => {
+                let total: i64 = self.conn.query_row(
+                    "SELECT COUNT(*) FROM functions WHERE program_id = ?1",
+                    params![program.0],
+                    |r| r.get(0),
+                )?;
+                let sql = format!(
+                    "SELECT entry, name, size, signature, calling_convention
+                     FROM functions WHERE program_id = ?1 ORDER BY {} {} LIMIT ?2 OFFSET ?3",
+                    sort_key.sql_column(),
+                    if ascending { "ASC" } else { "DESC" }
+                );
+                let mut stmt = self.conn.prepare(&sql)?;
+                let rows = stmt
+                    .query_map(params![program.0, limit, offset], map_function)?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                Ok((rows, Some(total as u64), self.revision(program)?))
+            }
+            Some(filter) => {
+                // Filtered path: scan, filter, sort, and paginate in Rust.
+                // SQLite cannot evaluate regex, and function tables are
+                // small (thousands of rows), so one code path keeps the
+                // total count consistent with the returned window.
+                let mut stmt = self.conn.prepare(
+                    "SELECT entry, name, size, signature, calling_convention
+                     FROM functions WHERE program_id = ?1",
+                )?;
+                let mut rows = stmt
+                    .query_map(params![program.0], map_function)?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                rows.retain(|row| filter.matches(&row.name));
+                rows.sort_by(|a, b| sort_key.compare(a, b));
+                if !ascending {
+                    rows.reverse();
+                }
+                let total = rows.len() as u64;
+                let start = (offset as usize).min(rows.len());
+                let end = (start + limit as usize).min(rows.len());
+                Ok((rows[start..end].to_vec(), Some(total), self.revision(program)?))
+            }
+        }
     }
 
     /// Paged symbols (review CORE-004).
@@ -1906,6 +2014,113 @@ mod tests {
         assert!(db.functions(id).unwrap().is_empty());
     }
 
+    fn seed_functions(db: &ProjectDb, id: ProgramId) {
+        let rows = vec![
+            FunctionRow {
+                entry: lre_model::Address::ram(0x400500),
+                name: "handle_request".into(),
+                size: 300,
+                signature: None,
+                calling_convention: None,
+            },
+            FunctionRow {
+                entry: lre_model::Address::ram(0x400000),
+                name: "add".into(),
+                size: 20,
+                signature: None,
+                calling_convention: None,
+            },
+            FunctionRow {
+                entry: lre_model::Address::ram(0x400100),
+                name: "AddEntry".into(),
+                size: 80,
+                signature: None,
+                calling_convention: None,
+            },
+            FunctionRow {
+                entry: lre_model::Address::ram(0x400200),
+                name: "malloc".into(),
+                size: 120,
+                signature: None,
+                calling_convention: None,
+            },
+        ];
+        db.replace_functions(id, &rows).unwrap();
+    }
+
+    #[test]
+    fn functions_page_filter_substring_is_case_insensitive() {
+        let db = ProjectDb::open_in_memory().unwrap();
+        let id = db.upsert_program("p", "x86:LE:64:default", &prov()).unwrap();
+        seed_functions(&db, id);
+        let filter = FunctionsFilter::parse("ADD").unwrap();
+        let (rows, total, _) = db
+            .functions_page(id, 0, 256, filter.as_ref(), None)
+            .unwrap();
+        assert_eq!(total, Some(2));
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.name.to_lowercase().contains("add")));
+    }
+
+    #[test]
+    fn functions_page_filter_regex_with_prefix() {
+        let db = ProjectDb::open_in_memory().unwrap();
+        let id = db.upsert_program("p", "x86:LE:64:default", &prov()).unwrap();
+        seed_functions(&db, id);
+        let filter = FunctionsFilter::parse("re:^(add|malloc)$").unwrap();
+        let (rows, total, _) = db
+            .functions_page(id, 0, 256, filter.as_ref(), None)
+            .unwrap();
+        assert_eq!(total, Some(2));
+        let mut names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["add", "malloc"]);
+    }
+
+    #[test]
+    fn functions_page_filter_regex_invalid_is_structured_error() {
+        let filter = FunctionsFilter::parse("re:[unclosed");
+        assert!(matches!(filter, Err(DbError::InvalidFilter(_))));
+    }
+
+    #[test]
+    fn functions_page_sort_by_size_desc_paginates() {
+        let db = ProjectDb::open_in_memory().unwrap();
+        let id = db.upsert_program("p", "x86:LE:64:default", &prov()).unwrap();
+        seed_functions(&db, id);
+        let (rows, total, _) = db
+            .functions_page(id, 1, 2, None, Some((FunctionSort::Size, false)))
+            .unwrap();
+        assert_eq!(total, Some(4));
+        let sizes: Vec<u64> = rows.iter().map(|r| r.size).collect();
+        assert_eq!(sizes, vec![120, 80], "sizes desc, window 1..3");
+    }
+
+    #[test]
+    fn functions_page_sort_by_name_case_insensitive() {
+        let db = ProjectDb::open_in_memory().unwrap();
+        let id = db.upsert_program("p", "x86:LE:64:default", &prov()).unwrap();
+        seed_functions(&db, id);
+        let (rows, _, _) = db
+            .functions_page(id, 0, 256, None, Some((FunctionSort::Name, true)))
+            .unwrap();
+        let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["add", "AddEntry", "handle_request", "malloc"]);
+    }
+
+    #[test]
+    fn functions_page_unfiltered_default_sort_is_entry_asc() {
+        let db = ProjectDb::open_in_memory().unwrap();
+        let id = db.upsert_program("p", "x86:LE:64:default", &prov()).unwrap();
+        seed_functions(&db, id);
+        let (rows, total, _) = db.functions_page(id, 0, 256, None, None).unwrap();
+        assert_eq!(total, Some(4));
+        let entries: Vec<u64> = rows.iter().map(|r| r.entry.offset).collect();
+        let mut sorted = entries.clone();
+        sorted.sort_unstable();
+        assert_eq!(entries, sorted);
+    }
+
     #[test]
     fn rename_updates_name_and_revision() {
         let db = ProjectDb::open_in_memory().unwrap();
@@ -1978,14 +2193,14 @@ mod tests {
             })
             .collect();
         db.replace_functions(id, &rows).unwrap();
-        let (p1, total, rev) = db.functions_page(id, 0, 10).unwrap();
+        let (p1, total, rev) = db.functions_page(id, 0, 10, None, None).unwrap();
         assert_eq!(p1.len(), 10);
         assert_eq!(total, Some(100));
         assert_eq!(p1[0].entry.offset, 0x400000);
-        let (p2, _, _) = db.functions_page(id, 90, 10).unwrap();
+        let (p2, _, _) = db.functions_page(id, 90, 10, None, None).unwrap();
         assert_eq!(p2.len(), 10);
         assert_eq!(p2[0].entry.offset, 0x400000 + 90 * 0x10);
-        let (p3, _, _) = db.functions_page(id, 999, 10).unwrap();
+        let (p3, _, _) = db.functions_page(id, 999, 10, None, None).unwrap();
         assert!(p3.is_empty());
         // replace bumps the revision (mutation event model: CORE-005)
         assert!(rev >= 2);

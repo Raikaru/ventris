@@ -345,7 +345,7 @@ fn run_inner(args: &[String]) -> Result<(), String> {
             let limit: u64 = flag(args, "--limit").and_then(|v| v.parse().ok()).unwrap_or(0);
             let rows = if limit > 0 {
                 let page = core
-                    .functions_page(&program, offset, limit)
+                    .functions_page(&program, offset, limit, None, None)
                     .map_err(|e| e.to_string())?;
                 println!("-- paged {}..{} of {:?} (rev {})", page.offset, page.offset + page.rows.len() as u64, page.total, page.revision);
                 page.rows

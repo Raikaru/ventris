@@ -131,10 +131,14 @@ impl ApiService {
             }
             "functions_page" => {
                 let program = string_param(params, "program")?;
+                let filter = params.get("filter").and_then(Value::as_str);
+                let sort = params.get("sort").and_then(Value::as_str);
                 value(self.core.functions_page(
                     &program,
                     u64_param(params, "offset")?.unwrap_or(0),
                     u64_param(params, "limit")?.unwrap_or(256),
+                    filter,
+                    sort,
                 ))
             }
             "symbols" => {

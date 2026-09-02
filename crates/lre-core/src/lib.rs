@@ -69,6 +69,9 @@ pub enum CoreError {
     /// Installed-architecture catalog failure.
     #[error("architecture: {0}")]
     Architecture(#[from] architecture::ArchitectureError),
+    /// Function sort key was not one of entry|name|size[:asc|:desc].
+    #[error("invalid sort key: {0}")]
+    InvalidSortKey(String),
 }
 
 /// Convenience alias with the error defaulted per project convention.
@@ -291,14 +294,23 @@ impl Core {
     }
 
     /// Paged functions (review CORE-004): bounded window + total + revision.
+    /// `filter` is a case-insensitive name substring, or a regex when it
+    /// carries a `re:` prefix. `sort` is "entry" | "name" | "size" with an
+    /// optional ":asc"/":desc" suffix; defaults to entry ascending.
     pub fn functions_page(
         &self,
         program: &str,
         offset: u64,
         limit: u64,
+        filter: Option<&str>,
+        sort: Option<&str>,
     ) -> Result<lre_model::Page<FunctionRow>> {
         let id = self.db.program_id(program)?;
-        let (rows, total, revision) = self.db.functions_page(id, offset, limit)?;
+        let filter = lre_db::FunctionsFilter::parse(filter.unwrap_or(""))?;
+        let sort = sort.map(parse_function_sort).transpose()?;
+        let (rows, total, revision) =
+            self.db
+                .functions_page(id, offset, limit, filter.as_ref(), sort)?;
         Ok(lre_model::Page { rows, offset, total, revision })
     }
 
@@ -930,6 +942,25 @@ impl Core {
         self.db.replace_datatypes(id, &datatypes)?;
         Ok(())
     }
+}
+
+/// Parses a function sort spec: "entry" | "name" | "size" with an optional
+/// ":asc"/":desc" suffix.
+fn parse_function_sort(text: &str) -> Result<(lre_db::FunctionSort, bool)> {
+    let (key, direction) = match text.split_once(':') {
+        Some((key, dir)) => (
+            key,
+            match dir {
+                "asc" => true,
+                "desc" => false,
+                _ => return Err(CoreError::InvalidSortKey(text.into())),
+            },
+        ),
+        None => (text, true),
+    };
+    let key = lre_db::FunctionSort::parse(key)
+        .ok_or_else(|| CoreError::InvalidSortKey(text.into()))?;
+    Ok((key, direction))
 }
 
 #[cfg(test)]

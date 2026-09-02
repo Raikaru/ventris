@@ -87,7 +87,9 @@ fn dispatch(core: &Core, request: &Value) -> Result<Value, String> {
             let program = required_string(request, "program")?;
             let offset = optional_u64(request, "offset")?.unwrap_or(0);
             let limit = optional_u64(request, "limit")?.unwrap_or(256);
-            to_value(core.functions_page(&program, offset, limit))
+            let filter = request.get("filter").and_then(Value::as_str);
+            let sort = request.get("sort").and_then(Value::as_str);
+            to_value(core.functions_page(&program, offset, limit, filter, sort))
         }
         "symbols_page" => {
             let program = required_string(request, "program")?;
