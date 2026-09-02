@@ -100,7 +100,20 @@ fn op_info(op: u8, op2: Option<u8>, op3: Option<u8>, rex_w: bool) -> OpInfo {
         0xa0..=0xa3 => OpInfo { modrm: false, imm: I32 },
         0xe4..=0xe7 => OpInfo { modrm: false, imm: I8 },
         0xcd => OpInfo { modrm: false, imm: I8 },
-        _ => OpInfo { modrm: false, imm: None },
+        0x50..=0x5f => OpInfo { modrm: false, imm: None }, // push/pop reg
+        0x90..=0x97 => OpInfo { modrm: false, imm: None }, // nop; xchg reg
+        0xa4..=0xa7 => OpInfo { modrm: false, imm: None }, // movs/cmps
+        0x98..=0x9f => OpInfo { modrm: false, imm: None }, // cbw/cwde/cdq...
+        0xc8 | 0xc9 => OpInfo { modrm: false, imm: None }, // enter/leave
+        0xd4..=0xd7 => OpInfo { modrm: false, imm: None }, // aam/aad/salc
+        0xe0..=0xe3 => OpInfo { modrm: false, imm: None }, // loop/jrcxz
+        0xf1 => OpInfo { modrm: false, imm: None },        // int1
+        0xf8..=0xfd => OpInfo { modrm: false, imm: None }, // clc/stc/cld/std
+        // DEFAULT: one-byte opcodes overwhelmingly carry a ModRM byte
+        // (all /r forms 00..3F, 63, 88..8F, x87 D8..DF, shifts). The old
+        // no-modrm default mis-lengthened e.g. `add eax,ebx` (01 c3) as
+        // one byte, misaligning every walk past the first arithmetic.
+        _ => OpInfo { modrm: true, imm: None },
     }
 }
 
@@ -347,7 +360,11 @@ pub fn discover(maps: &[(u64, u64, u64, &[u8])], seeds: &[u64]) -> Discovery {
                     addr += info.len as u64;
                 }
                 Flow::Jump(t) => {
-                    if in_map(t) {
+                    // Forward, in-map targets only: a backward jump would
+                    // underflow `addr - sv` at the offset computation and a
+                    // cross-map target would walk another region's bytes as
+                    // though they were this map's.
+                    if in_map(t) && t > addr {
                         addr = t;
                     } else {
                         addr += info.len as u64;
@@ -384,12 +401,16 @@ pub fn discover(maps: &[(u64, u64, u64, &[u8])], seeds: &[u64]) -> Discovery {
         // exists, capped by the distance to the next entry (a fall-through
         // path must never make a body overlap the following function).
         // The old size-always-distance-to-next fiction is gone.
+        // Next-entry cap: the distance to the next discovered function,
+        // or the end of the CURRENT map when there is none (a last function
+        // in a section previously used start+16, capping its proven body at
+        // 16 bytes).
         let next = entries
             .iter()
             .filter(|e| **e > start)
             .min()
             .copied()
-            .unwrap_or(start + 16);
+            .unwrap_or(sv + ss);
         let proven = span_end.saturating_sub(start).max(1);
         proven_bodies.insert(start, proven.min(next - start).max(1));
     }
@@ -503,6 +524,32 @@ mod tests {
         let d = discover(&maps, &[0x400000, 0x40000b]);
         assert_eq!(d.entries, vec![0x400000, 0x40000b]);
         assert_eq!(d.calls, vec![(0x40000f, 0x400000)]);
+    }
+
+    #[test]
+    fn main_prologue_lengths() {
+        // gcc -O1 prologue from the QA-003 many-function fixture:
+        // push rbx | mov edi,imm32 | call | mov ebx,eax | mov edi,imm32 |
+        // call | add eax,ebx | ...
+        let bytes = [
+            0x53, // push rbx (1)
+            0xbf, 0x00, 0x00, 0x00, 0x00, // mov edi, 0 (5)
+            0xe8, 0x83, 0xf5, 0xff, 0xff, // call (5)
+            0x89, 0xc3, // mov ebx, eax (2)
+            0xbf, 0x01, 0x00, 0x00, 0x00, // mov edi, 1 (5)
+            0xe8, 0x7b, 0xf5, 0xff, 0xff, // call (5)
+            0x01, 0xc3, // add eax, ebx (2)
+        ];
+        let mut addr = 0x400ed8u64;
+        let mut p = 0usize;
+        let mut lens = Vec::new();
+        while p < bytes.len() {
+            let info = decode(&bytes[p..], addr);
+            lens.push(info.len);
+            addr += info.len as u64;
+            p += info.len as usize;
+        }
+        assert_eq!(lens, vec![1, 5, 5, 2, 5, 5, 2]);
     }
 
     #[test]

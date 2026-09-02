@@ -107,6 +107,22 @@ see gate numbers below and benchmarks/reports/stage4-gate.json).
   11/11; stripped CLI discovery 7/7 subsets of the oracle; add/main
   semantic parity.
 
+## QA-003 corpus matrix: earned its keep
+- `tests/corpus.sh`: builds and imports plain C (O0/O2), PIE, C++ (exceptions
+  + TLS + switch), and a 400-function binary; writes
+  benchmarks/reports/corpus.json. Result: 5/5, **many_o2 = 406 functions**.
+- The matrix immediately found a critical decoder default bug: `op_info`
+  assumed no ModRM for unlisted opcodes, but most one-byte opcodes (01 add,
+  03 or, all /r forms...) carry one — `add eax,ebx` decoded as 1 byte and
+  misaligned every walk past the first arithmetic instruction (main of the
+  400-fn fixture stopped after its first call). Fixed: default ModRM, with
+  an explicit no-modrm set (push/pop, nop/xchg, cbw-family, enter/leave,
+  aam/aad, loop, int1, clc-family, movs/cmps). Regression tests:
+  `main_prologue_lengths` (1,5,5,2,5,5,2) and the existing suite.
+- Also fixed: last-function size cap used `start+16` as the fallback
+  "next entry" — capping proven bodies at 16 bytes for the final function
+  of a section; now uses the end of the current map.
+
 ## Phase 1 correctness closure (review batch)
 - CORE-008 shape: SLEIGH-first discovery — with the pinned console present,
   its disassembly is the primary flow source (unioned with the in-Rust
