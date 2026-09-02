@@ -69,14 +69,15 @@ pub fn disasm_native(cfg: &RuntimeConfig, binary: &Path, address: &str, count: u
     } else {
         format!("0x{address}")
     };
+    let bfd_target = bfd_target_for(&cfg.language_id, binary)?;
     let load_script = if cfg.language_id.starts_with("x86:") {
         format!(
             "load file {} {}\nadjust vma 0x400000\n",
-            cfg.language_id,
+            bfd_target,
             binary.display()
         )
     } else {
-        format!("load file {} {}\n", cfg.language_id, binary.display())
+        format!("load file {} {}\n", bfd_target, binary.display())
     };
     let script = format!(
         "{load_script}map function {hex_addr} func\nload function func\ndisassemble\n",
@@ -241,7 +242,7 @@ pub fn console_discover(
     binary: &Path,
     seeds: &[u64],
 ) -> Result<(Vec<(u64, u64)>, Vec<(u64, u64)>)> {
-    use std::io::{BufRead, BufReader, Write as _};
+    use std::io::{BufReader, Read as _, Write as _};
     let console = cfg
         .console_path
         .clone()
@@ -267,28 +268,24 @@ pub fn console_discover(
     let stdout = child.stdout.take().expect("console stdout");
     let mut reader = BufReader::new(stdout);
 
+    let bfd_target = bfd_target_for(&cfg.language_id, binary)?;
     let init_script = if cfg.language_id.starts_with("x86:") {
         format!(
             "load file {} {}\nadjust vma 0x400000\n",
-            cfg.language_id,
+            bfd_target,
             binary.display()
         )
     } else {
-        format!("load file {} {}\n", cfg.language_id, binary.display())
+        format!("load file {} {}\n", bfd_target, binary.display())
     };
     stdin
         .write_all(init_script.as_bytes())
         .and_then(|_| stdin.flush())
         .map_err(|e| NativeRuntimeError(format!("console write: {e}")))?;
-    let mut line_buf = String::new();
+    // The prompt "[decomp]> " carries no trailing newline, so line reads
+    // deadlock; each command's response is read until the next prompt.
     for _ in 0..2 {
-        line_buf.clear();
-        let n = reader
-            .read_line(&mut line_buf)
-            .map_err(|e| NativeRuntimeError(format!("console read: {e}")))?;
-        if n == 0 {
-            return err("console closed during init");
-        }
+        read_until_prompt(&mut reader)?;
     }
     let mut pending_seeds: Vec<u64> = seeds.to_vec();
     let mut all: Vec<(u64, u64)> = Vec::new();
@@ -312,60 +309,57 @@ pub fn console_discover(
             .and_then(|_| stdin.flush())
             .map_err(|e| NativeRuntimeError(format!("console write: {e}")))?;
         let mut last_addr: Option<u64> = None;
-        let mut prompts_seen = 0usize;
-        while prompts_seen < expected_prompts {
-            line_buf.clear();
-            let n = reader
-                .read_line(&mut line_buf)
-                .map_err(|e| NativeRuntimeError(format!("console read: {e}")))?;
-            if n == 0 {
-                break;
-            }
-            let line = line_buf.trim_end();
-            if line.ends_with("> ") || line.ends_with("decomp]>") {
-                prompts_seen += 1;
-                continue;
-            }
-            if let Some(rest) = line.strip_prefix("0x") {
-                if let Some((addr_s, tail)) = rest.split_once(':') {
-                    if let Ok(addr) = u64::from_str_radix(addr_s.trim(), 16) {
-                        last_addr = Some(addr);
-                        // ELF startup convention: right before the indirect
-                        // __libc_start_main GOT call, RDI holds main.
-                        if tail.contains("MOV") && tail.contains("RDI") {
-                            let mov_line = tail.split(',').nth(1).unwrap_or("");
-                            for tok in mov_line.split_whitespace() {
-                                if let Ok(t) = u64::from_str_radix(
-                                    tok.trim_start_matches("0x").trim_end_matches(','),
-                                    16,
-                                ) {
-                                    if !seen.contains(&t) && t != 0 {
-                                        seen.push(t);
-                                        pending_seeds.push(t);
+        // One prompt per command; each chunk carries the echoed command and
+        // its output, terminated by the next prompt.
+        for _ in 0..expected_prompts {
+            let chunk = read_until_prompt(&mut reader)?;
+            for line_buf in chunk.lines() {
+                let line = line_buf.trim_end();
+                let line = line.strip_prefix("[decomp]> ").unwrap_or(line);
+                if line.is_empty() {
+                    continue;
+                }
+                if let Some(rest) = line.strip_prefix("0x") {
+                    if let Some((addr_s, tail)) = rest.split_once(':') {
+                        if let Ok(addr) = u64::from_str_radix(addr_s.trim(), 16) {
+                            last_addr = Some(addr);
+                            // ELF startup convention: right before the indirect
+                            // __libc_start_main GOT call, RDI holds main.
+                            if tail.contains("MOV") && tail.contains("RDI") {
+                                let mov_line = tail.split(',').nth(1).unwrap_or("");
+                                for tok in mov_line.split_whitespace() {
+                                    if let Ok(t) = u64::from_str_radix(
+                                        tok.trim_start_matches("0x").trim_end_matches(','),
+                                        16,
+                                    ) {
+                                        if !seen.contains(&t) && t != 0 {
+                                            seen.push(t);
+                                            pending_seeds.push(t);
+                                        }
                                     }
                                 }
                             }
                         }
                     }
                 }
-            }
-            if line.contains("CALL") && line.contains(":") {
-                let after = line.split(':').last().unwrap_or("");
-                let mut toks = after.split_whitespace();
-                let _ = toks.next();
-                if let Some(op) = toks.next() {
-                    let clean = op.trim_end_matches(';');
-                    if let Ok(t) = u64::from_str_radix(clean.trim_start_matches("0x"), 16) {
-                        let frm = last_addr.unwrap_or(0);
-                        if t != 0 && !calls.iter().any(|(f, c)| *f == frm && *c == t) {
-                            calls.push((frm, t));
-                        }
-                        if !seen.contains(&t)
-                            && !this_round.contains(&t)
-                            && pending_seeds.len() < 64
-                        {
-                            seen.push(t);
-                            pending_seeds.push(t);
+                if line.contains("CALL") && line.contains(":") {
+                    let after = line.split(':').last().unwrap_or("");
+                    let mut toks = after.split_whitespace();
+                    let _ = toks.next();
+                    if let Some(op) = toks.next() {
+                        let clean = op.trim_end_matches(';');
+                        if let Ok(t) = u64::from_str_radix(clean.trim_start_matches("0x"), 16) {
+                            let frm = last_addr.unwrap_or(0);
+                            if t != 0 && !calls.iter().any(|(f, c)| *f == frm && *c == t) {
+                                calls.push((frm, t));
+                            }
+                            if !seen.contains(&t)
+                                && !this_round.contains(&t)
+                                && pending_seeds.len() < 64
+                            {
+                                seen.push(t);
+                                pending_seeds.push(t);
+                            }
                         }
                     }
                 }
@@ -383,6 +377,52 @@ pub fn console_discover(
         funcs.push((*a, next - *a));
     }
     Ok((funcs, calls))
+}
+
+/// Reads console output until the interactive prompt "[decomp]> " is seen.
+/// The prompt carries no trailing newline, so `read_line` deadlocks; the
+/// console also buffers, so the read must be byte-wise.
+fn read_until_prompt(
+    reader: &mut std::io::BufReader<std::process::ChildStdout>,
+) -> Result<String> {
+    use std::io::Read as _;
+    const PROMPT: &[u8] = b"[decomp]> ";
+    let mut buf: Vec<u8> = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        let n = reader
+            .read(&mut byte)
+            .map_err(|e| NativeRuntimeError(format!("console read: {e}")))?;
+        if n == 0 {
+            return err("console closed before prompt");
+        }
+        buf.push(byte[0]);
+        if buf.ends_with(PROMPT) {
+            return Ok(String::from_utf8_lossy(&buf).into_owned());
+        }
+    }
+}
+
+/// Maps the configured Ghidra language id + binary format to the BFD target
+/// name the console's `load file` command expects. The console's BFD loader
+/// derives the SLEIGH language from the image header itself, so the target
+/// must be a BFD name, never a Ghidra language id.
+fn bfd_target_for(language_id: &str, binary: &Path) -> Result<String> {
+    use std::io::Read as _;
+    let mut magic = [0u8; 2];
+    let mut file = std::fs::File::open(binary)
+        .map_err(|e| NativeRuntimeError(format!("bfd target probe: {e}")))?;
+    let got = file
+        .read(&mut magic)
+        .map_err(|e| NativeRuntimeError(format!("bfd target probe: {e}")))?;
+    let pe = got == 2 && &magic == b"MZ";
+    let sixty_four = language_id.contains(":64:");
+    Ok(match (pe, sixty_four) {
+        (true, true) => "pei-x86-64".into(),
+        (true, false) => "pei-i386".into(),
+        (false, true) => "elf64-x86-64".into(),
+        (false, false) => "elf32-i386".into(),
+    })
 }
 
 /// Convenience: seeds for the console discovery rounds from an import

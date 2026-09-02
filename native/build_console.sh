@@ -37,7 +37,10 @@ trap 'rm -rf "$BUILD"' EXIT
 cp -r "$ROOT/third_party/ghidra/decompiler" "$BUILD/decompiler"
 
 cd "$BUILD/decompiler"
-make decomp_opt -j"$JOBS" > /tmp/ghidra-console-build.log 2>&1
+# Fedora's libbfd (binutils 2.4x) pulls in zstd for compressed sections;
+# the pinned Makefile's LNK only carries -lz. Command-line override appends
+# it without touching the pinned tree.
+make decomp_opt -j"$JOBS" LNK="-lz -lzstd" > /tmp/ghidra-console-build.log 2>&1
 mkdir -p "$OUT"
 cp decomp_opt "$OUT/decomp_native"
 echo "built: $OUT/decomp_native"
