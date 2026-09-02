@@ -175,6 +175,19 @@ pub struct DisasmRow {
     pub text: String,
 }
 
+/// One durable change record: the mutation stream consumers watch
+/// (review CORE-005: every change carries a revision, and revisions are
+/// observable).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct RevisionEvent {
+    /// Revision the program reached with this change.
+    pub revision: u64,
+    /// Machine kind: "rename", "replace-functions", ... 
+    pub kind: String,
+    /// Human/detail payload (new name, replaced row count, ...).
+    pub detail: String,
+}
+
 /// A paged query result: a bounded window plus cursor info and the
 /// revision the window was read at (review CORE-004: views never preload).
 #[derive(Clone, Debug, serde::Serialize)]

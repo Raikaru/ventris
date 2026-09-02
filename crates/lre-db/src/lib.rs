@@ -6,7 +6,8 @@
 //! producer + upstream version so reopening never depends on the bridge.
 
 use lre_model::{
-    CommentRow, DataTypeRow, FunctionRow, ProgramId, Provenance, SymbolRow, XrefRow,
+    CommentRow, DataTypeRow, FunctionRow, ProgramId, Provenance, RevisionEvent, SymbolRow,
+    XrefRow,
 };
 use rusqlite::{params, Connection, Row};
 use std::path::Path;
@@ -123,6 +124,16 @@ impl ProjectDb {
                  definition TEXT NOT NULL DEFAULT '',
                  PRIMARY KEY (program_id, name)
              );
+
+             CREATE TABLE IF NOT EXISTS revision_events (
+                 program_id INTEGER NOT NULL REFERENCES programs(id),
+                 revision INTEGER NOT NULL,
+                 kind TEXT NOT NULL,
+                 detail TEXT NOT NULL DEFAULT '',
+                 at TEXT NOT NULL DEFAULT (datetime('now'))
+             );
+             CREATE INDEX IF NOT EXISTS idx_rev_events
+                 ON revision_events(program_id, revision);
              COMMIT;",
         )?;
         let v_text: String = self
@@ -194,6 +205,7 @@ impl ProjectDb {
             ])?;
         }
         drop(stmt);
+                self.bump_and_record(&tx, program, "replace-functions", &format!("{}", rows.len()))?;
         tx.commit()?;
         Ok(())
     }
@@ -217,6 +229,7 @@ impl ProjectDb {
             stmt.execute(params![program.0, addr_cell(&r.address), r.name, r.external as i64, r.source])?;
         }
         drop(stmt);
+                self.bump_and_record(&tx, program, "replace-symbols", &format!("{}", rows.len()))?;
         tx.commit()?;
         Ok(())
     }
@@ -235,6 +248,7 @@ impl ProjectDb {
             stmt.execute(params![program.0, addr_cell(&r.from), addr_cell(&r.to), r.kind])?;
         }
         drop(stmt);
+                self.bump_and_record(&tx, program, "replace-xrefs", &format!("{}", rows.len()))?;
         tx.commit()?;
         Ok(())
     }
@@ -242,17 +256,16 @@ impl ProjectDb {
     /// Applies an analyst rename: bumps the program revision and rewrites the
     /// function name. Fails when the function is unknown.
     pub fn rename_function(&self, program: ProgramId, entry: &lre_model::Address, name: &str) -> Result<()> {
-        let n = self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        let n = tx.execute(
             "UPDATE functions SET name = ?3 WHERE program_id = ?1 AND entry = ?2",
             params![program.0, addr_cell(entry), name],
         )?;
         if n == 0 {
             return Err(DbError::ProgramNotFound(program.0));
         }
-        self.conn.execute(
-            "UPDATE programs SET revision = revision + 1 WHERE id = ?1",
-            params![program.0],
-        )?;
+        self.bump_and_record(&tx, program, "rename", name)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -395,6 +408,7 @@ impl ProjectDb {
             ])?;
         }
         drop(stmt);
+                self.bump_and_record(&tx, program, "replace-comments", &format!("{}", rows.len()))?;
         tx.commit()?;
         Ok(())
     }
@@ -411,6 +425,7 @@ impl ProjectDb {
             stmt.execute(params![program.0, r.name, r.definition])?;
         }
         drop(stmt);
+                self.bump_and_record(&tx, program, "replace-datatypes", &format!("{}", rows.len()))?;
         tx.commit()?;
         Ok(())
     }
@@ -476,6 +491,64 @@ impl ProjectDb {
         )?;
         Ok(rev)
     }
+
+    /// Events after `since` (exclusive) for the program, ascending.
+    pub fn events_since(&self, program: ProgramId, since: u64) -> Result<Vec<RevisionEvent>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT revision, kind, detail FROM revision_events
+             WHERE program_id = ?1 AND revision > ?2 ORDER BY revision",
+        )?;
+        let rows = stmt
+            .query_map(params![program.0, since], |r| {
+                Ok(RevisionEvent {
+                    revision: r.get::<_, i64>(0)? as u64,
+                    kind: r.get(1)?,
+                    detail: r.get(2)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Record one mutation event (inside the caller's transaction).
+    fn record_event(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        program: ProgramId,
+        revision: u64,
+        kind: &str,
+        detail: &str,
+    ) -> Result<()> {
+        tx.execute(
+            "INSERT INTO revision_events(program_id, revision, kind, detail)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![program.0, revision, kind, detail],
+        )?;
+        Ok(())
+    }
+
+    /// Bumps the program revision by one and records an event (inside the
+    /// caller's transaction).
+    fn bump_and_record(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        program: ProgramId,
+        kind: &str,
+        detail: &str,
+    ) -> Result<u64> {
+        tx.execute(
+            "UPDATE programs SET revision = revision + 1 WHERE id = ?1",
+            params![program.0],
+        )?;
+        let rev: i64 = tx.query_row(
+            "SELECT revision FROM programs WHERE id = ?1",
+            params![program.0],
+            |r| r.get(0),
+        )?;
+        self.record_event(tx, program, rev as u64, kind, detail)?;
+        Ok(rev as u64)
+    }
+
 
     /// Language ID recorded for a program.
     pub fn program_language(&self, program: ProgramId) -> Result<String> {
@@ -625,7 +698,36 @@ mod tests {
         assert_eq!(p2[0].entry.offset, 0x400000 + 90 * 0x10);
         let (p3, _, _) = db.functions_page(id, 999, 10).unwrap();
         assert!(p3.is_empty());
-        assert_eq!(rev, 1);
+        // replace bumps the revision (mutation event model: CORE-005)
+        assert!(rev >= 2);
+    }
+
+    #[test]
+    fn revision_events_recorded() {
+        let db = ProjectDb::open_in_memory().unwrap();
+        let id = db.upsert_program("p", "x86:LE:64:default", &prov()).unwrap();
+        assert!(db.events_since(id, 0).unwrap().is_empty());
+        let rows = vec![FunctionRow {
+            entry: lre_model::Address::ram(0x400000),
+            name: "FUN_00400000".into(),
+            size: 4,
+            signature: None,
+            calling_convention: None,
+        }];
+        db.replace_functions(id, &rows).unwrap();
+        let evs = db.events_since(id, 0).unwrap();
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].kind, "replace-functions");
+        assert_eq!(evs[0].revision, 2, "upsert=1, replace bumps to 2");
+        db.rename_function(id, &lre_model::Address::ram(0x400000), "main").unwrap();
+        // after the replace (rev 2); the rename is rev 3
+        let evs = db.events_since(id, 2).unwrap();
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].kind, "rename");
+        assert_eq!(evs[0].detail, "main");
+        assert_eq!(evs[0].revision, 3);
+        // since = current revision -> nothing
+        assert!(db.events_since(id, 3).unwrap().is_empty());
     }
 
     #[test]

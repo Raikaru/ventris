@@ -126,6 +126,12 @@ impl Core {
         let id = self.db.program_id(program)?;
         Ok(self.db.functions(id)?)
     }
+    /// Revision events after `since` for the program (CORE-005).
+    pub fn events_since(&self, program: &str, since: u64) -> Result<Vec<lre_model::RevisionEvent>> {
+        let id = self.db.program_id(program)?;
+        Ok(self.db.events_since(id, since)?)
+    }
+
     /// Paged functions (review CORE-004): bounded window + total + revision.
     pub fn functions_page(
         &self,

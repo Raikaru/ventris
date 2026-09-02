@@ -123,6 +123,21 @@ see gate numbers below and benchmarks/reports/stage4-gate.json).
   "next entry" — capping proven bodies at 16 bytes for the final function
   of a section; now uses the end of the current map.
 
+## CORE-005: revision/event model
+- `revision_events` table (schema v2, created by migrate): every mutation is
+  transactional with a revision bump + an event row (kind/detail).
+- Wired: rename ("rename" + new name) and all five replace_* paths
+  ("replace-functions"/"replace-symbols"/"replace-xrefs"/
+  "replace-comments"/"replace-datatypes" + row count). rename_function is
+  now transactional.
+- `lre-model::RevisionEvent { revision, kind, detail }`; store
+  `events_since(program, since)`; `Core::events_since`.
+- Evidence (native import + rename, real store):
+  (2, replace-functions, 11), (3, replace-xrefs, 3), (4, rename,
+  renamed_add) — strictly increasing, observable windows.
+- Tests: `revision_events_recorded` (kinds, revisions, since-windows);
+  paged test updated for bump semantics. 36 workspace tests.
+
 ## CORE-004: paged query API
 - `lre-model::Page<T> { rows, offset, total, revision }`; store methods
   `functions_page`/`symbols_page`/`xrefs_page` (LIMIT/OFFSET windows +
