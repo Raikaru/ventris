@@ -123,6 +123,16 @@ see gate numbers below and benchmarks/reports/stage4-gate.json).
   "next entry" — capping proven bodies at 16 bytes for the final function
   of a section; now uses the end of the current map.
 
+## CORE-004: paged query API
+- `lre-model::Page<T> { rows, offset, total, revision }`; store methods
+  `functions_page`/`symbols_page`/`xrefs_page` (LIMIT/OFFSET windows +
+  COUNT + revision); Core exposes the same three.
+- CLI: `functions --offset N --limit M` proves the window path (header
+  prints the window, total, and rev); default remains the full list.
+- Test: `paged_functions_window` (100 rows; 10-row windows; boundaries;
+  revision 1).
+- 35 workspace tests.
+
 ## CORE-001: typed address migration
 - Model rows now carry `Address { space, offset }` (FunctionRow/SymbolRow/
   XrefRow/CommentRow/DisasmRow); strings exist only at serialization edges:

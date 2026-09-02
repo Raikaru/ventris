@@ -276,11 +276,23 @@ fn run_inner(args: &[String]) -> Result<(), String> {
         }
         "functions" => {
             let program = args.get(2).ok_or("functions needs a program name")?.clone();
-            let rows = core.functions(&program).map_err(|e| e.to_string())?;
+            let offset: u64 = flag(args, "--offset").and_then(|v| v.parse().ok()).unwrap_or(0);
+            let limit: u64 = flag(args, "--limit").and_then(|v| v.parse().ok()).unwrap_or(0);
+            let rows = if limit > 0 {
+                let page = core
+                    .functions_page(&program, offset, limit)
+                    .map_err(|e| e.to_string())?;
+                println!("-- paged {}..{} of {:?} (rev {})", page.offset, page.offset + page.rows.len() as u64, page.total, page.revision);
+                page.rows
+            } else {
+                core.functions(&program).map_err(|e| e.to_string())?
+            };
             for f in &rows {
                 println!("{}  {:6}  {}", f.entry, f.size, f.name);
             }
-            println!("-- {} functions", rows.len());
+            if limit == 0 {
+                println!("-- {} functions", rows.len());
+            }
         }
         "comments" => {
             let program = args.get(2).ok_or("comments needs a program name")?.clone();

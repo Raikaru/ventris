@@ -126,6 +126,43 @@ impl Core {
         let id = self.db.program_id(program)?;
         Ok(self.db.functions(id)?)
     }
+    /// Paged functions (review CORE-004): bounded window + total + revision.
+    pub fn functions_page(
+        &self,
+        program: &str,
+        offset: u64,
+        limit: u64,
+    ) -> Result<lre_model::Page<FunctionRow>> {
+        let id = self.db.program_id(program)?;
+        let (rows, total, revision) = self.db.functions_page(id, offset, limit)?;
+        Ok(lre_model::Page { rows, offset, total, revision })
+    }
+
+    /// Paged symbols (review CORE-004).
+    pub fn symbols_page(
+        &self,
+        program: &str,
+        offset: u64,
+        limit: u64,
+    ) -> Result<lre_model::Page<SymbolRow>> {
+        let id = self.db.program_id(program)?;
+        let (rows, total, revision) = self.db.symbols_page(id, offset, limit)?;
+        Ok(lre_model::Page { rows, offset, total, revision })
+    }
+
+    /// Paged xrefs in one direction (review CORE-004).
+    pub fn xrefs_page(
+        &self,
+        program: &str,
+        address: &lre_model::Address,
+        incoming: bool,
+        offset: u64,
+        limit: u64,
+    ) -> Result<lre_model::Page<XrefRow>> {
+        let id = self.db.program_id(program)?;
+        let (rows, total, revision) = self.db.xrefs_page(id, address, incoming, offset, limit)?;
+        Ok(lre_model::Page { rows, offset, total, revision })
+    }
 
     /// Lists comments from the project store (no JVM).
     pub fn comments(&self, program: &str) -> Result<Vec<CommentRow>> {

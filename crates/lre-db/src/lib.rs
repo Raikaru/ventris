@@ -268,6 +268,79 @@ impl ProjectDb {
         Ok(rows)
     }
 
+    /// Paged functions (review CORE-004): a bounded window + total + the
+    /// revision the window was read at. Views never preload.
+    pub fn functions_page(
+        &self,
+        program: ProgramId,
+        offset: u64,
+        limit: u64,
+    ) -> Result<(Vec<FunctionRow>, Option<u64>, u64)> {
+        let total: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM functions WHERE program_id = ?1", params![program.0], |r| r.get(0))?;
+        let mut stmt = self.conn.prepare(
+            "SELECT entry, name, size, signature, calling_convention
+             FROM functions WHERE program_id = ?1 ORDER BY entry LIMIT ?2 OFFSET ?3",
+        )?;
+        let rows = stmt
+            .query_map(params![program.0, limit, offset], map_function)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok((rows, Some(total as u64), self.revision(program)?))
+    }
+
+    /// Paged symbols (review CORE-004).
+    pub fn symbols_page(
+        &self,
+        program: ProgramId,
+        offset: u64,
+        limit: u64,
+    ) -> Result<(Vec<SymbolRow>, Option<u64>, u64)> {
+        let total: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM symbols WHERE program_id = ?1", params![program.0], |r| r.get(0))?;
+        let mut stmt = self.conn.prepare(
+            "SELECT address, name, external, source FROM symbols
+             WHERE program_id = ?1 ORDER BY address LIMIT ?2 OFFSET ?3",
+        )?;
+        let rows = stmt
+            .query_map(params![program.0, limit, offset], map_symbol)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok((rows, Some(total as u64), self.revision(program)?))
+    }
+
+    /// Paged xrefs in one direction (review CORE-004).
+    pub fn xrefs_page(
+        &self,
+        program: ProgramId,
+        address: &lre_model::Address,
+        incoming: bool,
+        offset: u64,
+        limit: u64,
+    ) -> Result<(Vec<XrefRow>, Option<u64>, u64)> {
+        let cell = addr_cell(address);
+        let (src, dst) = (cell.clone(), cell);
+        let sql_total = if incoming {
+            "SELECT COUNT(*) FROM xrefs WHERE program_id = ?1 AND dst = ?2"
+        } else {
+            "SELECT COUNT(*) FROM xrefs WHERE program_id = ?1 AND src = ?2"
+        };
+        let total: i64 = self.conn
+            .query_row(sql_total, params![program.0, dst], |r| r.get(0))?;
+        let (sql_win, key) = if incoming {
+            ("SELECT src, dst, kind FROM xrefs WHERE program_id = ?1 AND dst = ?2
+              ORDER BY src LIMIT ?3 OFFSET ?4", dst)
+        } else {
+            ("SELECT src, dst, kind FROM xrefs WHERE program_id = ?1 AND src = ?2
+              ORDER BY dst LIMIT ?3 OFFSET ?4", src)
+        };
+        let mut stmt = self.conn.prepare(sql_win)?;
+        let rows = stmt
+            .query_map(params![program.0, key, limit, offset], map_xref)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok((rows, Some(total as u64), self.revision(program)?))
+    }
+
     /// Lists xrefs pointing at `address`.
     pub fn xrefs_to(&self, program: ProgramId, address: &lre_model::Address) -> Result<Vec<XrefRow>> {
         let mut stmt = self.conn.prepare(
@@ -527,6 +600,32 @@ mod tests {
         assert_eq!(db.datatypes(id).unwrap()[0].name, "int");
         db.replace_comments(id, &[]).unwrap();
         assert!(db.comments(id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn paged_functions_window() {
+        let db = ProjectDb::open_in_memory().unwrap();
+        let id = db.upsert_program("p", "x86:LE:64:default", &prov()).unwrap();
+        let rows: Vec<FunctionRow> = (0..100u64)
+            .map(|i| FunctionRow {
+                entry: lre_model::Address::ram(0x400000 + i * 0x10),
+                name: format!("f{i}"),
+                size: 16,
+                signature: None,
+                calling_convention: None,
+            })
+            .collect();
+        db.replace_functions(id, &rows).unwrap();
+        let (p1, total, rev) = db.functions_page(id, 0, 10).unwrap();
+        assert_eq!(p1.len(), 10);
+        assert_eq!(total, Some(100));
+        assert_eq!(p1[0].entry.offset, 0x400000);
+        let (p2, _, _) = db.functions_page(id, 90, 10).unwrap();
+        assert_eq!(p2.len(), 10);
+        assert_eq!(p2[0].entry.offset, 0x400000 + 90 * 0x10);
+        let (p3, _, _) = db.functions_page(id, 999, 10).unwrap();
+        assert!(p3.is_empty());
+        assert_eq!(rev, 1);
     }
 
     #[test]

@@ -175,6 +175,20 @@ pub struct DisasmRow {
     pub text: String,
 }
 
+/// A paged query result: a bounded window plus cursor info and the
+/// revision the window was read at (review CORE-004: views never preload).
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct Page<T> {
+    /// The window of rows (at most `limit`).
+    pub rows: Vec<T>,
+    /// Offset of the first row in the full result.
+    pub offset: u64,
+    /// Total row count when known cheaply (COUNT), else `None`.
+    pub total: Option<u64>,
+    /// Store revision the window was read at (CORE-005 precursor).
+    pub revision: u64,
+}
+
 /// Program summary returned by import/open.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ProgramSummary {
