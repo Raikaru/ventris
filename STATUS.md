@@ -107,6 +107,26 @@ see gate numbers below and benchmarks/reports/stage4-gate.json).
   11/11; stripped CLI discovery 7/7 subsets of the oracle; add/main
   semantic parity.
 
+## Sessionful runtime foundation (review Phase 2 start)
+- `lre-core::session`: `RuntimeConfig` (immutable; env-derived defaults, the
+  internal contract services take — native_runtime migration continues),
+  `MemoryRegion { vaddr, size, file_off, file_size, flags }`,
+  `ProgramImage` (one read-only `memmap2` mapping + regions + sparse patch
+  overlay; BSS zero-fill bounded by `file_size`), `ProgramSession`
+  (program name + `Arc<ProgramImage>` + metadata with language/format/image
+  base).
+- `Core::open_session` (map-once) and `Core::mem_native` now served from a
+  cached `ProgramImage` — repeated reads no longer re-read, re-parse, or
+  re-discover the binary (review CORE-002 / 4.8).
+- New dependency: `memmap2` (safe `Mmap`; the one reviewed FFI-adjacent
+  site, read-only mappings only).
+- Tests (18 lre-core, 32 workspace): region file-byte reads, BSS zero-fill,
+  patch overlay, unmapped/crossing reads, `RuntimeConfig` defaults, and
+  `ProgramImage::open` against the real fixture (add's bytes at 0x400466).
+- The environment-var contract inside `native_runtime` moves to accept a
+  `RuntimeConfig` next (CORE-001 typed identity; CORE-004 paging...), per
+  the ratified 9-phase roadmap.
+
 ## Post-review hardening (facade contract + real-binary evidence)
 - Native paths moved into the Core facade (review: "a GUI can't reuse the
   native decompile/disasm without copying lre-cli's spawn logic"): new

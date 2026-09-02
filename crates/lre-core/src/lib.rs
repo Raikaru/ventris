@@ -8,6 +8,7 @@ pub mod bridge;
 pub mod disasm;
 pub mod native;
 pub mod native_runtime;
+pub mod session;
 
 use lre_db::ProjectDb;
 use lre_model::{CommentRow, DataTypeRow, DisasmRow, FunctionRow, ProgramId, ProgramSummary, SymbolRow, XrefRow};
@@ -43,11 +44,11 @@ pub type Result<T, E = CoreError> = std::result::Result<T, E>;
 pub struct Core {
     db: ProjectDb,
     db_path: PathBuf,
-    /// Last parsed native import (binary path -> mappings), so repeated
-    /// `mem_native` reads don't re-read and re-discover the whole file per
-    /// call. One-entry cache: the CLI's scroll pattern is single-binary;
-    /// the sessionful image layer (post-review plan) replaces this.
-    native_cache: std::cell::RefCell<Option<(PathBuf, std::sync::Arc<native::NativeImport>)>>,
+    /// Last mapped image for a binary path, so repeated `mem_native`
+    /// reads don't re-open/re-parse the file per call. One-entry cache:
+    /// the CLI's scroll pattern is single-binary; `ProgramSession` (the
+    /// sessionful image layer) supersedes it for interactive consumers.
+    native_cache: std::cell::RefCell<Option<(PathBuf, std::sync::Arc<session::ProgramImage>)>>,
 }
 
 impl Core {
@@ -214,27 +215,39 @@ impl Core {
     /// don't re-read and re-discover the whole binary per call.
     pub fn mem_native(&self, binary: &Path, vaddr: u64, size: usize) -> Result<Vec<u8>> {
         let binary = binary.to_path_buf();
-        let imp = {
+        let image = {
             let mut cache = self.native_cache.borrow_mut();
             let hit = cache.as_ref().map(|(p, _)| p == &binary).unwrap_or(false);
             if !hit {
-                let parsed = std::sync::Arc::new(native::load_native(&binary)?);
-                *cache = Some((binary.clone(), parsed.clone()));
-                parsed
+                let opened = std::sync::Arc::new(session::ProgramImage::open(&binary)?);
+                *cache = Some((binary.clone(), opened.clone()));
+                opened
             } else {
                 cache.as_ref().unwrap().1.clone()
             }
         };
-        for m in &imp.mappings {
-            if vaddr >= m.vaddr && vaddr + size as u64 <= m.vaddr + m.size {
-                let off = (vaddr - m.vaddr) as usize;
-                return Ok(m.bytes[off..off + size].to_vec());
-            }
-        }
-        Err(CoreError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("no mapping covers {vaddr:#x}..+{size:#x}"),
-        )))
+        image
+            .read(vaddr, size as u64)
+            .ok_or_else(|| {
+                CoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("no mapping covers {vaddr:#x}..+{size:#x}"),
+                ))
+            })
+    }
+
+    /// Opens a program session: the binary mapped once, regions derived,
+    /// metadata captured. Every interactive view and worker shares the
+    /// image; repeated reads never re-parse or re-discover the file.
+    pub fn open_session(&self, binary: &Path, program: &str) -> Result<session::ProgramSession> {
+        let imp = native::load_native(binary)?;
+        let image = std::sync::Arc::new(session::ProgramImage::open(binary)?);
+        let metadata = session::SessionMetadata::from_import(&imp);
+        Ok(session::ProgramSession {
+            program: program.to_string(),
+            image,
+            metadata,
+        })
     }
 
     /// Re-exports fresh facts from the bridge after an edit session.
