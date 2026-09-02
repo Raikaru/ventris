@@ -32,15 +32,34 @@ public:
     qint64 revision() const;
     void refresh();
 
+    /// Server-side name filter: case-insensitive substring, or regex when
+    /// the text carries a `re:` prefix. Empty text clears the filter.
+    void setFilter(const QString &filter);
+    QString filter() const;
+
+    /// Header-driven sort; column 3 (signature) is not sortable.
+    void sort(int column, Qt::SortOrder order) override;
+
+    /// Column 1 (name) is editable in place; the actual rename command is
+    /// issued by the window via renameRequested so the undo journal and
+    /// job list stay in one place.
+    Qt::ItemFlags flags(const QModelIndex &index) const override;
+    bool setData(const QModelIndex &index, const QVariant &value,
+                 int role = Qt::EditRole) override;
+
 signals:
     void requestError(const QString &message);
     void refreshed();
+    void renameRequested(const QString &address, const QString &name);
 
 private:
     void requestPage(bool reset);
 
     CoreBridge *bridge_;
     QString program_;
+    QString filter_;
+    int sort_column_ = 0;
+    Qt::SortOrder sort_order_ = Qt::AscendingOrder;
     qint64 total_ = 0;
     qint64 revision_ = 0;
     QVector<FunctionRowView> rows_;

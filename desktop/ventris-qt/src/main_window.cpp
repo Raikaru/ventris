@@ -7,11 +7,13 @@
 #include "listing_canvas.h"
 #include "navigation_controller.h"
 #include "json_util.h"
-#include "views.h"
 
 #include <QDockWidget>
 #include <QGridLayout>
 #include <QHeaderView>
+#include <QKeySequence>
+#include <QShortcut>
+#include <QTimer>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -106,7 +108,23 @@ MainWindow::MainWindow(const QString &project, const QString &program, const QSt
         root->addWidget(status_);
         setCentralWidget(central);
 
-        functions_ = new QTableView(this);
+        auto *functions_panel = new QWidget(this);
+        auto *functions_layout = new QVBoxLayout(functions_panel);
+        functions_layout->setContentsMargins(0, 0, 0, 0);
+        function_filter_edit_ = new QLineEdit(functions_panel);
+        function_filter_edit_->setObjectName(QStringLiteral("functionFilterEdit"));
+        function_filter_edit_->setPlaceholderText(
+            QStringLiteral("Filter (substring, or re: for regex)"));
+        function_filter_timer_ = new QTimer(function_filter_edit_);
+        function_filter_timer_->setSingleShot(true);
+        function_filter_timer_->setInterval(250);
+        connect(function_filter_edit_, &QLineEdit::textChanged, function_filter_timer_,
+                qOverload<>(&QTimer::start));
+        connect(function_filter_timer_, &QTimer::timeout, this, [this]() {
+            function_model_->setFilter(function_filter_edit_->text());
+        });
+        functions_layout->addWidget(function_filter_edit_);
+        functions_ = new QTableView(functions_panel);
         functions_->setObjectName(QStringLiteral("functionsView"));
         function_model_ = new FunctionTableModel(bridge_, functions_);
         functions_->setModel(function_model_);
@@ -115,9 +133,11 @@ MainWindow::MainWindow(const QString &project, const QString &program, const QSt
         functions_->horizontalHeader()->setStretchLastSection(true);
         functions_->verticalHeader()->setVisible(false);
         functions_->setAlternatingRowColors(true);
+        functions_->setSortingEnabled(true);
+        functions_layout->addWidget(functions_, 1);
         auto *functions_dock = new QDockWidget(QStringLiteral("Functions"), this);
         functions_dock->setObjectName(QStringLiteral("functionsDock"));
-        functions_dock->setWidget(functions_);
+        functions_dock->setWidget(functions_panel);
         addDockWidget(Qt::LeftDockWidgetArea, functions_dock);
 
         decompiler_ = new DecompilerView(this);
@@ -341,6 +361,8 @@ MainWindow::MainWindow(const QString &project, const QString &program, const QSt
         connect(rename, &QPushButton::clicked, this, &MainWindow::renameFunction);
         connect(comment, &QPushButton::clicked, this, &MainWindow::applyComment);
         connect(undo, &QPushButton::clicked, this, &MainWindow::undoCommand);
+        auto *undo_shortcut = new QShortcut(QKeySequence::Undo, this);
+        connect(undo_shortcut, &QShortcut::activated, this, &MainWindow::undoCommand);
         connect(search, &QPushButton::clicked, this, &MainWindow::loadFacts);
         connect(bookmark, &QPushButton::clicked, this, &MainWindow::setBookmark);
         connect(patch, &QPushButton::clicked, this, &MainWindow::setPatch);
@@ -357,12 +379,22 @@ MainWindow::MainWindow(const QString &project, const QString &program, const QSt
             if (!index.isValid()) {
                 return;
             }
-            const QString address =
-                function_model_->data(function_model_->index(index.row(), 0)).toString();
             name_edit_->setText(
                 function_model_->data(function_model_->index(index.row(), 1)).toString());
-            navigation_->goTo(address, true);
         });
+        auto jump_to_index = [this](const QModelIndex &index) {
+            if (!index.isValid()) {
+                return;
+            }
+            name_edit_->setText(
+                function_model_->data(function_model_->index(index.row(), 1)).toString());
+            navigation_->goTo(
+                function_model_->data(function_model_->index(index.row(), 0)).toString(), true);
+        };
+        connect(functions_, &QTableView::doubleClicked, this, jump_to_index);
+        connect(functions_, &QTableView::activated, this, jump_to_index);
+        connect(function_model_, &FunctionTableModel::renameRequested, this,
+                &MainWindow::renameFunctionAt);
         connect(function_model_, &FunctionTableModel::requestError, this,
                 [this](const QString &message) { setStatus(message, true); });
         connect(function_model_, &FunctionTableModel::refreshed, this, [this]() {
@@ -1101,21 +1133,29 @@ void MainWindow::propagateTypes() {
     }
 
 void MainWindow::renameFunction() {
-        const int job = beginJob(QStringLiteral("rename %1").arg(address_edit_->text()));
-        bridge_->request(QJsonObject{{"method", "rename"},
-                                     {"program", program_edit_->text()},
-                                     {"address", address_edit_->text()},
-                                     {"name", name_edit_->text()}},
-                         [this, job](const QJsonObject &response) {
-                             QString error;
-                             if (!successful(response, &error)) {
-                                 finishJob(job, false, error);
-                                 return;
-                             }
-                             function_model_->refresh();
-                             finishJob(job, true, QStringLiteral("rename committed"));
-                         });
+    renameFunctionAt(address_edit_->text(), name_edit_->text());
+}
+
+void MainWindow::renameFunctionAt(const QString &address, const QString &name) {
+    if (address.isEmpty() || name.trimmed().isEmpty()) {
+        setStatus(QStringLiteral("address and new name are required"), true);
+        return;
     }
+    const int job = beginJob(QStringLiteral("rename %1").arg(address));
+    bridge_->request(QJsonObject{{"method", "rename"},
+                                 {"program", program_edit_->text()},
+                                 {"address", address},
+                                 {"name", name}},
+                     [this, job, address](const QJsonObject &response) {
+                         QString error;
+                         if (!successful(response, &error)) {
+                             finishJob(job, false, error);
+                             return;
+                         }
+                         function_model_->refresh();
+                         finishJob(job, true, QStringLiteral("renamed %1").arg(address));
+                     });
+}
 
 void MainWindow::applyComment() {
         const int job = beginJob(QStringLiteral("comment %1").arg(address_edit_->text()));

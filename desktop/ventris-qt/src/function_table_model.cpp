@@ -53,6 +53,45 @@ void FunctionTableModel::fetchMore(const QModelIndex &parent) {
     }
 }
 
+void FunctionTableModel::setFilter(const QString &filter) {
+    if (filter_ == filter) {
+        return;
+    }
+    filter_ = filter;
+    refresh();
+}
+
+QString FunctionTableModel::filter() const { return filter_; }
+
+void FunctionTableModel::sort(int column, Qt::SortOrder order) {
+    if (column < 0 || column > 2) {
+        return;
+    }
+    sort_column_ = column;
+    sort_order_ = order;
+    refresh();
+}
+
+Qt::ItemFlags FunctionTableModel::flags(const QModelIndex &index) const {
+    Qt::ItemFlags result = QAbstractTableModel::flags(index);
+    if (index.isValid() && index.column() == 1) {
+        result |= Qt::ItemIsEditable;
+    }
+    return result;
+}
+
+bool FunctionTableModel::setData(const QModelIndex &index, const QVariant &value, int role) {
+    if (role != Qt::EditRole || !index.isValid() || index.column() != 1) {
+        return false;
+    }
+    const QString name = value.toString().trimmed();
+    if (name.isEmpty() || index.row() >= rows_.size()) {
+        return false;
+    }
+    emit renameRequested(rows_.at(index.row()).address, name);
+    return true;
+}
+
 void FunctionTableModel::setProgram(const QString &program) {
     program_ = program;
     refresh();
@@ -77,10 +116,16 @@ void FunctionTableModel::requestPage(bool reset) {
     }
     loading_ = true;
     const quint64 generation = ++generation_;
+    static const char *sort_keys[] = {"entry", "name", "size"};
     QJsonObject request{{"method", "functions_page"},
                         {"program", program_},
                         {"offset", reset ? 0 : rows_.size()},
-                        {"limit", page_size_}};
+                        {"limit", page_size_},
+                        {"sort", sort_keys[sort_column_]},
+                        {"ascending", sort_order_ == Qt::AscendingOrder}};
+    if (!filter_.isEmpty()) {
+        request["filter"] = filter_;
+    }
     bridge_->request(request, [this, generation, reset](const QJsonObject &response) {
         if (generation != generation_) {
             return;

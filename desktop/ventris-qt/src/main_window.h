@@ -10,6 +10,7 @@ class GraphCanvas;
 class ListingCanvas;
 class NavigationController;
 class QLabel;
+class QTimer;
 class QLineEdit;
 class QListWidget;
 class QPlainTextEdit;
@@ -37,6 +38,7 @@ private slots:
     void loadFacts();
     void loadMemory();
     void loadHex();
+    void renameFunctionAt(const QString &address, const QString &name);
     void loadGraph();
     void loadAnalystData();
     void setBookmark();
@@ -73,8 +75,10 @@ private:
     QLineEdit *search_edit_ = nullptr;
     QLineEdit *bookmark_edit_ = nullptr;
     QLineEdit *patch_original_edit_ = nullptr;
-    QLineEdit *patch_new_edit_ = nullptr;
     QTableView *functions_ = nullptr;
+    QLineEdit *function_filter_edit_ = nullptr;
+    QTimer *function_filter_timer_ = nullptr;
+    QLineEdit *patch_new_edit_ = nullptr;
     FunctionTableModel *function_model_ = nullptr;
     QTableWidget *xrefs_ = nullptr;
     QTableWidget *symbols_ = nullptr;
