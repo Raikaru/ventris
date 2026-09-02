@@ -13,6 +13,7 @@
 #include <QHeaderView>
 #include <QKeySequence>
 #include <QShortcut>
+#include <QMenu>
 #include <QTimer>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -34,6 +35,7 @@ MainWindow::MainWindow(const QString &project, const QString &program, const QSt
                         const QString &address, QWidget *parent)
         : QMainWindow(parent), bridge_(new CoreBridge(project, this)),
           program_(program), binary_(binary), address_(address) {
+        navigation_ = new NavigationController(this);
         setWindowTitle(QStringLiteral("Ventris"));
         resize(1280, 820);
 
@@ -104,6 +106,22 @@ MainWindow::MainWindow(const QString &project, const QString &program, const QSt
         root->addLayout(controls);
         listing_canvas_ = new ListingCanvas(central);
         root->addWidget(listing_canvas_, 1);
+        connect(listing_canvas_, &ListingCanvas::addressSelected, this,
+                [this](const QString &address, bool record) {
+                    navigation_->goTo(address, record);
+                });
+        connect(listing_canvas_, &ListingCanvas::windowNeeded, this,
+                [this](const QString &start) { loadListingAt(start); });
+        connect(listing_canvas_, &ListingCanvas::backRequested, navigation_,
+                &NavigationController::back);
+        connect(listing_canvas_, &ListingCanvas::forwardRequested, navigation_,
+                &NavigationController::forward);
+        connect(listing_canvas_, &ListingCanvas::contextMenuRequested, this,
+                &MainWindow::listingContextMenu);
+        auto *bytes_toggle = new QShortcut(QKeySequence(QStringLiteral("Ctrl+B")), this);
+        connect(bytes_toggle, &QShortcut::activated, this, [this]() {
+            listing_canvas_->setBytesVisible(!listing_canvas_->bytesVisible());
+        });
         status_ = new QLabel(this);
         root->addWidget(status_);
         setCentralWidget(central);
@@ -333,7 +351,6 @@ MainWindow::MainWindow(const QString &project, const QString &program, const QSt
         jobs_dock->setWidget(jobs_);
         addDockWidget(Qt::BottomDockWidgetArea, jobs_dock);
 
-        navigation_ = new NavigationController(this);
         connect(navigation_, &NavigationController::addressChanged, this,
                 [this](const QString &address) {
                     address_edit_->setText(address);
@@ -486,22 +503,58 @@ void MainWindow::decompile() {
     }
 
 void MainWindow::loadListing() {
-        const int job = beginJob(QStringLiteral("listing %1").arg(address_edit_->text()));
-        bridge_->request(QJsonObject{{"method", "listing"},
-                                     {"binary", binary_edit_->text()},
-                                     {"start", address_edit_->text()},
-                                     {"count", 96}},
-                         [this, job](const QJsonObject &response) {
-                             QString error;
-                             if (!successful(response, &error)) {
-                                 finishJob(job, false, error);
-                                 return;
-                             }
-                             listing_canvas_->setRows(
-                                 response.value("result").toObject().value("rows").toArray());
-                             finishJob(job, true, QStringLiteral("listing loaded"));
-                         });
+    loadListingAt(address_edit_->text());
+}
+
+void MainWindow::loadListingAt(const QString &address) {
+    if (address.isEmpty() || binary_edit_->text().isEmpty()) {
+        return;
     }
+    const int job = beginJob(QStringLiteral("listing %1").arg(address));
+    bridge_->request(QJsonObject{{"method", "listing"},
+                                 {"binary", binary_edit_->text()},
+                                 {"start", address},
+                                 {"count", 128}},
+                     [this, job, address](const QJsonObject &response) {
+                         QString error;
+                         if (!successful(response, &error)) {
+                             finishJob(job, false, error);
+                             return;
+                         }
+                         const QJsonArray rows =
+                             response.value("result").toObject().value("rows").toArray();
+                         QVector<ListingRowView> views;
+                         views.reserve(rows.size());
+                         for (const QJsonValue &row : rows) {
+                             views.append(ListingRowView::fromJson(row.toObject()));
+                         }
+                         listing_canvas_->setWindow(views);
+                         listing_canvas_->setAddress(address);
+                         finishJob(job, true, QStringLiteral("listing loaded"));
+                     });
+}
+
+void MainWindow::listingContextMenu(const QPoint &global_pos, const QString &address) {
+    QMenu menu(this);
+    menu.addAction(QStringLiteral("Rename…"), this, [this, address]() {
+        address_edit_->setText(address);
+        name_edit_->setFocus();
+        renameFunctionAt(address, name_edit_->text());
+    });
+    menu.addAction(QStringLiteral("Add comment…"), this, [this, address]() {
+        address_edit_->setText(address);
+        applyComment();
+    });
+    menu.addAction(QStringLiteral("Show xrefs"), this, [this, address]() {
+        address_edit_->setText(address);
+        loadXrefs();
+    });
+    menu.addAction(QStringLiteral("Decompile here"), this, [this, address]() {
+        address_edit_->setText(address);
+        decompile();
+    });
+    menu.exec(global_pos);
+}
 
 void MainWindow::loadXrefs() {
         const int job = beginJob(QStringLiteral("xrefs %1").arg(address_edit_->text()));

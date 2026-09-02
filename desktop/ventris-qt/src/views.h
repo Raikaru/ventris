@@ -32,17 +32,19 @@ struct FunctionRowView {
 };
 
 /// One listing row (CORE-007): stable id (= instruction address offset),
-/// display address, rendered mnemonic + operands.
+/// display address, rendered mnemonic + operands, raw instruction bytes.
 struct ListingRowView {
     quint64 stable_id = 0;
     QString address;
     QString text;
+    QString bytes;
 
     static ListingRowView fromJson(const QJsonObject &row) {
         ListingRowView view;
         view.stable_id = row.value("stable_id").toVariant().toULongLong();
         view.address = addressText(row.value("address"));
         view.text = row.value("text").toString();
+        view.bytes = row.value("bytes").toString();
         return view;
     }
 };

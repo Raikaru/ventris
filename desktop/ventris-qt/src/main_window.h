@@ -35,8 +35,10 @@ private slots:
     void decompile();
     void loadListing();
     void loadXrefs();
-    void loadFacts();
     void loadMemory();
+    void loadFacts();
+    void loadListingAt(const QString &address);
+    void listingContextMenu(const QPoint &global_pos, const QString &address);
     void loadHex();
     void renameFunctionAt(const QString &address, const QString &name);
     void loadGraph();
