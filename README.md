@@ -104,9 +104,19 @@ RUNS=3 VENTRIS_SLA=... ./benchmarks/gate.sh # memory/perf gates
   against Ghidra, not a replacement.
 - **Real-binary sample (`/usr/lib64/libc.so.6`, 2.48 MB, stripped, this
   machine)**: native import recovers 3,999 functions in 0.54 s (exported
-  symbols, init/fini arrays, flow closure); a real 192-byte varargs function
-  (`__GI___asprintf`) decompiles natively in 0.9 s. Function-set parity
-  against the Ghidra oracle on this binary is reported in STATUS.md.
+  symbols, init/fini arrays, two-path flow closure); a real 192-byte varargs
+  function (`__GI___asprintf`) decompiles natively in 0.9 s. Against the
+  Ghidra oracle (3,987): intersection 3,930 — **precision 0.983, recall
+  0.986** (69 native-only / 57 oracle-only entries, mostly boundary and
+  alias differences). Function-set agreement, not just count proximity.
+- **Gate semantics**: `benchmarks/gate.sh` distinguishes a COMPLETE run
+  (every required phase executed) from a PARTIAL one (missing SLEIGH
+  console → `"complete": false, "skipped": ["disasm-native"],
+  "functional_pass": false, "performance_pass": true`, exit 2). A complete
+  PASS (exit 0) requires all phases; the current environment (no
+  binutils-devel, no sudo) yields PARTIAL on both the gate and the
+  console-dependent differential steps — the worker/CLI parity steps run
+  unconditionally and pass.
 - **Known limits (support matrix)**: non-PIE executables only (PIE/ASLR
   binaries work via the bridge); indirect-only CRT helpers (`_init`,
   `register_tm_clones`, PLT shims) are not recovered by native discovery;

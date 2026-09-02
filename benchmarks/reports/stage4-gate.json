@@ -11,34 +11,25 @@
   "runs": [
     {
       "run": 1,
-      "wall_s": 0.1,
-      "import_kb": 5752,
-      "disasm_kb": 0,
-      "decompile_kb": 39208
-    },
-    {
-      "run": 2,
       "wall_s": 0.11,
-      "import_kb": 5656,
+      "import_kb": 5544,
       "disasm_kb": 0,
-      "decompile_kb": 39440
-    },
-    {
-      "run": 3,
-      "wall_s": 0.12,
-      "import_kb": 5656,
-      "disasm_kb": 0,
-      "decompile_kb": 39432
+      "decompile_kb": 39436
     }
   ],
   "median_wall_s": 0.11,
-  "peak_import_kb": 5752,
+  "peak_import_kb": 5544,
   "peak_disasm_kb": 0,
-  "peak_decompile_kb": 39440,
+  "peak_decompile_kb": 39436,
   "gates": {
     "peak_kb": 100000,
     "wall_s": 120.0,
     "stock_ghidra_baseline_kb": 384000
   },
-  "pass": true
+  "complete": false,
+  "skipped": [
+    "disasm-native"
+  ],
+  "performance_pass": true,
+  "functional_pass": false
 }

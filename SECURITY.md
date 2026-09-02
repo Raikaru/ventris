@@ -26,14 +26,19 @@ Include:
 
 The security review covers the shipped runtime surfaces:
 
-- the Rust workspace has no third-party runtime dependencies, and its library
-  crates forbid `unsafe_code`;
+- the Rust workspace (lre-model, lre-db, lre-core, lre-cli, lre-worker)
+  keeps third-party runtime dependencies to serde/rusqlite/thiserror/base64,
+  and its library crates forbid `unsafe_code` where reviewed constructs are
+  not required;
 - binary parsing and analysis are bounded by the selected image and function
-  range; malformed input must fail without executing target code;
-- the Python wheel forwards to an explicitly selected executable and does not
-  execute shell commands or download native code;
-- the VS Code integration spawns the configured executable without a shell and
-  passes typed arguments directly to the public CLI.
+  range; truncated or malformed ELF/PE input must return a typed error, never
+  panic or execute bytes from the target file;
+- the native worker and SLEIGH console are spawned as child processes without
+  a shell (`Command` with argv only); user-supplied paths and addresses are
+  passed as arguments, never interpolated into a shell command line;
+- the Java bridge (a development-only oracle path, never a supported runtime
+  surface for the JVM-free workflow) loads Ghidra's own jars from the pinned
+  install and is not exposed to untrusted input directly.
 
 The repository's runtime dependency and release checks are part of the
 release gate. They do not replace review of the host, binary inputs, proxy, or

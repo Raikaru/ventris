@@ -39,6 +39,8 @@ CONSOLE_AVAILABLE=1
 export VENTRIS_CONSOLE="$CONSOLE"
 export VENTRIS_SLA
 
+rss() { grep 'Maximum resident set size' "$1" | grep -o '[0-9]*' || echo 0; }
+
 rm -rf "$OUTDIR"
 mkdir -p "$OUTDIR"
 
@@ -73,7 +75,6 @@ for i in $(seq 1 "$RUNS"); do
 
     end=$(date +%s.%N)
     elapsed=$(echo "$end - $start" | bc)
-    rss() { grep 'Maximum resident set size' "$1" | grep -o '[0-9]*' || echo 0; }
     results=$(python3 -c "
 import json, sys
 r = json.loads(sys.argv[1])
@@ -93,6 +94,7 @@ runs = json.loads(sys.argv[2])
 outdir = pathlib.Path(sys.argv[3])
 gate_kb = int(sys.argv[4])
 gate_wall = float(sys.argv[5])
+console_available = sys.argv[6] == "1"
 def med(v):
     v = sorted(v)
     return v[len(v)//2] if v else 0
@@ -108,10 +110,16 @@ report = {
     "peak_decompile_kb": peak("decompile_kb"),
     "gates": {"peak_kb": gate_kb, "wall_s": gate_wall,
               "stock_ghidra_baseline_kb": 384000},
-    "pass": (peak("import_kb") <= gate_kb
-             and peak("decompile_kb") <= gate_kb
-             and (not peak("disasm_kb") or peak("disasm_kb") <= gate_kb)
-             and med([r["wall_s"] for r in runs]) <= gate_wall),
+    "complete": console_available,
+    "skipped": [] if console_available else ["disasm-native"],
+    "performance_pass": (peak("import_kb") <= gate_kb
+                         and peak("decompile_kb") <= gate_kb
+                         and (not peak("disasm_kb") or peak("disasm_kb") <= gate_kb)
+                         and med([r["wall_s"] for r in runs]) <= gate_wall),
+    "functional_pass": console_available and (peak("import_kb") <= gate_kb
+                         and peak("decompile_kb") <= gate_kb
+                         and peak("disasm_kb") <= gate_kb
+                         and med([r["wall_s"] for r in runs]) <= gate_wall),
 }
 # Re-verify the end-to-end artifacts really are the expected content.
 add = (outdir / "decompile_1.out").read_text()
@@ -126,11 +134,15 @@ print(json.dumps(report, indent=2))
 reports_dir = root / "benchmarks" / "reports"
 reports_dir.mkdir(parents=True, exist_ok=True)
 (reports_dir / "stage4-gate.json").write_text(json.dumps(report, indent=2) + "\n")
-if report["pass"]:
-    print(f"GATE PASS: peak {max(report['peak_import_kb'], report['peak_disasm_kb'], report['peak_decompile_kb'])} KB (limit {gate_kb}), "
+if report["functional_pass"]:
+    print(f"GATE PASS (complete): peak {max(report['peak_import_kb'], report['peak_disasm_kb'], report['peak_decompile_kb'])} KB (limit {gate_kb}), "
           f"median wall {report['median_wall_s']} s (limit {gate_wall})")
     print(f"  vs stock Ghidra baseline ~{report['gates']['stock_ghidra_baseline_kb']} KB peak")
-else:
-    print(f"GATE FAIL: see {reports_dir / 'stage4-gate.json'}")
-    sys.exit(1)
+    sys.exit(0)
+if report["performance_pass"] and not report["complete"]:
+    print(f"GATE PARTIAL (incomplete run — skipped: {report['skipped']}): performance within bounds, "
+          f"but a required phase did not run. See {reports_dir / 'stage4-gate.json'}")
+    sys.exit(2)
+print(f"GATE FAIL: see {reports_dir / 'stage4-gate.json'}")
+sys.exit(1)
 EOF

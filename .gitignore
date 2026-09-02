@@ -37,3 +37,7 @@ third_party/ghidra/decompiler/sleigh_opt
 
 # Local analysis caches
 .lre/
+
+# Volatile benchmark run artifacts (keep only the summarized report)
+/benchmarks/reports/gate-run/
+/benchmarks/reports/**/*.sqlite

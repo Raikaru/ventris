@@ -155,6 +155,10 @@ pub fn import_elf(data: &[u8]) -> Result<NativeImport> {
     if data.get(0..4) != Some(b"\x7fELF") {
         return err("not an ELF");
     }
+    // A magic-only (or truncated) file must error, not panic on indexing.
+    if data.len() < 6 {
+        return err("truncated ELF header");
+    }
     if data[4] != 2 || data[5] != 1 {
         return err("ELF64 little-endian expected");
     }
@@ -378,7 +382,10 @@ pub fn import_pe(data: &[u8]) -> Result<NativeImport> {
         let mut bytes = data.get(raw..raw + raw_size).unwrap_or(&[]).to_vec();
         bytes.resize(size, 0);
         let sflags = u32_at(data, o + 36)? as u64; // section characteristics
-        let exec = sflags & 0x60000000 != 0;
+        // IMAGE_SCN_MEM_EXECUTE = 0x20000000; the old mask (0x60000000)
+        // OR'd in IMAGE_SCN_MEM_READ (0x40000000), classifying readable
+        // data sections as executable code.
+        let exec = sflags & 0x20000000 != 0;
         mappings.push(Mapping {
             vaddr: image_base + vaddr,
             size: size as u64,
@@ -709,6 +716,37 @@ mod tests {
         assert_eq!(f.entry, 0x401000);
         assert_eq!(f.size, 4);
         assert_eq!(imp.mappings[0].vaddr, 0x401000);
+    }
+
+    #[test]
+    fn pe_exec_requires_execute_characteristic() {
+        // Section flags: READ (0x40000000) alone must NOT be executable.
+        let mut b = vec![0u8; 0x200];
+        b[0..2].copy_from_slice(b"MZ");
+        b[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        b[0x80..0x84].copy_from_slice(b"PE\0\0");
+        b[0x84..0x86].copy_from_slice(&0x8664u16.to_le_bytes());
+        b[0x86..0x88].copy_from_slice(&1u16.to_le_bytes()); // 1 section
+        b[0x94..0x96].copy_from_slice(&0xf0u16.to_le_bytes()); // opt size
+        b[0x98..0xa0].copy_from_slice(&0x140000000u64.to_le_bytes()); // ImageBase
+        let sec = 0x80 + 24 + 0xf0;
+        b[sec + 8..sec + 12].copy_from_slice(&0x1000u32.to_le_bytes()); // vsize
+        b[sec + 16..sec + 20].copy_from_slice(&0x200u32.to_le_bytes()); // raw size
+        b[sec + 20..sec + 24].copy_from_slice(&0x100u32.to_le_bytes()); // raw ptr
+        b[sec + 36..sec + 40].copy_from_slice(&0x40000000u32.to_le_bytes()); // READ only
+        let imp = import_pe(&b).unwrap();
+        assert_eq!(imp.mappings[0].flags & 0x4, 0, "readable data must not be exec");
+        // EXECUTE (0x20000000) must be.
+        b[sec + 36..sec + 40].copy_from_slice(&0x60000000u32.to_le_bytes());
+        let imp = import_pe(&b).unwrap();
+        assert_eq!(imp.mappings[0].flags & 0x4, 0x4, "code section must be exec");
+    }
+
+    #[test]
+    fn truncated_elf_magic_errors_not_panics() {
+        assert!(import_elf(b"\x7fELF").is_err());
+        assert!(import_elf(b"\x7fELF\x02\x01").is_err());
+        assert!(import_elf(b"\x7fELF\x02\x01\x00\x00").is_err());
     }
 
     #[test]

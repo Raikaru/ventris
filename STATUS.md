@@ -139,6 +139,40 @@ see gate numbers below and benchmarks/reports/stage4-gate.json).
   binutils-devel (bfd.h) which is not installed here; console-dependent
   test steps are skipped with an explicit note, worker/CLI parity runs
   unconditionally.
+## Second-review hardening (decoder/parser correctness, gate honesty)
+- Decoder fixes with regression tests (all in `short_branch_and_no_modrm_0f_lengths`):
+  - short branches (EB/70..7F) read the displacement as ONE sign-extended
+    byte; the old 4-byte reader included following instructions in the
+    target (frame_dummy's `jmp -0x76` used to mislabel its target).
+  - 0F opcodes without ModRM (syscall, rdtsc/cpuid, bswap, emms, ...) no
+    longer take a phantom ModRM byte (length 2, not 3+).
+  - F6/F7 group: the immediate exists only for the TEST form (modrm ext 0);
+    NOT/NEG/MUL/DIV no longer gain 1/4 phantom bytes.
+- PE: executable classification now tests IMAGE_SCN_MEM_EXECUTE only
+  (0x20000000); the old mask OR'd in MEM_READ and classified readable data
+  sections as code (regression `pe_exec_requires_execute_characteristic`).
+- ELF: a magic-only/truncated header returns a typed error instead of
+  panicking on `data[4]`/`data[5]` (`truncated_elf_magic_errors_not_panics`).
+- Discovery: the walk became genuinely two-path (conditional branches
+  explore the taken edge and resume the fall-through from an explicit
+  stack). The decoder fixes had dropped 0x4003c0 from the stripped fixture
+  because dtors_aux's `jne` skipped the fall-through body containing its
+  call; with both edges explored it returns (7/15, correct edges, not
+  decoder luck). Regression `conditional_fallthrough_discovers_call_target`.
+- `mem_native` no longer re-reads/re-discovers the binary per read (one-entry
+  parsed-import cache).
+- Gate honesty (review 4.13): `rss()` defined before use (console-present
+  runs previously tripped `command not found` under `set -e`); reports now
+  carry `complete`/`skipped`/`performance_pass`/`functional_pass` and exit 2
+  on PARTIAL — an incomplete run can no longer read as PASS.
+- `.gitignore`: volatile `benchmarks/reports/gate-run/` + run sqlite files.
+- SECURITY.md: removed stale Python-wheel/VSCode claims from the scrapped
+  project; documents the actual child-process and parser boundaries.
+- libc function-set metrics (not count proximity): 3,930 common of
+  native 3,999 / oracle 3,987; precision 0.983, recall 0.986; residuals are
+  boundary/alias differences (e.g. native-only 0x774 `_dl_argv`-adjacent
+  aliases vs oracle-only 0x7b0).
+
 
 ## Native import (no-JVM) landed
 - `lre-core::native`: ELF64 + PE32+ parsers (sections -> memory map,

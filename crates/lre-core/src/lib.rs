@@ -43,6 +43,11 @@ pub type Result<T, E = CoreError> = std::result::Result<T, E>;
 pub struct Core {
     db: ProjectDb,
     db_path: PathBuf,
+    /// Last parsed native import (binary path -> mappings), so repeated
+    /// `mem_native` reads don't re-read and re-discover the whole file per
+    /// call. One-entry cache: the CLI's scroll pattern is single-binary;
+    /// the sessionful image layer (post-review plan) replaces this.
+    native_cache: std::cell::RefCell<Option<(PathBuf, std::sync::Arc<native::NativeImport>)>>,
 }
 
 impl Core {
@@ -50,7 +55,11 @@ impl Core {
     pub fn open(project_dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(project_dir)?;
         let db = ProjectDb::open(&project_dir.join("project.sqlite"))?;
-        Ok(Self { db, db_path: project_dir.to_path_buf() })
+        Ok(Self {
+            db,
+            db_path: project_dir.to_path_buf(),
+            native_cache: std::cell::RefCell::new(None),
+        })
     }
 
     /// Path of the backing database (diagnostics).
@@ -200,8 +209,22 @@ impl Core {
     }
 
     /// Bytes at `vaddr` from the binary's mappings (native memory inspection).
+    ///
+    /// Uses a one-entry cache of the parsed import so viewport-sized reads
+    /// don't re-read and re-discover the whole binary per call.
     pub fn mem_native(&self, binary: &Path, vaddr: u64, size: usize) -> Result<Vec<u8>> {
-        let imp = native::load_native(binary)?;
+        let binary = binary.to_path_buf();
+        let imp = {
+            let mut cache = self.native_cache.borrow_mut();
+            let hit = cache.as_ref().map(|(p, _)| p == &binary).unwrap_or(false);
+            if !hit {
+                let parsed = std::sync::Arc::new(native::load_native(&binary)?);
+                *cache = Some((binary.clone(), parsed.clone()));
+                parsed
+            } else {
+                cache.as_ref().unwrap().1.clone()
+            }
+        };
         for m in &imp.mappings {
             if vaddr >= m.vaddr && vaddr + size as u64 <= m.vaddr + m.size {
                 let off = (vaddr - m.vaddr) as usize;

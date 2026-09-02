@@ -57,10 +57,18 @@ fn op_info(op: u8, op2: Option<u8>, op3: Option<u8>, rex_w: bool) -> OpInfo {
                 imm: if o2 == 0x3a { I8 } else { None },
             };
         }
+        // 0F opcodes WITHOUT a ModRM byte: syscall (05), invd/wbinvd
+        // (08/09), ud2 (0b), wrmsr/rdtsc/rdmsr (30/31/32), their siblings
+        // (33/34/35/37), emms (77), cpuid (a2), bswap (c8..cf). The old
+        // table assumed modrm for every 0F opcode, mis-lengthening
+        // syscall/rdtsc/bswap and poisoning every walk through them.
+        let no_modrm = matches!(o2, 0x05 | 0x06 | 0x07 | 0x08 | 0x09 | 0x0b | 0x30 | 0x31
+            | 0x32 | 0x33 | 0x34 | 0x35 | 0x37 | 0x77 | 0xa2 | 0xc8..=0xcf);
         return match o2 {
             0x70..=0x7f => OpInfo { modrm: true, imm: I8 },
             0x80..=0x8f => OpInfo { modrm: false, imm: Imm32Rel },
             0xc2 | 0xc0 | 0xc1 => OpInfo { modrm: true, imm: I8 },
+            _ if no_modrm => OpInfo { modrm: false, imm: None },
             _ => OpInfo { modrm: true, imm: None },
         };
     }
@@ -73,8 +81,7 @@ fn op_info(op: u8, op2: Option<u8>, op3: Option<u8>, rex_w: bool) -> OpInfo {
         0xc6 => OpInfo { modrm: true, imm: I8 },
         0xc7 => OpInfo { modrm: true, imm: I32 },
         0xd0..=0xd3 => OpInfo { modrm: true, imm: None },
-        0xf6 => OpInfo { modrm: true, imm: I8 },
-        0xf7 => OpInfo { modrm: true, imm: I32 },
+        0xf6 | 0xf7 => OpInfo { modrm: true, imm: None },
         0xfe | 0xff => OpInfo { modrm: true, imm: None },
         0x69 => OpInfo { modrm: true, imm: I32 },
         0x6b => OpInfo { modrm: true, imm: I8 },
@@ -159,8 +166,8 @@ pub fn decode(b: &[u8], addr: u64) -> InstrInfo {
     let flow_len: Option<(Flow, u8)> = match op {
         0xe8 => Some((Flow::Call(rel_target(b, p + 1, 5, addr)), 5)),
         0xe9 => Some((Flow::Jump(rel_target(b, p + 1, 5, addr)), 5)),
-        0xeb => Some((Flow::Jump(rel_target(b, p + 1, 2, addr)), 2)),
-        0x70..=0x7f => Some((Flow::JumpCond(rel_target(b, p + 1, 2, addr)), 2)),
+        0xeb => Some((Flow::Jump(rel8_target(b, p + 1, 2, addr)), 2)),
+        0x70..=0x7f => Some((Flow::JumpCond(rel8_target(b, p + 1, 2, addr)), 2)),
         0x0f if op2.map(|o| (0x80..=0x8f).contains(&o)).unwrap_or(false) => {
             Some((Flow::JumpCond(rel_target(b, p + 2, 6, addr)), 6))
         }
@@ -215,13 +222,23 @@ pub fn decode(b: &[u8], addr: u64) -> InstrInfo {
         };
         len += 1; // modrm
         len += mem_modlen(b, m, false) as usize;
-        match info.imm {
-            ImmKind::I8 => len += 1,
-            ImmKind::I16 => len += 2,
-            ImmKind::I32 => len += 4,
-            ImmKind::I64 => len += 8,
-            ImmKind::None => {}
-            ImmKind::Imm8Rel | ImmKind::Imm32Rel => {}
+        // F6/F7 group: the immediate exists only for the TEST forms
+        // (modrm ext 0); NOT/NEG/MUL/DIV take none.
+        let reg = (modrm >> 3) & 7;
+        let f_test_imm = match (op, reg) {
+            (0xf6, 0) => Some(1),
+            (0xf7, 0) => Some(4),
+            _ => None,
+        };
+        match f_test_imm.or(match info.imm {
+            ImmKind::I8 => Some(1),
+            ImmKind::I16 => Some(2),
+            ImmKind::I32 => Some(4),
+            ImmKind::I64 => Some(8),
+            ImmKind::None | ImmKind::Imm8Rel | ImmKind::Imm32Rel => None,
+        }) {
+            Some(n) => len += n,
+            None => {}
         }
         return InstrInfo { len: len.min(15) as u8, flow };
     }
@@ -244,6 +261,13 @@ fn rel_target(b: &[u8], o: usize, total: usize, addr: u64) -> u64 {
         b.get(o + 2).copied().unwrap_or(0),
         b.get(o + 3).copied().unwrap_or(0),
     ]) as i64;
+    addr.wrapping_add(total as u64).wrapping_add(rel as u64)
+}
+/// Short-relative branch target: the displacement is one sign-extended
+/// byte (EB/70..7F). Reading 4 bytes would include the following
+/// instruction in the displacement.
+fn rel8_target(b: &[u8], o: usize, total: usize, addr: u64) -> u64 {
+    let rel = b.get(o).copied().unwrap_or(0) as i8 as i64;
     addr.wrapping_add(total as u64).wrapping_add(rel as u64)
 }
 
@@ -281,28 +305,55 @@ pub fn discover(maps: &[(u64, u64, u64, &[u8])], seeds: &[u64]) -> Discovery {
         }) else {
             continue;
         };
+        // Two-path walk: conditional branches explore the target first and
+        // keep the fall-through on an explicit stack (a single linear path
+        // over the taken edge skips bodies behind the non-taken edge — the
+        // dtors_aux `jne` ahead of its call to deregister_tm_clones).
+        let mut paths: Vec<u64> = Vec::new();
+        let mut visited: std::collections::HashSet<u64> = std::collections::HashSet::new();
         let mut addr = start;
-        let mut count = 0u32;
+        let mut walked = 0u32;
         loop {
+            let in_map = |a: u64| maps.iter().any(|(v, s, _, _)| a >= *v && a < v + s);
+            if !visited.insert(addr) {
+                // already covered (loop back-edge) — continue this path's
+                // fall-through only if a conditional put one aside
+                if paths.is_empty() {
+                    break;
+                }
+                addr = paths.pop().unwrap();
+                continue;
+            }
             let off = (addr - sv) as usize;
             if off >= *ss as usize {
-                break;
+                if paths.is_empty() {
+                    break;
+                }
+                addr = paths.pop().unwrap();
+                continue;
             }
             let win = &bytes[off..];
             let info = decode(win, addr);
             match info.flow {
                 Flow::Call(t) => {
                     calls.push((addr, t));
-                    let in_map = maps.iter().any(|(v, s, _, _)| t >= *v && t < v + s);
-                    if in_map && !entries.contains(&t) {
+                    if in_map(t) && !entries.contains(&t) {
                         entries.push(t);
                         queue.push(t);
                     }
                     addr += info.len as u64;
                 }
-                Flow::Jump(t) | Flow::JumpCond(t) => {
-                    let in_map = maps.iter().any(|(v, s, _, _)| t >= *v && t < v + s);
-                    if t > addr && in_map {
+                Flow::Jump(t) => {
+                    if in_map(t) {
+                        addr = t;
+                    } else {
+                        addr += info.len as u64;
+                    }
+                }
+                Flow::JumpCond(t) => {
+                    if in_map(t) && t > addr {
+                        // target first, fall-through saved for later
+                        paths.push(addr + info.len as u64);
                         addr = t;
                     } else {
                         addr += info.len as u64;
@@ -312,11 +363,17 @@ pub fn discover(maps: &[(u64, u64, u64, &[u8])], seeds: &[u64]) -> Discovery {
                     maybe_seed_entry(bytes, *sv, off, &mut entries, &mut queue);
                     addr += info.len as u64;
                 }
-                Flow::Indirect | Flow::Stop | Flow::Bad => break,
+                Flow::Indirect | Flow::Stop | Flow::Bad => {
+                    if paths.is_empty() {
+                        break;
+                    }
+                    addr = paths.pop().unwrap();
+                    continue;
+                }
                 Flow::Next => addr += info.len as u64,
             }
-            count += 1;
-            if count > 100_000 {
+            walked += 1;
+            if walked > 100_000 {
                 break;
             }
         }
@@ -439,6 +496,33 @@ mod tests {
     }
 
     #[test]
+    fn short_branch_and_no_modrm_0f_lengths() {
+        // 73 02 (jbe +2 over two nops): target = addr + 4, NOT addr + 5+<garbage>.
+        let d = decode(&[0x73, 0x02, 0x90, 0x90], 0x1000);
+        assert_eq!(d.len, 2);
+        assert_eq!(d.flow, Flow::JumpCond(0x1004));
+        // EB 0 (jmps over nothing): target = addr + 2 (the old 4-byte read
+        // produced addr + 2 + rel, where rel included two following bytes).
+        let d = decode(&[0xeb, 0x00, 0x55, 0x55], 0x2000);
+        assert_eq!(d.len, 2);
+        assert_eq!(d.flow, Flow::Jump(0x2002));
+        // syscall (0f 05), rdtsc (0f 31), cpuid (0f a2), bswap eax (0f c8):
+        // no ModRM byte — old table said 3+ bytes.
+        for enc in [[0x0f, 0x05], [0x0f, 0x31], [0x0f, 0xa2], [0x0f, 0xc8]] {
+            assert_eq!(decode(&enc, 0x3000).len, 2, "enc {enc:x?}");
+        }
+        // F6 test al, imm8 (f6 c0 55 = 3) vs NOT al (f6 d0 = 2, no imm).
+        assert_eq!(decode(&[0xf6, 0xc0, 0x55], 0x4000).len, 3);
+        assert_eq!(decode(&[0xf6, 0xd0], 0x4000).len, 2);
+        // F7 test rax, imm32 (f7 c0 78 56 34 12 = 6) vs NOT rax (f7 d0 = 2).
+        assert_eq!(
+            decode(&[0xf7, 0xc0, 0x78, 0x56, 0x34, 0x12], 0x4000).len,
+            6
+        );
+        assert_eq!(decode(&[0xf7, 0xd0], 0x4000).len, 2);
+    }
+
+    #[test]
     fn prefixed_memory_lengths() {
         // ENDBR64 (f3 0f 1e fa) = 4; mov rax,[rip+0x12345678] (48 8b 05
         // 78 56 34 12) = 7; lea rdi,[rip+disp32] (48 8d 3d ...) = 7. The
@@ -454,6 +538,27 @@ mod tests {
         assert_eq!(info.len, 7);
         let info = decode(&bytes[11..], 0x40038b);
         assert_eq!(info.len, 7);
+    }
+
+    #[test]
+    fn conditional_fallthrough_discovers_call_target() {
+        // jne +8 over the call; the call body is reachable only on the
+        // non-taken edge (the dtors_aux shape).
+        let mut code = vec![0x90u8; 0x100];
+        // 0x00: jne +8 (skips 0x02..0x0a) -> target 0x0a
+        code[0x00] = 0x75;
+        code[0x01] = 0x08;
+        // 0x02: call 0x20 (fall-through only)
+        code[0x02] = 0xe8;
+        code[0x03..0x07].copy_from_slice(&((0x20 - 0x07) as i32).to_le_bytes());
+        // 0x0a: ret
+        code[0x0a] = 0xc3;
+        // 0x20: ret (the called function)
+        code[0x20] = 0xc3;
+        let maps = vec![(0x400000u64, code.len() as u64, 0u64, code.as_slice())];
+        let d = discover(&maps, &[0x400000]);
+        assert!(d.entries.contains(&0x400020), "fall-through call target discovered");
+        assert!(d.calls.iter().any(|(f, t)| *f == 0x400002 && *t == 0x400020));
     }
 
     #[test]
