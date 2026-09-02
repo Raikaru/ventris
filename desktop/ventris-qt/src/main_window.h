@@ -87,7 +87,8 @@ private:
     QTimer *function_filter_timer_ = nullptr;
     QLineEdit *patch_new_edit_ = nullptr;
     FunctionTableModel *function_model_ = nullptr;
-    QTableWidget *xrefs_ = nullptr;
+    QTableWidget *xrefs_to_ = nullptr;
+    QTableWidget *xrefs_from_ = nullptr;
     QTableWidget *symbols_ = nullptr;
     QTableWidget *strings_ = nullptr;
     QTableWidget *search_results_ = nullptr;

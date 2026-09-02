@@ -681,12 +681,20 @@ impl ProjectDb {
         };
         let total: i64 = self.conn
             .query_row(sql_total, params![program.0, dst], |r| r.get(0))?;
+        // The containing function resolves at query time: the function
+        // whose [entry, entry+size) range holds the source address.
         let (sql_win, key) = if incoming {
-            ("SELECT src, dst, kind FROM xrefs WHERE program_id = ?1 AND dst = ?2
-              ORDER BY src LIMIT ?3 OFFSET ?4", dst)
+            ("SELECT x.src, x.dst, x.kind, \
+              (SELECT f.name FROM functions f WHERE f.program_id = x.program_id \
+               AND f.entry <= x.src AND x.src < f.entry + f.size LIMIT 1) \
+              FROM xrefs x WHERE x.program_id = ?1 AND x.dst = ?2
+              ORDER BY x.src LIMIT ?3 OFFSET ?4", dst)
         } else {
-            ("SELECT src, dst, kind FROM xrefs WHERE program_id = ?1 AND src = ?2
-              ORDER BY dst LIMIT ?3 OFFSET ?4", src)
+            ("SELECT x.src, x.dst, x.kind, \
+              (SELECT f.name FROM functions f WHERE f.program_id = x.program_id \
+               AND f.entry <= x.src AND x.src < f.entry + f.size LIMIT 1) \
+              FROM xrefs x WHERE x.program_id = ?1 AND x.src = ?2
+              ORDER BY x.dst LIMIT ?3 OFFSET ?4", src)
         };
         let mut stmt = self.conn.prepare(sql_win)?;
         let rows = stmt
@@ -698,7 +706,10 @@ impl ProjectDb {
     /// Lists xrefs pointing at `address`.
     pub fn xrefs_to(&self, program: ProgramId, address: &lre_model::Address) -> Result<Vec<XrefRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT src, dst, kind FROM xrefs WHERE program_id = ?1 AND dst = ?2 ORDER BY src",
+            "SELECT x.src, x.dst, x.kind, \
+              (SELECT f.name FROM functions f WHERE f.program_id = x.program_id \
+               AND f.entry <= x.src AND x.src < f.entry + f.size LIMIT 1) \
+              FROM xrefs x WHERE x.program_id = ?1 AND x.dst = ?2 ORDER BY x.src",
         )?;
         let rows = stmt
             .query_map(params![program.0, addr_cell(address)], map_xref)?
@@ -709,7 +720,10 @@ impl ProjectDb {
     /// Lists xrefs leaving `address`.
     pub fn xrefs_from(&self, program: ProgramId, address: &lre_model::Address) -> Result<Vec<XrefRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT src, dst, kind FROM xrefs WHERE program_id = ?1 AND src = ?2 ORDER BY dst",
+            "SELECT x.src, x.dst, x.kind, \
+              (SELECT f.name FROM functions f WHERE f.program_id = x.program_id \
+               AND f.entry <= x.src AND x.src < f.entry + f.size LIMIT 1) \
+              FROM xrefs x WHERE x.program_id = ?1 AND x.src = ?2 ORDER BY x.dst",
         )?;
         let rows = stmt
             .query_map(params![program.0, addr_cell(address)], map_xref)?
@@ -1952,6 +1966,7 @@ fn map_xref(r: &Row<'_>) -> rusqlite::Result<XrefRow> {
         from: addr_from_cell(r.get(0)?),
         to: addr_from_cell(r.get(1)?),
         kind: r.get(2)?,
+        function: r.get(3)?,
     })
 }
 
@@ -2263,6 +2278,7 @@ mod tests {
         let db = ProjectDb::open_in_memory().unwrap();
         let id = db.upsert_program("p", "x86:LE:64:default", &prov()).unwrap();
         let rows = vec![XrefRow {
+            function: None,
             from: lre_model::Address::ram(0x400488),
             to: lre_model::Address::ram(0x400466),
             kind: "UNCONDITIONAL_CALL".into(),
@@ -2311,6 +2327,7 @@ mod tests {
         db.replace_xrefs(
             id,
             &[XrefRow {
+                function: None,
                 from: entry.clone(),
                 to: lre_model::Address::ram(0x401000),
                 kind: "DATA".into(),

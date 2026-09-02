@@ -151,6 +151,9 @@ pub struct XrefRow {
     pub to: Address,
     /// Ghidra reference type name (`UNCONDITIONAL_CALL`, `DATA`, ...).
     pub kind: String,
+    /// Name of the function containing the source address, resolved at
+    /// query time; None for data xrefs or unmapped sources.
+    pub function: Option<String>,
 }
 
 /// One symbol row.

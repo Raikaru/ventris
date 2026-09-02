@@ -672,6 +672,8 @@ pub fn store_import(
             from: lre_model::Address::ram(x.from),
             to: lre_model::Address::ram(x.to),
             kind: x.kind.clone(),
+            // Containment resolves at query time from the function table.
+            function: None,
         })
         .collect();
     db.replace_xrefs(pid, &xrows)?;

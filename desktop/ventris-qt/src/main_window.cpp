@@ -349,15 +349,35 @@ MainWindow::MainWindow(const QString &project, const QString &program, const QSt
         type_dock->setWidget(type_panel);
         addDockWidget(Qt::LeftDockWidgetArea, type_dock);
 
-        xrefs_ = new QTableWidget(0, 3, this);
-        xrefs_->setObjectName(QStringLiteral("xrefsView"));
-        xrefs_->setHorizontalHeaderLabels(
-            {QStringLiteral("From"), QStringLiteral("Kind"), QStringLiteral("To")});
-        xrefs_->horizontalHeader()->setStretchLastSection(true);
-        xrefs_->verticalHeader()->setVisible(false);
+        auto *xrefs_tabs = new QTabWidget(this);
+        auto make_xrefs_table = [this](QTabWidget *parent, const QString &object_name) {
+            auto *table = new QTableWidget(0, 4, parent);
+            table->setObjectName(object_name);
+            table->setHorizontalHeaderLabels({QStringLiteral("Address"),
+                                              QStringLiteral("Function"),
+                                              QStringLiteral("Kind"),
+                                              QStringLiteral("Target")});
+            table->horizontalHeader()->setStretchLastSection(true);
+            table->verticalHeader()->setVisible(false);
+            table->setSelectionBehavior(QAbstractItemView::SelectRows);
+            table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+            return table;
+        };
+        xrefs_to_ = make_xrefs_table(xrefs_tabs, QStringLiteral("xrefsToView"));
+        xrefs_from_ = make_xrefs_table(xrefs_tabs, QStringLiteral("xrefsFromView"));
+        xrefs_tabs->addTab(xrefs_to_, QStringLiteral("To"));
+        xrefs_tabs->addTab(xrefs_from_, QStringLiteral("From"));
+        connect(xrefs_to_, &QTableWidget::itemDoubleClicked, this,
+                [this](QTableWidgetItem *item) {
+                    navigation_->goTo(item->text().split(QLatin1Char(' ')).first(), true);
+                });
+        connect(xrefs_from_, &QTableWidget::itemDoubleClicked, this,
+                [this](QTableWidgetItem *item) {
+                    navigation_->goTo(item->text().split(QLatin1Char(' ')).first(), true);
+                });
         auto *xrefs_dock = new QDockWidget(QStringLiteral("Xrefs"), this);
         xrefs_dock->setObjectName(QStringLiteral("xrefsDock"));
-        xrefs_dock->setWidget(xrefs_);
+        xrefs_dock->setWidget(xrefs_tabs);
         addDockWidget(Qt::RightDockWidgetArea, xrefs_dock);
 
         jobs_ = new QListWidget(this);
@@ -592,37 +612,56 @@ void MainWindow::listingContextMenu(const QPoint &global_pos, const QString &add
 }
 
 void MainWindow::loadXrefs() {
-        const int job = beginJob(QStringLiteral("xrefs %1").arg(address_edit_->text()));
+    const QString address = address_edit_->text();
+    if (address.isEmpty()) {
+        return;
+    }
+    auto fill = [this](QTableWidget *table, const QString &address, bool incoming) {
+        const int job = beginJob(QStringLiteral("xrefs %1 %2")
+                                     .arg(incoming ? QStringLiteral("to")
+                                                   : QStringLiteral("from"))
+                                     .arg(address));
         bridge_->request(QJsonObject{{"method", "xrefs_page"},
                                      {"program", program_edit_->text()},
-                                     {"address", address_edit_->text()},
-                                     {"incoming", true},
+                                     {"address", address},
+                                     {"incoming", incoming},
                                      {"offset", 0},
                                      {"limit", 256}},
-                         [this, job](const QJsonObject &response) {
+                         [this, job, table](const QJsonObject &response) {
                              QString error;
                              if (!successful(response, &error)) {
                                  finishJob(job, false, error);
                                  return;
                              }
-                             const QJsonArray rows =
-                                 response.value("result").toObject().value("rows").toArray();
-                             xrefs_->setRowCount(0);
+                             const QJsonArray rows = response.value("result")
+                                                         .toObject()
+                                                         .value("rows")
+                                                         .toArray();
+                             table->setRowCount(0);
                              for (const QJsonValue &value : rows) {
                                  const QJsonObject row = value.toObject();
-                                 const int index = xrefs_->rowCount();
-                                 xrefs_->insertRow(index);
-                                 xrefs_->setItem(index, 0,
-                                                 new QTableWidgetItem(addressText(row.value("from"))));
-                                 xrefs_->setItem(index, 1,
-                                                 new QTableWidgetItem(row.value("kind").toString()));
-                                 xrefs_->setItem(index, 2,
-                                                 new QTableWidgetItem(addressText(row.value("to"))));
+                                 const int index = table->rowCount();
+                                 table->insertRow(index);
+                                 const QString from = addressText(row.value("from"));
+                                 const QString to = addressText(row.value("to"));
+                                 const QString function = row.value("function").toString();
+                                 table->setItem(index, 0, new QTableWidgetItem(from));
+                                 table->setItem(index, 1,
+                                                new QTableWidgetItem(function.isEmpty()
+                                                                         ? QStringLiteral("—")
+                                                                         : function));
+                                 table->setItem(index, 2,
+                                                new QTableWidgetItem(
+                                                    row.value("kind").toString()));
+                                 table->setItem(index, 3, new QTableWidgetItem(to));
                              }
                              finishJob(job, true,
-                                       QStringLiteral("%1 incoming xrefs").arg(rows.size()));
+                                       QStringLiteral("%1 xrefs").arg(rows.size()));
                          });
-    }
+    };
+    fill(xrefs_to_, address, true);
+    fill(xrefs_from_, address, false);
+}
 
 void MainWindow::loadFacts() {
         const QString program = program_edit_->text();
