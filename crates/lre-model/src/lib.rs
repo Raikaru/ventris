@@ -249,6 +249,9 @@ pub struct ListingRow {
     pub address: Address,
     /// Rendered mnemonic + operands.
     pub text: String,
+    /// Raw instruction bytes as hex; empty when the source cannot read
+    /// the image.
+    pub bytes: String,
 }
 
 /// One listing window (CORE-007): bounded rows + overscan for a

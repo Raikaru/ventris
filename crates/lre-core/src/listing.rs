@@ -63,6 +63,7 @@ impl ListingSource for ConsoleListingSource {
                     stable_id: off,
                     address: Address::ram(off),
                     text: text.to_string(),
+                    bytes: String::new(),
                 });
                 addr = off + 1;
             }
@@ -115,6 +116,7 @@ mod tests {
                     stable_id: start + i as u64,
                     address: Address::ram(start + i as u64),
                     text: format!("insn {}", start + i as u64),
+                    bytes: String::new(),
                 })
                 .collect())
         }

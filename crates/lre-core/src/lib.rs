@@ -181,7 +181,22 @@ impl Core {
         overscan_fraction: f32,
     ) -> Result<lre_model::ListingWindow> {
         let source = listing::ConsoleListingSource::new(self.config.clone(), binary);
-        Ok(listing::window(&source, start, count, overscan_fraction)?)
+        let mut window = listing::window(&source, start, count, overscan_fraction)?;
+        // Enrich rows with raw instruction bytes: the decoder gives the
+        // length, the mapped image gives the bytes. Rows whose bytes cannot
+        // be read stay empty rather than failing the window.
+        for row in &mut window.rows {
+            let bytes = self
+                .mem_native(binary, row.address.offset, 16)
+                .unwrap_or_default();
+            if bytes.is_empty() {
+                continue;
+            }
+            let info = crate::disasm::decode(&bytes, row.address.offset);
+            let len = (info.len as usize).clamp(1, bytes.len());
+            row.bytes = bytes[..len].iter().map(|b| format!("{b:02x}")).collect();
+        }
+        Ok(window)
     }
 
     /// Revision events after `since` for the program (CORE-005).
