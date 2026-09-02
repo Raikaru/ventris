@@ -1,0 +1,14 @@
+[package]
+name = "lre-api"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Versioned local JSON API for the Ventris Core service"
+
+[dependencies]
+lre-core = { path = "../lre-core" }
+lre-debug = { path = "../lre-debug" }
+lre-model = { path = "../lre-model" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

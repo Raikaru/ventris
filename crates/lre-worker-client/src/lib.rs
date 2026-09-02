@@ -5,6 +5,7 @@
 //! restart on the next lease. `ProgramProvider` facts are loaded once per
 //! spawn from the store + the mapped binary.
 
+use lre_model::{Address, DecompDoc};
 use lre_worker::{
     load_specs, open_store, worker::NativeWorker, BinaryBacking, ProgramProvider, WorkerError,
 };
@@ -80,6 +81,22 @@ impl WorkerSession {
     pub fn decompile(&mut self, address: u64) -> lre_worker::Result<Vec<u8>> {
         let space = self.ram_space();
         self.worker.decompile_at(&mut self.provider, space, address)
+    }
+
+    /// Decompiles one address and decodes the pinned packed document into
+    /// structured tokens. The returned revision is zero because the worker
+    /// response is not a store mutation; a Core/session caller stamps its
+    /// current program revision when publishing it.
+    pub fn decompile_doc(&mut self, address: u64) -> lre_worker::Result<DecompDoc> {
+        let raw = self.decompile(address)?;
+        Ok(DecompDoc {
+            tokens: lre_worker::decode_tokens_with_ram_space(
+                &raw,
+                Some(self.ram_space() as u64),
+            ),
+            address: Address::ram(address),
+            revision: 0,
+        })
     }
 
     fn pid(&self) -> Option<u32> {
@@ -286,6 +303,19 @@ impl WorkerPool {
                 }),
         }
     }
+
+    /// Convenience: decompile and decode one structured document with the
+    /// pool's deadline/restart semantics.
+    pub fn decompile_doc(&mut self, address: u64) -> PoolResult<DecompDoc> {
+        let res = self.with_worker(|session| session.decompile_doc(address));
+        let budget = self.config.deadline;
+        match res {
+            Err(PoolError::Worker(ref worker)) if matches!(worker, WorkerError::Process(_)) => {
+                Err(PoolError::Deadline(budget))
+            }
+            other => other,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -311,10 +341,12 @@ mod tests {
             &lre_core::session::RuntimeConfig {
                 decompiler_path: wedge_script(),
                 spec_root: PathBuf::from("native/specs"),
-                ghidra_install: PathBuf::from("/tmp"),
                 worker_path: PathBuf::from("/tmp"),
                 console_path: None,
+                language_id: "x86:LE:64:default".into(),
+                language_dir: PathBuf::from("native/specs"),
                 sla_path: None,
+                ghidra_install: PathBuf::from("/tmp"),
                 worker_memory_cap: 0,
             },
             Path::new("/bin/true"),

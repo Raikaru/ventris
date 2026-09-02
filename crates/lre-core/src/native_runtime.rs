@@ -56,11 +56,7 @@ pub fn disasm_native(cfg: &RuntimeConfig, binary: &Path, address: &str, count: u
         .clone()
         .unwrap_or_else(|| PathBuf::from("native/build/decomp_native"));
     let ghroot = cfg.ghidra_install.to_string_lossy().into_owned();
-    let langs = cfg
-        .ghidra_install
-        .join("Ghidra/Processors/x86/data/languages")
-        .to_string_lossy()
-        .into_owned();
+    let langs = cfg.language_dir.to_string_lossy().into_owned();
     if !console.is_file() {
         return err(format!(
             "SLEIGH console missing: {} — build native/build_console.sh \
@@ -73,10 +69,17 @@ pub fn disasm_native(cfg: &RuntimeConfig, binary: &Path, address: &str, count: u
     } else {
         format!("0x{address}")
     };
+    let load_script = if cfg.language_id.starts_with("x86:") {
+        format!(
+            "load file {} {}\nadjust vma 0x400000\n",
+            cfg.language_id,
+            binary.display()
+        )
+    } else {
+        format!("load file {} {}\n", cfg.language_id, binary.display())
+    };
     let script = format!(
-        "load file x86:LE:64:default {}\nadjust vma 0x400000\n\
-         map function {hex_addr} func\nload function func\ndisassemble\n",
-        binary.display()
+        "{load_script}map function {hex_addr} func\nload function func\ndisassemble\n",
     );
     let mut child = Command::new(&console)
         .arg("-s")
@@ -115,14 +118,15 @@ pub fn disasm_native(cfg: &RuntimeConfig, binary: &Path, address: &str, count: u
 
 /// Performant `decompile-native`: one address decompiled by the patched
 /// `ghidra_opt` through `lre-worker` (raw-SLEIGH, no JVM).
-pub fn decompile_native(
+fn run_decompiler(
     cfg: &RuntimeConfig,
     binary: &Path,
     address: &str,
     program: &str,
     project_dir: &Path,
     base: Option<u64>,
-) -> Result<String> {
+    structured: bool,
+) -> Result<Vec<u8>> {
     let opt = &cfg.decompiler_path;
     let specs = &cfg.spec_root;
     let worker = &cfg.worker_path;
@@ -130,8 +134,8 @@ pub fn decompile_native(
     // configured (see native/build_ghidra_opt.sh).
     let sla = cfg.sla_path.as_ref().ok_or_else(|| {
         NativeRuntimeError(
-            "no SLA configured: point VENTRIS_SLA (or RuntimeConfig::sla_path) \
-             at the compiled x86-64.sla"
+            "no SLA configured: set VENTRIS_SLA or RuntimeConfig::sla_path \
+             to a compiled SLEIGH language file"
                 .into(),
         )
     })?;
@@ -162,7 +166,8 @@ pub fn decompile_native(
             pe_image_base(&data).unwrap_or(0x400000)
         }
     };
-    let out = Command::new(worker)
+    let mut command = Command::new(worker);
+    command
         .arg(opt)
         .arg(specs)
         .arg(binary)
@@ -172,6 +177,13 @@ pub fn decompile_native(
         .arg(project_dir)
         .arg("--base")
         .arg(format!("{base:#x}"))
+        .env("VENTRIS_LANGUAGE", &cfg.language_id)
+        .env("VENTRIS_LANGUAGE_DIR", &cfg.language_dir)
+        .env("VENTRIS_SLA", sla);
+    if structured {
+        command.env("WORKER_STRUCTURED", "1");
+    }
+    let out = command
         .output()
         .map_err(|e| NativeRuntimeError(format!("worker spawn: {e}")))?;
     if !out.status.success() {
@@ -181,7 +193,39 @@ pub fn decompile_native(
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    Ok(out.stdout)
+}
+
+/// Perform `decompile-native`: one address decompiled by the patched
+/// `ghidra_opt` through `lre-worker` (raw-SLEIGH, no JVM).
+pub fn decompile_native(
+    cfg: &RuntimeConfig,
+    binary: &Path,
+    address: &str,
+    program: &str,
+    project_dir: &Path,
+    base: Option<u64>,
+) -> Result<String> {
+    let stdout = run_decompiler(cfg, binary, address, program, project_dir, base, false)?;
+    Ok(String::from_utf8_lossy(&stdout).into_owned())
+}
+
+/// Performs the same native decompile but returns the packed document as
+/// structured model data. The worker stamped revision is zero; the Core
+/// facade replaces it with the current durable program revision.
+pub fn decompile_native_doc(
+    cfg: &RuntimeConfig,
+    binary: &Path,
+    address: &str,
+    program: &str,
+    project_dir: &Path,
+    base: Option<u64>,
+) -> Result<lre_model::DecompDoc> {
+    let stdout = run_decompiler(cfg, binary, address, program, project_dir, base, true)?;
+    let text = String::from_utf8(stdout)
+        .map_err(|e| NativeRuntimeError(format!("worker document is not UTF-8: {e}")))?;
+    serde_json::from_str(text.trim())
+        .map_err(|e| NativeRuntimeError(format!("invalid structured worker document: {e}")))
 }
 
 /// Console-driven function discovery: the pinned console disassembles each
@@ -203,11 +247,7 @@ pub fn console_discover(
         .clone()
         .unwrap_or_else(|| PathBuf::from("native/build/decomp_native"));
     let ghroot = cfg.ghidra_install.to_string_lossy().into_owned();
-    let langs = cfg
-        .ghidra_install
-        .join("Ghidra/Processors/x86/data/languages")
-        .to_string_lossy()
-        .into_owned();
+    let langs = cfg.language_dir.to_string_lossy().into_owned();
     if !console.is_file() {
         return err(format!(
             "SLEIGH console missing: {} — build native/build_console.sh or \
@@ -227,10 +267,15 @@ pub fn console_discover(
     let stdout = child.stdout.take().expect("console stdout");
     let mut reader = BufReader::new(stdout);
 
-    let init_script = format!(
-        "load file x86:LE:64:default {}\nadjust vma 0x400000\n",
-        binary.display()
-    );
+    let init_script = if cfg.language_id.starts_with("x86:") {
+        format!(
+            "load file {} {}\nadjust vma 0x400000\n",
+            cfg.language_id,
+            binary.display()
+        )
+    } else {
+        format!("load file {} {}\n", cfg.language_id, binary.display())
+    };
     stdin
         .write_all(init_script.as_bytes())
         .and_then(|_| stdin.flush())

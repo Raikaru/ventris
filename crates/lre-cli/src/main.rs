@@ -32,21 +32,47 @@ fn usage() {
         "usage:
   lre-cli import <binary> [--project DIR] [--ghidra DIR]
   lre-cli import-native <binary> [--name NAME] [--project DIR]   (no JVM)
-  lre-cli open <program> [--project DIR]                  (store-only, no JVM)
+  lre-cli architectures [--project DIR]   (uses VENTRIS_GHIDRA)
   lre-cli functions <program> [--project DIR]
   lre-cli symbols <program> [--project DIR]
-  lre-cli xrefs <program> (--to | --from) <address> [--project DIR]
+  lre-cli strings <program> [--project DIR]
+  lre-cli search <program> <term> [--limit N] [--project DIR]
+  lre-cli graph <program> [--project DIR]
+  lre-cli memory-regions <program> [--project DIR]
+  lre-cli bookmarks <program> [--project DIR]
+  lre-cli bookmark <program> <address> <label> [comment] [--project DIR]
+  lre-cli patches <program> [--project DIR]
+  lre-cli patch <program> <address> <original-hex> <patched-hex> [--disabled] [--project DIR]
   lre-cli rename <program> <address> <new-name> [--project DIR]
-  lre-cli mem <binary> <vaddr> [size]                              (no JVM)
   lre-cli decompile <program> <address> [--ghidra DIR]
   lre-cli disasm <program> <address> [-n N] [--ghidra DIR]
   lre-cli decompile-native <binary> <address> [--name NAME] [--project DIR] [--base HEX]
+  lre-cli decompile-native-doc <binary> <address> [--name NAME] [--project DIR] [--base HEX]
   lre-cli disasm-native <binary> <address> [-n N]                  (no JVM)
   lre-cli dump-specs <program> --out <dir> [--ghidra DIR]"
         );
     std::process::exit(2);
 }
 
+
+fn parse_bytes(value: &str) -> Result<Vec<u8>, String> {
+    let value = value.trim_start_matches("0x");
+    if value.len() % 2 != 0 {
+        return Err(format!("hex byte string has odd length: {value}"));
+    }
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let text = std::str::from_utf8(pair).map_err(|e| e.to_string())?;
+            u8::from_str_radix(text, 16).map_err(|e| format!("bad byte {text}: {e}"))
+        })
+        .collect()
+}
+
+fn hex_bytes(value: &[u8]) -> String {
+    value.iter().map(|byte| format!("{byte:02x}")).collect()
+}
 fn flag(args: &[String], name: &str) -> Option<String> {
     args.iter()
         .position(|a| a == name)
@@ -251,6 +277,45 @@ fn run_inner(args: &[String]) -> Result<(), String> {
                 .map_err(|e| e.to_string())?;
             print!("{code}");
         }
+        "decompile-native-doc" => {
+            let binary = args
+                .get(2)
+                .ok_or("decompile-native-doc needs a binary path")?
+                .clone();
+            let address_arg = args
+                .get(3)
+                .ok_or("decompile-native-doc needs a vaddr (hex)")?
+                .clone();
+            let address = lre_model::Address::parse_ram_hex(&address_arg)
+                .ok_or_else(|| format!("bad address: {address_arg}"))?;
+            let program = flag(args, "--name").unwrap_or_else(|| {
+                Path::new(&binary)
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "program".into())
+            });
+            let base = flag(args, "--base")
+                .and_then(|b| u64::from_str_radix(b.trim_start_matches("0x"), 16).ok());
+            let doc = core
+                .decompile_native_doc(Path::new(&binary), &address, &program, base)
+                .map_err(|e| e.to_string())?;
+            println!(
+                "{}",
+                serde_json::to_string(&doc).map_err(|e| e.to_string())?
+            );
+        }
+        "architectures" => {
+            for architecture in core.architectures().map_err(|e| e.to_string())? {
+                println!(
+                    "{}\t{}\t{}\t{}\t{}",
+                    architecture.id,
+                    architecture.processor,
+                    architecture.endian,
+                    architecture.bits.map_or_else(|| "?".into(), |bits| bits.to_string()),
+                    architecture.sla_count
+                );
+            }
+        }
         "import" => {
             let binary = args
                 .get(2)
@@ -324,6 +389,116 @@ fn run_inner(args: &[String]) -> Result<(), String> {
             }
             println!("-- {} symbols", rows.len());
         }
+        "strings" => {
+            let program = args.get(2).ok_or("strings needs a program name")?.clone();
+            let rows = core.strings(&program).map_err(|e| e.to_string())?;
+            for row in &rows {
+                println!("{}  [{}]  {}", row.address, row.kind, row.value);
+            }
+            println!("-- {} strings", rows.len());
+        }
+        "search" => {
+            let program = args.get(2).ok_or("search needs a program name")?.clone();
+            let term = args.get(3).ok_or("search needs a term")?.clone();
+            let limit = flag(args, "--limit")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(256);
+            let rows = core.search(&program, &term, limit).map_err(|e| e.to_string())?;
+            for row in &rows {
+                let address = row
+                    .address
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "-".into());
+                println!("{address}  [{}]  {}  {}", row.kind, row.name, row.context);
+            }
+            println!("-- {} search hits", rows.len());
+        }
+        "graph" => {
+            let program = args.get(2).ok_or("graph needs a program name")?.clone();
+            let (nodes, edges) = core.function_graph(&program).map_err(|e| e.to_string())?;
+            for node in &nodes {
+                println!("node {} {}", node.address, node.name);
+            }
+            for edge in &edges {
+                println!("edge {} --{}--> {}", edge.from, edge.kind, edge.to);
+            }
+            println!("-- {} nodes, {} edges", nodes.len(), edges.len());
+        }
+        "memory-regions" => {
+            let program = args.get(2).ok_or("memory-regions needs a program name")?.clone();
+            let rows = core.memory_regions(&program).map_err(|e| e.to_string())?;
+            for row in &rows {
+                println!(
+                    "{}  {:#x}  {:#x}  {}  {}",
+                    row.name, row.start.offset, row.size, row.permissions, row.source
+                );
+            }
+            println!("-- {} memory regions", rows.len());
+        }
+        "bookmarks" => {
+            let program = args.get(2).ok_or("bookmarks needs a program name")?.clone();
+            let rows = core.bookmarks(&program).map_err(|e| e.to_string())?;
+            for row in &rows {
+                println!("{}  {}  {}", row.address, row.label, row.comment);
+            }
+            println!("-- {} bookmarks", rows.len());
+        }
+        "bookmark" => {
+            let program = args.get(2).ok_or("bookmark needs a program name")?.clone();
+            let address_arg = args.get(3).ok_or("bookmark needs an address")?.clone();
+            let label = args.get(4).ok_or("bookmark needs a label")?.clone();
+            let comment = args
+                .get(5)
+                .filter(|value| !value.starts_with("--"))
+                .cloned()
+                .unwrap_or_default();
+            let address = lre_model::Address::parse_ram_hex(&address_arg)
+                .ok_or_else(|| format!("bad address: {address_arg}"))?;
+            core.set_bookmark(
+                &program,
+                &lre_model::BookmarkRow {
+                    address: address.clone(),
+                    label: label.clone(),
+                    comment,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+            println!("bookmarked {} -> {}", address, label);
+        }
+        "patches" => {
+            let program = args.get(2).ok_or("patches needs a program name")?.clone();
+            let rows = core.patches(&program).map_err(|e| e.to_string())?;
+            for row in &rows {
+                println!(
+                    "{}  {} -> {}  {}",
+                    row.address,
+                    hex_bytes(&row.original),
+                    hex_bytes(&row.patched),
+                    if row.enabled { "enabled" } else { "disabled" }
+                );
+            }
+            println!("-- {} patches", rows.len());
+        }
+        "patch" => {
+            let program = args.get(2).ok_or("patch needs a program name")?.clone();
+            let address_arg = args.get(3).ok_or("patch needs an address")?.clone();
+            let original = args.get(4).ok_or("patch needs original bytes")?.clone();
+            let patched = args.get(5).ok_or("patch needs patched bytes")?.clone();
+            let address = lre_model::Address::parse_ram_hex(&address_arg)
+                .ok_or_else(|| format!("bad address: {address_arg}"))?;
+            core.set_patch(
+                &program,
+                &lre_model::PatchRow {
+                    address: address.clone(),
+                    original: parse_bytes(&original)?,
+                    patched: parse_bytes(&patched)?,
+                    enabled: !args.iter().any(|value| value == "--disabled"),
+                },
+            )
+            .map_err(|e| e.to_string())?;
+            println!("patched {}", address);
+        }
         "xrefs" => {
             let program = args.get(2).ok_or("xrefs needs a program name")?.clone();
 
@@ -352,6 +527,24 @@ fn run_inner(args: &[String]) -> Result<(), String> {
             core.rename_command(&program, &address, &name)
                 .map_err(|e| e.to_string())?;
             println!("renamed {} -> {}", address, name);
+        }
+        "comment" => {
+            let program = args.get(2).ok_or("comment needs a program name")?.clone();
+            let address_arg = args.get(3).ok_or("comment needs an address")?.clone();
+            let text = args.get(4).ok_or("comment needs comment text")?.clone();
+            let address = lre_model::Address::parse_ram_hex(&address_arg)
+                .ok_or_else(|| format!("bad address: {address_arg}"))?;
+            let function = flag(args, "--function")
+                .map(|value| {
+                    lre_model::Address::parse_ram_hex(&value)
+                        .ok_or_else(|| format!("bad function address: {value}"))
+                })
+                .transpose()?
+                .unwrap_or_else(|| address.clone());
+            let kind = flag(args, "--kind").unwrap_or_else(|| "eol".into());
+            core.comment_command(&program, &address, &function, &kind, &text)
+                .map_err(|e| e.to_string())?;
+            println!("commented {} [{}]", address, kind);
         }
         "undo" => {
             let program = args.get(2).ok_or("undo needs a program name")?.clone();

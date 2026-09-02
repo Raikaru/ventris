@@ -20,13 +20,6 @@ pub use lre_worker::{decode_addr_element, spec_dir, ProgramProvider};
 /// output) plus registers.txt; the program and its functions come from the
 /// project store so the worker is the store-backed no-JVM decompiler.
 fn main() {
-    // Raw-SLEIGH mode: when VENTRIS_SLA points at a compiled .sla, the
-    // patched (out-of-tree) ghidra_opt self-disassembles instead of asking
-    // the client for pcode (see crates docs / upstream-ghidra.md).
-    if let Ok(sla) = std::env::var("VENTRIS_SLA") {
-        // SAFETY: set before any thread spawns; single-threaded main start.
-        unsafe { std::env::set_var("VENTRIS_SLA", sla) };
-    }
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 6 {
         eprintln!(
@@ -83,6 +76,30 @@ fn run(
         provider.function_names.insert(off, f.name);
         provider.function_sizes.insert(off, f.size as u64);
     }
+    for symbol in db.symbols(pid)? {
+        provider
+            .symbol_names
+            .entry(symbol.address.offset)
+            .or_insert_with(|| symbol.name.clone());
+        if symbol.external {
+            provider
+                .external_names
+                .insert(symbol.address.offset, symbol.name);
+        }
+    }
+    for comment in db.comments(pid)? {
+        provider
+            .comments
+            .entry(comment.function.offset)
+            .or_default()
+            .push((comment.address.offset, comment.kind, comment.text));
+    }
+    for datatype in db.datatypes(pid)? {
+        provider.datatypes.insert(datatype.name, datatype.definition);
+    }
+    for string in db.strings(pid)? {
+        provider.strings.insert(string.address.offset, string.value);
+    }
 
     let offset = u64::from_str_radix(addr.trim_start_matches("0x"), 16)
         .map_err(|e| lre_worker::WorkerError::Setup(e.to_string()))?;
@@ -92,47 +109,25 @@ fn run(
     worker.set_action(&mut provider, "decompile", "")?;
     let ram = provider.ram_space_index as u32;
     let raw = worker.decompile_at(&mut provider, ram, offset)?;
-    // The C text is printed by the C++ as <syntax> markup: every printable
-    // token is an ATTRIB_CONTENT string (EmitMarkup::print, prettyprint.cc:
-    // 311-317) in stream order. Concatenate them; the packed doc only wraps.
-    let c_text = {
-        let mut out = String::new();
-        let mut p = 0usize;
-        while p < raw.len() {
-            let h = raw[p];
-            p += 1;
-            let k = h & 0xc0;
-            if k == 0xc0 {
-                let mut aid = (h & 0x1f) as u64;
-                if h & 0x20 != 0 {
-                    aid = (aid << 7) | (raw[p] & 0x7f) as u64;
-                    p += 1;
-                }
-                let tb = raw[p];
-                p += 1;
-                let tc = tb >> 4;
-                let ln = (tb & 0xf) as usize;
-                let mut v = 0u64;
-                for _ in 0..ln {
-                    v = (v << 7) | (raw[p] & 0x7f) as u64;
-                    p += 1;
-                }
-                if tc == 7 && aid == 1 && p + v as usize <= raw.len() {
-                    out.push_str(&String::from_utf8_lossy(&raw[p..p + v as usize]));
-                    p += v as usize;
-                } else if tc == 7 {
-                    p += v as usize;
-                }
-            } else if k == 0x40 || k == 0x80 {
-                if h & 0x20 != 0 {
-                    p += 1;
-                }
-            } else {
-                p += 1;
-            }
-        }
-        out
-    };
+    // The packed response is the source of truth for both structured tokens
+    // and rendered compatibility text. `decode_tokens_with_ram_space` follows
+    // PackedDecode.java and preserves token metadata; concatenation is only
+    // the legacy CLI presentation boundary.
+    let tokens = lre_worker::decode_tokens_with_ram_space(&raw, Some(ram as u64));
+    if std::env::var_os("WORKER_STRUCTURED").is_some() {
+        let doc = lre_model::DecompDoc {
+            tokens,
+            address: lre_model::Address::ram(offset),
+            revision: 0,
+        };
+        println!(
+            "{}",
+            serde_json::to_string(&doc)
+                .map_err(|e| lre_worker::WorkerError::Setup(format!("encode document: {e}")))?
+        );
+        return Ok(());
+    }
+    let c_text: String = tokens.iter().map(|token| token.text.as_str()).collect();
     if std::env::var_os("WORKER_DUMP").is_some() {
         let mut f = std::fs::File::create("/tmp/ctext_dump.txt").unwrap();
         use std::io::Write as _;

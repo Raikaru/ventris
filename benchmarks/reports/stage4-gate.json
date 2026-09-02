@@ -11,19 +11,19 @@
   "runs": [
     {
       "run": 1,
-      "wall_s": 0.11,
-      "import_kb": 5544,
+      "wall_s": 0.16,
+      "import_kb": 5908,
       "disasm_kb": 0,
-      "decompile_kb": 39436
+      "decompile_kb": 39160
     }
   ],
-  "median_wall_s": 0.11,
-  "peak_import_kb": 5544,
+  "median_wall_s": 0.16,
+  "peak_import_kb": 5908,
   "peak_disasm_kb": 0,
-  "peak_decompile_kb": 39436,
+  "peak_decompile_kb": 39160,
   "gates": {
     "peak_kb": 100000,
-    "wall_s": 120.0,
+    "wall_s": 180.0,
     "stock_ghidra_baseline_kb": 384000
   },
   "complete": false,

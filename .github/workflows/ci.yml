@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+
+  python-and-sbom:
+    name: Python and SBOM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m py_compile python/*.py packaging/*.py
+      - run: python packaging/sbom.py --output "$RUNNER_TEMP/ventris.spdx.json"
+      - name: Validate SPDX document
+        env:
+          SBOM_PATH: ${{ runner.temp }}/ventris.spdx.json
+        run: |
+          python -c "import json, os; document = json.load(open(os.environ['SBOM_PATH'])); assert document['spdxVersion'] == 'SPDX-2.3'; assert document['packages']"
+      - run: python packaging/update_manifest.py --version ci --root . --output "$RUNNER_TEMP/update.json" LICENSE
+      - run: python packaging/verify_update.py "$RUNNER_TEMP/update.json" --root .
+
+  qt:
+    name: Qt desktop (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Qt on Ubuntu
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build qt6-base-dev
+      - name: Install Qt on macOS
+        if: runner.os == 'macOS'
+        run: brew install qt
+      - name: Install Qt on Windows
+        if: runner.os == 'Windows'
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.7.3"
+          arch: win64_msvc2022_64
+          cache: true
+      - name: Configure desktop
+        run: cmake -S desktop/ventris-qt -B build/ventris-qt -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: Build desktop
+        run: cmake --build build/ventris-qt --config Release --target ventris-qt
+      - name: Build installer archive
+        run: cmake --build build/ventris-qt --config Release --target package

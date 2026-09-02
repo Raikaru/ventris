@@ -7,6 +7,9 @@ members = [
     "crates/lre-cli",
     "crates/lre-worker",
     "crates/lre-worker-client",
+    "crates/lre-qt-bridge",
+    "crates/lre-api",
+    "crates/lre-debug",
 ]
 
 [workspace.package]

@@ -56,8 +56,17 @@ for i in $(seq 1 "$RUNS"); do
     "$CLI" functions gate --project "$PROJECT" > "$OUTDIR/functions_$i.out"
     "$CLI" xrefs gate --to 00400466 --project "$PROJECT" > "$OUTDIR/xrefs_$i.out"
     "$CLI" rename gate 00400466 gate_add --project "$PROJECT" > /dev/null
+    "$CLI" undo gate --project "$PROJECT" > "$OUTDIR/undo_rename_$i.out"
+    "$CLI" functions gate --project "$PROJECT" > "$OUTDIR/functions_undo_$i.out"
+    python3 - "$OUTDIR/functions_undo_$i.out" <<'PY'
+import pathlib, sys
+if "gate_add" in pathlib.Path(sys.argv[1]).read_text():
+    raise SystemExit("rename remained after undo")
+PY
+    "$CLI" comment gate 00400466 "gate comment" --project "$PROJECT" > /dev/null
+    "$CLI" undo gate --project "$PROJECT" > "$OUTDIR/undo_comment_$i.out"
     "$CLI" open gate --project "$PROJECT" > "$OUTDIR/open_$i.out"
-    # disasm-native (SLEIGH console, no JVM); console-dependent
+    "$CLI" open gate --project "$PROJECT" > "$OUTDIR/reopen_$i.out"
     if [ "$CONSOLE_AVAILABLE" -eq 1 ]; then
         /usr/bin/time -v "$CLI" disasm-native "$BIN" 00400466 -n 4 \
             > "$OUTDIR/disasm_$i.out" 2> "$OUTDIR/disasm_$i.time" || { cat "$OUTDIR/disasm_$i.out" >&2; exit 1; }

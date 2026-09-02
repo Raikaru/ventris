@@ -1,0 +1,1914 @@
+#include <QAbstractTableModel>
+#include <QAbstractItemView>
+#include <QApplication>
+#include <QCoreApplication>
+#include <QCommandLineParser>
+#include <QFutureWatcher>
+#include <QHeaderView>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonValue>
+#include <QDateTime>
+#include <QFontDatabase>
+#include <QGridLayout>
+#include <QLabel>
+#include <QLineEdit>
+#include <QMainWindow>
+#include <QDockWidget>
+#include <QPainter>
+#include <QPlainTextEdit>
+#include <QPushButton>
+#include <QListWidget>
+#include <QScrollBar>
+#include <QSettings>
+#include <QSplitter>
+#include <QTableView>
+#include <QTableWidget>
+#include <QThreadPool>
+#include <QTabWidget>
+#include <QHBoxLayout>
+#include <QWheelEvent>
+#include <QtConcurrent/QtConcurrentRun>
+#include <QStringList>
+
+#include <functional>
+#include <atomic>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <cmath>
+
+#include <lre-qt-bridge/src/lib.rs.h>
+
+namespace {
+
+using ResponseCallback = std::function<void(const QJsonObject &)>;
+
+class CoreBridge final : public QObject {
+    Q_OBJECT
+
+public:
+    explicit CoreBridge(const QString &project, QObject *parent = nullptr)
+        : QObject(parent) {
+        try {
+            const QByteArray utf8 = project.toUtf8();
+            core_.emplace(ventris::core_open(
+                rust::Str(utf8.constData(), static_cast<std::size_t>(utf8.size()))));
+        } catch (const std::exception &error) {
+            startup_error_ = QString::fromUtf8(error.what());
+        }
+        pool_.setMaxThreadCount(2);
+    }
+
+    ~CoreBridge() override { shutdown(); }
+
+    /// Stop accepting work, discard queued jobs, and wait for running Core
+    /// calls to return before the Rust handle is dropped. Native decompiler
+    /// calls remain isolated child processes; the Core call cannot leave one
+    /// orphaned after this barrier.
+    void shutdown() {
+        const bool was_shutdown = shutting_down_.exchange(true);
+        if (was_shutdown) {
+            return;
+        }
+        pool_.clear();
+        pool_.waitForDone();
+    }
+
+    QString startupError() const { return startup_error_; }
+
+    void request(const QJsonObject &request, ResponseCallback callback) {
+        if (shutting_down_.load()) {
+            callback(QJsonObject{{"ok", false}, {"error", "bridge is shutting down"}});
+            return;
+        }
+        if (!core_.has_value()) {
+            callback(QJsonObject{{"ok", false}, {"error", startup_error_}});
+            return;
+        }
+        const QByteArray encoded = QJsonDocument(request).toJson(QJsonDocument::Compact);
+        QFuture<QString> future = QtConcurrent::run(&pool_, [this, encoded]() {
+            rust::String response = ventris::core_request(
+                **core_, rust::Str(encoded.constData(), static_cast<std::size_t>(encoded.size())));
+            return QString::fromUtf8(response.data(), static_cast<int>(response.size()));
+        });
+        auto *watcher = new QFutureWatcher<QString>(this);
+        connect(watcher, &QFutureWatcher<QString>::finished, this,
+                [watcher, callback = std::move(callback)]() mutable {
+                    const QString response = watcher->result();
+                    const QJsonDocument document =
+                        QJsonDocument::fromJson(response.toUtf8());
+                    if (document.isObject()) {
+                        callback(document.object());
+                    } else {
+                        callback(QJsonObject{{"ok", false},
+                                             {"error", "Rust bridge returned invalid JSON"}});
+                    }
+                    watcher->deleteLater();
+                });
+        watcher->setFuture(future);
+    }
+
+private:
+    std::optional<rust::Box<ventris::CoreHandle>> core_;
+    QString startup_error_;
+    std::atomic_bool shutting_down_{false};
+    QThreadPool pool_;
+};
+
+static QString addressText(const QJsonValue &value) {
+    if (value.isString()) {
+        return value.toString();
+    }
+    if (value.isObject()) {
+        const QJsonObject object = value.toObject();
+        const qlonglong offset = object.value("offset").toVariant().toLongLong();
+        return QStringLiteral("0x%1").arg(static_cast<qulonglong>(offset), 0, 16);
+    }
+    return QStringLiteral("?");
+}
+
+static QJsonArray bytesFromText(QString text) {
+    text.remove(' ');
+    text.remove(':');
+    if (text.startsWith(QStringLiteral("0x"))) {
+        text.remove(0, 2);
+    }
+    QJsonArray bytes;
+    if (text.isEmpty() || text.size() % 2 != 0) {
+        return bytes;
+    }
+    for (int offset = 0; offset < text.size(); offset += 2) {
+        bool ok = false;
+        const int byte = text.mid(offset, 2).toInt(&ok, 16);
+        if (!ok || byte < 0 || byte > 255) {
+            return {};
+        }
+        bytes.append(byte);
+    }
+    return bytes;
+}
+
+static QString bytesText(const QJsonArray &bytes) {
+    QString text;
+    for (const QJsonValue &value : bytes) {
+        text += QStringLiteral("%1").arg(value.toInt(), 2, 16, QLatin1Char('0'));
+    }
+    return text.toUpper();
+}
+
+static QJsonValue optionalInteger(const QString &text) {
+    const QString trimmed = text.trimmed();
+    if (trimmed.isEmpty()) {
+        return QJsonValue(QJsonValue::Null);
+    }
+    bool ok = false;
+    const qlonglong value = trimmed.toLongLong(&ok, 0);
+    return ok ? QJsonValue(value) : QJsonValue(QJsonValue::Null);
+}
+
+static bool successful(const QJsonObject &response, QString *error = nullptr) {
+    if (response.value("ok").toBool(false)) {
+        return true;
+    }
+    if (error != nullptr) {
+        *error = response.value("error").toString(QStringLiteral("request failed"));
+    }
+    return false;
+}
+
+class FunctionTableModel final : public QAbstractTableModel {
+    Q_OBJECT
+
+public:
+    explicit FunctionTableModel(CoreBridge *bridge, QObject *parent = nullptr)
+        : QAbstractTableModel(parent), bridge_(bridge) {}
+
+    int rowCount(const QModelIndex &parent = QModelIndex()) const override {
+        return parent.isValid() ? 0 : rows_.size();
+    }
+
+    int columnCount(const QModelIndex &parent = QModelIndex()) const override {
+        return parent.isValid() ? 0 : 4;
+    }
+
+    QVariant headerData(int section, Qt::Orientation orientation,
+                        int role = Qt::DisplayRole) const override {
+        if (role != Qt::DisplayRole || orientation != Qt::Horizontal) {
+            return {};
+        }
+        static const QStringList labels = {QStringLiteral("Address"), QStringLiteral("Name"),
+                                           QStringLiteral("Size"), QStringLiteral("Signature")};
+        return labels.value(section);
+    }
+
+    QVariant data(const QModelIndex &index, int role = Qt::DisplayRole) const override {
+        if (!index.isValid() || index.row() >= rows_.size() || role != Qt::DisplayRole) {
+            return {};
+        }
+        const QJsonObject row = rows_.at(index.row()).toObject();
+        switch (index.column()) {
+        case 0:
+            return addressText(row.value("entry"));
+        case 1:
+            return row.value("name").toString();
+        case 2:
+            return row.value("size").toVariant().toLongLong();
+        case 3:
+            return row.value("signature").toString();
+        default:
+            return {};
+        }
+    }
+
+    bool canFetchMore(const QModelIndex &parent) const override {
+        return !parent.isValid() && !loading_ && rows_.size() < total_;
+    }
+
+    void fetchMore(const QModelIndex &parent) override {
+        if (!parent.isValid() && canFetchMore(parent)) {
+            requestPage(false);
+        }
+    }
+
+    void setProgram(const QString &program) {
+        program_ = program;
+        refresh();
+    }
+
+    QString program() const { return program_; }
+    qint64 total() const { return total_; }
+    qint64 revision() const { return revision_; }
+
+    void refresh() {
+        beginResetModel();
+        rows_ = {};
+        total_ = 0;
+        revision_ = 0;
+        endResetModel();
+        requestPage(true);
+    }
+
+signals:
+    void requestError(const QString &message);
+    void refreshed();
+
+private:
+    void requestPage(bool reset) {
+        if (loading_ || program_.isEmpty()) {
+            return;
+        }
+        loading_ = true;
+        const quint64 generation = ++generation_;
+        QJsonObject request{{"method", "functions_page"},
+                            {"program", program_},
+                            {"offset", reset ? 0 : rows_.size()},
+                            {"limit", page_size_}};
+        bridge_->request(request, [this, generation, reset](const QJsonObject &response) {
+            if (generation != generation_) {
+                return;
+            }
+            loading_ = false;
+            QString error;
+            if (!successful(response, &error)) {
+                emit requestError(error);
+                return;
+            }
+            const QJsonObject result = response.value("result").toObject();
+            const QJsonArray incoming = result.value("rows").toArray();
+            if (reset) {
+                beginResetModel();
+                rows_ = incoming;
+                endResetModel();
+            } else if (!incoming.isEmpty()) {
+                const int first = rows_.size();
+                beginInsertRows(QModelIndex(), first, first + incoming.size() - 1);
+                for (const QJsonValue &row : incoming) {
+                    rows_.append(row);
+                }
+                endInsertRows();
+            }
+            total_ = result.value("total").toVariant().toLongLong();
+            revision_ = result.value("revision").toVariant().toLongLong();
+            emit refreshed();
+        });
+    }
+
+    CoreBridge *bridge_;
+    QString program_;
+    QJsonArray rows_;
+    qint64 total_ = 0;
+    qint64 revision_ = 0;
+    bool loading_ = false;
+    quint64 generation_ = 0;
+    static constexpr qint64 page_size_ = 256;
+};
+
+class ListingCanvas final : public QWidget {
+    Q_OBJECT
+
+public:
+    explicit ListingCanvas(QWidget *parent = nullptr) : QWidget(parent) {
+        setMinimumHeight(180);
+        setFocusPolicy(Qt::StrongFocus);
+    }
+
+    void setRows(const QJsonArray &rows) {
+        rows_ = rows;
+        top_row_ = 0;
+        update();
+    }
+
+    QSize sizeHint() const override { return {640, 260}; }
+
+protected:
+    void paintEvent(QPaintEvent *) override {
+        QPainter painter(this);
+        painter.fillRect(rect(), QColor("#101419"));
+        painter.setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+        const QFontMetrics metrics = painter.fontMetrics();
+        const int line_height = metrics.lineSpacing();
+        int y = metrics.ascent() + 8;
+        const int visible = qMax(0, (height() - 8) / line_height);
+        for (int i = 0; i < visible && top_row_ + i < rows_.size(); ++i) {
+            const QJsonObject row = rows_.at(top_row_ + i).toObject();
+            painter.setPen(QColor("#79b8ff"));
+            const QString address = addressText(row.value("address"));
+            painter.drawText(8, y, address.leftJustified(14, QLatin1Char(' ')));
+            painter.setPen(QColor("#d6dee8"));
+            painter.drawText(126, y, row.value("text").toString());
+            y += line_height;
+        }
+        if (rows_.isEmpty()) {
+            painter.setPen(QColor("#7e8996"));
+            painter.drawText(8, y, QStringLiteral("No listing loaded"));
+        }
+    }
+
+    void wheelEvent(QWheelEvent *event) override {
+        const int delta = event->angleDelta().y();
+        const int step = delta > 0 ? -3 : 3;
+        top_row_ = qBound(0, top_row_ + step, qMax(0, rows_.size() - 1));
+        update();
+        event->accept();
+    }
+
+private:
+    QJsonArray rows_;
+    int top_row_ = 0;
+};
+
+class GraphCanvas final : public QWidget {
+public:
+    explicit GraphCanvas(QWidget *parent = nullptr) : QWidget(parent) {
+        setMinimumSize(420, 260);
+    }
+
+    void setGraph(const QJsonObject &graph) {
+        nodes_ = graph.value("nodes").toArray();
+        edges_ = graph.value("edges").toArray();
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override {
+        QPainter painter(this);
+        painter.fillRect(rect(), QColor("#101419"));
+        painter.setRenderHint(QPainter::Antialiasing);
+        const int columns = qMax(1, qCeil(std::sqrt(static_cast<double>(nodes_.size()))));
+        const int cell_width = qMax(150, width() / columns);
+        const int cell_height = 64;
+        auto node_index = [this](const QJsonValue &address) {
+            const QString target = addressText(address);
+            for (int index = 0; index < nodes_.size(); ++index) {
+                if (addressText(nodes_.at(index).toObject().value("address")) == target) {
+                    return index;
+                }
+            }
+            return -1;
+        };
+        auto center = [columns, cell_width, cell_height](int index) {
+            const int row = index / columns;
+            const int column = index % columns;
+            return QPoint(column * cell_width + cell_width / 2, row * cell_height + 32);
+        };
+        painter.setPen(QColor("#56606d"));
+        for (const QJsonValue &value : edges_) {
+            const QJsonObject edge = value.toObject();
+            const int from = node_index(edge.value("from"));
+            const int to = node_index(edge.value("to"));
+            if (from >= 0 && to >= 0) {
+                painter.drawLine(center(from), center(to));
+            }
+        }
+        for (int index = 0; index < nodes_.size(); ++index) {
+            const QJsonObject node = nodes_.at(index).toObject();
+            const QPoint point = center(index);
+            const QRect box(point.x() - cell_width / 2 + 6, point.y() - 22, cell_width - 12, 44);
+            painter.setBrush(QColor("#202a35"));
+            painter.setPen(QColor("#79b8ff"));
+            painter.drawRoundedRect(box, 5, 5);
+            painter.setPen(QColor("#d6dee8"));
+            painter.drawText(box.adjusted(6, 5, -6, -5), Qt::AlignCenter,
+                             node.value("name").toString() + QStringLiteral("\n") +
+                                 addressText(node.value("address")));
+        }
+    }
+
+private:
+    QJsonArray nodes_;
+    QJsonArray edges_;
+};
+
+class MainWindow final : public QMainWindow {
+    Q_OBJECT
+
+public:
+    explicit MainWindow(const QString &project, const QString &program, const QString &binary,
+                        const QString &address, QWidget *parent = nullptr)
+        : QMainWindow(parent), bridge_(new CoreBridge(project, this)),
+          program_(program), binary_(binary), address_(address) {
+        setWindowTitle(QStringLiteral("Ventris"));
+        resize(1280, 820);
+
+        auto *central = new QWidget(this);
+        auto *root = new QVBoxLayout(central);
+        auto *controls = new QGridLayout();
+        project_edit_ = new QLineEdit(project, central);
+        program_edit_ = new QLineEdit(program, central);
+        binary_edit_ = new QLineEdit(binary, central);
+        address_edit_ = new QLineEdit(address, central);
+        name_edit_ = new QLineEdit(central);
+        comment_edit_ = new QLineEdit(central);
+        comment_kind_edit_ = new QLineEdit(QStringLiteral("eol"), central);
+        controls->addWidget(new QLabel(QStringLiteral("Project"), central), 0, 0);
+        search_edit_ = new QLineEdit(central);
+        bookmark_edit_ = new QLineEdit(central);
+        patch_original_edit_ = new QLineEdit(central);
+        patch_new_edit_ = new QLineEdit(central);
+        controls->addWidget(project_edit_, 0, 1);
+        controls->addWidget(new QLabel(QStringLiteral("Program"), central), 0, 2);
+        controls->addWidget(program_edit_, 0, 3);
+        controls->addWidget(new QLabel(QStringLiteral("Binary"), central), 1, 0);
+        controls->addWidget(binary_edit_, 1, 1, 1, 3);
+        controls->addWidget(new QLabel(QStringLiteral("Address"), central), 2, 0);
+        controls->addWidget(address_edit_, 2, 1);
+
+        auto *import = new QPushButton(QStringLiteral("Import native"), central);
+        auto *open = new QPushButton(QStringLiteral("Open"), central);
+        auto *refresh = new QPushButton(QStringLiteral("Refresh"), central);
+        auto *back = new QPushButton(QStringLiteral("<"), central);
+        auto *forward = new QPushButton(QStringLiteral(">"), central);
+        auto *decompile = new QPushButton(QStringLiteral("Decompile"), central);
+        auto *listing = new QPushButton(QStringLiteral("Listing"), central);
+        auto *xref = new QPushButton(QStringLiteral("Xrefs"), central);
+        controls->addWidget(import, 2, 2);
+        controls->addWidget(open, 2, 3);
+        controls->addWidget(back, 3, 0);
+        controls->addWidget(forward, 3, 1);
+        controls->addWidget(refresh, 3, 2);
+        controls->addWidget(decompile, 3, 3);
+        controls->addWidget(new QLabel(QStringLiteral("Rename"), central), 4, 0);
+        controls->addWidget(name_edit_, 4, 1);
+        auto *rename = new QPushButton(QStringLiteral("Apply rename"), central);
+        controls->addWidget(rename, 4, 2);
+        controls->addWidget(new QLabel(QStringLiteral("Comment"), central), 5, 0);
+        controls->addWidget(comment_edit_, 5, 1);
+        controls->addWidget(new QLabel(QStringLiteral("Kind"), central), 5, 2);
+        controls->addWidget(comment_kind_edit_, 5, 3);
+        auto *comment = new QPushButton(QStringLiteral("Apply comment"), central);
+        auto *undo = new QPushButton(QStringLiteral("Undo"), central);
+        controls->addWidget(comment, 6, 1);
+        controls->addWidget(undo, 6, 2);
+        controls->addWidget(listing, 6, 3);
+        controls->addWidget(xref, 7, 3);
+        controls->addWidget(new QLabel(QStringLiteral("Search"), central), 8, 0);
+        controls->addWidget(search_edit_, 8, 1);
+        auto *search = new QPushButton(QStringLiteral("Find"), central);
+        controls->addWidget(search, 8, 2);
+        controls->addWidget(new QLabel(QStringLiteral("Bookmark"), central), 9, 0);
+        controls->addWidget(bookmark_edit_, 9, 1);
+        auto *bookmark = new QPushButton(QStringLiteral("Set bookmark"), central);
+        controls->addWidget(bookmark, 9, 2);
+        controls->addWidget(new QLabel(QStringLiteral("Patch old/new"), central), 10, 0);
+        controls->addWidget(patch_original_edit_, 10, 1);
+        controls->addWidget(patch_new_edit_, 10, 2);
+        auto *patch = new QPushButton(QStringLiteral("Apply patch"), central);
+        controls->addWidget(patch, 10, 3);
+        root->addLayout(controls);
+        listing_canvas_ = new ListingCanvas(central);
+        root->addWidget(listing_canvas_, 1);
+        status_ = new QLabel(this);
+        root->addWidget(status_);
+        setCentralWidget(central);
+
+        functions_ = new QTableView(this);
+        functions_->setObjectName(QStringLiteral("functionsView"));
+        function_model_ = new FunctionTableModel(bridge_, functions_);
+        functions_->setModel(function_model_);
+        functions_->setSelectionBehavior(QAbstractItemView::SelectRows);
+        functions_->setSelectionMode(QAbstractItemView::SingleSelection);
+        functions_->horizontalHeader()->setStretchLastSection(true);
+        functions_->verticalHeader()->setVisible(false);
+        functions_->setAlternatingRowColors(true);
+        auto *functions_dock = new QDockWidget(QStringLiteral("Functions"), this);
+        functions_dock->setObjectName(QStringLiteral("functionsDock"));
+        functions_dock->setWidget(functions_);
+        addDockWidget(Qt::LeftDockWidgetArea, functions_dock);
+
+        decompiler_ = new QPlainTextEdit(this);
+        decompiler_->setObjectName(QStringLiteral("decompilerView"));
+        decompiler_->setReadOnly(true);
+        decompiler_->setPlaceholderText(QStringLiteral("Structured decompiler document"));
+        auto *decompiler_dock = new QDockWidget(QStringLiteral("Decompiler"), this);
+        decompiler_dock->setObjectName(QStringLiteral("decompilerDock"));
+        decompiler_dock->setWidget(decompiler_);
+        addDockWidget(Qt::BottomDockWidgetArea, decompiler_dock);
+
+
+        auto *facts_tabs = new QTabWidget(this);
+        symbols_ = new QTableWidget(0, 4, facts_tabs);
+        symbols_->setHorizontalHeaderLabels(
+            {QStringLiteral("Address"), QStringLiteral("Name"), QStringLiteral("Source"),
+             QStringLiteral("External")});
+        strings_ = new QTableWidget(0, 3, facts_tabs);
+        strings_->setHorizontalHeaderLabels(
+            {QStringLiteral("Address"), QStringLiteral("Kind"), QStringLiteral("Value")});
+        search_results_ = new QTableWidget(0, 4, facts_tabs);
+        search_results_->setHorizontalHeaderLabels(
+            {QStringLiteral("Address"), QStringLiteral("Kind"), QStringLiteral("Name"),
+             QStringLiteral("Context")});
+        facts_tabs->addTab(symbols_, QStringLiteral("Symbols"));
+        facts_tabs->addTab(strings_, QStringLiteral("Strings"));
+        facts_tabs->addTab(search_results_, QStringLiteral("Search"));
+        auto *facts_dock = new QDockWidget(QStringLiteral("Symbols / strings / search"), this);
+        facts_dock->setObjectName(QStringLiteral("factsDock"));
+        facts_dock->setWidget(facts_tabs);
+        addDockWidget(Qt::RightDockWidgetArea, facts_dock);
+
+        auto *memory_panel = new QWidget(this);
+        auto *memory_layout = new QVBoxLayout(memory_panel);
+        memory_regions_ = new QTableWidget(0, 5, memory_panel);
+        memory_regions_->setHorizontalHeaderLabels(
+            {QStringLiteral("Name"), QStringLiteral("Start"), QStringLiteral("Size"),
+             QStringLiteral("Permissions"), QStringLiteral("Source")});
+        hex_view_ = new QPlainTextEdit(memory_panel);
+        hex_view_->setReadOnly(true);
+        hex_view_->setPlaceholderText(QStringLiteral("Select an address to inspect bytes"));
+        memory_layout->addWidget(memory_regions_, 1);
+        memory_layout->addWidget(hex_view_, 1);
+        auto *memory_dock = new QDockWidget(QStringLiteral("Memory map / hex"), this);
+        memory_dock->setObjectName(QStringLiteral("memoryDock"));
+        memory_dock->setWidget(memory_panel);
+        addDockWidget(Qt::RightDockWidgetArea, memory_dock);
+
+        graph_canvas_ = new GraphCanvas(this);
+        auto *graph_dock = new QDockWidget(QStringLiteral("Function graph"), this);
+        graph_dock->setObjectName(QStringLiteral("functionGraphDock"));
+        graph_dock->setWidget(graph_canvas_);
+        addDockWidget(Qt::BottomDockWidgetArea, graph_dock);
+
+        auto *analyst_tabs = new QTabWidget(this);
+        bookmarks_ = new QTableWidget(0, 3, analyst_tabs);
+        bookmarks_->setHorizontalHeaderLabels(
+            {QStringLiteral("Address"), QStringLiteral("Label"), QStringLiteral("Comment")});
+        patches_ = new QTableWidget(0, 4, analyst_tabs);
+        patches_->setHorizontalHeaderLabels(
+            {QStringLiteral("Address"), QStringLiteral("Original"), QStringLiteral("Patched"),
+             QStringLiteral("Enabled")});
+        analyst_tabs->addTab(bookmarks_, QStringLiteral("Bookmarks"));
+        analyst_tabs->addTab(patches_, QStringLiteral("Patches"));
+        auto *analyst_dock = new QDockWidget(QStringLiteral("Analyst data"), this);
+        analyst_dock->setObjectName(QStringLiteral("analystDataDock"));
+        analyst_dock->setWidget(analyst_tabs);
+        addDockWidget(Qt::LeftDockWidgetArea, analyst_dock);
+
+        trace_events_ = new QTableWidget(0, 7, this);
+        trace_events_->setObjectName(QStringLiteral("traceTimelineView"));
+        trace_events_->setHorizontalHeaderLabels(
+            {QStringLiteral("Seq"), QStringLiteral("At"), QStringLiteral("Thread"),
+             QStringLiteral("Address"), QStringLiteral("Kind"), QStringLiteral("Payload"),
+             QStringLiteral("Provenance")});
+        trace_events_->horizontalHeader()->setStretchLastSection(true);
+        trace_events_->verticalHeader()->setVisible(false);
+        auto *trace_dock = new QDockWidget(QStringLiteral("Trace timeline"), this);
+        trace_dock->setObjectName(QStringLiteral("traceTimelineDock"));
+        trace_dock->setWidget(trace_events_);
+        addDockWidget(Qt::BottomDockWidgetArea, trace_dock);
+
+        auto *collab_panel = new QWidget(this);
+        auto *collab_layout = new QVBoxLayout(collab_panel);
+        auto *collab_editor = new QGridLayout();
+        actor_edit_ = new QLineEdit(QStringLiteral("local"), collab_panel);
+        op_id_edit_ = new QLineEdit(collab_panel);
+        lamport_edit_ = new QLineEdit(QStringLiteral("1"), collab_panel);
+        collab_kind_edit_ = new QLineEdit(QStringLiteral("note"), collab_panel);
+        collab_payload_edit_ = new QLineEdit(QStringLiteral("{}"), collab_panel);
+        collab_editor->addWidget(new QLabel(QStringLiteral("Actor"), collab_panel), 0, 0);
+        collab_editor->addWidget(actor_edit_, 0, 1);
+        collab_editor->addWidget(new QLabel(QStringLiteral("Operation id"), collab_panel), 1, 0);
+        collab_editor->addWidget(op_id_edit_, 1, 1);
+        collab_editor->addWidget(new QLabel(QStringLiteral("Lamport"), collab_panel), 2, 0);
+        collab_editor->addWidget(lamport_edit_, 2, 1);
+        collab_editor->addWidget(new QLabel(QStringLiteral("Kind"), collab_panel), 3, 0);
+        collab_editor->addWidget(collab_kind_edit_, 3, 1);
+        collab_editor->addWidget(new QLabel(QStringLiteral("Payload"), collab_panel), 4, 0);
+        collab_editor->addWidget(collab_payload_edit_, 4, 1);
+        auto *collab_actions = new QHBoxLayout();
+        auto *append_collab = new QPushButton(QStringLiteral("Append operation"), collab_panel);
+        auto *apply_collab = new QPushButton(QStringLiteral("Apply selected"), collab_panel);
+        auto *refresh_collab = new QPushButton(QStringLiteral("Refresh"), collab_panel);
+        collab_actions->addWidget(append_collab);
+        collab_actions->addWidget(apply_collab);
+        collab_actions->addWidget(refresh_collab);
+        collab_ops_ = new QTableWidget(0, 7, collab_panel);
+        collab_ops_->setObjectName(QStringLiteral("collaborationOpsView"));
+        collab_ops_->setHorizontalHeaderLabels(
+            {QStringLiteral("Operation"), QStringLiteral("Actor"), QStringLiteral("Lamport"),
+             QStringLiteral("Kind"), QStringLiteral("Payload"), QStringLiteral("Applied"),
+             QStringLiteral("Provenance")});
+        collab_ops_->horizontalHeader()->setStretchLastSection(true);
+        collab_ops_->verticalHeader()->setVisible(false);
+        collab_layout->addLayout(collab_editor);
+        collab_layout->addLayout(collab_actions);
+        collab_layout->addWidget(collab_ops_, 1);
+        auto *collab_dock = new QDockWidget(QStringLiteral("Collaboration"), this);
+        collab_dock->setObjectName(QStringLiteral("collaborationDock"));
+        collab_dock->setWidget(collab_panel);
+        addDockWidget(Qt::RightDockWidgetArea, collab_dock);
+        auto *type_panel = new QWidget(this);
+        auto *type_layout = new QVBoxLayout(type_panel);
+        auto *type_editor = new QGridLayout();
+        type_name_edit_ = new QLineEdit(type_panel);
+        type_kind_edit_ = new QLineEdit(QStringLiteral("struct"), type_panel);
+        type_definition_edit_ = new QLineEdit(type_panel);
+        type_size_edit_ = new QLineEdit(type_panel);
+        type_alignment_edit_ = new QLineEdit(type_panel);
+        type_base_edit_ = new QLineEdit(type_panel);
+        type_editor->addWidget(new QLabel(QStringLiteral("Type"), type_panel), 0, 0);
+        type_editor->addWidget(type_name_edit_, 0, 1);
+        type_editor->addWidget(new QLabel(QStringLiteral("Kind"), type_panel), 0, 2);
+        type_editor->addWidget(type_kind_edit_, 0, 3);
+        type_editor->addWidget(new QLabel(QStringLiteral("Definition"), type_panel), 1, 0);
+        type_editor->addWidget(type_definition_edit_, 1, 1, 1, 3);
+        type_editor->addWidget(new QLabel(QStringLiteral("Size"), type_panel), 2, 0);
+        type_editor->addWidget(type_size_edit_, 2, 1);
+        type_editor->addWidget(new QLabel(QStringLiteral("Alignment"), type_panel), 2, 2);
+        type_editor->addWidget(type_alignment_edit_, 2, 3);
+        type_editor->addWidget(new QLabel(QStringLiteral("Base type"), type_panel), 3, 0);
+        type_editor->addWidget(type_base_edit_, 3, 1);
+
+        field_ordinal_edit_ = new QLineEdit(QStringLiteral("0"), type_panel);
+        field_name_edit_ = new QLineEdit(type_panel);
+        field_offset_edit_ = new QLineEdit(QStringLiteral("0"), type_panel);
+        field_size_edit_ = new QLineEdit(type_panel);
+        field_type_edit_ = new QLineEdit(type_panel);
+        type_editor->addWidget(new QLabel(QStringLiteral("Field ordinal"), type_panel), 4, 0);
+        type_editor->addWidget(field_ordinal_edit_, 4, 1);
+        type_editor->addWidget(new QLabel(QStringLiteral("Field name"), type_panel), 4, 2);
+        type_editor->addWidget(field_name_edit_, 4, 3);
+        type_editor->addWidget(new QLabel(QStringLiteral("Field offset"), type_panel), 5, 0);
+        type_editor->addWidget(field_offset_edit_, 5, 1);
+        type_editor->addWidget(new QLabel(QStringLiteral("Field size"), type_panel), 5, 2);
+        type_editor->addWidget(field_size_edit_, 5, 3);
+        type_editor->addWidget(new QLabel(QStringLiteral("Field type"), type_panel), 6, 0);
+        type_editor->addWidget(field_type_edit_, 6, 1, 1, 3);
+
+        prototype_signature_edit_ = new QLineEdit(type_panel);
+        calling_convention_edit_ = new QLineEdit(type_panel);
+        type_editor->addWidget(new QLabel(QStringLiteral("Prototype"), type_panel), 7, 0);
+        type_editor->addWidget(prototype_signature_edit_, 7, 1);
+        type_editor->addWidget(new QLabel(QStringLiteral("Calling convention"), type_panel), 7, 2);
+        type_editor->addWidget(calling_convention_edit_, 7, 3);
+
+        stack_name_edit_ = new QLineEdit(type_panel);
+        stack_storage_edit_ = new QLineEdit(type_panel);
+        stack_type_edit_ = new QLineEdit(type_panel);
+        stack_offset_edit_ = new QLineEdit(type_panel);
+        stack_size_edit_ = new QLineEdit(type_panel);
+        type_editor->addWidget(new QLabel(QStringLiteral("Stack variable"), type_panel), 8, 0);
+        type_editor->addWidget(stack_name_edit_, 8, 1);
+        type_editor->addWidget(new QLabel(QStringLiteral("Storage"), type_panel), 8, 2);
+        type_editor->addWidget(stack_storage_edit_, 8, 3);
+        type_editor->addWidget(new QLabel(QStringLiteral("Variable type"), type_panel), 9, 0);
+        type_editor->addWidget(stack_type_edit_, 9, 1);
+        type_editor->addWidget(new QLabel(QStringLiteral("Offset / size"), type_panel), 9, 2);
+        auto *stack_numbers = new QWidget(type_panel);
+        auto *stack_numbers_layout = new QHBoxLayout(stack_numbers);
+        stack_numbers_layout->setContentsMargins(0, 0, 0, 0);
+        stack_numbers_layout->addWidget(stack_offset_edit_);
+        stack_numbers_layout->addWidget(stack_size_edit_);
+        type_editor->addWidget(stack_numbers, 9, 3);
+
+        auto *type_actions = new QHBoxLayout();
+        auto *save_type = new QPushButton(QStringLiteral("Save type"), type_panel);
+        auto *save_field = new QPushButton(QStringLiteral("Save field"), type_panel);
+        auto *save_prototype = new QPushButton(QStringLiteral("Save prototype"), type_panel);
+        auto *save_stack = new QPushButton(QStringLiteral("Save stack variable"), type_panel);
+        auto *propagate = new QPushButton(QStringLiteral("Propagate types"), type_panel);
+        type_actions->addWidget(save_type);
+        type_actions->addWidget(save_field);
+        type_actions->addWidget(save_prototype);
+        type_actions->addWidget(save_stack);
+        type_actions->addWidget(propagate);
+        type_layout->addLayout(type_editor);
+        type_layout->addLayout(type_actions);
+
+        auto *type_tabs = new QTabWidget(type_panel);
+        types_ = new QTableWidget(0, 7, type_tabs);
+        types_->setHorizontalHeaderLabels(
+            {QStringLiteral("Name"), QStringLiteral("Kind"), QStringLiteral("Definition"),
+             QStringLiteral("Size"), QStringLiteral("Align"), QStringLiteral("Base"),
+             QStringLiteral("Provenance")});
+        type_fields_ = new QTableWidget(0, 6, type_tabs);
+        type_fields_->setHorizontalHeaderLabels(
+            {QStringLiteral("Type"), QStringLiteral("Ordinal"), QStringLiteral("Field"),
+             QStringLiteral("Offset"), QStringLiteral("Size"), QStringLiteral("Type ref")});
+        prototypes_ = new QTableWidget(0, 4, type_tabs);
+        prototypes_->setHorizontalHeaderLabels(
+            {QStringLiteral("Function"), QStringLiteral("Signature"),
+             QStringLiteral("Calling convention"), QStringLiteral("Return type")});
+        stack_variables_ = new QTableWidget(0, 7, type_tabs);
+        stack_variables_->setHorizontalHeaderLabels(
+            {QStringLiteral("Function"), QStringLiteral("Ordinal"), QStringLiteral("Name"),
+             QStringLiteral("Storage"), QStringLiteral("Type"), QStringLiteral("Offset"),
+             QStringLiteral("Size")});
+        type_links_ = new QTableWidget(0, 4, type_tabs);
+        type_links_->setHorizontalHeaderLabels(
+            {QStringLiteral("Source"), QStringLiteral("Target"), QStringLiteral("Kind"),
+             QStringLiteral("Provenance")});
+        type_tabs->addTab(types_, QStringLiteral("Types"));
+        type_tabs->addTab(type_fields_, QStringLiteral("Fields"));
+        type_tabs->addTab(prototypes_, QStringLiteral("Prototypes"));
+        type_tabs->addTab(stack_variables_, QStringLiteral("Stack"));
+        type_tabs->addTab(type_links_, QStringLiteral("Graph"));
+        type_layout->addWidget(type_tabs, 1);
+        auto *type_dock = new QDockWidget(QStringLiteral("Types / prototypes"), this);
+        type_dock->setObjectName(QStringLiteral("typesDock"));
+        type_dock->setWidget(type_panel);
+        addDockWidget(Qt::LeftDockWidgetArea, type_dock);
+
+        xrefs_ = new QTableWidget(0, 3, this);
+        xrefs_->setObjectName(QStringLiteral("xrefsView"));
+        xrefs_->setHorizontalHeaderLabels(
+            {QStringLiteral("From"), QStringLiteral("Kind"), QStringLiteral("To")});
+        xrefs_->horizontalHeader()->setStretchLastSection(true);
+        xrefs_->verticalHeader()->setVisible(false);
+        auto *xrefs_dock = new QDockWidget(QStringLiteral("Xrefs"), this);
+        xrefs_dock->setObjectName(QStringLiteral("xrefsDock"));
+        xrefs_dock->setWidget(xrefs_);
+        addDockWidget(Qt::RightDockWidgetArea, xrefs_dock);
+
+        jobs_ = new QListWidget(this);
+        jobs_->setObjectName(QStringLiteral("analysisJobs"));
+        auto *jobs_dock = new QDockWidget(QStringLiteral("Analysis jobs"), this);
+        jobs_dock->setObjectName(QStringLiteral("analysisJobsDock"));
+        jobs_dock->setWidget(jobs_);
+        addDockWidget(Qt::BottomDockWidgetArea, jobs_dock);
+
+        connect(import, &QPushButton::clicked, this, &MainWindow::importNative);
+        connect(open, &QPushButton::clicked, this, &MainWindow::openProgram);
+        connect(refresh, &QPushButton::clicked, function_model_, &FunctionTableModel::refresh);
+        connect(back, &QPushButton::clicked, this, &MainWindow::goBack);
+        connect(save_type, &QPushButton::clicked, this, &MainWindow::saveTypeDefinition);
+        connect(save_field, &QPushButton::clicked, this, &MainWindow::saveTypeField);
+        connect(save_prototype, &QPushButton::clicked, this, &MainWindow::savePrototype);
+        connect(save_stack, &QPushButton::clicked, this, &MainWindow::saveStackVariable);
+        connect(propagate, &QPushButton::clicked, this, &MainWindow::propagateTypes);
+        connect(append_collab, &QPushButton::clicked, this, &MainWindow::appendCollaboration);
+        connect(apply_collab, &QPushButton::clicked, this, &MainWindow::applyCollaboration);
+        connect(refresh_collab, &QPushButton::clicked, this, &MainWindow::loadCollaboration);
+        connect(collab_ops_, &QTableWidget::cellClicked, this,
+                [this](int row, int) {
+                    if (auto *item = collab_ops_->item(row, 0)) {
+                        op_id_edit_->setText(item->text());
+                    }
+                });
+        connect(forward, &QPushButton::clicked, this, &MainWindow::goForward);
+        connect(decompile, &QPushButton::clicked, this, &MainWindow::decompile);
+        connect(listing, &QPushButton::clicked, this, &MainWindow::loadListing);
+        connect(xref, &QPushButton::clicked, this, &MainWindow::loadXrefs);
+        connect(rename, &QPushButton::clicked, this, &MainWindow::renameFunction);
+        connect(comment, &QPushButton::clicked, this, &MainWindow::applyComment);
+        connect(undo, &QPushButton::clicked, this, &MainWindow::undoCommand);
+        connect(search, &QPushButton::clicked, this, &MainWindow::loadFacts);
+        connect(bookmark, &QPushButton::clicked, this, &MainWindow::setBookmark);
+        connect(patch, &QPushButton::clicked, this, &MainWindow::setPatch);
+        connect(memory_regions_, &QTableWidget::cellClicked, this,
+                [this](int row, int) {
+                    if (auto *item = memory_regions_->item(row, 1)) {
+                        navigate(item->text(), true);
+                    }
+                });
+        connect(address_edit_, &QLineEdit::returnPressed, this, [this]() {
+            navigate(address_edit_->text(), true);
+        });
+        connect(functions_, &QTableView::clicked, this, [this](const QModelIndex &index) {
+            if (!index.isValid()) {
+                return;
+            }
+            const QString address =
+                function_model_->data(function_model_->index(index.row(), 0)).toString();
+            name_edit_->setText(
+                function_model_->data(function_model_->index(index.row(), 1)).toString());
+            navigate(address, true);
+        });
+        connect(function_model_, &FunctionTableModel::requestError, this,
+                [this](const QString &message) { setStatus(message, true); });
+        connect(function_model_, &FunctionTableModel::refreshed, this, [this]() {
+            setStatus(QStringLiteral("%1 functions (revision %2)")
+                          .arg(function_model_->total())
+                          .arg(function_model_->revision()));
+            loadFacts();
+            loadMemory();
+            loadGraph();
+            loadAnalystData();
+            loadTypes();
+            loadTrace();
+            loadCollaboration();
+        });
+        if (!bridge_->startupError().isEmpty()) {
+            setStatus(bridge_->startupError(), true);
+        } else if (!program_.isEmpty()) {
+            function_model_->setProgram(program_);
+        }
+        restoreWorkspace();
+    }
+
+    ~MainWindow() override {
+        saveWorkspace();
+        bridge_->shutdown();
+    }
+
+private slots:
+    void importNative() {
+        const int job = beginJob(QStringLiteral("native import"));
+        const QString binary = binary_edit_->text();
+        const QString program = program_edit_->text();
+        bridge_->request(QJsonObject{{"method", "import_native"},
+                                     {"binary", binary},
+                                     {"name", program}},
+                         [this, job, program](const QJsonObject &response) {
+                             QString error;
+                             if (!successful(response, &error)) {
+                                 finishJob(job, false, error);
+                                 return;
+                             }
+                             finishJob(job, true, QStringLiteral("imported %1").arg(program));
+                             function_model_->setProgram(program);
+                         });
+    }
+
+    void openProgram() {
+        const int job = beginJob(QStringLiteral("open program"));
+        const QString program = program_edit_->text();
+        bridge_->request(QJsonObject{{"method", "open"}, {"program", program}},
+                         [this, job, program](const QJsonObject &response) {
+                             QString error;
+                             if (!successful(response, &error)) {
+                                 finishJob(job, false, error);
+                                 return;
+                             }
+                             finishJob(job, true, QStringLiteral("opened %1").arg(program));
+                             function_model_->setProgram(program);
+                         });
+    }
+
+    void decompile() {
+        const int job = beginJob(QStringLiteral("decompile %1").arg(address_edit_->text()));
+        bridge_->request(QJsonObject{{"method", "decompile_doc"},
+                                     {"binary", binary_edit_->text()},
+                                     {"program", program_edit_->text()},
+                                     {"address", address_edit_->text()}},
+                         [this, job](const QJsonObject &response) {
+                             QString error;
+                             if (!successful(response, &error)) {
+                                 finishJob(job, false, error);
+                                 return;
+                             }
+                             const QJsonObject result = response.value("result").toObject();
+                             const QJsonArray tokens = result.value("tokens").toArray();
+                             QString text;
+                             text.reserve(tokens.size() * 8);
+                             for (const QJsonValue &token : tokens) {
+                                 text += token.toObject().value("text").toString();
+                             }
+                             decompiler_->setPlainText(text);
+                             finishJob(job, true,
+                                       QStringLiteral("%1 tokens, revision %2")
+                                           .arg(tokens.size())
+                                           .arg(result.value("revision").toInteger()));
+                         });
+    }
+
+    void loadListing() {
+        const int job = beginJob(QStringLiteral("listing %1").arg(address_edit_->text()));
+        bridge_->request(QJsonObject{{"method", "listing"},
+                                     {"binary", binary_edit_->text()},
+                                     {"start", address_edit_->text()},
+                                     {"count", 96}},
+                         [this, job](const QJsonObject &response) {
+                             QString error;
+                             if (!successful(response, &error)) {
+                                 finishJob(job, false, error);
+                                 return;
+                             }
+                             listing_canvas_->setRows(
+                                 response.value("result").toObject().value("rows").toArray());
+                             finishJob(job, true, QStringLiteral("listing loaded"));
+                         });
+    }
+
+    void loadXrefs() {
+        const int job = beginJob(QStringLiteral("xrefs %1").arg(address_edit_->text()));
+        bridge_->request(QJsonObject{{"method", "xrefs_page"},
+                                     {"program", program_edit_->text()},
+                                     {"address", address_edit_->text()},
+                                     {"incoming", true},
+                                     {"offset", 0},
+                                     {"limit", 256}},
+                         [this, job](const QJsonObject &response) {
+                             QString error;
+                             if (!successful(response, &error)) {
+                                 finishJob(job, false, error);
+                                 return;
+                             }
+                             const QJsonArray rows =
+                                 response.value("result").toObject().value("rows").toArray();
+                             xrefs_->setRowCount(0);
+                             for (const QJsonValue &value : rows) {
+                                 const QJsonObject row = value.toObject();
+                                 const int index = xrefs_->rowCount();
+                                 xrefs_->insertRow(index);
+                                 xrefs_->setItem(index, 0,
+                                                 new QTableWidgetItem(addressText(row.value("from"))));
+                                 xrefs_->setItem(index, 1,
+                                                 new QTableWidgetItem(row.value("kind").toString()));
+                                 xrefs_->setItem(index, 2,
+                                                 new QTableWidgetItem(addressText(row.value("to"))));
+                             }
+                             finishJob(job, true,
+                                       QStringLiteral("%1 incoming xrefs").arg(rows.size()));
+                         });
+    }
+
+    void loadFacts() {
+        const QString program = program_edit_->text();
+        int job = beginJob(QStringLiteral("symbols"));
+        bridge_->request(QJsonObject{{"method", "symbols"}, {"program", program}},
+                         [this, job](const QJsonObject &response) {
+                             QString error;
+                             if (!successful(response, &error)) {
+                                 finishJob(job, false, error);
+                                 return;
+                             }
+                             const QJsonArray rows = response.value("result").toArray();
+                             symbols_->setRowCount(0);
+                             for (const QJsonValue &value : rows) {
+                                 const QJsonObject row = value.toObject();
+                                 const int index = symbols_->rowCount();
+                                 symbols_->insertRow(index);
+                                 symbols_->setItem(index, 0,
+                                                   new QTableWidgetItem(addressText(row.value("address"))));
+                                 symbols_->setItem(index, 1,
+                                                   new QTableWidgetItem(row.value("name").toString()));
+                                 symbols_->setItem(index, 2,
+                                                   new QTableWidgetItem(row.value("source").toString()));
+                                 symbols_->setItem(index, 3,
+                                                   new QTableWidgetItem(
+                                                       row.value("external").toBool() ? "yes" : "no"));
+                             }
+                             finishJob(job, true, QStringLiteral("%1 symbols").arg(rows.size()));
+                         });
+
+        job = beginJob(QStringLiteral("strings"));
+        bridge_->request(QJsonObject{{"method", "strings"}, {"program", program}},
+                         [this, job](const QJsonObject &response) {
+                             QString error;
+                             if (!successful(response, &error)) {
+                                 finishJob(job, false, error);
+                                 return;
+                             }
+                             const QJsonArray rows = response.value("result").toArray();
+                             strings_->setRowCount(0);
+                             for (const QJsonValue &value : rows) {
+                                 const QJsonObject row = value.toObject();
+                                 const int index = strings_->rowCount();
+                                 strings_->insertRow(index);
+                                 strings_->setItem(index, 0,
+                                                   new QTableWidgetItem(addressText(row.value("address"))));
+                                 strings_->setItem(index, 1,
+                                                   new QTableWidgetItem(row.value("kind").toString()));
+                                 strings_->setItem(index, 2,
+                                                   new QTableWidgetItem(row.value("value").toString()));
+                             }
+                             finishJob(job, true, QStringLiteral("%1 strings").arg(rows.size()));
+                         });
+
+        job = beginJob(QStringLiteral("search"));
+        bridge_->request(QJsonObject{{"method", "search"},
+                                     {"program", program},
+                                     {"term", search_edit_->text()},
+                                     {"limit", 256}},
+                         [this, job](const QJsonObject &response) {
+                             QString error;
+                             if (!successful(response, &error)) {
+                                 finishJob(job, false, error);
+                                 return;
+                             }
+                             const QJsonArray rows = response.value("result").toArray();
+                             search_results_->setRowCount(0);
+                             for (const QJsonValue &value : rows) {
+                                 const QJsonObject row = value.toObject();
+                                 const int index = search_results_->rowCount();
+                                 search_results_->insertRow(index);
+                                 search_results_->setItem(index, 0,
+                                                   new QTableWidgetItem(addressText(row.value("address"))));
+                                 search_results_->setItem(index, 1,
+                                                   new QTableWidgetItem(row.value("kind").toString()));
+                                 search_results_->setItem(index, 2,
+                                                   new QTableWidgetItem(row.value("name").toString()));
+                                 search_results_->setItem(index, 3,
+                                                   new QTableWidgetItem(row.value("context").toString()));
+                             }
+                             finishJob(job, true,
+                                       QStringLiteral("%1 search hits").arg(rows.size()));
+                         });
+    }
+
+    void loadMemory() {
+        const int job = beginJob(QStringLiteral("memory map"));
+        bridge_->request(QJsonObject{{"method", "memory_regions"},
+                                     {"program", program_edit_->text()}},
+                         [this, job](const QJsonObject &response) {
+                             QString error;
+                             if (!successful(response, &error)) {
+                                 finishJob(job, false, error);
+                                 return;
+                             }
+                             const QJsonArray rows = response.value("result").toArray();
+                             memory_regions_->setRowCount(0);
+                             for (const QJsonValue &value : rows) {
+                                 const QJsonObject row = value.toObject();
+                                 const int index = memory_regions_->rowCount();
+                                 memory_regions_->insertRow(index);
+                                 memory_regions_->setItem(index, 0,
+                                                   new QTableWidgetItem(row.value("name").toString()));
+                                 memory_regions_->setItem(index, 1,
+                                                   new QTableWidgetItem(addressText(row.value("start"))));
+                                 memory_regions_->setItem(index, 2,
+                                                   new QTableWidgetItem(
+                                                       QStringLiteral("0x%1")
+                                                           .arg(row.value("size").toInteger(), 0, 16)));
+                                 memory_regions_->setItem(index, 3,
+                                                   new QTableWidgetItem(
+                                                       row.value("permissions").toString()));
+                                 memory_regions_->setItem(index, 4,
+                                                   new QTableWidgetItem(row.value("source").toString()));
+                             }
+                             finishJob(job, true,
+                                       QStringLiteral("%1 memory regions").arg(rows.size()));
+                             loadHex();
+                         });
+    }
+
+    void loadHex() {
+        const int job = beginJob(QStringLiteral("hex %1").arg(address_edit_->text()));
+        bridge_->request(QJsonObject{{"method", "memory"},
+                                     {"binary", binary_edit_->text()},
+                                     {"address", address_edit_->text()},
+                                     {"size", 128}},
+                         [this, job](const QJsonObject &response) {
+                             QString error;
+                             if (!successful(response, &error)) {
+                                 finishJob(job, false, error);
+                                 return;
+                             }
+                             const QJsonObject result = response.value("result").toObject();
+                             const QString bytes = result.value("bytes_hex").toString();
+                             QString output;
+                             for (int offset = 0; offset < bytes.size(); offset += 32) {
+                                 output += QStringLiteral("%1  %2\n")
+                                               .arg(address_edit_->text())
+                                               .arg(bytes.mid(offset, 32).toUpper());
+                             }
+                             hex_view_->setPlainText(output);
+                             finishJob(job, true,
+                                       QStringLiteral("%1 bytes").arg(bytes.size() / 2));
+                         });
+    }
+
+    void loadGraph() {
+        const int job = beginJob(QStringLiteral("function graph"));
+        bridge_->request(QJsonObject{{"method", "function_graph"},
+                                     {"program", program_edit_->text()}},
+                         [this, job](const QJsonObject &response) {
+                             QString error;
+                             if (!successful(response, &error)) {
+                                 finishJob(job, false, error);
+                                 return;
+                             }
+                             graph_canvas_->setGraph(response.value("result").toObject());
+                             finishJob(job, true, QStringLiteral("graph loaded"));
+                         });
+    }
+
+    void loadAnalystData() {
+        const int job = beginJob(QStringLiteral("bookmarks"));
+        bridge_->request(QJsonObject{{"method", "bookmarks"},
+                                     {"program", program_edit_->text()}},
+                         [this, job](const QJsonObject &response) {
+                             QString error;
+                             if (!successful(response, &error)) {
+                                 finishJob(job, false, error);
+                                 return;
+                             }
+                             const QJsonArray rows = response.value("result").toArray();
+                             bookmarks_->setRowCount(0);
+                             for (const QJsonValue &value : rows) {
+                                 const QJsonObject row = value.toObject();
+                                 const int index = bookmarks_->rowCount();
+                                 bookmarks_->insertRow(index);
+                                 bookmarks_->setItem(index, 0,
+                                                      new QTableWidgetItem(addressText(row.value("address"))));
+                                 bookmarks_->setItem(index, 1,
+                                                      new QTableWidgetItem(row.value("label").toString()));
+                                 bookmarks_->setItem(index, 2,
+                                                      new QTableWidgetItem(row.value("comment").toString()));
+                             }
+                             finishJob(job, true,
+                                       QStringLiteral("%1 bookmarks").arg(rows.size()));
+                         });
+        const int patch_job = beginJob(QStringLiteral("patches"));
+        bridge_->request(QJsonObject{{"method", "patches"},
+                                     {"program", program_edit_->text()}},
+                         [this, patch_job](const QJsonObject &response) {
+                             QString error;
+                             if (!successful(response, &error)) {
+                                 finishJob(patch_job, false, error);
+                                 return;
+                             }
+                             const QJsonArray rows = response.value("result").toArray();
+                             patches_->setRowCount(0);
+                             for (const QJsonValue &value : rows) {
+                                 const QJsonObject row = value.toObject();
+                                 const int index = patches_->rowCount();
+                                 patches_->insertRow(index);
+                                 patches_->setItem(index, 0,
+                                                   new QTableWidgetItem(addressText(row.value("address"))));
+                                 patches_->setItem(index, 1,
+                                                   new QTableWidgetItem(
+                                                       bytesText(row.value("original").toArray())));
+                                 patches_->setItem(index, 2,
+                                                   new QTableWidgetItem(
+                                                       bytesText(row.value("patched").toArray())));
+                                 patches_->setItem(index, 3,
+                                                   new QTableWidgetItem(
+                                                       row.value("enabled").toBool() ? "yes" : "no"));
+                             }
+                             finishJob(patch_job, true,
+                                       QStringLiteral("%1 patches").arg(rows.size()));
+                         });
+    }
+
+    void setBookmark() {
+        const int job = beginJob(QStringLiteral("set bookmark"));
+        bridge_->request(
+            QJsonObject{{"method", "set_bookmark"},
+                        {"program", program_edit_->text()},
+                        {"bookmark",
+                         QJsonObject{{"address", address_edit_->text()},
+                                     {"label", bookmark_edit_->text()},
+                                     {"comment", comment_edit_->text()}}}},
+            [this, job](const QJsonObject &response) {
+                QString error;
+                if (!successful(response, &error)) {
+                    finishJob(job, false, error);
+                    return;
+                }
+                loadAnalystData();
+                finishJob(job, true, QStringLiteral("bookmark committed"));
+            });
+    }
+
+    void setPatch() {
+        const int job = beginJob(QStringLiteral("set patch"));
+        bridge_->request(
+            QJsonObject{{"method", "set_patch"},
+                        {"program", program_edit_->text()},
+                        {"address", address_edit_->text()},
+                        {"original", bytesFromText(patch_original_edit_->text())},
+                        {"patched", bytesFromText(patch_new_edit_->text())},
+                        {"enabled", true}},
+            [this, job](const QJsonObject &response) {
+                QString error;
+                if (!successful(response, &error)) {
+                    finishJob(job, false, error);
+                    return;
+                }
+                loadAnalystData();
+                finishJob(job, true, QStringLiteral("patch committed"));
+            });
+    }
+
+    void loadTrace() {
+        const int job = beginJob(QStringLiteral("trace timeline"));
+        bridge_->request(QJsonObject{{"method", "trace_events"},
+                                     {"program", program_edit_->text()},
+                                     {"since", 0},
+                                     {"limit", 256}},
+                         [this, job](const QJsonObject &response) {
+                             QString error;
+                             if (!successful(response, &error)) {
+                                 finishJob(job, false, error);
+                                 return;
+                             }
+                             const QJsonArray rows = response.value("result").toArray();
+                             trace_events_->setRowCount(0);
+                             for (const QJsonValue &value : rows) {
+                                 const QJsonObject row = value.toObject();
+                                 const int index = trace_events_->rowCount();
+                                 trace_events_->insertRow(index);
+                                 trace_events_->setItem(
+                                     index, 0,
+                                     new QTableWidgetItem(
+                                         QString::number(row.value("sequence").toInteger())));
+                                 trace_events_->setItem(
+                                     index, 1,
+                                     new QTableWidgetItem(row.value("at").toString()));
+                                 trace_events_->setItem(
+                                     index, 2,
+                                     new QTableWidgetItem(row.value("thread").toString()));
+                                 trace_events_->setItem(
+                                     index, 3,
+                                     new QTableWidgetItem(addressText(row.value("address"))));
+                                 trace_events_->setItem(
+                                     index, 4,
+                                     new QTableWidgetItem(row.value("kind").toString()));
+                                 trace_events_->setItem(
+                                     index, 5,
+                                     new QTableWidgetItem(row.value("payload").toString()));
+                                 trace_events_->setItem(
+                                     index, 6,
+                                     new QTableWidgetItem(row.value("provenance").toString()));
+                             }
+                             finishJob(job, true,
+                                       QStringLiteral("%1 trace events").arg(rows.size()));
+                         });
+    }
+    void loadCollaboration() {
+        const int job = beginJob(QStringLiteral("collaboration"));
+        bridge_->request(QJsonObject{{"method", "collab_ops"},
+                                     {"program", program_edit_->text()}},
+                         [this, job](const QJsonObject &response) {
+                             QString error;
+                             if (!successful(response, &error)) {
+                                 finishJob(job, false, error);
+                                 return;
+                             }
+                             const QJsonArray rows = response.value("result").toArray();
+                             collab_ops_->setRowCount(0);
+                             for (const QJsonValue &value : rows) {
+                                 const QJsonObject row = value.toObject();
+                                 const int index = collab_ops_->rowCount();
+                                 collab_ops_->insertRow(index);
+                                 collab_ops_->setItem(
+                                     index, 0,
+                                     new QTableWidgetItem(row.value("op_id").toString()));
+                                 collab_ops_->setItem(
+                                     index, 1,
+                                     new QTableWidgetItem(row.value("actor").toString()));
+                                 collab_ops_->setItem(
+                                     index, 2,
+                                     new QTableWidgetItem(
+                                         QString::number(row.value("lamport").toInteger())));
+                                 collab_ops_->setItem(
+                                     index, 3,
+                                     new QTableWidgetItem(row.value("kind").toString()));
+                                 collab_ops_->setItem(
+                                     index, 4,
+                                     new QTableWidgetItem(row.value("payload").toString()));
+                                 collab_ops_->setItem(
+                                     index, 5,
+                                     new QTableWidgetItem(
+                                         row.value("applied").toBool() ? "yes" : "no"));
+                                 collab_ops_->setItem(
+                                     index, 6,
+                                     new QTableWidgetItem(row.value("provenance").toString()));
+                             }
+                             finishJob(job, true,
+                                       QStringLiteral("%1 collaboration operations")
+                                           .arg(rows.size()));
+                         });
+    }
+
+    void appendCollaboration() {
+        if (actor_edit_->text().trimmed().isEmpty() ||
+            op_id_edit_->text().trimmed().isEmpty() ||
+            collab_kind_edit_->text().trimmed().isEmpty()) {
+            setStatus(QStringLiteral("actor, operation id, and kind are required"), true);
+            return;
+        }
+        bool ok = false;
+        const qulonglong lamport = lamport_edit_->text().toULongLong(&ok, 0);
+        if (!ok) {
+            setStatus(QStringLiteral("lamport must be an unsigned integer"), true);
+            return;
+        }
+        const int job = beginJob(QStringLiteral("append collaboration operation"));
+        bridge_->request(
+            QJsonObject{
+                {"method", "append_collab_op"},
+                {"program", program_edit_->text()},
+                {"operation",
+                 QJsonObject{
+                     {"op_id", op_id_edit_->text()},
+                     {"actor", actor_edit_->text()},
+                     {"lamport", static_cast<qint64>(lamport)},
+                     {"kind", collab_kind_edit_->text()},
+                     {"payload", collab_payload_edit_->text()},
+                     {"applied", false},
+                     {"provenance", QStringLiteral("ui:%1").arg(actor_edit_->text())}}}},
+            [this, job](const QJsonObject &response) {
+                QString error;
+                if (!successful(response, &error)) {
+                    finishJob(job, false, error);
+                    return;
+                }
+                loadCollaboration();
+                finishJob(job, true, QStringLiteral("collaboration operation stored"));
+            });
+    }
+
+    void applyCollaboration() {
+        const QString op_id = op_id_edit_->text().trimmed();
+        if (op_id.isEmpty()) {
+            setStatus(QStringLiteral("select or enter an operation id"), true);
+            return;
+        }
+        const int job = beginJob(QStringLiteral("apply collaboration operation"));
+        bridge_->request(QJsonObject{{"method", "apply_collab_op"},
+                                     {"program", program_edit_->text()},
+                                     {"op_id", op_id}},
+                         [this, job](const QJsonObject &response) {
+                             QString error;
+                             if (!successful(response, &error)) {
+                                 finishJob(job, false, error);
+                                 return;
+                             }
+                             loadCollaboration();
+                             finishJob(job, true, QStringLiteral("collaboration operation applied"));
+                         });
+    }
+
+
+    void loadTypes() {
+        const QString program = program_edit_->text();
+        const int type_job = beginJob(QStringLiteral("types"));
+        bridge_->request(QJsonObject{{"method", "type_defs"}, {"program", program}},
+                         [this, type_job](const QJsonObject &response) {
+                             QString error;
+                             if (!successful(response, &error)) {
+                                 finishJob(type_job, false, error);
+                                 return;
+                             }
+                             const QJsonArray rows = response.value("result").toArray();
+                             types_->setRowCount(0);
+                             for (const QJsonValue &value : rows) {
+                                 const QJsonObject row = value.toObject();
+                                 const int index = types_->rowCount();
+                                 types_->insertRow(index);
+                                 types_->setItem(index, 0,
+                                                 new QTableWidgetItem(row.value("name").toString()));
+                                 types_->setItem(index, 1,
+                                                 new QTableWidgetItem(row.value("kind").toString()));
+                                 types_->setItem(
+                                     index, 2,
+                                     new QTableWidgetItem(row.value("definition").toString()));
+                                 types_->setItem(
+                                     index, 3,
+                                     new QTableWidgetItem(
+                                         row.value("size").isNull()
+                                             ? QString()
+                                             : QString::number(row.value("size").toInteger())));
+                                 types_->setItem(
+                                     index, 4,
+                                     new QTableWidgetItem(
+                                         row.value("alignment").isNull()
+                                             ? QString()
+                                             : QString::number(
+                                                   row.value("alignment").toInteger())));
+                                 types_->setItem(index, 5,
+                                                 new QTableWidgetItem(
+                                                     row.value("base_type").toString()));
+                                 types_->setItem(index, 6,
+                                                 new QTableWidgetItem(
+                                                     row.value("provenance").toString()));
+                             }
+                             finishJob(type_job, true,
+                                       QStringLiteral("%1 types").arg(rows.size()));
+                         });
+
+        const int field_job = beginJob(QStringLiteral("type fields"));
+        bridge_->request(QJsonObject{{"method", "type_fields"}, {"program", program}},
+                         [this, field_job](const QJsonObject &response) {
+                             QString error;
+                             if (!successful(response, &error)) {
+                                 finishJob(field_job, false, error);
+                                 return;
+                             }
+                             const QJsonArray rows = response.value("result").toArray();
+                             type_fields_->setRowCount(0);
+                             for (const QJsonValue &value : rows) {
+                                 const QJsonObject row = value.toObject();
+                                 const int index = type_fields_->rowCount();
+                                 type_fields_->insertRow(index);
+                                 type_fields_->setItem(
+                                     index, 0,
+                                     new QTableWidgetItem(row.value("type_name").toString()));
+                                 type_fields_->setItem(
+                                     index, 1,
+                                     new QTableWidgetItem(
+                                         QString::number(row.value("ordinal").toInteger())));
+                                 type_fields_->setItem(
+                                     index, 2,
+                                     new QTableWidgetItem(row.value("field_name").toString()));
+                                 type_fields_->setItem(
+                                     index, 3,
+                                     new QTableWidgetItem(
+                                         QString::number(row.value("offset").toInteger())));
+                                 type_fields_->setItem(
+                                     index, 4,
+                                     new QTableWidgetItem(
+                                         row.value("size").isNull()
+                                             ? QString()
+                                             : QString::number(row.value("size").toInteger())));
+                                 type_fields_->setItem(
+                                     index, 5,
+                                     new QTableWidgetItem(row.value("type_ref").toString()));
+                             }
+                             finishJob(field_job, true,
+                                       QStringLiteral("%1 fields").arg(rows.size()));
+                         });
+
+        const int prototype_job = beginJob(QStringLiteral("prototypes"));
+        bridge_->request(QJsonObject{{"method", "prototypes"}, {"program", program}},
+                         [this, prototype_job](const QJsonObject &response) {
+                             QString error;
+                             if (!successful(response, &error)) {
+                                 finishJob(prototype_job, false, error);
+                                 return;
+                             }
+                             const QJsonArray rows = response.value("result").toArray();
+                             prototypes_->setRowCount(0);
+                             for (const QJsonValue &value : rows) {
+                                 const QJsonObject row = value.toObject();
+                                 const int index = prototypes_->rowCount();
+                                 prototypes_->insertRow(index);
+                                 prototypes_->setItem(
+                                     index, 0,
+                                     new QTableWidgetItem(addressText(row.value("function"))));
+                                 prototypes_->setItem(
+                                     index, 1,
+                                     new QTableWidgetItem(row.value("signature").toString()));
+                                 prototypes_->setItem(
+                                     index, 2,
+                                     new QTableWidgetItem(
+                                         row.value("calling_convention").toString()));
+                                 prototypes_->setItem(
+                                     index, 3,
+                                     new QTableWidgetItem(row.value("return_type").toString()));
+                             }
+                             finishJob(prototype_job, true,
+                                       QStringLiteral("%1 prototypes").arg(rows.size()));
+                         });
+
+        const int stack_job = beginJob(QStringLiteral("stack variables"));
+        bridge_->request(QJsonObject{{"method", "stack_variables"}, {"program", program}},
+                         [this, stack_job](const QJsonObject &response) {
+                             QString error;
+                             if (!successful(response, &error)) {
+                                 finishJob(stack_job, false, error);
+                                 return;
+                             }
+                             const QJsonArray rows = response.value("result").toArray();
+                             stack_variables_->setRowCount(0);
+                             for (const QJsonValue &value : rows) {
+                                 const QJsonObject row = value.toObject();
+                                 const int index = stack_variables_->rowCount();
+                                 stack_variables_->insertRow(index);
+                                 stack_variables_->setItem(
+                                     index, 0,
+                                     new QTableWidgetItem(addressText(row.value("function"))));
+                                 stack_variables_->setItem(
+                                     index, 1,
+                                     new QTableWidgetItem(
+                                         QString::number(row.value("ordinal").toInteger())));
+                                 stack_variables_->setItem(
+                                     index, 2,
+                                     new QTableWidgetItem(row.value("name").toString()));
+                                 stack_variables_->setItem(
+                                     index, 3,
+                                     new QTableWidgetItem(row.value("storage").toString()));
+                                 stack_variables_->setItem(
+                                     index, 4,
+                                     new QTableWidgetItem(row.value("type_name").toString()));
+                                 stack_variables_->setItem(
+                                     index, 5,
+                                     new QTableWidgetItem(
+                                         row.value("offset").isNull()
+                                             ? QString()
+                                             : QString::number(row.value("offset").toInteger())));
+                                 stack_variables_->setItem(
+                                     index, 6,
+                                     new QTableWidgetItem(
+                                         row.value("size").isNull()
+                                             ? QString()
+                                             : QString::number(row.value("size").toInteger())));
+                             }
+                             finishJob(stack_job, true,
+                                       QStringLiteral("%1 stack variables").arg(rows.size()));
+                         });
+
+        const int graph_job = beginJob(QStringLiteral("type graph"));
+        bridge_->request(QJsonObject{{"method", "type_graph"}, {"program", program}},
+                         [this, graph_job](const QJsonObject &response) {
+                             QString error;
+                             if (!successful(response, &error)) {
+                                 finishJob(graph_job, false, error);
+                                 return;
+                             }
+                             const QJsonArray rows =
+                                 response.value("result").toObject().value("edges").toArray();
+                             type_links_->setRowCount(0);
+                             for (const QJsonValue &value : rows) {
+                                 const QJsonObject row = value.toObject();
+                                 const int index = type_links_->rowCount();
+                                 type_links_->insertRow(index);
+                                 type_links_->setItem(
+                                     index, 0,
+                                     new QTableWidgetItem(row.value("source").toString()));
+                                 type_links_->setItem(
+                                     index, 1,
+                                     new QTableWidgetItem(row.value("target").toString()));
+                                 type_links_->setItem(
+                                     index, 2,
+                                     new QTableWidgetItem(row.value("kind").toString()));
+                                 type_links_->setItem(
+                                     index, 3,
+                                     new QTableWidgetItem(row.value("provenance").toString()));
+                             }
+                             finishJob(graph_job, true,
+                                       QStringLiteral("%1 type links").arg(rows.size()));
+                         });
+    }
+
+    void saveTypeDefinition() {
+        if (type_name_edit_->text().trimmed().isEmpty()) {
+            setStatus(QStringLiteral("type name is required"), true);
+            return;
+        }
+        const int job = beginJob(QStringLiteral("save type"));
+        bridge_->request(
+            QJsonObject{
+                {"method", "set_type_def"},
+                {"program", program_edit_->text()},
+                {"row", QJsonObject{
+                            {"name", type_name_edit_->text()},
+                            {"kind", type_kind_edit_->text()},
+                            {"definition", type_definition_edit_->text()},
+                            {"size", optionalInteger(type_size_edit_->text())},
+                            {"alignment", optionalInteger(type_alignment_edit_->text())},
+                            {"base_type", type_base_edit_->text().isEmpty()
+                                              ? QJsonValue(QJsonValue::Null)
+                                              : QJsonValue(type_base_edit_->text())},
+                            {"provenance", "ui"}}}},
+            [this, job](const QJsonObject &response) {
+                QString error;
+                if (!successful(response, &error)) {
+                    finishJob(job, false, error);
+                    return;
+                }
+                loadTypes();
+                finishJob(job, true, QStringLiteral("type saved"));
+            });
+    }
+
+    void saveTypeField() {
+        if (type_name_edit_->text().trimmed().isEmpty() ||
+            field_name_edit_->text().trimmed().isEmpty()) {
+            setStatus(QStringLiteral("type and field names are required"), true);
+            return;
+        }
+        const int job = beginJob(QStringLiteral("save type field"));
+        bridge_->request(
+            QJsonObject{
+                {"method", "set_type_field"},
+                {"program", program_edit_->text()},
+                {"row", QJsonObject{
+                            {"type_name", type_name_edit_->text()},
+                            {"ordinal", optionalInteger(field_ordinal_edit_->text())},
+                            {"field_name", field_name_edit_->text()},
+                            {"offset", optionalInteger(field_offset_edit_->text())},
+                            {"size", optionalInteger(field_size_edit_->text())},
+                            {"type_ref", field_type_edit_->text().isEmpty()
+                                             ? QJsonValue(QJsonValue::Null)
+                                             : QJsonValue(field_type_edit_->text())}}}},
+            [this, job](const QJsonObject &response) {
+                QString error;
+                if (!successful(response, &error)) {
+                    finishJob(job, false, error);
+                    return;
+                }
+                loadTypes();
+                finishJob(job, true, QStringLiteral("type field saved"));
+            });
+    }
+
+    void savePrototype() {
+        const int job = beginJob(QStringLiteral("save prototype"));
+        bridge_->request(
+            QJsonObject{{"method", "set_prototype"},
+                        {"program", program_edit_->text()},
+                        {"row", QJsonObject{
+                                    {"function", address_edit_->text()},
+                                    {"signature", prototype_signature_edit_->text()},
+                                    {"calling_convention", calling_convention_edit_->text()
+                                                               .isEmpty()
+                                                           ? QJsonValue(QJsonValue::Null)
+                                                           : QJsonValue(
+                                                                 calling_convention_edit_->text())},
+                                    {"return_type", QJsonValue(QJsonValue::Null)}}}},
+            [this, job](const QJsonObject &response) {
+                QString error;
+                if (!successful(response, &error)) {
+                    finishJob(job, false, error);
+                    return;
+                }
+                loadTypes();
+                finishJob(job, true, QStringLiteral("prototype saved"));
+            });
+    }
+
+    void saveStackVariable() {
+        const int job = beginJob(QStringLiteral("save stack variable"));
+        bridge_->request(
+            QJsonObject{
+                {"method", "set_stack_variable"},
+                {"program", program_edit_->text()},
+                {"row", QJsonObject{
+                            {"function", address_edit_->text()},
+                            {"ordinal", optionalInteger(field_ordinal_edit_->text())},
+                            {"name", stack_name_edit_->text()},
+                            {"storage", stack_storage_edit_->text()},
+                            {"type_name", stack_type_edit_->text().isEmpty()
+                                              ? QJsonValue(QJsonValue::Null)
+                                              : QJsonValue(stack_type_edit_->text())},
+                            {"offset", optionalInteger(stack_offset_edit_->text())},
+                            {"size", optionalInteger(stack_size_edit_->text())}}}},
+            [this, job](const QJsonObject &response) {
+                QString error;
+                if (!successful(response, &error)) {
+                    finishJob(job, false, error);
+                    return;
+                }
+                loadTypes();
+                finishJob(job, true, QStringLiteral("stack variable saved"));
+            });
+    }
+
+    void propagateTypes() {
+        const int job = beginJob(QStringLiteral("propagate types"));
+        bridge_->request(QJsonObject{{"method", "propagate_type_links"},
+                                     {"program", program_edit_->text()}},
+                         [this, job](const QJsonObject &response) {
+                             QString error;
+                             if (!successful(response, &error)) {
+                                 finishJob(job, false, error);
+                                 return;
+                             }
+                             loadTypes();
+                             finishJob(job, true,
+                                       QStringLiteral("%1 type links")
+                                           .arg(response.value("result").toArray().size()));
+                         });
+    }
+
+    void renameFunction() {
+        const int job = beginJob(QStringLiteral("rename %1").arg(address_edit_->text()));
+        bridge_->request(QJsonObject{{"method", "rename"},
+                                     {"program", program_edit_->text()},
+                                     {"address", address_edit_->text()},
+                                     {"name", name_edit_->text()}},
+                         [this, job](const QJsonObject &response) {
+                             QString error;
+                             if (!successful(response, &error)) {
+                                 finishJob(job, false, error);
+                                 return;
+                             }
+                             function_model_->refresh();
+                             finishJob(job, true, QStringLiteral("rename committed"));
+                         });
+    }
+
+    void applyComment() {
+        const int job = beginJob(QStringLiteral("comment %1").arg(address_edit_->text()));
+        bridge_->request(QJsonObject{{"method", "comment"},
+                                     {"program", program_edit_->text()},
+                                     {"address", address_edit_->text()},
+                                     {"kind", comment_kind_edit_->text()},
+                                     {"text", comment_edit_->text()}},
+                         [this, job](const QJsonObject &response) {
+                             QString error;
+                             if (!successful(response, &error)) {
+                                 finishJob(job, false, error);
+                                 return;
+                             }
+                             finishJob(job, true, QStringLiteral("comment committed"));
+                         });
+    }
+
+    void undoCommand() {
+        const int job = beginJob(QStringLiteral("undo"));
+        bridge_->request(QJsonObject{{"method", "undo"},
+                                     {"program", program_edit_->text()}},
+                         [this, job](const QJsonObject &response) {
+                             QString error;
+                             if (!successful(response, &error)) {
+                                 finishJob(job, false, error);
+                                 return;
+                             }
+                             function_model_->refresh();
+                             finishJob(job, true,
+                                       response.value("result").toObject().value("message").toString());
+                         });
+    }
+
+    void goBack() {
+        if (history_index_ <= 0) {
+            return;
+        }
+        --history_index_;
+        navigate(history_.at(history_index_), false);
+    }
+
+    void goForward() {
+        if (history_index_ + 1 >= history_.size()) {
+            return;
+        }
+        ++history_index_;
+        navigate(history_.at(history_index_), false);
+    }
+
+private:
+    void navigate(const QString &address, bool record) {
+        if (address.isEmpty()) {
+            return;
+        }
+        if (record) {
+            while (history_.size() > history_index_ + 1) {
+                history_.removeLast();
+            }
+            if (history_.isEmpty() || history_.last() != address) {
+                history_.append(address);
+            }
+            history_index_ = history_.size() - 1;
+        }
+        address_edit_->setText(address);
+        decompile();
+        loadListing();
+        loadXrefs();
+    }
+
+    int beginJob(const QString &label) {
+        jobs_->addItem(label + QStringLiteral(" — running"));
+        jobs_->scrollToBottom();
+        return jobs_->count() - 1;
+    }
+
+    void finishJob(int index, bool ok, const QString &detail) {
+        if (auto *item = jobs_->item(index)) {
+            item->setText((ok ? QStringLiteral("PASS ") : QStringLiteral("FAIL ")) + detail);
+        }
+        setStatus(detail, !ok);
+    }
+
+    void setStatus(const QString &message, bool error = false) {
+        status_->setText(message);
+        status_->setStyleSheet(error ? QStringLiteral("color:#e06c75")
+                                     : QStringLiteral("color:#98c379"));
+    }
+
+    void restoreWorkspace() {
+        QSettings settings(QStringLiteral("Ventris"), QStringLiteral("Ventris"));
+        const QByteArray geometry = settings.value(QStringLiteral("geometry")).toByteArray();
+        const QByteArray state = settings.value(QStringLiteral("state")).toByteArray();
+        if (!geometry.isEmpty()) {
+            restoreGeometry(geometry);
+        }
+        if (!state.isEmpty()) {
+            restoreState(state);
+        }
+    }
+
+    void saveWorkspace() {
+        QSettings settings(QStringLiteral("Ventris"), QStringLiteral("Ventris"));
+        settings.setValue(QStringLiteral("geometry"), saveGeometry());
+        settings.setValue(QStringLiteral("state"), saveState());
+    }
+
+    CoreBridge *bridge_;
+    QString program_;
+    QString binary_;
+    QString address_;
+    QStringList history_;
+    int history_index_ = -1;
+    QLineEdit *project_edit_ = nullptr;
+    QLineEdit *program_edit_ = nullptr;
+    QLineEdit *binary_edit_ = nullptr;
+    QLineEdit *address_edit_ = nullptr;
+    QLineEdit *name_edit_ = nullptr;
+    QLineEdit *comment_edit_ = nullptr;
+    QLineEdit *comment_kind_edit_ = nullptr;
+    QLineEdit *search_edit_ = nullptr;
+    QLineEdit *bookmark_edit_ = nullptr;
+    QLineEdit *patch_original_edit_ = nullptr;
+    QLineEdit *patch_new_edit_ = nullptr;
+    QLineEdit *actor_edit_ = nullptr;
+    QLineEdit *op_id_edit_ = nullptr;
+    QLineEdit *lamport_edit_ = nullptr;
+    QLineEdit *collab_kind_edit_ = nullptr;
+    QLineEdit *collab_payload_edit_ = nullptr;
+    QTableView *functions_ = nullptr;
+    FunctionTableModel *function_model_ = nullptr;
+    QTableWidget *xrefs_ = nullptr;
+    QTableWidget *symbols_ = nullptr;
+    QTableWidget *strings_ = nullptr;
+    QTableWidget *search_results_ = nullptr;
+    QTableWidget *memory_regions_ = nullptr;
+    QTableWidget *bookmarks_ = nullptr;
+    QTableWidget *patches_ = nullptr;
+    QTableWidget *trace_events_ = nullptr;
+    QTableWidget *collab_ops_ = nullptr;
+    QListWidget *jobs_ = nullptr;
+    ListingCanvas *listing_canvas_ = nullptr;
+    GraphCanvas *graph_canvas_ = nullptr;
+    QPlainTextEdit *decompiler_ = nullptr;
+    QLabel *status_ = nullptr;
+    QPlainTextEdit *hex_view_ = nullptr;
+    QLineEdit *type_name_edit_ = nullptr;
+    QLineEdit *type_kind_edit_ = nullptr;
+    QLineEdit *type_size_edit_ = nullptr;
+    QLineEdit *type_alignment_edit_ = nullptr;
+    QLineEdit *type_definition_edit_ = nullptr;
+    QLineEdit *field_ordinal_edit_ = nullptr;
+    QLineEdit *type_base_edit_ = nullptr;
+    QLineEdit *field_name_edit_ = nullptr;
+    QLineEdit *field_offset_edit_ = nullptr;
+    QLineEdit *field_size_edit_ = nullptr;
+    QLineEdit *field_type_edit_ = nullptr;
+    QLineEdit *prototype_signature_edit_ = nullptr;
+    QLineEdit *calling_convention_edit_ = nullptr;
+    QLineEdit *stack_name_edit_ = nullptr;
+    QLineEdit *stack_storage_edit_ = nullptr;
+    QLineEdit *stack_type_edit_ = nullptr;
+    QLineEdit *stack_offset_edit_ = nullptr;
+    QLineEdit *stack_size_edit_ = nullptr;
+    QTableWidget *types_ = nullptr;
+    QTableWidget *type_fields_ = nullptr;
+    QTableWidget *prototypes_ = nullptr;
+    QTableWidget *stack_variables_ = nullptr;
+    QTableWidget *type_links_ = nullptr;
+};
+}
+
+
+#include "main.moc"
+
+int main(int argc, char **argv) {
+    QApplication application(argc, argv);
+    QCoreApplication::setOrganizationName(QStringLiteral("Ventris"));
+    QCoreApplication::setApplicationName(QStringLiteral("Ventris"));
+
+    QCommandLineParser parser;
+    parser.setApplicationDescription(QStringLiteral("Native Ventris reverse-engineering UI"));
+    parser.addHelpOption();
+    QCommandLineOption project_option(QStringList() << "p" << "project", "SQLite project", "dir",
+                                      QStringLiteral(".lre"));
+    QCommandLineOption program_option(QStringList() << "n" << "name", "Program name", "name");
+    QCommandLineOption binary_option(QStringList() << "b" << "binary", "Binary path", "path");
+    QCommandLineOption address_option(QStringList() << "a" << "address", "RAM address", "hex",
+                                      QStringLiteral("00400466"));
+    parser.addOption(project_option);
+    parser.addOption(program_option);
+    parser.addOption(binary_option);
+    parser.addOption(address_option);
+    parser.process(application);
+
+    const QString program = parser.value(program_option);
+    MainWindow window(parser.value(project_option), program, parser.value(binary_option),
+                      parser.value(address_option));
+    window.show();
+    return application.exec();
+}

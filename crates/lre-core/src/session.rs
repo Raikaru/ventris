@@ -27,7 +27,11 @@ pub struct RuntimeConfig {
     pub spec_root: PathBuf,
     /// SLEIGH console binary (disasm-native / console discovery), if built.
     pub console_path: Option<PathBuf>,
-    /// Compiled x86-64 .sla used by the raw-SLEIGH worker hook.
+    /// Selected Ghidra language id (defaults to x86-64).
+    pub language_id: String,
+    /// Installed processor directory used by the SLEIGH console.
+    pub language_dir: PathBuf,
+    /// Compiled .sla used by the raw-SLEIGH worker hook.
     pub sla_path: Option<PathBuf>,
     /// Ghidra 12.1.3 install root (console language lookup).
     pub ghidra_install: PathBuf,
@@ -53,6 +57,17 @@ impl RuntimeConfig {
                     std::env::var("HOME").unwrap_or_default()
                 ))
             });
+        let language_id = std::env::var("VENTRIS_LANGUAGE")
+            .unwrap_or_else(|_| "x86:LE:64:default".into());
+        let language_dir = std::env::var("VENTRIS_LANGUAGE_DIR")
+            .map(PathBuf::from)
+            .ok()
+            .or_else(|| {
+                crate::architecture::directory_for_id(&install, &language_id)
+                    .ok()
+                    .flatten()
+            })
+            .unwrap_or_else(|| install.join("Ghidra/Processors/x86/data/languages"));
         let worker_path = std::env::var("VENTRIS_WORKER")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("target/debug/lre-worker"));
@@ -84,6 +99,8 @@ impl RuntimeConfig {
             worker_path,
             decompiler_path,
             spec_root,
+            language_id,
+            language_dir,
             console_path,
             sla_path,
             ghidra_install: install,
@@ -222,7 +239,7 @@ pub struct ProgramSession {
 
 #[derive(Debug, Clone)]
 pub struct SessionMetadata {
-    /// `x86:LE:64:default`
+    /// Ghidra-compatible language id selected by the importer.
     pub language: String,
     /// `ELF` / `PE`
     pub format: String,
@@ -241,7 +258,7 @@ impl SessionMetadata {
             .unwrap_or(0)
             & !0xfff;
         Self {
-            language: "x86:LE:64:default".into(),
+            language: imp.language.clone(),
             format: imp.format.clone(),
             image_base,
         }

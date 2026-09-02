@@ -4,15 +4,22 @@
 //! import fills, with provenance `native-import`.
 //!
 //! Design notes:
-//! - x86-64 only (the pinned SLEIGH language); multi-arch is a later stage.
-//! - Function discovery: symbol-table function symbols + the loaded entry
-//!   point, closed over direct `call rel32` targets found while sweeping the
-//!   code sections (linear sweep). This matches Ghidra's analyzer output for
-//!   small, unreoptimized fixtures (the differential test pins function-set
-//!   equality for the not-stripped ELF fixture; PE uses the entry walk).
+//! - ELF64 import selects a Ghidra language from `e_machine` for the
+//!   architectures currently represented in the catalog; PE remains x86-64.
+//! - Structural ELF facts (mappings, symbols, entry point) are architecture
+//!   independent. The fallback flow walker is x86-64 only; other languages
+//!   retain those facts for the selected SLEIGH consumer.
+//! - Function discovery for x86-64: symbol-table function symbols + the loaded
+//!   entry point, closed over direct `call rel32` targets found while sweeping
+//!   the code sections (linear sweep). This matches Ghidra's analyzer output
+//!   for small, unreoptimized fixtures (the differential test pins
+//!   function-set equality for the not-stripped ELF fixture; PE uses the
+//!   entry walk).
 
 use lre_db::ProjectDb;
-use lre_model::{FunctionRow, Provenance, ProgramSummary, XrefRow};
+use lre_model::{
+    FunctionRow, MemoryRegion, Provenance, ProgramSummary, StringRow, XrefRow,
+};
 use std::path::Path;
 
 /// Errors from a native import.
@@ -72,8 +79,9 @@ pub struct NativeImport {
     pub xrefs: Vec<NativeXref>,
     pub externals: Vec<(u64, String)>,
     pub format: String,
+    /// Ghidra-compatible language id selected from the file machine.
+    pub language: String,
 }
-
 fn err<T>(msg: impl Into<String>) -> Result<T> {
     Err(ImportError::Bad(msg.into()))
 }
@@ -150,6 +158,19 @@ fn parse_elf_sections(data: &[u8]) -> Result<(Vec<ElfSection>, Vec<u8>)> {
     Ok((sections, shstr))
 }
 
+fn elf_language(machine: u16) -> Result<String> {
+    match machine {
+        0x03e => Ok("x86:LE:64:default".into()),
+        0x0b7 => Ok("AARCH64:LE:64:v8A".into()),
+        0x028 => Ok("ARM:LE:32:v7".into()),
+        0x008 => Ok("MIPS:LE:32:default".into()),
+        0x0f3 => Ok("RISCV:LE:64:default".into()),
+        0x014 => Ok("PowerPC:LE:32:default".into()),
+        0x015 => Ok("PowerPC:LE:64:default".into()),
+        other => err(format!("unsupported ELF machine {other:#x}")),
+    }
+}
+
 /// ELF64 parse. Returns (mappings, functions from symtab + entry, externals).
 pub fn import_elf(data: &[u8]) -> Result<NativeImport> {
     if data.get(0..4) != Some(b"\x7fELF") {
@@ -162,6 +183,7 @@ pub fn import_elf(data: &[u8]) -> Result<NativeImport> {
     if data[4] != 2 || data[5] != 1 {
         return err("ELF64 little-endian expected");
     }
+    let language = elf_language(u16_at(data, 18)?)?;
     let entry = u64_at(data, 24)?;
     let (sections, _shstr) = parse_elf_sections(data)?;
 
@@ -346,6 +368,7 @@ pub fn import_elf(data: &[u8]) -> Result<NativeImport> {
         xrefs: Vec::new(),
         externals,
         format: "ELF".into(),
+        language,
     })
 }
 
@@ -409,6 +432,7 @@ pub fn import_pe(data: &[u8]) -> Result<NativeImport> {
         xrefs: Vec::new(),
         externals: Vec::new(),
         format: "PE".into(),
+        language: "x86:LE:64:default".into(),
     })
 }
 
@@ -508,6 +532,11 @@ pub fn load_native(binary: &Path) -> Result<NativeImport> {
 /// the mapping, records calls as xrefs, and closes the function set).
 pub fn flow_discover(imp: &mut NativeImport) {
     if imp.mappings.is_empty() {
+        return;
+    }
+    if !imp.language.is_empty() && !imp.language.starts_with("x86:") {
+        // The byte walker is x86-specific; non-x86 imports retain symbols
+        // and the entry point until their selected SLEIGH consumer runs.
         return;
     }
     let code = code_ranges(imp);
@@ -610,7 +639,21 @@ pub fn store_import(
             functions[i].size = end.saturating_sub(functions[i].entry).max(1);
         }
     }
-    let pid = db.upsert_program(program, "x86:LE:64:default", &native_provenance())?;
+    let pid = db.upsert_program(program, &imp.language, &native_provenance())?;
+    let regions = imp
+        .mappings
+        .iter()
+        .enumerate()
+        .map(|(index, mapping)| MemoryRegion {
+            name: format!("{}:{index}", imp.format.to_ascii_lowercase()),
+            start: lre_model::Address::ram(mapping.vaddr),
+            size: mapping.size,
+            permissions: mapping_permissions(mapping.flags, &imp.format),
+            source: "native-import".into(),
+        })
+        .collect::<Vec<_>>();
+    db.replace_memory_regions(pid, &regions)?;
+    db.replace_strings(pid, &discover_strings(imp))?;
     let rows: Vec<FunctionRow> = functions
         .iter()
         .map(|f| FunctionRow {
@@ -635,8 +678,54 @@ pub fn store_import(
     Ok(ProgramSummary {
         program: program.to_string(),
         functions: functions.len() as u64,
-        language: "x86:LE:64:default".into(),
+        language: imp.language.clone(),
     })
+}
+
+fn mapping_permissions(flags: u64, format: &str) -> String {
+    let (read, write, execute) = if format.eq_ignore_ascii_case("ELF") {
+        (flags & 0x2 != 0, flags & 0x1 != 0, flags & 0x4 != 0)
+    } else {
+        (
+            flags & 0x40000000 != 0,
+            flags & 0x80000000 != 0,
+            flags & 0x20000000 != 0,
+        )
+    };
+    format!(
+        "{}{}{}",
+        if read { "r" } else { "-" },
+        if write { "w" } else { "-" },
+        if execute { "x" } else { "-" }
+    )
+}
+
+fn discover_strings(imp: &NativeImport) -> Vec<StringRow> {
+    let mut rows = Vec::new();
+    for mapping in &imp.mappings {
+        let mut start = None;
+        for index in 0..=mapping.bytes.len() {
+            let printable = mapping
+                .bytes
+                .get(index)
+                .is_some_and(|byte| (0x20..=0x7e).contains(byte));
+            if printable && start.is_none() {
+                start = Some(index);
+            }
+            if (!printable || index == mapping.bytes.len()) && start.is_some() {
+                let begin = start.take().unwrap_or(index);
+                if index.saturating_sub(begin) >= 4 {
+                    let value = String::from_utf8_lossy(&mapping.bytes[begin..index]).into_owned();
+                    rows.push(StringRow {
+                        address: lre_model::Address::ram(mapping.vaddr + begin as u64),
+                        value,
+                        kind: "ASCII".into(),
+                    });
+                }
+            }
+        }
+    }
+    rows
 }
 
 #[cfg(test)]
@@ -668,12 +757,40 @@ mod tests {
     }
 
     #[test]
+    fn architecture_selection_and_flow_guard_are_explicit() {
+        assert_eq!(elf_language(0x0b7).unwrap(), "AARCH64:LE:64:v8A");
+        assert_eq!(elf_language(0x0f3).unwrap(), "RISCV:LE:64:default");
+        assert!(elf_language(0xffff).is_err());
+
+        let mut arm = NativeImport {
+            language: "AARCH64:LE:64:v8A".into(),
+            mappings: vec![Mapping {
+                vaddr: 0x1000,
+                size: 5,
+                file_off: 0,
+                flags: 0x4,
+                bytes: vec![0xe8, 0, 0, 0, 0],
+            }],
+            functions: vec![NativeFunction {
+                entry: 0x1000,
+                name: "entry".into(),
+                size: 0,
+            }],
+            ..Default::default()
+        };
+        flow_discover(&mut arm);
+        assert!(arm.xrefs.is_empty());
+        assert_eq!(arm.functions.len(), 1);
+    }
+
+    #[test]
     fn elf_load_populates_functions() {
         // Build a tiny synthetic ELF64 with one symtab entry.
         let mut b = vec![0u8; 0x1000];
         b[0..4].copy_from_slice(b"\x7fELF");
         b[4] = 2;
         b[5] = 1;
+        b[18..20].copy_from_slice(&0x3eu16.to_le_bytes());
         // e_entry
         b[24..32].copy_from_slice(&0x401000u64.to_le_bytes());
         // ehdr: e_shoff (0x200), e_shentsize (64), e_shnum (4),
@@ -719,6 +836,7 @@ mod tests {
         assert_eq!(f.entry, 0x401000);
         assert_eq!(f.size, 4);
         assert_eq!(imp.mappings[0].vaddr, 0x401000);
+        assert_eq!(imp.language, "x86:LE:64:default");
     }
 
     #[test]

@@ -33,6 +33,7 @@ third_party/ghidra/decompiler/com_opt/
 third_party/ghidra/decompiler/ghi_opt/
 third_party/ghidra/decompiler/sla_opt/
 third_party/ghidra/decompiler/ghidra_opt
+/desktop/ventris-qt/generated/
 third_party/ghidra/decompiler/sleigh_opt
 
 # Local analysis caches

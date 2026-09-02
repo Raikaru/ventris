@@ -175,6 +175,71 @@ pub struct DisasmRow {
     pub text: String,
 }
 
+/// Decompiler token kinds (from the packed document's element ids — pinned
+/// from ElementId.java; WORKER-004).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TokenKind {
+    Value,
+    Variable,
+    Op,
+    Syntax,
+    FuncName,
+    Type,
+    Comment,
+    Label,
+    Field,
+    Bitfield,
+    Break,
+    Other,
+}
+
+/// The p-code object reference carried by a specialized Clang token.
+///
+/// `id` is the decompiler's per-response PcodeFactory index. It is not a
+/// durable database id or an address; consumers must treat it as scoped to
+/// this decompiler document.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DecompReference {
+    pub kind: DecompReferenceKind,
+    pub id: u64,
+}
+
+/// Which p-code object a decompiler token references.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum DecompReferenceKind {
+    Varnode,
+    Operation,
+}
+
+/// One structured decompiler token: text + kind + any entity mapping the
+/// packed document carried (WORKER-004).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct DecompToken {
+    pub text: String,
+    pub kind: TokenKind,
+    /// Ghidra syntax color class (0..7; ATTRIB_COLOR).
+    pub color: u8,
+    /// Entity name when the token carried ATTRIB_NAME.
+    pub symbol: Option<String>,
+    /// Entity address when the token carried space+off attributes.
+    pub address: Option<Address>,
+    /// Per-response p-code reference from ATTRIB_VARREF/ATTRIB_OPREF.
+    pub reference: Option<DecompReference>,
+    /// Data-type id carried by ClangTypeToken/ClangFieldToken.
+    pub datatype_id: Option<u64>,
+    /// Number of characters of indentation carried by ClangBreak.
+    pub indent: Option<i64>,
+}
+
+/// The structured decompiler document for one function (WORKER-004): a
+/// token stream the UI renders without re-parsing C text.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct DecompDoc {
+    pub tokens: Vec<DecompToken>,
+    pub address: Address,
+    pub revision: u64,
+}
+
 /// One listing row (CORE-007): stable id (= instruction address),
 /// typed address, and the rendered text a virtualized view shows.
 #[derive(Clone, Debug, serde::Serialize)]
@@ -278,7 +343,176 @@ pub struct DataTypeRow {
     pub definition: String,
 }
 
+/// A string discovered in loaded memory or a string table.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct StringRow {
+    pub address: Address,
+    pub value: String,
+    pub kind: String,
+}
 
+/// One mapped binary region used by the memory map and hex view.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct MemoryRegion {
+    pub name: String,
+    pub start: Address,
+    pub size: u64,
+    pub permissions: String,
+    pub source: String,
+}
+
+/// A full-text search result across durable analysis facts.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct SearchHit {
+    pub address: Option<Address>,
+    pub kind: String,
+    pub name: String,
+    pub context: String,
+}
+
+/// A function graph vertex.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct GraphNode {
+    pub address: Address,
+    pub name: String,
+}
+
+/// A function graph edge.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct GraphEdge {
+    pub from: Address,
+    pub to: Address,
+    pub kind: String,
+}
+
+/// User bookmark attached to an address.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct BookmarkRow {
+    pub address: Address,
+    pub label: String,
+    pub comment: String,
+}
+
+/// One byte patch with both source and active values retained.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct PatchRow {
+    pub address: Address,
+    pub original: Vec<u8>,
+    pub patched: Vec<u8>,
+    pub enabled: bool,
+}
+
+
+
+/// A named data type with its composite metadata.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct TypeDefRow {
+    pub name: String,
+    pub kind: String,
+    pub definition: String,
+    pub size: Option<u64>,
+    pub alignment: Option<u64>,
+    pub base_type: Option<String>,
+    pub provenance: String,
+}
+
+/// One field in a composite type.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct TypeFieldRow {
+    pub type_name: String,
+    pub ordinal: u32,
+    pub field_name: String,
+    pub offset: u64,
+    pub size: Option<u64>,
+    pub type_ref: Option<String>,
+}
+
+/// Function prototype and calling convention.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct PrototypeRow {
+    pub function: Address,
+    pub signature: String,
+    pub calling_convention: Option<String>,
+    pub return_type: Option<String>,
+}
+
+/// One recovered stack variable.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct StackVariableRow {
+    pub function: Address,
+    pub ordinal: u32,
+    pub name: String,
+    pub storage: String,
+    pub type_name: Option<String>,
+    pub offset: Option<i64>,
+    pub size: Option<u64>,
+}
+
+/// A typed dependency edge retained with provenance.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct TypeLinkRow {
+    pub source: String,
+    pub target: String,
+    pub kind: String,
+    pub provenance: String,
+}
+
+/// Type graph node used by the type manager.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct TypeGraphNode {
+    pub name: String,
+    pub kind: String,
+    pub size: Option<u64>,
+}
+
+/// One installed SLEIGH processor/language variant.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ArchitectureSpec {
+    pub id: String,
+    pub processor: String,
+    pub endian: String,
+    pub bits: Option<u32>,
+    pub language_dir: String,
+    pub sla_count: u32,
+}
+
+/// One execution/analysis event in a durable timeline.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct TraceEvent {
+    /// Monotonic sequence within a program.
+    pub sequence: u64,
+    /// Source timestamp supplied by the recorder.
+    pub at: String,
+    /// Thread or execution context label.
+    pub thread: String,
+    /// Optional RAM address associated with the event.
+    pub address: Option<Address>,
+    /// Event kind, for example `breakpoint` or `instruction`.
+    pub kind: String,
+    /// Structured payload retained at the serialization edge.
+    pub payload: String,
+    /// Producer/provenance label.
+    pub provenance: String,
+}
+
+/// One deterministic, idempotent collaboration operation.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct CollaborationOp {
+    /// Client-generated idempotency key.
+    pub op_id: String,
+    /// Stable actor identity used for deterministic ordering.
+    pub actor: String,
+    /// Lamport clock supplied by the actor.
+    pub lamport: u64,
+    /// Operation kind, interpreted by the collaboration client.
+    pub kind: String,
+    /// Operation payload.
+    pub payload: String,
+    /// Whether this operation has been applied locally.
+    pub applied: bool,
+    /// Producer/provenance label.
+    pub provenance: String,
+}
 
 #[cfg(test)]
 mod tests {

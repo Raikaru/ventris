@@ -1,8 +1,32 @@
 # STATUS
 
 ## Current phase/generation
-Stage 4: JVM-free supported workflow closed and gated (39.6 MB peak vs 375 MiB stock;
-see gate numbers below and benchmarks/reports/stage4-gate.json).
+Stage 9 optional surfaces are implemented. Stage 4 remains the gated native
+workflow baseline (39.6 MB peak vs 375 MiB stock; see gate numbers below and
+`benchmarks/reports/stage4-gate.json`).
+
+## Current implementation surface
+
+- Phases 5–7 are implemented in `lre-core`, `lre-api`, the Qt workstation
+  source, and `python/`: symbols/strings/search, memory and graph views,
+  bookmarks/patches, typed data manager and propagation, a versioned
+  stdio/HTTP API, a dependency-free SDK and console, an isolated
+  permissioned plugin host, and an AI tool adapter.
+- Phase 9 surfaces now include isolated GDB/LLDB read backends, durable trace
+  timeline events, and a deterministic, idempotent collaboration operation
+  log exposed by Core/API/Qt/SDK.
+- Native ELF64 structural import selects Ghidra language ids for x86-64,
+  AARCH64, ARM, MIPS, RISC-V, and PowerPC. The fallback flow walker and
+  currently gated worker workflow remain x86-64-specific.
+- `lre-cli architectures --project DIR` scans the installed `.ldefs` catalog.
+  Non-x86 native decompile parity is not claimed without a matching compiled
+  SLEIGH language and normalized specification bundle.
+- `desktop/ventris-qt` has CPack TGZ packaging. `packaging/sbom.py` emits an
+  SPDX 2.3 SBOM; `update_manifest.py` and `verify_update.py` produce and
+  validate release artifact metadata.
+- `.github/workflows/ci.yml` is the cross-platform build/test definition.
+  The current workstation lacks Qt 6 development files, so the Qt configure
+  and visual smoke path is CI-only here.
 
 ## Completed and verified
 - Scrap of the old partial-decompiler-port architecture; pinned Ghidra

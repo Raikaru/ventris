@@ -65,6 +65,16 @@ pub struct ProgramProvider {
     pub function_names: HashMap<u64, String>,
     /// Entry address -> byte size (from the store).
     pub function_sizes: HashMap<u64, u64>,
+    /// Symbol names at arbitrary addresses, including imported labels.
+    pub symbol_names: HashMap<u64, String>,
+    /// Function-address to comments exported from the durable store.
+    pub comments: HashMap<u64, Vec<(u64, String, String)>>,
+    /// Data-type name to a human-readable definition.
+    pub datatypes: HashMap<String, String>,
+    /// External address/name pairs used by getExternalRef.
+    pub external_names: HashMap<u64, String>,
+    /// String data indexed by address for getStringData.
+    pub strings: HashMap<u64, String>,
     /// Track which space index `ram` occupies once the tspec registers it.
     pub ram_space_index: i64,
     /// Register space index from the tspec (x86-64: 4).
@@ -83,6 +93,11 @@ impl ProgramProvider {
             functions,
             function_names: HashMap::new(),
             function_sizes: HashMap::new(),
+            symbol_names: HashMap::new(),
+            comments: HashMap::new(),
+            datatypes: HashMap::new(),
+            external_names: HashMap::new(),
+            strings: HashMap::new(),
             ram_space_index: 3,
             register_space_index: 4,
             registers: HashMap::new(),
@@ -229,33 +244,26 @@ impl NativeWorker {
             wire::query::GETBYTES => self.answer_getbytes(provider, &payload),
             wire::query::GETMAPPEDSYMBOLS => self.answer_getmappedsymbols(provider, &payload),
             wire::query::GETREGISTER => self.answer_getregister(provider, &payload),
-            // String answers (getCodeLabel, getUserOpName): the C++ reads a
-            // string stream back; empty string means "unknown".
             wire::query::GETREGISTERNAME => self.answer_getregistername(provider, &payload),
-            wire::query::ISNAMEUSED => self.answer_bool(false),
-            // String answers (getCodeLabel, getUserOpName): the C++ reads a
-            // string stream back; empty string means "unknown".
-            wire::query::GETCODELABEL | wire::query::GETUSEROPNAME => self.answer_str(""),
-            // getTrackedRegisters is decoded unconditionally by
-            // ContextGhidra::getTrackedSet (ghidra_context.cc:20-30), so an
-            // empty <tracked_pointset> element is mandatory.
-            wire::query::GETTRACKEDREGISTERS => self.answer_tracked_pointset(),
-            // Empty callback list: every query fn in ghidra_arch.cc treats
-            // an empty response as a non-fatal unknown.
+            wire::query::GETCODELABEL => self.answer_code_label(provider, &payload),
+            wire::query::GETSTRINGDATA => self.answer_string_data(provider, &payload),
+            wire::query::GETCOMMENTS => self.answer_comments(provider, &payload),
+            wire::query::GETDATATYPE => self.answer_datatype(provider, &payload),
+            wire::query::GETEXTERNALREF => self.answer_external_ref(provider, &payload),
+            wire::query::ISNAMEUSED => self.answer_name_used(provider, &payload),
+            // These callbacks have no durable facts in the current model.
+            // An empty response is the protocol's defined "unknown" value,
+            // not a hang or a fabricated fallback.
             wire::query::GETCALLFIXUP
             | wire::query::GETCALLMECH
             | wire::query::GETCALLOTHERFIXUP
-            | wire::query::GETCOMMENTS
             | wire::query::GETCPOOLREF
-            | wire::query::GETDATATYPE
-            | wire::query::GETEXTERNALREF
             | wire::query::GETNAMESPACEPATH
             | wire::query::GETPCODE
             | wire::query::GETPCODEEXECUTABLE
-            | wire::query::GETSTRINGDATA => self.answer_empty(),
+            | wire::query::GETUSEROPNAME => self.answer_empty(),
+            wire::query::GETTRACKEDREGISTERS => self.answer_tracked_pointset(),
             other => {
-                // Unknown query: exception burst aborts the command loudly
-                // instead of hanging the decompiler waiting for data.
                 let msg = format!("ventris-worker: unsupported query id {other}");
                 let mut buf = Vec::new();
                 encode_burst(&mut buf, burst::EXCEP_OPEN);
@@ -353,6 +361,168 @@ impl NativeWorker {
     /// Java DecompCallback.getMappedSymbols writes (encodeResult +
     /// HighSymbol.encodeMapSym); anything else answers an empty response,
     /// which readAll treats as "no data" (a hole).
+    /// Resolves labels from durable symbols and function names.
+    fn answer_code_label(
+        &mut self,
+        provider: &mut ProgramProvider,
+        payload: &[u8],
+    ) -> Result<()> {
+        let (_, address, _) = decode_addr_element(payload)
+            .ok_or_else(|| WorkerError::Protocol("bad getCodeLabel address".into()))?;
+        let name = provider
+            .symbol_names
+            .get(&address)
+            .or_else(|| provider.function_names.get(&address))
+            .map(String::as_str)
+            .unwrap_or("");
+        self.answer_str(name)
+    }
+
+    /// Answers `isNameUsed` from all durable function and symbol names.
+    fn answer_name_used(
+        &mut self,
+        provider: &mut ProgramProvider,
+        payload: &[u8],
+    ) -> Result<()> {
+        let name = find_name_attribute(payload).unwrap_or_default();
+        let used = provider.function_names.values().any(|value| value == &name)
+            || provider.symbol_names.values().any(|value| value == &name);
+        self.answer_bool(used)
+    }
+
+    /// Returns UTF-8 string bytes using the exact A-biased byte-stream shape
+    /// consumed by ArchitectureGhidra::getStringData.
+    fn answer_string_data(
+        &mut self,
+        provider: &mut ProgramProvider,
+        payload: &[u8],
+    ) -> Result<()> {
+        let (_, address, _) = decode_addr_element(payload)
+            .ok_or_else(|| WorkerError::Protocol("bad getStringData address".into()))?;
+        let max_size = find_numeric_attribute(payload, wire::attr::MAXSIZE)
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(4096)
+            .min(1024 * 1024);
+        let bytes = provider
+            .strings
+            .get(&address)
+            .map(|value| value.as_bytes().to_vec())
+            .or_else(|| {
+                provider
+                    .backing
+                    .slice_at(address, max_size as u64, provider.base)
+                    .map(|value| value.to_vec())
+            })
+            .unwrap_or_default();
+        let mut utf8 = bytes;
+        if let Some(nul) = utf8.iter().position(|byte| *byte == 0) {
+            utf8.truncate(nul);
+        }
+        utf8.truncate(max_size);
+        let mut buf = Vec::new();
+        encode_burst(&mut buf, burst::QRESPONSE_OPEN);
+        encode_burst(&mut buf, burst::BYTESTREAM_OPEN);
+        for byte in &utf8 {
+            buf.extend_from_slice(&[(byte >> 4) + b'A', (byte & 0xf) + b'A']);
+        }
+        encode_burst(&mut buf, burst::BYTESTREAM_CLOSE);
+        encode_burst(&mut buf, burst::QRESPONSE_CLOSE);
+        self.write_frame(&buf)
+    }
+
+    /// Encodes store comments in the packed `<commentdb>` form consumed by
+    /// CommentDatabaseInternal::decode.
+    fn answer_comments(
+        &mut self,
+        provider: &mut ProgramProvider,
+        payload: &[u8],
+    ) -> Result<()> {
+        let (_, function, _) = decode_addr_element(payload)
+            .ok_or_else(|| WorkerError::Protocol("bad getComments address".into()))?;
+        let mut doc = Vec::new();
+        wire::encode_header(&mut doc, wire::ELEMENT_START, wire::elem::COMMENTDB);
+        for (address, kind, text) in provider.comments.get(&function).into_iter().flatten() {
+            wire::encode_header(&mut doc, wire::ELEMENT_START, wire::elem::COMMENT);
+            wire::encode_string_attribute(
+                &mut doc,
+                wire::attr::TYPE,
+                comment_type_name(kind).as_bytes(),
+            );
+            wire::encode_addr_element(&mut doc, provider.ram_space_index as u32, function);
+            wire::encode_addr_element(&mut doc, provider.ram_space_index as u32, *address);
+            wire::encode_header(&mut doc, wire::ELEMENT_START, wire::elem::TEXT);
+            wire::encode_string_attribute(&mut doc, wire::attr::CONTENT, text.as_bytes());
+            wire::encode_header(&mut doc, wire::ELEMENT_END, wire::elem::TEXT);
+            wire::encode_header(&mut doc, wire::ELEMENT_END, wire::elem::COMMENT);
+        }
+        wire::encode_header(&mut doc, wire::ELEMENT_END, wire::elem::COMMENTDB);
+        let mut buf = Vec::new();
+        encode_burst(&mut buf, burst::QRESPONSE_OPEN);
+        encode_string_stream(&mut buf, &doc);
+        encode_burst(&mut buf, burst::QRESPONSE_CLOSE);
+        self.write_frame(&buf)
+    }
+
+    /// Encodes a conservative basic datatype response. The durable type
+    /// definition is intentionally retained as store text; the decompiler
+    /// needs the name/size/metatype wire fields to continue safely.
+    fn answer_datatype(
+        &mut self,
+        provider: &mut ProgramProvider,
+        payload: &[u8],
+    ) -> Result<()> {
+        let name = find_name_attribute(payload).unwrap_or_default();
+        let mut buf = Vec::new();
+        encode_burst(&mut buf, burst::QRESPONSE_OPEN);
+        if provider.datatypes.contains_key(&name) {
+            let mut doc = Vec::new();
+            wire::encode_header(&mut doc, wire::ELEMENT_START, wire::elem::TYPE);
+            wire::encode_string_attribute(&mut doc, wire::attr::NAME, name.as_bytes());
+            wire::encode_attribute(&mut doc, wire::attr::ID, wire::attr_type::UNSIGNED_INT, 1);
+            wire::encode_attribute(&mut doc, wire::attr::SIZE, wire::attr_type::POSITIVE_INT, 1);
+            wire::encode_string_attribute(
+                &mut doc,
+                wire::attr::METATYPE,
+                datatype_metatype(provider.datatypes.get(&name).map(String::as_str).unwrap_or(""))
+                    .as_bytes(),
+            );
+            wire::encode_header(&mut doc, wire::ELEMENT_END, wire::elem::TYPE);
+            encode_string_stream(&mut buf, &doc);
+        }
+        encode_burst(&mut buf, burst::QRESPONSE_CLOSE);
+        self.write_frame(&buf)
+    }
+
+    /// Resolves imported addresses to an external-reference symbol.
+    fn answer_external_ref(
+        &mut self,
+        provider: &mut ProgramProvider,
+        payload: &[u8],
+    ) -> Result<()> {
+        let (_, address, _) = decode_addr_element(payload)
+            .ok_or_else(|| WorkerError::Protocol("bad getExternalRef address".into()))?;
+        let mut buf = Vec::new();
+        encode_burst(&mut buf, burst::QRESPONSE_OPEN);
+        if let Some(name) = provider.external_names.get(&address) {
+            let mut doc = Vec::new();
+            wire::encode_header(
+                &mut doc,
+                wire::ELEMENT_START,
+                wire::elem::EXTERNREFSYMBOL,
+            );
+            wire::encode_string_attribute(&mut doc, wire::attr::NAME, name.as_bytes());
+            wire::encode_addr_element(&mut doc, provider.ram_space_index as u32, address);
+            wire::encode_header(
+                &mut doc,
+                wire::ELEMENT_END,
+                wire::elem::EXTERNREFSYMBOL,
+            );
+            encode_string_stream(&mut buf, &doc);
+        }
+        encode_burst(&mut buf, burst::QRESPONSE_CLOSE);
+        self.write_frame(&buf)
+    }
+
     fn answer_getmappedsymbols(
         &mut self,
         provider: &mut ProgramProvider,
@@ -651,6 +821,68 @@ pub fn find_name_attribute(data: &[u8]) -> Option<String> {
         }
     }
     name
+}
+
+/// Finds a numeric packed attribute without assuming it is the first one.
+pub fn find_numeric_attribute(data: &[u8], target: u32) -> Option<i64> {
+    let mut pos = 0usize;
+    while pos < data.len() {
+        let header = data[pos];
+        pos += 1;
+        match header & wire::HEADER_MASK_EQ {
+            h if h == wire::ELEMENT_START_EQ || h == wire::ELEMENT_END_EQ => {
+                if header & 0x20 != 0 {
+                    pos = pos.checked_add(1)?;
+                }
+            }
+            h if h == wire::ATTRIBUTE_EQ => {
+                let (id, ty) = decode_attr_header(header, data, &mut pos)?;
+                let groups = (ty & 0xf) as usize;
+                if ty >> 4 == wire::attr_type::STRING {
+                    let len = decode_int_value(data, pos, &mut pos, groups)? as usize;
+                    pos = pos.checked_add(len)?;
+                    continue;
+                }
+                let value = decode_int_value(data, pos, &mut pos, groups)?;
+                if id == target {
+                    return match ty >> 4 {
+                        wire::attr_type::NEGATIVE_INT => Some(-(value as i64)),
+                        _ => i64::try_from(value).ok(),
+                    };
+                }
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+fn comment_type_name(kind: &str) -> &'static str {
+    match kind.to_ascii_lowercase().as_str() {
+        "header" | "plate" | "pre" => "header",
+        "warning" => "warning",
+        "warningheader" => "warningheader",
+        "user2" => "user2",
+        "user3" => "user3",
+        _ => "user1",
+    }
+}
+
+fn datatype_metatype(definition: &str) -> &'static str {
+    let definition = definition.to_ascii_lowercase();
+    if definition.contains("struct") {
+        "struct"
+    } else if definition.contains("union") {
+        "union"
+    } else if definition.contains("enum") {
+        "enum_int"
+    } else if definition.contains("float") {
+        "float"
+    } else if definition.contains("bool") {
+        "bool"
+    } else {
+        "int"
+    }
 }
 
 /// Path helper for the pinned language tree (spike layout).

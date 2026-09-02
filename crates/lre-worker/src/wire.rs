@@ -107,23 +107,51 @@ pub mod elem {
     pub const MAPSYM: u32 = 76;
     /// ELEM_FUNCTION (funcdata.cc:23)
     pub const FUNCTION: u32 = 116;
-    /// ELEM_DOC (ghidra_process.cc:73)
+    /// ELEM_DOC (ghidra_process.cc:73).
     pub const DOC: u32 = 229;
-    /// ELEM_TRACKED_POINTSET (globalcontext.cc:25)
+    /// ELEM_TRACKED_POINTSET (globalcontext.cc:25).
     pub const TRACKED_POINTSET: u32 = 125;
+    /// ELEM_HOLE (database.cc:36).
+    pub const HOLE: u32 = 74;
+    /// ELEM_PARENT (database.cc:39).
+    pub const PARENT: u32 = 77;
+    /// ELEM_EXTERNREFSYMBOL (database.cc:32).
+    pub const EXTERNREFSYMBOL: u32 = 70;
+    /// ELEM_COMMENT (comment.cc:21).
+    pub const COMMENT: u32 = 86;
+    /// ELEM_COMMENTDB (comment.cc:22).
+    pub const COMMENTDB: u32 = 87;
+    /// ELEM_TEXT (comment.cc:23).
+    pub const TEXT: u32 = 88;
+    /// ELEM_TYPE (type.cc:67).
+    pub const TYPE: u32 = 60;
+    /// ELEM_TYPEREF (type.cc:70).
+    pub const TYPEREF: u32 = 63;
 }
 
 pub mod attr {
-    /// ATTRIB_ID (marshal.cc:1240)
+    /// ATTRIB_CONTENT (marshal.cc:1232).
+    pub const CONTENT: u32 = 1;
+    /// ATTRIB_ID (marshal.cc:1240).
     pub const ID: u32 = 9;
-    /// ATTRIB_NAME (marshal.cc:1245)
+    /// ATTRIB_NAME (marshal.cc:1245).
     pub const NAME: u32 = 14;
-    /// ATTRIB_OFFSET (marshal.cc:1247)
+    /// ATTRIB_OFFSET (marshal.cc:1247).
     pub const OFFSET: u32 = 16;
-    /// ATTRIB_SIZE (marshal.cc:1252)
+    /// ATTRIB_SIZE (marshal.cc:1252).
     pub const SIZE: u32 = 19;
-    /// ATTRIB_SPACE (marshal.cc:1253)
+    /// ATTRIB_SPACE (marshal.cc:1253).
     pub const SPACE: u32 = 20;
+    /// ATTRIB_METATYPE (marshal.cc:1243).
+    pub const METATYPE: u32 = 12;
+    /// ATTRIB_TYPE (marshal.cc:1253).
+    pub const TYPE: u32 = 22;
+    /// ATTRIB_FIRST (address.cc:21).
+    pub const FIRST: u32 = 27;
+    /// ATTRIB_LAST (address.cc:22).
+    pub const LAST: u32 = 28;
+    /// ATTRIB_MAXSIZE (fspec.cc:27).
+    pub const MAXSIZE: u32 = 120;
 }
 
 /// Query element ids (ghidra_arch.cc:30-48); these are what the decompiler

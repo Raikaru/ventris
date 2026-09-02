@@ -1,0 +1,9 @@
+[package]
+name = "lre-debug"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Isolated GDB/LLDB read-only debugger backends"
+
+[dependencies]
+thiserror = { workspace = true }
