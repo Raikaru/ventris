@@ -571,14 +571,18 @@ void MainWindow::loadXrefs() {
 void MainWindow::loadFacts() {
         const QString program = program_edit_->text();
         int job = beginJob(QStringLiteral("symbols"));
-        bridge_->request(QJsonObject{{"method", "symbols"}, {"program", program}},
+        bridge_->request(QJsonObject{{"method", "symbols_page"},
+                                     {"program", program},
+                                     {"offset", 0},
+                                     {"limit", 256}},
                          [this, job](const QJsonObject &response) {
                              QString error;
                              if (!successful(response, &error)) {
                                  finishJob(job, false, error);
                                  return;
                              }
-                             const QJsonArray rows = response.value("result").toArray();
+                             const QJsonArray rows =
+                                 response.value("result").toObject().value("rows").toArray();
                              symbols_->setRowCount(0);
                              for (const QJsonValue &value : rows) {
                                  const QJsonObject row = value.toObject();
