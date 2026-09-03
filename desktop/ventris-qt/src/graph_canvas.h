@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QHash>
 #include <QPointF>
 #include <QVector>
 #include <QWidget>
@@ -47,9 +48,16 @@ protected:
 private:
     QPointF nodeCenter(const Node &node) const;
     QString nodeAt(const QPoint &pos) const;
+    struct ResolvedEdge {
+        int from_index = -1;
+        int to_index = -1;
+        QString kind;
+    };
 
     QVector<Node> nodes_;
     QVector<Edge> edges_;
+    QVector<ResolvedEdge> resolved_edges_;
+    QHash<QString, int> node_lookup_;
     double zoom_ = 1.0;
     QPointF pan_;
     bool panning_ = false;

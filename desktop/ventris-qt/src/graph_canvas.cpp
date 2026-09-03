@@ -36,6 +36,19 @@ GraphCanvas::GraphCanvas(QWidget *parent) : QWidget(parent) {
 void GraphCanvas::setGraph(const QVector<Node> &nodes, const QVector<Edge> &edges) {
     nodes_ = nodes;
     edges_ = edges;
+    node_lookup_.clear();
+    for (int i = 0; i < nodes_.size(); ++i) {
+        node_lookup_.insert(nodes_[i].address, i);
+    }
+    resolved_edges_.clear();
+    resolved_edges_.reserve(edges_.size());
+    for (const Edge &edge : edges_) {
+        ResolvedEdge resolved;
+        resolved.from_index = node_lookup_.value(edge.from, -1);
+        resolved.to_index = node_lookup_.value(edge.to, -1);
+        resolved.kind = edge.kind;
+        resolved_edges_.append(resolved);
+    }
     zoom_ = 1.0;
     pan_ = QPointF(0, 0);
     fit_pending_ = true;  // fit once the widget knows its size
@@ -101,21 +114,15 @@ void GraphCanvas::paintEvent(QPaintEvent *) {
     }
 
     // Edges: straight lines colored by kind; call edges dashed.
-    for (const Edge &edge : edges_) {
-        const Node *from = nullptr;
-        const Node *to = nullptr;
-        for (const Node &node : nodes_) {
-            if (node.address == edge.from && from == nullptr) {
-                from = &node;
-            }
-            if (node.address == edge.to && to == nullptr) {
-                to = &node;
-            }
-        }
-        if (from == nullptr) {
+    for (const ResolvedEdge &edge : resolved_edges_) {
+        if (edge.from_index < 0 || edge.from_index >= nodes_.size()) {
             continue;  // call edges may target other functions
         }
-        const QPointF start = nodeCenter(*from);
+        const Node &from = nodes_[edge.from_index];
+        const Node *to = (edge.to_index >= 0 && edge.to_index < nodes_.size())
+                             ? &nodes_[edge.to_index]
+                             : nullptr;
+        const QPointF start = nodeCenter(from);
         const QPointF end = to != nullptr
                                 ? nodeCenter(*to)
                                 : start + QPointF(0, kNodeHeight * zoom_);
