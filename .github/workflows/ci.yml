@@ -42,6 +42,8 @@ jobs:
           python -c "import json, os; document = json.load(open(os.environ['SBOM_PATH'])); assert document['spdxVersion'] == 'SPDX-2.3'; assert document['packages']"
       - run: python packaging/update_manifest.py --version ci --root . --output "$RUNNER_TEMP/update.json" LICENSE
       - run: python packaging/verify_update.py "$RUNNER_TEMP/update.json" --root .
+      - name: Validate AGENTS.md operating loop and CONTRIBUTING.md policy
+        run: python tests/agents_policy_test.py
 
   qt:
     name: Qt desktop (${{ matrix.os }})
