@@ -1,5 +1,7 @@
 #pragma once
 
+#include <QElapsedTimer>
+#include <QJsonObject>
 #include <QMainWindow>
 
 #include "views.h"
@@ -38,6 +40,8 @@ public:
     explicit MainWindow(const QString &project, const QString &program,
                         const QString &binary, const QString &address,
                         QWidget *parent = nullptr);
+    /// Runs the deterministic offscreen UI gate and exits the application.
+    void runGate();
     ~MainWindow() override;
 
 private slots:
@@ -78,6 +82,11 @@ private:
     void setStatus(const QString &message, bool error = false);
     void restoreWorkspace();
     void saveWorkspace();
+    void gateModelRefreshed();
+    void gateStartLargestFunction();
+    void gateStartDecompile(const QString &address);
+    void gateStartGraph();
+    void finishGate(bool ok, const QString &detail = {});
 
     CoreBridge *bridge_;
     QString program_;
@@ -146,4 +155,10 @@ private:
     QTableWidget *prototypes_ = nullptr;
     QTableWidget *stack_variables_ = nullptr;
     QTableWidget *type_links_ = nullptr;
+    enum class GateStage { Inactive, LoadingList, Filtering, ClearingFilter };
+    bool gate_active_ = false;
+    GateStage gate_stage_ = GateStage::Inactive;
+    QElapsedTimer gate_timer_;
+    QJsonObject gate_metrics_;
+    QString gate_address_;
 };

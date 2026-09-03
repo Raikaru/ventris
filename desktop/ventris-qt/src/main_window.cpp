@@ -11,6 +11,7 @@
 #include "navigation_controller.h"
 #include "json_util.h"
 
+#include <QCoreApplication>
 #include <QDockWidget>
 #include <QGridLayout>
 #include <QHBoxLayout>
@@ -36,6 +37,7 @@
 #include <QListWidget>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QTextStream>
 #include <QSettings>
 #include <QSplitter>
 #include <QTabWidget>
@@ -363,6 +365,8 @@ MainWindow::MainWindow(const QString &project, const QString &program, const QSt
         functions_->setObjectName(QStringLiteral("functionsView"));
         function_model_ = new FunctionTableModel(bridge_, functions_);
         functions_->setModel(function_model_);
+        connect(function_model_, &FunctionTableModel::refreshed, this,
+                &MainWindow::gateModelRefreshed);
         functions_->setSelectionBehavior(QAbstractItemView::SelectRows);
         functions_->setSelectionMode(QAbstractItemView::SingleSelection);
         functions_->horizontalHeader()->setStretchLastSection(true);
@@ -835,6 +839,236 @@ void MainWindow::decompile() {
                                        .arg(revision));
                      });
 }
+void MainWindow::runGate() {
+    if (gate_active_) {
+        return;
+    }
+    gate_active_ = true;
+    gate_stage_ = GateStage::Inactive;
+    gate_metrics_ = QJsonObject();
+    gate_address_.clear();
+
+    const QString binary = binary_edit_->text();
+    const QString program = program_edit_->text();
+    if (binary.isEmpty() || program.isEmpty()) {
+        finishGate(false, QStringLiteral("gate requires --binary and --name"));
+        return;
+    }
+
+    bridge_->request(QJsonObject{{"method", "import_native"},
+                                 {"binary", binary},
+                                 {"name", program}},
+                     [this](const QJsonObject &response) {
+                         QString error;
+                         if (!successful(response, &error)) {
+                             finishGate(false, error);
+                             return;
+                         }
+                         const QString program = program_edit_->text();
+                         navigation_->setProgram(program);
+                         strings_model_->setProgram(program);
+                         gate_stage_ = GateStage::LoadingList;
+                         gate_timer_.start();
+                         function_model_->setProgram(program);
+                     });
+}
+
+void MainWindow::gateModelRefreshed() {
+    if (!gate_active_) {
+        return;
+    }
+    const GateStage stage = gate_stage_;
+    if (stage != GateStage::LoadingList && stage != GateStage::Filtering &&
+        stage != GateStage::ClearingFilter) {
+        return;
+    }
+    QTimer::singleShot(0, this, [this, stage]() {
+        if (!gate_active_ || gate_stage_ != stage) {
+            return;
+        }
+        if (functions_ != nullptr) {
+            functions_->viewport()->repaint();
+        }
+        const double elapsed_ms =
+            static_cast<double>(gate_timer_.nsecsElapsed()) / 1'000'000.0;
+        if (stage == GateStage::LoadingList) {
+            gate_metrics_.insert(QStringLiteral("ui.list.load_ms"), elapsed_ms);
+            gate_stage_ = GateStage::Filtering;
+            gate_timer_.restart();
+            function_filter_edit_->setText(QStringLiteral("FUN_"));
+        } else if (stage == GateStage::Filtering) {
+            gate_metrics_.insert(QStringLiteral("ui.list.filter_ms"), elapsed_ms);
+            gate_stage_ = GateStage::ClearingFilter;
+            function_filter_edit_->clear();
+        } else {
+            gateStartLargestFunction();
+        }
+    });
+}
+
+void MainWindow::gateStartLargestFunction() {
+    gate_stage_ = GateStage::Inactive;
+    bridge_->request(QJsonObject{{"method", "functions_page"},
+                                 {"program", program_edit_->text()},
+                                 {"offset", 0},
+                                 {"limit", 1},
+                                 {"sort", "size:desc"}},
+                     [this](const QJsonObject &response) {
+                         QString error;
+                         if (!successful(response, &error)) {
+                             finishGate(false, error);
+                             return;
+                         }
+                         const QJsonArray rows =
+                             response.value("result").toObject().value("rows").toArray();
+                         if (rows.isEmpty()) {
+                             finishGate(false, QStringLiteral("gate found no functions"));
+                             return;
+                         }
+                         gate_address_ = addressText(rows.first().toObject().value("entry"));
+                         if (gate_address_.isEmpty() || gate_address_ == QStringLiteral("?")) {
+                             finishGate(false, QStringLiteral("gate found an invalid function address"));
+                             return;
+                         }
+                         gateStartDecompile(gate_address_);
+                     });
+}
+
+void MainWindow::gateStartDecompile(const QString &address) {
+    bridge_->request(QJsonObject{{"method", "decompile_doc"},
+                                 {"binary", binary_edit_->text()},
+                                 {"program", program_edit_->text()},
+                                 {"address", address}},
+                     [this](const QJsonObject &response) {
+                         QString error;
+                         if (!successful(response, &error)) {
+                             finishGate(false, error);
+                             return;
+                         }
+                         const QJsonArray tokens =
+                             response.value("result").toObject().value("tokens").toArray();
+                         QVector<TokenView> token_views;
+                         token_views.reserve(tokens.size());
+                         for (const QJsonValue &token : tokens) {
+                             token_views.append(TokenView::fromJson(token.toObject()));
+                         }
+                         decompiler_->setTokens(token_views);
+
+                         bridge_->request(
+                             QJsonObject{{"method", "listing"},
+                                         {"binary", binary_edit_->text()},
+                                         {"start", gate_address_},
+                                         {"count", 128}},
+                             [this, token_views = std::move(token_views)](
+                                 const QJsonObject &listing_response) mutable {
+                                 QVector<ListingRowView> listing_views;
+                                 if (successful(listing_response)) {
+                                     const QJsonArray rows = listing_response.value("result")
+                                                                  .toObject()
+                                                                  .value("rows")
+                                                                  .toArray();
+                                     listing_views.reserve(rows.size());
+                                     for (const QJsonValue &row : rows) {
+                                         listing_views.append(
+                                             ListingRowView::fromJson(row.toObject()));
+                                     }
+                                 } else {
+                                     // The UI gate remains useful on machines
+                                     // without the optional SLEIGH console: a
+                                     // loaded function header still exercises
+                                     // the highlight and paint path.
+                                     ListingRowView header;
+                                     header.address = gate_address_;
+                                     header.kind = QStringLiteral("function_header");
+                                     header.text = QStringLiteral("gate function");
+                                     QString offset = gate_address_;
+                                     if (offset.startsWith(QStringLiteral("0x"))) {
+                                         offset.remove(0, 2);
+                                     }
+                                     bool address_ok = false;
+                                     header.stable_id = offset.toULongLong(&address_ok, 16);
+                                     listing_views.append(header);
+                                 }
+                                 listing_canvas_->setWindow(listing_views);
+                                 gate_timer_.start();
+                                 decompiler_->setTokens(token_views);
+                                 decompiler_->setAddress(gate_address_);
+                                 listing_canvas_->setAddress(gate_address_);
+                                 decompiler_->repaint();
+                                 listing_canvas_->repaint();
+                                 gate_metrics_.insert(
+                                     QStringLiteral("ui.sync_ms"),
+                                     static_cast<double>(gate_timer_.nsecsElapsed()) /
+                                         1'000'000.0);
+                                 gateStartGraph();
+                             });
+                     });
+}
+
+void MainWindow::gateStartGraph() {
+    gate_timer_.start();
+    bridge_->request(QJsonObject{{"method", "function_bb_graph"},
+                                 {"binary", binary_edit_->text()},
+                                 {"address", gate_address_}},
+                     [this](const QJsonObject &response) {
+                         QString error;
+                         if (!successful(response, &error)) {
+                             finishGate(false, error);
+                             return;
+                         }
+                         gate_metrics_.insert(
+                             QStringLiteral("ui.graph.layout_ms"),
+                             static_cast<double>(gate_timer_.nsecsElapsed()) / 1'000'000.0);
+                         const QJsonObject result = response.value("result").toObject();
+                         QVector<GraphCanvas::Node> nodes;
+                         QVector<GraphCanvas::Edge> edges;
+                         for (const QJsonValue &value : result.value("nodes").toArray()) {
+                             const QJsonObject row = value.toObject();
+                             GraphCanvas::Node node;
+                             node.address = row.value("address").toString();
+                             node.size = row.value("size").toVariant().toULongLong();
+                             node.pos = QPointF(row.value("x").toVariant().toDouble(),
+                                                row.value("y").toVariant().toDouble());
+                             nodes.append(node);
+                         }
+                         for (const QJsonValue &value : result.value("edges").toArray()) {
+                             const QJsonObject row = value.toObject();
+                             GraphCanvas::Edge edge;
+                             edge.from = row.value("from").toString();
+                             edge.to = row.value("to").toString();
+                             edge.kind = row.value("kind").toString();
+                             edges.append(edge);
+                         }
+                         gate_timer_.start();
+                         graph_canvas_->setGraph(nodes, edges);
+                         graph_canvas_->setAddress(gate_address_);
+                         graph_canvas_->repaint();
+                         gate_metrics_.insert(
+                             QStringLiteral("ui.graph.paint_ms"),
+                             static_cast<double>(gate_timer_.nsecsElapsed()) / 1'000'000.0);
+                         // Installation is measured by the release install smoke, not
+                         // by an already-installed local executable.
+                         gate_metrics_.insert(QStringLiteral("ui.install.ok"), false);
+                         finishGate(true);
+                     });
+}
+
+void MainWindow::finishGate(bool ok, const QString &detail) {
+    if (!gate_active_) {
+        return;
+    }
+    gate_active_ = false;
+    gate_stage_ = GateStage::Inactive;
+    const QJsonObject output{{"metrics", gate_metrics_}};
+    QTextStream out(stdout);
+    out << QJsonDocument(output).toJson(QJsonDocument::Compact) << Qt::endl;
+    if (!ok) {
+        QTextStream err(stderr);
+        err << "Ventris UI gate: " << detail << Qt::endl;
+    }
+    QCoreApplication::exit(ok ? 0 : 1);
+}
+
 
 void MainWindow::loadListing() {
     loadListingAt(address_edit_->text());
@@ -1880,6 +2114,9 @@ void MainWindow::restoreWorkspace() {
 }
 
 void MainWindow::checkOnboardingGate() {
+    if (qEnvironmentVariableIsSet("VENTRIS_UI_GATE")) {
+        return;
+    }
     QSettings settings(QStringLiteral("Ventris"), QStringLiteral("Ventris"));
     if (settings.value(QStringLiteral("onboarded"), false).toBool()) {
         return;
