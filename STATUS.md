@@ -475,5 +475,11 @@ green (82 tests across 20 suites); the CPack TGZ builds.
   the gate on libc with install evaluation enabled. All six metrics pass within
   thresholds (`ui.install.ok: true`, `passed: true`).
 
+- m0-007: recovered RIP-relative data xrefs (`InstrInfo::rip_data` over `[rip + disp32]`),
+  full near/short conditional branch kinds, and CRT helpers (`_init`, `_fini`, and
+  relative relocation function pointers like `register_tm_clones`) in the native import
+  pipeline. Recovered 11,282 `DATA` xrefs on libc and all 4 xref kinds on tiny_bin.
+  The acceptance smoke `tests/data_xrefs.sh` passes.
+
 ## Next bounded task
-m0-007: recover data xrefs and PLT/CRT entries in native import pipeline.
+All scheduled M0 milestones (m0-001 through m0-007: UI gates, largest-BB graph, list filter, package smoke, data xrefs/CRT) are complete.

@@ -563,6 +563,50 @@ pub fn import_elf(data: &[u8]) -> Result<NativeImport> {
             }
         }
     }
+    for s in &sections {
+        if s.flags & 0x4 != 0 && s.size > 0 {
+            if s.name == ".init" && s.addr != 0 && !functions.iter().any(|f| f.entry == s.addr) {
+                functions.push(NativeFunction {
+                    entry: s.addr,
+                    name: "_init".into(),
+                    size: s.size.max(1),
+                });
+            } else if s.name == ".fini" && s.addr != 0 && !functions.iter().any(|f| f.entry == s.addr) {
+                functions.push(NativeFunction {
+                    entry: s.addr,
+                    name: "_fini".into(),
+                    size: s.size.max(1),
+                });
+            }
+        }
+    }
+    for r in sections.iter().filter(|s| s.typ == 4 && s.size > 0) {
+        let entry_count = r.size as usize / 24;
+        for i in 0..entry_count {
+            let hdr = r.off as usize + i * 24;
+            if hdr + 24 > data.len() {
+                break;
+            }
+            let r_info = u64_at(data, hdr + 8)?;
+            let r_type = (r_info & 0xffffffff) as u32;
+            if r_type == 8 {
+                let addend = u64_at(data, hdr + 16)? as i64;
+                if addend > 0 {
+                    let target = addend as u64;
+                    let in_code = mappings
+                        .iter()
+                        .any(|m| m.flags & 0x4 != 0 && target >= m.vaddr && target < m.vaddr + m.size);
+                    if in_code && !functions.iter().any(|f| f.entry == target) {
+                        functions.push(NativeFunction {
+                            entry: target,
+                            name: format!("FUN_{target:08x}"),
+                            size: 1,
+                        });
+                    }
+                }
+            }
+        }
+    }
     if entry != 0 && !functions.iter().any(|f| f.entry == entry) {
         functions.push(NativeFunction {
             entry,
@@ -657,43 +701,77 @@ pub fn code_ranges(imp: &NativeImport) -> Vec<(u64, u64)> {
 
 /// Sweeps mappings for direct call rel32 / jcc rel32 targets (x86-64).
 pub fn sweep_calls(imp: &mut NativeImport) {
+    if !imp.language.is_empty() && !imp.language.starts_with("x86:") {
+        return;
+    }
     let mut xrefs = Vec::new();
+    let in_maps = |addr: u64| {
+        imp.mappings
+            .iter()
+            .any(|m| addr >= m.vaddr && addr < m.vaddr + m.size)
+    };
     for m in &imp.mappings {
+        if m.flags & 0x4 == 0 {
+            continue;
+        }
         let b = &m.bytes;
         let mut i = 0usize;
         while i < b.len() {
-            match b[i] {
-                0xe8 if i + 5 <= b.len() => {
-                    let rel = i32::from_le_bytes([b[i + 1], b[i + 2], b[i + 3], b[i + 4]]);
+            let addr = m.vaddr + i as u64;
+            let win = &b[i..];
+            let tmp_buf;
+            let buf = if win.len() >= 16 {
+                win
+            } else {
+                let mut tmp = [0u8; 16];
+                tmp[..win.len()].copy_from_slice(win);
+                tmp_buf = tmp;
+                &tmp_buf[..]
+            };
+            let info = crate::disasm::decode(buf, addr);
+            if info.len == 0 {
+                i += 1;
+                continue;
+            }
+            match info.flow {
+                crate::disasm::Flow::Call(t) => {
                     xrefs.push(NativeXref {
-                        from: m.vaddr + i as u64,
-                        to: (m.vaddr + i as u64).wrapping_add(5).wrapping_add(rel as u64),
+                        from: addr,
+                        to: t,
                         kind: "UNCONDITIONAL_CALL".into(),
                     });
-                    i += 5;
                 }
-                0x0f if b.get(i + 1) == Some(&0x85) && i + 6 <= b.len() => {
-                    let rel = i32::from_le_bytes([b[i + 2], b[i + 3], b[i + 4], b[i + 5]]);
+                crate::disasm::Flow::Jump(t) => {
                     xrefs.push(NativeXref {
-                        from: m.vaddr + i as u64,
-                        to: (m.vaddr + i as u64).wrapping_add(6).wrapping_add(rel as u64),
-                        kind: "CONDITIONAL_JUMP".into(),
-                    });
-                    i += 6;
-                }
-                0xe9 if i + 5 <= b.len() => {
-                    let rel = i32::from_le_bytes([b[i + 1], b[i + 2], b[i + 3], b[i + 4]]);
-                    xrefs.push(NativeXref {
-                        from: m.vaddr + i as u64,
-                        to: (m.vaddr + i as u64).wrapping_add(5).wrapping_add(rel as u64),
+                        from: addr,
+                        to: t,
                         kind: "UNCONDITIONAL_JUMP".into(),
                     });
-                    i += 5;
                 }
-                _ => i += 1,
+                crate::disasm::Flow::JumpCond(t) => {
+                    xrefs.push(NativeXref {
+                        from: addr,
+                        to: t,
+                        kind: "CONDITIONAL_JUMP".into(),
+                    });
+                }
+                _ => {}
             }
+            if let Some(target) = info.rip_data {
+                if in_maps(target) {
+                    xrefs.push(NativeXref {
+                        from: addr,
+                        to: target,
+                        kind: "DATA".into(),
+                    });
+                }
+            }
+            let step = (info.len as usize).min(b.len() - i).max(1);
+            i += step;
         }
     }
+    xrefs.sort_by(|a, b| (a.from, a.to, &a.kind).cmp(&(b.from, b.to, &b.kind)));
+    xrefs.dedup_by(|a, b| a.from == b.from && a.to == b.to && a.kind == b.kind);
     imp.xrefs = xrefs;
 }
 
@@ -733,6 +811,7 @@ pub fn load_native(binary: &Path) -> Result<NativeImport> {
     } else {
         return err("unsupported format (ELF/PE expected)");
     };
+    sweep_calls(&mut imp);
     flow_discover(&mut imp);
     Ok(imp)
 }
@@ -804,6 +883,15 @@ pub fn flow_discover(imp: &mut NativeImport) {
                 from: *from,
                 to: *to,
                 kind: "UNCONDITIONAL_CALL".into(),
+            });
+        }
+    }
+    for (from, to) in &d.data_refs {
+        if !xrefs.iter().any(|x| x.from == *from && x.to == *to) {
+            xrefs.push(NativeXref {
+                from: *from,
+                to: *to,
+                kind: "DATA".into(),
             });
         }
     }

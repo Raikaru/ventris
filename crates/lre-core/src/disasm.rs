@@ -28,6 +28,7 @@ pub enum Flow {
 pub struct InstrInfo {
     pub len: u8,
     pub flow: Flow,
+    pub rip_data: Option<u64>,
 }
 
 /// Opcodes with an immediate following the memory/operand encoding.
@@ -120,7 +121,9 @@ fn op_info(op: u8, op2: Option<u8>, op3: Option<u8>, rex_w: bool) -> OpInfo {
 /// ModRM + SIB + displacement length for memory operands (starting the
 /// walk at `b[m]` = the ModRM byte, with the opcode consumed at `p`).
 fn mem_modlen(b: &[u8], m: usize, force_memory: bool) -> u8 {
-    let modrm = b[m];
+    let Some(&modrm) = b.get(m) else {
+        return 0;
+    };
     let modbits = modrm >> 6;
     if !force_memory && modbits == 3 {
         return 0; // register operand
@@ -129,7 +132,7 @@ fn mem_modlen(b: &[u8], m: usize, force_memory: bool) -> u8 {
     match modbits {
         0 => {
             if rm == 4 {
-                let sib = b[m + 1];
+                let sib = b.get(m + 1).copied().unwrap_or(0);
                 let base = sib & 7;
                 if base == 5 && (sib >> 7) == 0 {
                     5 // SIB + disp32, no base
@@ -198,13 +201,13 @@ pub fn decode(b: &[u8], addr: u64) -> InstrInfo {
         _ => None,
     };
     if let Some((f, l)) = flow_len {
-        return InstrInfo { len: l, flow: f };
+        return InstrInfo { len: l, flow: f, rip_data: None };
     }
     // 0F 90-9F setcc/setb: flow Next with full length.
     if op == 0x0f && op2.map(|o| (0x90..=0x9f).contains(&o)).unwrap_or(false) {
         let m = p + 2;
         let len = p + 3 + mem_modlen(b, m, false) as usize;
-        return InstrInfo { len: len.min(15) as u8, flow: Flow::Next };
+        return InstrInfo { len: len.min(15) as u8, flow: Flow::Next, rip_data: None };
     }
 
     let info = op_info(op, op2, op3, rex_w);
@@ -221,8 +224,11 @@ pub fn decode(b: &[u8], addr: u64) -> InstrInfo {
         // wrong byte and misaligned every subsequent walk).
         let m = len;
         let modrm = b.get(m).copied().unwrap_or(0);
+        let reg = (modrm >> 3) & 7;
+        let modbits = modrm >> 6;
+        let rm = modrm & 7;
+        let is_rip_rel = modbits == 0 && rm == 5;
         let flow = if op == 0xff {
-            let reg = (modrm >> 3) & 7;
             match reg {
                 2 => Flow::IndirectCall,
                 4 => Flow::Indirect,
@@ -253,7 +259,19 @@ pub fn decode(b: &[u8], addr: u64) -> InstrInfo {
             Some(n) => len += n,
             None => {}
         }
-        return InstrInfo { len: len.min(15) as u8, flow };
+        let final_len = len.min(15) as u8;
+        let rip_data = if is_rip_rel && !matches!(flow, Flow::IndirectCall | Flow::Indirect) {
+            let disp = i32::from_le_bytes([
+                b.get(m + 1).copied().unwrap_or(0),
+                b.get(m + 2).copied().unwrap_or(0),
+                b.get(m + 3).copied().unwrap_or(0),
+                b.get(m + 4).copied().unwrap_or(0),
+            ]) as i64;
+            Some(addr.wrapping_add(final_len as u64).wrapping_add(disp as u64))
+        } else {
+            None
+        };
+        return InstrInfo { len: final_len, flow, rip_data };
     }
     match info.imm {
         ImmKind::I8 => len += 1,
@@ -264,7 +282,7 @@ pub fn decode(b: &[u8], addr: u64) -> InstrInfo {
         ImmKind::Imm32Rel => len += 4,
         ImmKind::None => {}
     }
-    InstrInfo { len: len.min(15) as u8, flow: Flow::Next }
+    InstrInfo { len: len.min(15) as u8, flow: Flow::Next, rip_data: None }
 }
 
 fn rel_target(b: &[u8], o: usize, total: usize, addr: u64) -> u64 {
@@ -295,6 +313,7 @@ pub struct Discovery {
     pub entries: Vec<u64>,
     pub sizes: Vec<u64>,
     pub calls: Vec<(u64, u64)>,
+    pub data_refs: Vec<(u64, u64)>,
 }
 
 /// Flow-based discovery over `maps` (vaddr, size, file_off, bytes);
@@ -307,6 +326,7 @@ pub fn discover(maps: &[(u64, u64, u64, &[u8])], seeds: &[u64]) -> Discovery {
     let mut queue: Vec<u64> = entries.clone();
     let mut processed: Vec<u64> = Vec::new();
     let mut calls = Vec::new();
+    let mut data_refs = Vec::new();
     let mut proven_bodies: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
 
     while let Some(start) = queue.pop() {
@@ -350,6 +370,11 @@ pub fn discover(maps: &[(u64, u64, u64, &[u8])], seeds: &[u64]) -> Discovery {
             let win = &bytes[off..];
             let info = decode(win, addr);
             span_end = span_end.max(addr + info.len as u64);
+            if let Some(target) = info.rip_data {
+                if in_map(target) {
+                    data_refs.push((addr, target));
+                }
+            }
             match info.flow {
                 Flow::Call(t) => {
                     calls.push((addr, t));
@@ -420,10 +445,14 @@ pub fn discover(maps: &[(u64, u64, u64, &[u8])], seeds: &[u64]) -> Discovery {
         .iter()
         .map(|e| proven_bodies.get(e).copied().unwrap_or(16))
         .collect();
+    calls.dedup();
+    data_refs.sort_unstable();
+    data_refs.dedup();
     Discovery {
         entries,
         sizes,
         calls,
+        data_refs,
     }
 }
 
