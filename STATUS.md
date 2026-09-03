@@ -412,8 +412,15 @@ Engine-gated follow-ups (each blocks one roadmap exit criterion):
   `ListingRow` from the console source.
 - Pool-level job status (idle workers, restarts, memory caps) needs
   WorkerPool wired into the decompile path.
-- Phase 4 (game-first surfaces) is scoped by the roadmap to wait for a
-  concrete target game/engine.
+- Phase 4 (game-first surfaces): the target arrived (007 Agent Under
+  Fire, GameCube GQFE78). ELF32 BE PowerPC import landed (644 functions
+  with symbols from base.elf), and the first two Phase 4 surfaces ship:
+  IDA-style byte-pattern signature search and vtable recovery
+  (core-012/qt-022). PPC decompile parity still needs the worker spec
+  bundle (registers.txt/tspec.xml for PowerPC + ghidra_opt language
+  registration); struct-editor propagation still waits on worker
+  prototype injection. The live-target memory overlay remains gated on
+  lre-debug (Dolphin IPC read backend unowned).
 
 ## Next bounded task
 Native getPcode server (SLEIGH pcode generation for
