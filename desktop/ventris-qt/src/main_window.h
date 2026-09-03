@@ -3,6 +3,7 @@
 #include <QMainWindow>
 
 #include "views.h"
+#include <QSet>
 #include <QStringList>
 
 class CoreBridge;
@@ -64,6 +65,7 @@ private slots:
 private:
     int beginJob(const QString &label);
     void finishJob(int index, bool ok, const QString &detail);
+    void cancelJob();
     void setStatus(const QString &message, bool error = false);
     void restoreWorkspace();
     void saveWorkspace();
@@ -100,6 +102,7 @@ private:
     QTableWidget *bookmarks_ = nullptr;
     QTableWidget *patches_ = nullptr;
     QListWidget *jobs_ = nullptr;
+    QSet<int> cancelled_jobs_;
     ListingCanvas *listing_canvas_ = nullptr;
     GraphCanvas *graph_canvas_ = nullptr;
     DecompilerView *decompiler_ = nullptr;

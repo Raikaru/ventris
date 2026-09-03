@@ -481,11 +481,18 @@ MainWindow::MainWindow(const QString &project, const QString &program, const QSt
         xrefs_dock->setWidget(xrefs_tabs);
         addDockWidget(Qt::RightDockWidgetArea, xrefs_dock);
 
-        jobs_ = new QListWidget(this);
+        auto *jobs_panel = new QWidget(this);
+        auto *jobs_layout = new QVBoxLayout(jobs_panel);
+        jobs_layout->setContentsMargins(0, 0, 0, 0);
+        jobs_ = new QListWidget(jobs_panel);
         jobs_->setObjectName(QStringLiteral("analysisJobs"));
+        jobs_layout->addWidget(jobs_, 1);
+        auto *cancel_job = new QPushButton(QStringLiteral("Cancel selected"), jobs_panel);
+        connect(cancel_job, &QPushButton::clicked, this, &MainWindow::cancelJob);
+        jobs_layout->addWidget(cancel_job);
         auto *jobs_dock = new QDockWidget(QStringLiteral("Analysis jobs"), this);
         jobs_dock->setObjectName(QStringLiteral("analysisJobsDock"));
-        jobs_dock->setWidget(jobs_);
+        jobs_dock->setWidget(jobs_panel);
         addDockWidget(Qt::BottomDockWidgetArea, jobs_dock);
 
         connect(navigation_, &NavigationController::addressChanged, this,
@@ -1412,17 +1419,44 @@ void MainWindow::undoCommand() {
     }
 
 int MainWindow::beginJob(const QString &label) {
-        jobs_->addItem(label + QStringLiteral(" — running"));
+        auto *item = new QListWidgetItem(QStringLiteral("▶ ") + label, jobs_);
+        item->setForeground(QColor("#e5c07b"));
         jobs_->scrollToBottom();
         return jobs_->count() - 1;
     }
 
 void MainWindow::finishJob(int index, bool ok, const QString &detail) {
         if (auto *item = jobs_->item(index)) {
-            item->setText((ok ? QStringLiteral("PASS ") : QStringLiteral("FAIL ")) + detail);
+            if (cancelled_jobs_.contains(index)) {
+                item->setText(QStringLiteral("✗ cancelled — ") + detail);
+                item->setForeground(QColor("#7e8996"));
+            } else if (ok) {
+                item->setText(QStringLiteral("✓ ") + detail);
+                item->setForeground(QColor("#98c379"));
+            } else {
+                // Every failed request lands here with the error that
+                // caused it (Phase 2.5: no silent failures).
+                item->setText(QStringLiteral("✗ ") + detail);
+                item->setForeground(QColor("#e06c75"));
+            }
         }
         setStatus(detail, !ok);
     }
+
+void MainWindow::cancelJob() {
+    const int row = jobs_->currentRow();
+    if (row < 0) {
+        return;
+    }
+    if (auto *item = jobs_->item(row)) {
+        if (item->text().startsWith(QStringLiteral("▶ "))) {
+            cancelled_jobs_.insert(row);
+            // The in-flight worker call is bounded by the pool deadline;
+            // its result is discarded when it arrives.
+            item->setText(item->text() + QStringLiteral(" (cancelling…)"));
+        }
+    }
+}
 
 void MainWindow::setStatus(const QString &message, bool error) {
         status_->setText(message);
