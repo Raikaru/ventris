@@ -450,5 +450,11 @@ green (82 tests across 20 suites); the CPack TGZ builds.
     Under Fire RVZ served GDB port 24689; `memory_live` read 16 bytes at
     `0x80000000`, beginning with `47 57 37 45 36 39` (`GW7E69`).
 
+- m0-003: added `lre-cli graph <program> --largest --binary <path>` locator
+  which sorts recovered functions by size descending, analyzes their native
+  basic-block graphs, and returns the target function with >= 200 blocks
+  (found `__vfscanf_internal` at `00042cb0` with 297 basic blocks on libc).
+  The acceptance smoke `tests/largest_graph.sh` passes against `/usr/lib64/libc.so.6`.
+
 ## Next bounded task
-m0-003: add the largest-basic-block function locator to lre-cli.
+m0-004: measure and verify Qt layout/paint execution on the largest-BB graph.

@@ -37,7 +37,7 @@ fn usage() {
   lre-cli symbols <program> [--project DIR]
   lre-cli strings <program> [--project DIR]
   lre-cli search <program> <term> [--limit N] [--project DIR]
-  lre-cli graph <program> [--project DIR]
+  lre-cli graph <program> [--largest --binary BINARY] [--project DIR]
   lre-cli memory-regions <program> [--project DIR]
   lre-cli bookmarks <program> [--project DIR]
   lre-cli bookmark <program> <address> <label> [comment] [--project DIR]
@@ -418,14 +418,51 @@ fn run_inner(args: &[String]) -> Result<(), String> {
         }
         "graph" => {
             let program = args.get(2).ok_or("graph needs a program name")?.clone();
-            let (nodes, edges) = core.function_graph(&program).map_err(|e| e.to_string())?;
-            for node in &nodes {
-                println!("node {} {}", node.address, node.name);
+            let is_largest = args.iter().any(|a| a == "--largest");
+            if is_largest {
+                let binary_arg = flag(args, "--binary")
+                    .ok_or("graph --largest requires --binary <path>")?;
+                let binary_path = Path::new(&binary_arg);
+                let mut functions = core.functions(&program).map_err(|e| e.to_string())?;
+                functions.sort_by(|a, b| b.size.cmp(&a.size));
+                let mut best: Option<(usize, String, String, serde_json::Value)> = None;
+                for f in functions {
+                    let addr_hex = format!("{:x}", f.entry.offset);
+                    if let Ok(graph_json) = core.function_bb_graph(binary_path, &addr_hex) {
+                        let blocks = graph_json
+                            .get("nodes")
+                            .and_then(|n| n.as_array())
+                            .map(|a| a.len())
+                            .unwrap_or(0);
+                        let better = best.as_ref().map(|(count, _, _, _)| blocks > *count).unwrap_or(true);
+                        if better {
+                            best = Some((blocks, f.name.clone(), f.entry.to_string(), graph_json));
+                        }
+                        if blocks >= 200 {
+                            break;
+                        }
+                    }
+                }
+                let (blocks, name, address, graph) = best
+                    .ok_or_else(|| format!("no recoverable basic-block graph for program {program}"))?;
+                let out = serde_json::json!({
+                    "program": program,
+                    "name": name,
+                    "address": address,
+                    "blocks": blocks,
+                    "graph": graph,
+                });
+                println!("{out}");
+            } else {
+                let (nodes, edges) = core.function_graph(&program).map_err(|e| e.to_string())?;
+                for node in &nodes {
+                    println!("node {} {}", node.address, node.name);
+                }
+                for edge in &edges {
+                    println!("edge {} --{}--> {}", edge.from, edge.kind, edge.to);
+                }
+                println!("-- {} nodes, {} edges", nodes.len(), edges.len());
             }
-            for edge in &edges {
-                println!("edge {} --{}--> {}", edge.from, edge.kind, edge.to);
-            }
-            println!("-- {} nodes, {} edges", nodes.len(), edges.len());
         }
         "memory-regions" => {
             let program = args.get(2).ok_or("memory-regions needs a program name")?.clone();
