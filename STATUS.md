@@ -424,6 +424,10 @@ green (82 tests across 20 suites); the CPack TGZ builds.
   261.120 ms, sync 60.694 ms, graph layout 11.457 ms, graph paint
   18.160 ms. The report is intentionally `passed: false`: filter and sync
   exceed the frozen thresholds, and fresh-install validation is not local.
+- m0-002 instrumentation now records all six frozen UI fields on libc
+  (`ui.list.load_ms`, `ui.list.filter_ms`, `ui.sync_ms`, `ui.graph.layout_ms`,
+  `ui.graph.paint_ms`, and `ui.install.ok`); the acceptance smoke confirms
+  every field is non-null.
 - Phase 4 (game-first surfaces): the target arrived (007 Agent Under
   Fire, GameCube GQFE78). ELF32 BE PowerPC import landed (644 functions
   with symbols from base.elf), the first two Phase 4 surfaces ship
@@ -447,4 +451,4 @@ green (82 tests across 20 suites); the CPack TGZ builds.
     `0x80000000`, beginning with `47 57 37 45 36 39` (`GW7E69`).
 
 ## Next bounded task
-m0-002: add --gate instrumentation hooks around list, filter, sync, and graph.
+m0-003: add the largest-basic-block function locator to lre-cli.
