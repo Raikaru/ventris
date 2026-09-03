@@ -70,6 +70,7 @@ private slots:
 private:
     int beginJob(const QString &label);
     void finishJob(int index, bool ok, const QString &detail);
+    void refreshJobs();
     void cancelJob();
     void showCommandPalette();
     void checkOnboardingGate();
@@ -112,6 +113,7 @@ private:
     QTableWidget *bookmarks_ = nullptr;
     QTableWidget *patches_ = nullptr;
     QListWidget *jobs_ = nullptr;
+    QLabel *jobs_summary_ = nullptr;
     QSet<int> cancelled_jobs_;
     ListingCanvas *listing_canvas_ = nullptr;
     GraphCanvas *graph_canvas_ = nullptr;

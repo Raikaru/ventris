@@ -12,6 +12,7 @@ crate-type = ["rlib", "staticlib"]
 [dependencies]
 cxx = "1"
 lre-core = { path = "../lre-core" }
+lre-worker-client = { path = "../lre-worker-client" }
 lre-model = { path = "../lre-model" }
 serde = { workspace = true }
 serde_json = { workspace = true }

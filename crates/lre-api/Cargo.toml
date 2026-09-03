@@ -8,6 +8,7 @@ description = "Versioned local JSON API for the Ventris Core service"
 [dependencies]
 lre-core = { path = "../lre-core" }
 lre-debug = { path = "../lre-debug" }
+lre-worker-client = { path = "../lre-worker-client" }
 lre-model = { path = "../lre-model" }
 serde = { workspace = true }
 serde_json = { workspace = true }

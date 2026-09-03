@@ -132,9 +132,14 @@ impl Core {
         })
     }
 
-    /// Path of the backing database (diagnostics).
+    /// Project directory containing the backing database (diagnostics).
     pub fn db_path(&self) -> &Path {
         &self.db_path
+    }
+    /// Runtime configuration used by native consumers such as the supervised
+    /// worker pool. The configuration remains owned by Core.
+    pub fn runtime_config(&self) -> &session::RuntimeConfig {
+        &self.config
     }
     /// Lists language variants available in the configured Ghidra install.
     pub fn architectures(&self) -> Result<Vec<ArchitectureSpec>> {

@@ -38,9 +38,9 @@ workflow baseline (39.6 MB peak vs 375 MiB stock; see gate numbers below and
   function_xrefs_from/export_facts/rename/decompile/disassemble/ping/
   dump_specs. Written against verified Ghidra sources only.
 - Rust workspace: lre-model, lre-db (SQLite WAL+FK, schema_version=1,
-  revision-stamped mutations), lre-core (CoreService facade),
-  lre-cli, lre-worker, and lre-debug. `cargo test --workspace`: 78 tests
-  pass across 20 suites.
+  revision-stamped mutations), lre-core (CoreService facade), lre-cli,
+  lre-worker, lre-worker-client, lre-api, and lre-debug. `cargo test
+  --workspace`: 82 tests pass across 20 suites.
 - E2E proven on x86-64 ELF fixture (gcc -O0, 12.6 KB):
   - import: 15 functions, 34 xrefs, 93 symbols persisted with
     provenance `ghidra-bridge / 12.1.3`
@@ -406,11 +406,14 @@ Verified on this machine: libc (2.48 MB) imports in 4.5 s with 4,023
 functions; server-side filter answers in 20-30 ms; listing windows and
 decompilation render (malloc_printerr decompiled JVM-free); the Qt app runs
 the libc project offscreen without crashing; `cargo test --workspace` is
-green (79 tests across 20 suites); the CPack TGZ builds.
+green (82 tests across 20 suites); the CPack TGZ builds.
 
-- Remaining engine-gated follow-up:
-- Pool-level job status (idle workers, restarts, memory caps) needs
-  WorkerPool wired into the decompile path.
+- Engine-gated progress:
+- WorkerPool is wired through API and Qt `decompile_doc`; `jobs_page`
+  reports bounded job rows, idle/busy workers, restart count, configured
+  memory cap, and memory-cap hits. The x86 tiny API smoke returned a
+  succeeded row with one idle worker; a `/bin/false` worker smoke returned
+  a failed row with `restarts=1`.
 - Listing rows now carry explicit `function_header`, `bb_separator`, `label`,
   `data`, and `instruction` kinds from the core model. The parser acceptance
   fixture covers all five kinds; native console smoke emitted four basic-block
@@ -439,5 +442,4 @@ green (79 tests across 20 suites); the CPack TGZ builds.
     `0x80000000`, beginning with `47 57 37 45 36 39` (`GW7E69`).
 
 ## Next bounded task
-Pool-level job status: wire `WorkerPool` into the decompile path and expose
-idle workers, restart, and memory-cap state.
+m0-001: add the offscreen UI gate harness and emit `ui-gate.json`.

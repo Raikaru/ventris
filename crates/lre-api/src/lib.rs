@@ -7,11 +7,13 @@
 use lre_core::Core;
 use lre_debug::{BackendKind, DebugBackend, DebugCommand};
 use lre_model::{Address, AddressSpace};
+use lre_worker_client::WorkerPoolManager;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::Duration;
 
 pub const API_VERSION: u64 = 1;
@@ -49,15 +51,19 @@ struct ResponseEnvelope {
     error: Option<ErrorEnvelope>,
 }
 
-/// One Core-backed API endpoint. It is intentionally single-threaded: Core's
-/// native image cache and SQLite connection are not shared across workers.
+/// One Core-backed API endpoint. Core remains the semantic owner; the
+/// supervised worker manager owns warm decompiler sessions and their status.
 pub struct ApiService {
     core: Core,
+    worker_pool: Mutex<WorkerPoolManager>,
 }
 
 impl ApiService {
     pub fn new(core: Core) -> Self {
-        Self { core }
+        Self {
+            core,
+            worker_pool: Mutex::new(WorkerPoolManager::default()),
+        }
     }
 
     pub fn core(&self) -> &Core {
@@ -242,6 +248,19 @@ impl ApiService {
                         .unwrap_or(0.25) as f32,
                 ))
             }
+            "jobs_page" => {
+                let offset = u64_param(params, "offset")?.unwrap_or(0);
+                let limit = u64_param(params, "limit")?.unwrap_or(64);
+                let pool = self
+                    .worker_pool
+                    .lock()
+                    .map_err(|_| DispatchError::Worker("worker pool mutex poisoned".into()))?;
+                Ok(json!(pool.jobs_page(
+                    self.core.runtime_config().worker_memory_cap,
+                    offset,
+                    limit,
+                )))
+            }
             "disasm_native" => {
                 let binary = path_param(params, "binary")?;
                 let address = address_param(params, "address")?;
@@ -254,12 +273,17 @@ impl ApiService {
                 let binary = path_param(params, "binary")?;
                 let program = string_param(params, "program")?;
                 let address = address_param(params, "address")?;
-                value(self.core.decompile_native_doc(
-                    &binary,
-                    &address,
-                    &program,
-                    u64_param(params, "base")?,
-                ))
+                require_ram(&address)?;
+                let base = u64_param(params, "base")?;
+                let mut pool = self
+                    .worker_pool
+                    .lock()
+                    .map_err(|_| DispatchError::Worker("worker pool mutex poisoned".into()))?;
+                let doc = pool
+                    .decompile_doc(&self.core, &binary, &address, &program, base)
+                    .map_err(|error| DispatchError::Worker(error.to_string()))?;
+                serde_json::to_value(doc)
+                    .map_err(|error| DispatchError::Request(format!("encode result: {error}")))
             }
             "rename" => {
                 let program = string_param(params, "program")?;
@@ -402,6 +426,8 @@ enum DispatchError {
     Request(String),
     #[error("core: {0}")]
     Core(#[from] lre_core::CoreError),
+    #[error("worker: {0}")]
+    Worker(String),
     #[error("debugger: {0}")]
     Debugger(#[from] lre_debug::DebugError),
     #[error("unknown_method: {0}")]
@@ -413,6 +439,7 @@ impl DispatchError {
         match self {
             Self::Request(_) => "invalid_params",
             Self::Core(_) => "core_error",
+            Self::Worker(_) => "worker_error",
             Self::Debugger(_) => "debugger_error",
             Self::UnknownMethod(_) => "unknown_method",
         }
@@ -718,4 +745,30 @@ mod tests {
         assert!(response.get("error").is_none());
     }
 
+    #[test]
+    fn jobs_page_reports_pool_limits_before_first_job() {
+        let service = service();
+        let response: Value = serde_json::from_str(
+            &service.handle_line(
+                &serde_json::json!({
+                    "api": 1,
+                    "id": "jobs",
+                    "method": "jobs_page",
+                    "params": {"offset": 0, "limit": 10}
+                })
+                .to_string(),
+            ),
+        )
+        .unwrap();
+        assert!(response.get("error").is_none());
+        assert_eq!(response["result"]["total"], 0);
+        assert_eq!(response["result"]["pool"]["idle_workers"], 0);
+        assert_eq!(response["result"]["pool"]["busy_workers"], 0);
+        assert_eq!(response["result"]["pool"]["restarts"], 0);
+        assert_eq!(response["result"]["pool"]["memory_cap_hits"], 0);
+        assert_eq!(
+            response["result"]["pool"]["memory_cap_bytes"],
+            service.core().runtime_config().worker_memory_cap
+        );
+    }
 }

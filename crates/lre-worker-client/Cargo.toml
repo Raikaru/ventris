@@ -11,3 +11,4 @@ lre-db = { path = "../lre-db" }
 lre-worker = { path = "../lre-worker" }
 lre-core = { path = "../lre-core" }
 thiserror = { workspace = true }
+serde = { workspace = true }

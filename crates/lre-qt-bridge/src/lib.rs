@@ -1,12 +1,14 @@
 //! CXX-facing adapter for the native Qt consumer.
 //!
 //! Qt owns widgets and schedules calls on its worker pool. Rust remains the
-//! semantic owner: every request below dispatches to `lre_core::Core`, never
-//! to a second storage or process-launch implementation. The wire value is a
-//! small JSON envelope so the C++ side does not duplicate Rust model structs.
+//! semantic owner: fact requests dispatch to `lre_core::Core`, while
+//! decompilation and pool status use the supervised worker manager attached to
+//! the same Core handle. The wire value is a small JSON envelope so the C++
+//! side does not duplicate Rust model structs.
 
 use lre_core::Core;
 use lre_model::{Address, AddressSpace};
+use lre_worker_client::WorkerPoolManager;
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -24,14 +26,17 @@ mod ffi {
 
 /// Thread-safe handle held by the C++ bridge. The mutex serializes SQLite and
 /// Core's one-entry native image cache while Qt may issue concurrent requests.
+/// The worker manager has a separate mutex because its warm process is mutable.
 pub struct CoreHandle {
     core: Mutex<Core>,
+    worker_pool: Mutex<WorkerPoolManager>,
 }
 
 pub fn core_open(project: &str) -> Result<Box<CoreHandle>, Box<dyn std::error::Error>> {
     let core = Core::open(Path::new(project))?;
     Ok(Box::new(CoreHandle {
         core: Mutex::new(core),
+        worker_pool: Mutex::new(WorkerPoolManager::default()),
     }))
 }
 
@@ -39,11 +44,15 @@ pub fn core_request(core: &CoreHandle, request_json: &str) -> String {
     let result = (|| -> Result<Value, String> {
         let request: Value = serde_json::from_str(request_json)
             .map_err(|e| format!("invalid request JSON: {e}"))?;
+        let mut worker_pool = core
+            .worker_pool
+            .lock()
+            .map_err(|_| "WorkerPool mutex poisoned".to_string())?;
         let guard = core
             .core
             .lock()
             .map_err(|_| "Core mutex poisoned".to_string())?;
-        dispatch(&guard, &request)
+        dispatch(&guard, &mut worker_pool, &request)
     })();
     match result {
         Ok(result) => serde_json::to_string(&json!({ "ok": true, "result": result }))
@@ -57,7 +66,11 @@ fn error_json(error: &str) -> String {
         .unwrap_or_else(|_| "{\"ok\":false,\"error\":\"response encoding failed\"}".into())
 }
 
-fn dispatch(core: &Core, request: &Value) -> Result<Value, String> {
+fn dispatch(
+    core: &Core,
+    worker_pool: &mut WorkerPoolManager,
+    request: &Value,
+) -> Result<Value, String> {
     let method = request
         .get("method")
         .and_then(Value::as_str)
@@ -425,6 +438,15 @@ fn dispatch(core: &Core, request: &Value) -> Result<Value, String> {
                 .unwrap_or(0.25) as f32;
             to_value(core.listing_window(&binary, &start, count, overscan))
         }
+        "jobs_page" => {
+            let offset = optional_u64(request, "offset")?.unwrap_or(0);
+            let limit = optional_u64(request, "limit")?.unwrap_or(64);
+            Ok(json!(worker_pool.jobs_page(
+                core.runtime_config().worker_memory_cap,
+                offset,
+                limit,
+            )))
+        }
         "disasm_native" => {
             let binary = required_path(request, "binary")?;
             let address = required_address(request, "address")?;
@@ -437,8 +459,12 @@ fn dispatch(core: &Core, request: &Value) -> Result<Value, String> {
             let binary = required_path(request, "binary")?;
             let program = required_string(request, "program")?;
             let address = required_address(request, "address")?;
+            require_ram(&address)?;
             let base = optional_u64(request, "base")?;
-            to_value(core.decompile_native_doc(&binary, &address, &program, base))
+            let doc = worker_pool
+                .decompile_doc(core, &binary, &address, &program, base)
+                .map_err(|error| error.to_string())?;
+            serde_json::to_value(doc).map_err(|error| format!("encode result: {error}"))
         }
         _ => Err(format!("unknown Core API method: {method}")),
     }
@@ -574,5 +600,18 @@ mod tests {
         assert_eq!(required_address(&request, "address").unwrap(), Address::ram(0x400466));
         let request = json!({"address": {"space": {"Other": "register"}, "offset": 8}});
         assert!(required_address(&request, "address").is_ok());
+    }
+    #[test]
+    fn jobs_page_reports_pool_limits_before_first_job() {
+        let handle = core_open(temp_project().to_str().unwrap()).unwrap();
+        let response: Value =
+            serde_json::from_str(&core_request(&handle, r#"{"method":"jobs_page"}"#)).unwrap();
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["result"]["total"], 0);
+        assert_eq!(response["result"]["pool"]["idle_workers"], 0);
+        assert_eq!(response["result"]["pool"]["busy_workers"], 0);
+        assert_eq!(response["result"]["pool"]["restarts"], 0);
+        assert_eq!(response["result"]["pool"]["memory_cap_hits"], 0);
+        assert!(response["result"]["pool"]["memory_cap_bytes"].is_number());
     }
 }

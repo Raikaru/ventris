@@ -262,8 +262,8 @@ impl NativeWorker {
             | wire::query::GETCPOOLREF
             | wire::query::GETNAMESPACEPATH
             | wire::query::GETPCODE
-            | wire::query::GETPCODEEXECUTABLE
-            | wire::query::GETUSEROPNAME => self.answer_empty(),
+            | wire::query::GETPCODEEXECUTABLE => self.answer_empty(),
+            wire::query::GETUSEROPNAME => self.answer_str(""),
             wire::query::GETTRACKEDREGISTERS => self.answer_tracked_pointset(),
             other => {
                 let msg = format!("ventris-worker: unsupported query id {other}");

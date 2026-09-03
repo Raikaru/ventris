@@ -247,6 +247,7 @@ dependencies = [
  "lre-core",
  "lre-debug",
  "lre-model",
+ "lre-worker-client",
  "serde",
  "serde_json",
  "thiserror",
@@ -313,6 +314,7 @@ dependencies = [
  "cxx-build",
  "lre-core",
  "lre-model",
+ "lre-worker-client",
  "serde",
  "serde_json",
 ]
@@ -337,6 +339,7 @@ dependencies = [
  "lre-db",
  "lre-model",
  "lre-worker",
+ "serde",
  "thiserror",
 ]
 
