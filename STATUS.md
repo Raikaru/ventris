@@ -499,7 +499,15 @@ green (82 tests across 20 suites); the CPack TGZ builds.
   staleness check and acceptance test `tests/support_matrix_test.py`.
 
 ## Current milestone
-M0 — Honest floor (all tasks m0-001 through m0-010 implemented; final ui.install.ok verification awaits 3-OS CI on tag)
+M1 — Discovery becomes generic
+
+## M1 progress
+- m1-001: implemented native SLEIGH console request `flow(addr)` extracting
+  {length, fallthrough, targets, kind} from p-code (BRANCH, CBRANCH, BRANCHIND,
+  CALL, CALLIND, RETURN, FALLTHROUGH) across loaded architectures. Unit test
+  `test_pcode_flow_x86_and_ppc` passes on x86-64 (`tiny_bin` return/fallthrough)
+  and PowerPC (`base.elf` 0x80680000 fallthrough length=4 and 0x8068001c CBRANCH
+  targets=[0x80680030]).
 
 ## Next task
-m1-001: Console request: flow(addr) -> {fallthrough, targets[], kind} from pcode (BRANCH, CBRANCH, BRANCHIND, CALL, CALLIND, RETURN) for any loaded language
+m1-002: Rewrite discovery as a worklist over m1-001; seeds = entry, symbols, init/fini arrays, exported functions, call targets
