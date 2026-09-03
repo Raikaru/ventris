@@ -242,7 +242,7 @@ dependencies = [
 
 [[package]]
 name = "lre-api"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "lre-core",
  "lre-debug",
@@ -254,7 +254,7 @@ dependencies = [
 
 [[package]]
 name = "lre-cli"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "base64",
  "lre-core",
@@ -266,7 +266,7 @@ dependencies = [
 
 [[package]]
 name = "lre-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "base64",
  "lre-db",
@@ -279,7 +279,7 @@ dependencies = [
 
 [[package]]
 name = "lre-db"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "lre-model",
  "regex",
@@ -291,14 +291,14 @@ dependencies = [
 
 [[package]]
 name = "lre-debug"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "lre-model"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -306,7 +306,7 @@ dependencies = [
 
 [[package]]
 name = "lre-qt-bridge"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "cxx",
  "cxx-build",
@@ -318,7 +318,7 @@ dependencies = [
 
 [[package]]
 name = "lre-worker"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "lre-core",
  "lre-db",
@@ -330,7 +330,7 @@ dependencies = [
 
 [[package]]
 name = "lre-worker-client"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "lre-core",
  "lre-db",
