@@ -18,7 +18,13 @@
 #include <QInputDialog>
 #include <QShortcut>
 #include <functional>
+#include <QCheckBox>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QMenuBar>
+#include <QMessageBox>
 #include <QMenu>
+#include <QMessageBox>
 #include <QTimer>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -224,6 +230,63 @@ MainWindow::MainWindow(const QString &project, const QString &program, const QSt
             new QShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+P")), this);
         connect(palette_shortcut, &QShortcut::activated, this,
                 &MainWindow::showCommandPalette);
+        // Project management menu: open, recent, import with progress.
+        auto *file_menu = menuBar()->addMenu(QStringLiteral("&File"));
+        file_menu->addAction(QStringLiteral("&Open project…"), this, [this]() {
+            const QString dir = QFileDialog::getExistingDirectory(
+                this, QStringLiteral("Open project directory"), project_edit_->text());
+            if (dir.isEmpty()) {
+                return;
+            }
+            QSettings settings(QStringLiteral("Ventris"), QStringLiteral("Ventris"));
+            QStringList recent =
+                settings.value(QStringLiteral("recentProjects")).toStringList();
+            recent.removeAll(dir);
+            recent.prepend(dir);
+            while (recent.size() > 8) {
+                recent.removeLast();
+            }
+            settings.setValue(QStringLiteral("recentProjects"), recent);
+            QMessageBox::information(
+                this, QStringLiteral("Project selected"),
+                QStringLiteral("Project %1 will open on restart.").arg(dir));
+        });
+        recent_menu_ = file_menu->addMenu(QStringLiteral("Open &recent"));
+        connect(recent_menu_, &QMenu::aboutToShow, this, [this]() {
+            recent_menu_->clear();
+            QSettings settings(QStringLiteral("Ventris"), QStringLiteral("Ventris"));
+            const QStringList recent =
+                settings.value(QStringLiteral("recentProjects")).toStringList();
+            for (const QString &dir : recent) {
+                recent_menu_->addAction(dir, this, [this, dir]() {
+                    QMessageBox::information(
+                        this, QStringLiteral("Project selected"),
+                        QStringLiteral("Project %1 will open on restart.").arg(dir));
+                });
+            }
+            if (recent.isEmpty()) {
+                recent_menu_->addAction(QStringLiteral("(no recent projects)"))
+                    ->setEnabled(false);
+            }
+        });
+        file_menu->addAction(QStringLiteral("&Import binary…"), this, [this]() {
+            const QString binary = QFileDialog::getOpenFileName(
+                this, QStringLiteral("Import native binary"), QString(),
+                QStringLiteral("All files (*)"));
+            if (binary.isEmpty()) {
+                return;
+            }
+            QInputDialog name_dialog(this);
+            name_dialog.setWindowTitle(QStringLiteral("Program name"));
+            name_dialog.setLabelText(QStringLiteral("Program name:"));
+            name_dialog.setTextValue(QFileInfo(binary).fileName());
+            if (name_dialog.exec() != QDialog::Accepted) {
+                return;
+            }
+            binary_edit_->setText(binary);
+            program_edit_->setText(name_dialog.textValue().trimmed());
+            importNative();
+        });
         connect(decompiler_, &DecompilerView::renameRequested, this,
                 [this](const QString &address, const QString &current_name) {
                     QInputDialog dialog(this);
@@ -596,6 +659,7 @@ MainWindow::MainWindow(const QString &project, const QString &program, const QSt
             navigation_->setProgram(program_);
             strings_model_->setProgram(program_);
         }
+        checkOnboardingGate();
         restoreWorkspace();
     }
 
@@ -1623,6 +1687,64 @@ void MainWindow::restoreWorkspace() {
                 navigation_->goTo(last_address, false);
             }
         }
+    }
+}
+
+void MainWindow::checkOnboardingGate() {
+    QSettings settings(QStringLiteral("Ventris"), QStringLiteral("Ventris"));
+    if (settings.value(QStringLiteral("onboarded"), false).toBool()) {
+        return;
+    }
+    const QString home = qEnvironmentVariable("HOME");
+    const QString ghidra =
+        qEnvironmentVariable("VENTRIS_GHIDRA_INSTALL",
+                             home + QStringLiteral("/ghidra_12.1.3_PUBLIC"));
+    const QString sla = qEnvironmentVariable("VENTRIS_SLA");
+    const QString opt = QStringLiteral("native/build/ghidra_opt");
+    const QString console = QStringLiteral("native/build/decomp_native");
+
+    QStringList missing;
+    if (!QDir(ghidra).exists()) {
+        missing << QStringLiteral(
+            "Ghidra install not found at %1 — set VENTRIS_GHIDRA_INSTALL or clone "
+            "the pinned 12.1.3 tree there.").arg(ghidra);
+    }
+    if (sla.isEmpty() || !QFileInfo::exists(sla)) {
+        missing << QStringLiteral(
+            "No compiled SLEIGH language (VENTRIS_SLA) — expected e.g. "
+            "<ghidra>/Ghidra/Processors/x86/data/languages/x86-64.sla. "
+            "Decompilation needs it; import and listing do not.");
+    }
+    if (!QFileInfo::exists(opt)) {
+        missing << QStringLiteral(
+            "Decompiler binary missing at %1 — run native/build_ghidra_opt.sh.")
+                     .arg(opt);
+    }
+    if (!QFileInfo::exists(console)) {
+        missing << QStringLiteral(
+            "SLEIGH console missing at %1 — run native/build_console.sh "
+            "(needs binutils-devel). Listing and discovery need it.")
+                     .arg(console);
+    }
+
+    QString message;
+    if (missing.isEmpty()) {
+        message = QStringLiteral(
+            "All native components found. Import a binary from File > Import "
+            "binary…, then navigate Functions → Listing → Decompiler → Xrefs.");
+    } else {
+        message = QStringLiteral("The environment gate is PARTIAL:\n\n%1\n\n"
+                                  "The UI still opens; features above fail with the "
+                                  "exact missing component in the Jobs dock.")
+                      .arg(missing.join(QStringLiteral("\n")));
+    }
+    QMessageBox box(this);
+    box.setWindowTitle(QStringLiteral("Ventris setup"));
+    box.setText(message);
+    box.setCheckBox(new QCheckBox(QStringLiteral("Don't show again")));
+    box.exec();
+    if (box.checkBox()->isChecked()) {
+        settings.setValue(QStringLiteral("onboarded"), true);
     }
 }
 
