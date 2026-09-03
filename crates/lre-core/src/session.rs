@@ -45,6 +45,19 @@ impl Default for RuntimeConfig {
     }
 }
 
+/// Reads the stored language id for `program` from the project database.
+/// Used to drive per-language decompile resolution; falls back to the
+/// configured default when the store is unreachable.
+pub fn program_language(
+    cfg: &RuntimeConfig,
+    program: &str,
+    project_dir: &std::path::Path,
+) -> crate::Result<String> {
+    let db = crate::ProjectDb::open(&project_dir.join("project.sqlite"))?;
+    let id = db.program_id(program)?;
+    Ok(db.program_language(id)?)
+}
+
 impl RuntimeConfig {
     /// Builds a config from the environment (the CLI's documented surface),
     /// with repo/install-relative defaults.

@@ -117,6 +117,67 @@ pub fn disasm_native(cfg: &RuntimeConfig, binary: &Path, address: &str, count: u
     Ok(lines.into_iter().take(count as usize).collect::<Vec<_>>().join("\n"))
 }
 
+/// Resolves the decompile inputs for a program language id: the compiled
+/// SLA (from the install's .ldefs), the language dir, and the vendored
+/// spec bundle (native/specs/<lang>, generated once via `dump-specs`).
+/// Falls back to the configured x86 defaults when the language is the
+/// default x86-64 or the env explicitly set the pieces.
+fn language_decompile_config(
+    cfg: &RuntimeConfig,
+    language: &str,
+) -> Result<(std::path::PathBuf, std::path::PathBuf, std::path::PathBuf, String)> {
+    // Explicit env wins (existing behavior).
+    if let Some(sla) = &cfg.sla_path {
+        return Ok((
+            sla.clone(),
+            cfg.spec_root.clone(),
+            cfg.language_dir.clone(),
+            cfg.language_id.clone(),
+        ));
+    }
+    // Default x86-64: keep the vendored x86 bundle.
+    if language == "x86:LE:64:default" {
+        return Ok((
+            cfg.ghidra_install
+                .join("Ghidra/Processors/x86/data/languages/x86-64.sla"),
+            cfg.spec_root.clone(),
+            cfg.language_dir.clone(),
+            cfg.language_id.clone(),
+        ));
+    }
+    // Other languages: resolve the sla from the install ldefs and the
+    // vendored spec bundle keyed by the language id.
+    let specs = crate::architecture::discover(&cfg.ghidra_install)
+        .map_err(|e| NativeRuntimeError(e.to_string()))?;
+    let spec = specs
+        .iter()
+        .find(|s| s.id == language)
+        .ok_or_else(|| {
+            NativeRuntimeError(format!(
+                "language {language} not found in the Ghidra install"
+            ))
+        })?;
+    let lang_dir = std::path::PathBuf::from(&spec.language_dir);
+    let slafile = crate::architecture::slafile_for_id(&lang_dir, language)
+        .map_err(|e| NativeRuntimeError(e.to_string()))?
+        .ok_or_else(|| {
+            NativeRuntimeError(format!("no .sla listed for {language} in its .ldefs"))
+        })?;
+    let sla = lang_dir.join(slafile);
+    let bundle = cfg
+        .spec_root
+        .join(language.replace(':', "-"));
+    if !bundle.join("tspec.xml").is_file() {
+        return err(format!(
+            "spec bundle missing for {language}: {} — generate it once with \
+             `lre-cli dump-specs <program> --out {}` (JVM bridge)",
+            bundle.display(),
+            bundle.display()
+        ));
+    }
+    Ok((sla, bundle, lang_dir, language.to_string()))
+}
+
 /// Performant `decompile-native`: one address decompiled by the patched
 /// `ghidra_opt` through `lre-worker` (raw-SLEIGH, no JVM).
 fn run_decompiler(
@@ -129,17 +190,13 @@ fn run_decompiler(
     structured: bool,
 ) -> Result<Vec<u8>> {
     let opt = &cfg.decompiler_path;
-    let specs = &cfg.spec_root;
     let worker = &cfg.worker_path;
     // The patched ghidra_opt self-disassembles only when a compiled .sla is
-    // configured (see native/build_ghidra_opt.sh).
-    let sla = cfg.sla_path.as_ref().ok_or_else(|| {
-        NativeRuntimeError(
-            "no SLA configured: set VENTRIS_SLA or RuntimeConfig::sla_path \
-             to a compiled SLEIGH language file"
-                .into(),
-        )
-    })?;
+    // configured (see native/build_ghidra_opt.sh). The program language
+    // drives the SLA + spec bundle; explicit env overrides win.
+    let language = crate::session::program_language(cfg, program, project_dir)
+        .unwrap_or_else(|_| cfg.language_id.clone());
+    let (sla, specs, lang_dir, language_id) = language_decompile_config(cfg, &language)?;
     if !sla.is_file() {
         return err(format!(
             "configured SLA does not exist: {} — the decompiler silently fails \
@@ -178,9 +235,9 @@ fn run_decompiler(
         .arg(project_dir)
         .arg("--base")
         .arg(format!("{base:#x}"))
-        .env("VENTRIS_LANGUAGE", &cfg.language_id)
-        .env("VENTRIS_LANGUAGE_DIR", &cfg.language_dir)
-        .env("VENTRIS_SLA", sla);
+        .env("VENTRIS_LANGUAGE", &language_id)
+        .env("VENTRIS_LANGUAGE_DIR", &lang_dir)
+        .env("VENTRIS_SLA", &sla);
     if structured {
         command.env("WORKER_STRUCTURED", "1");
     }

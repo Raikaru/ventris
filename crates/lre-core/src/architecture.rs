@@ -72,6 +72,20 @@ pub fn directory_for_id(install: &Path, id: &str) -> Result<Option<PathBuf>> {
 }
 
 
+/// Finds the compiled SLA file name for a language id by scanning the
+/// language dir's .ldefs for the matching `<language ... slafile="...">`.
+pub fn slafile_for_id(language_dir: &Path, id: &str) -> Result<Option<String>> {
+    for ldefs in language_dir_files(language_dir)? {
+        let xml = std::fs::read_to_string(&ldefs)?;
+        for language in tags(&xml, "language") {
+            if attribute(language, "id").as_deref() == Some(id) {
+                return Ok(attribute(language, "slafile"));
+            }
+        }
+    }
+    Ok(None)
+}
+
 fn language_dir_files(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut files = std::fs::read_dir(dir)?
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
