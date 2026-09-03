@@ -105,6 +105,7 @@ private:
     QSet<int> cancelled_jobs_;
     ListingCanvas *listing_canvas_ = nullptr;
     GraphCanvas *graph_canvas_ = nullptr;
+    QDockWidget *graph_dock_ = nullptr;
     DecompilerView *decompiler_ = nullptr;
     QLabel *status_ = nullptr;
     HexCanvas *hex_canvas_ = nullptr;

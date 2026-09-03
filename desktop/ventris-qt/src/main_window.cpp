@@ -121,6 +121,19 @@ MainWindow::MainWindow(const QString &project, const QString &program, const QSt
                 &NavigationController::forward);
         connect(listing_canvas_, &ListingCanvas::contextMenuRequested, this,
                 &MainWindow::listingContextMenu);
+        connect(graph_canvas_, &GraphCanvas::addressSelected, this,
+                [this](const QString &address, bool record) {
+                    navigation_->goTo(address, record);
+                });
+        // Listing <-> Graph toggle on Space (IDA-style): the central
+        // listing canvas and the graph dock swap focus.
+        auto *graph_toggle = new QShortcut(QKeySequence(Qt::Key_Space), listing_canvas_);
+        graph_toggle->setContext(Qt::WidgetWithChildrenShortcut);
+        connect(graph_toggle, &QShortcut::activated, this, [this]() {
+            loadGraph();
+            graph_dock_->raise();
+            graph_dock_->setFocus();
+        });
         auto *bytes_toggle = new QShortcut(QKeySequence(QStringLiteral("Ctrl+B")), this);
         connect(bytes_toggle, &QShortcut::activated, this, [this]() {
             listing_canvas_->setBytesVisible(!listing_canvas_->bytesVisible());
@@ -318,10 +331,10 @@ MainWindow::MainWindow(const QString &project, const QString &program, const QSt
         addDockWidget(Qt::RightDockWidgetArea, memory_dock);
 
         graph_canvas_ = new GraphCanvas(this);
-        auto *graph_dock = new QDockWidget(QStringLiteral("Function graph"), this);
-        graph_dock->setObjectName(QStringLiteral("functionGraphDock"));
-        graph_dock->setWidget(graph_canvas_);
-        addDockWidget(Qt::BottomDockWidgetArea, graph_dock);
+        graph_dock_ = new QDockWidget(QStringLiteral("Function graph"), this);
+        graph_dock_->setObjectName(QStringLiteral("functionGraphDock"));
+        graph_dock_->setWidget(graph_canvas_);
+        addDockWidget(Qt::BottomDockWidgetArea, graph_dock_);
 
         auto *analyst_tabs = new QTabWidget(this);
         bookmarks_ = new QTableWidget(0, 3, analyst_tabs);
@@ -915,19 +928,43 @@ void MainWindow::loadHexAt(const QString &address) {
 }
 
 void MainWindow::loadGraph() {
-        const int job = beginJob(QStringLiteral("function graph"));
-        bridge_->request(QJsonObject{{"method", "function_graph"},
-                                     {"program", program_edit_->text()}},
-                         [this, job](const QJsonObject &response) {
-                             QString error;
-                             if (!successful(response, &error)) {
-                                 finishJob(job, false, error);
-                                 return;
-                             }
-                             graph_canvas_->setGraph(response.value("result").toObject());
-                             finishJob(job, true, QStringLiteral("graph loaded"));
-                         });
+    if (binary_edit_->text().isEmpty() || address_edit_->text().isEmpty()) {
+        return;
     }
+    const int job = beginJob(QStringLiteral("function graph %1").arg(address_edit_->text()));
+    bridge_->request(QJsonObject{{"method", "function_bb_graph"},
+                                 {"binary", binary_edit_->text()},
+                                 {"address", address_edit_->text()}},
+                     [this, job](const QJsonObject &response) {
+                         QString error;
+                         if (!successful(response, &error)) {
+                             finishJob(job, false, error);
+                             return;
+                         }
+                         const QJsonObject result = response.value("result").toObject();
+                         GraphCanvas::Node node;
+                         GraphCanvas::Edge edge;
+                         QVector<GraphCanvas::Node> nodes;
+                         QVector<GraphCanvas::Edge> edges;
+                         for (const QJsonValue &value : result.value("nodes").toArray()) {
+                             const QJsonObject row = value.toObject();
+                             node.address = row.value("address").toString();
+                             node.size = row.value("size").toVariant().toULongLong();
+                             node.pos = QPointF(row.value("x").toVariant().toDouble(),
+                                                row.value("y").toVariant().toDouble());
+                             nodes.append(node);
+                         }
+                         for (const QJsonValue &value : result.value("edges").toArray()) {
+                             const QJsonObject row = value.toObject();
+                             edge.from = row.value("from").toString();
+                             edge.to = row.value("to").toString();
+                             edge.kind = row.value("kind").toString();
+                             edges.append(edge);
+                         }
+                         graph_canvas_->setGraph(nodes, edges);
+                         finishJob(job, true, QStringLiteral("graph loaded"));
+                     });
+}
 
 void MainWindow::loadAnalystData() {
         const int job = beginJob(QStringLiteral("bookmarks"));

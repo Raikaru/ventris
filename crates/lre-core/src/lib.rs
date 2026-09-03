@@ -7,6 +7,7 @@
 pub mod bridge;
 pub mod architecture;
 pub mod disasm;
+pub mod graph;
 pub mod listing;
 pub mod native;
 pub mod native_runtime;
@@ -197,6 +198,23 @@ impl Core {
             row.bytes = bytes[..len].iter().map(|b| format!("{b:02x}")).collect();
         }
         Ok(window)
+    }
+
+    /// Basic-block graph of the function at `address` with layered layout
+    /// coordinates (Phase 2.1). Nodes carry block ranges; edges are typed
+    /// true/false/unconditional/call.
+    pub fn function_bb_graph(
+        &self,
+        binary: &std::path::Path,
+        address: &str,
+    ) -> Result<serde_json::Value> {
+        let hex = address.trim_start_matches("0x");
+        let offset = u64::from_str_radix(hex, 16)
+            .map_err(|_| CoreError::Collaboration(format!("bad address: {address}")))?;
+        let reader = |off: u64, size: usize| self.mem_native(binary, off, size).ok();
+        let graph = graph::basic_blocks(&reader, offset, 4096);
+        let layout = graph::layered_layout(&graph);
+        Ok(graph::graph_wire(&graph, &layout))
     }
 
     /// Revision events after `since` for the program (CORE-005).

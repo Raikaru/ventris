@@ -236,6 +236,12 @@ fn dispatch(core: &Core, request: &Value) -> Result<Value, String> {
             let limit = optional_u64(request, "limit")?.unwrap_or(256);
             to_value(core.search(&program, &term, limit))
         }
+        "function_bb_graph" => {
+            let binary = required_path(request, "binary")?;
+            let address = required_string(request, "address")?;
+            core.function_bb_graph(&binary, &address)
+                .map_err(|e| e.to_string())
+        }
         "function_graph" => {
             let program = required_string(request, "program")?;
             let (nodes, edges) = core.function_graph(&program).map_err(|e| e.to_string())?;
