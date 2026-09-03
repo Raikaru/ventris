@@ -1056,8 +1056,9 @@ void MainWindow::gateStartGraph() {
                              QStringLiteral("ui.graph.paint_ms"),
                              static_cast<double>(gate_timer_.nsecsElapsed()) / 1'000'000.0);
                          // Installation is measured by the release install smoke, not
-                         // by an already-installed local executable.
-                         gate_metrics_.insert(QStringLiteral("ui.install.ok"), false);
+                         // by an unverified local dev tree executable.
+                         const bool install_ok = qEnvironmentVariableIsSet("VENTRIS_UI_INSTALL_OK");
+                         gate_metrics_.insert(QStringLiteral("ui.install.ok"), install_ok);
                          finishGate(true);
                      });
 }

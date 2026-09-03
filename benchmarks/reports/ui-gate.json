@@ -1,7 +1,7 @@
 {
   "gate": "ui",
   "milestone": "M0",
-  "commit": "02eb05e02774b558eae7977ac2d5351abc219cc1",
+  "commit": "455a25e1edb92c649ce4adad1e0f37a381ce35b6",
   "date": "2026-09-03",
   "machine": {
     "os": "Linux-7.1.12-200.fc44.x86_64-x86_64-with-glibc2.43",
@@ -12,14 +12,14 @@
     {
       "id": "libc",
       "sha256": "01cccbe278d898add05282986a9346d4dda4b3d2b84bc496f9c04c66016528db",
-      "status": "fail",
+      "status": "pass",
       "metrics": {
-        "ui.list.load_ms": 11.820639,
-        "ui.list.filter_ms": 5.688481,
-        "ui.sync_ms": 2.148793,
-        "ui.graph.layout_ms": 11.707645,
-        "ui.graph.paint_ms": 8.040818,
-        "ui.install.ok": false
+        "ui.list.load_ms": 9.648449,
+        "ui.list.filter_ms": 4.761792,
+        "ui.sync_ms": 2.215739,
+        "ui.graph.layout_ms": 11.571316,
+        "ui.graph.paint_ms": 7.891484,
+        "ui.install.ok": true
       },
       "thresholds": {
         "ui.list.load_ms": 500.0,
@@ -32,9 +32,9 @@
     }
   ],
   "summary": {
-    "pass": 0,
-    "fail": 1,
+    "pass": 1,
+    "fail": 0,
     "skipped": 0
   },
-  "passed": false
+  "passed": true
 }
