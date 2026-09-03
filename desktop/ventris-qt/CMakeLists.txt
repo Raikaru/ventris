@@ -58,6 +58,8 @@ add_executable(ventris-qt
     src/navigation_controller.cpp
     src/strings_table_model.h
     src/strings_table_model.cpp
+    src/theme.h
+    src/theme.cpp
     src/hex_canvas.h
     src/hex_canvas.cpp
     src/main_window.h

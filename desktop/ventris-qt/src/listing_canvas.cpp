@@ -1,6 +1,8 @@
 #include "listing_canvas.h"
 
 #include <QContextMenuEvent>
+#include "theme.h"
+
 #include <QFontDatabase>
 #include <QKeyEvent>
 #include <QMenu>
@@ -13,16 +15,6 @@ namespace {
 constexpr int kMargin = 8;
 constexpr int kAddressWidth = 14;   // characters
 constexpr int kBytesWidth = 32;     // characters, 16 bytes
-// Colors are the single palette referenced by every paint site; Phase 3
-// moves them into the theme system.
-const QColor kBackground("#101419");
-const QColor kAddressColumn("#79b8ff");
-const QColor kBytesColumn("#8fa8bf");
-const QColor kMnemonic("#c678dd");
-const QColor kOperands("#d6dee8");
-const QColor kJumpTarget("#56b6c2");
-const QColor kCursorLine("#2a3542");
-const QColor kEmptyText("#7e8996");
 
 /// Returns the hex token of `text` spanning character column `column`,
 /// or empty when the click is not on an address-like token.
@@ -138,7 +130,7 @@ void ListingCanvas::ensureWindowAround(int index) {
 
 void ListingCanvas::paintEvent(QPaintEvent *) {
     QPainter painter(this);
-    painter.fillRect(rect(), kBackground);
+    painter.fillRect(rect(), Theme::current().background);
     painter.setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
     const QFontMetrics metrics = painter.fontMetrics();
     const int line = rowHeight();
@@ -148,21 +140,21 @@ void ListingCanvas::paintEvent(QPaintEvent *) {
     for (int i = first; i < rows_.size() && i < first + visibleRows(); ++i, y += line) {
         const ListingRowView &row = rows_.at(i);
         if (i == cursorIndex()) {
-            painter.fillRect(QRect(0, y - metrics.ascent(), width(), line), kCursorLine);
+            painter.fillRect(QRect(0, y - metrics.ascent(), width(), line), Theme::current().cursor_line);
         }
         int x = kMargin;
-        painter.setPen(kAddressColumn);
+        painter.setPen(Theme::current().address_column);
         painter.drawText(x, y, row.address.leftJustified(kAddressWidth, QLatin1Char(' ')));
         x += kAddressWidth * char_w + 8;
         if (bytes_visible_) {
-            painter.setPen(kBytesColumn);
+            painter.setPen(Theme::current().bytes_column);
             painter.drawText(x, y, row.bytes.leftJustified(kBytesWidth, QLatin1Char(' ')));
             x += (kBytesWidth + 2) * char_w;
         }
         // Syntax coloring: mnemonic vs operands, jump targets highlighted.
         const QString text = row.text;
         const int mnemonic_end = text.indexOf(QLatin1Char(' '));
-        painter.setPen(kMnemonic);
+        painter.setPen(Theme::current().mnemonic);
         painter.drawText(x, y, mnemonic_end < 0 ? text : text.left(mnemonic_end));
         if (mnemonic_end >= 0) {
             const QString operands = text.mid(mnemonic_end);
@@ -177,8 +169,8 @@ void ListingCanvas::paintEvent(QPaintEvent *) {
                 bool is_hex = false;
                 token.toULongLong(&is_hex, 16);
                 painter.setPen(token.startsWith(QStringLiteral("0x")) && is_hex
-                                   ? kJumpTarget
-                                   : kOperands);
+                                   ? Theme::current().jump_target
+                                   : Theme::current().operands);
                 painter.drawText(ox, y, token);
                 ox += (token.size() + 1) * char_w;
                 token_begin = c + 1;
@@ -186,7 +178,7 @@ void ListingCanvas::paintEvent(QPaintEvent *) {
         }
     }
     if (rows_.isEmpty()) {
-        painter.setPen(kEmptyText);
+        painter.setPen(Theme::current().empty_text);
         painter.drawText(kMargin, y, QStringLiteral("No listing loaded"));
     }
 }

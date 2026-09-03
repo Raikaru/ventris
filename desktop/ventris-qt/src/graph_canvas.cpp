@@ -1,5 +1,7 @@
 #include "graph_canvas.h"
 
+#include "theme.h"
+
 #include <QFontDatabase>
 #include <QMouseEvent>
 #include <QPainter>
@@ -7,31 +9,21 @@
 
 namespace {
 
-const QColor kBackground("#101419");
-const QColor kNodeFill("#202a35");
-const QColor kNodeBorder("#79b8ff");
-const QColor kNodeHighlight("#e5c07b");
-const QColor kNodeText("#d6dee8");
-const QColor kEdgeTrue("#98c379");
-const QColor kEdgeFalse("#e06c75");
-const QColor kEdgeUnconditional("#56606d");
-const QColor kEdgeCall("#c678dd");
-const QColor kEmptyText("#7e8996");
 
 constexpr int kNodeWidth = 180;
 constexpr int kNodeHeight = 60;
 
 QColor edgeColor(const QString &kind) {
     if (kind == QStringLiteral("true")) {
-        return kEdgeTrue;
+        return Theme::current().edge_true;
     }
     if (kind == QStringLiteral("false")) {
-        return kEdgeFalse;
+        return Theme::current().edge_false;
     }
     if (kind == QStringLiteral("call")) {
-        return kEdgeCall;
+        return Theme::current().edge_call;
     }
-    return kEdgeUnconditional;
+    return Theme::current().edge_unconditional;
 }
 
 }  // namespace
@@ -93,12 +85,12 @@ QString GraphCanvas::nodeAt(const QPoint &pos) const {
 
 void GraphCanvas::paintEvent(QPaintEvent *) {
     QPainter painter(this);
-    painter.fillRect(rect(), kBackground);
+    painter.fillRect(rect(), Theme::current().background);
     painter.setRenderHint(QPainter::Antialiasing);
     painter.setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
 
     if (nodes_.isEmpty()) {
-        painter.setPen(kEmptyText);
+        painter.setPen(Theme::current().empty_text);
         painter.drawText(rect().adjusted(8, 8, -8, -8), Qt::AlignTop | Qt::AlignLeft,
                          QStringLiteral("No function graph loaded"));
         return;
@@ -156,10 +148,10 @@ void GraphCanvas::paintEvent(QPaintEvent *) {
         const QPointF top_left = node.pos * zoom_ + pan_;
         const QRectF box(top_left, QSizeF(kNodeWidth * zoom_, kNodeHeight * zoom_));
         const bool highlighted = node.address == highlight_address_;
-        painter.setBrush(QBrush(kNodeFill));
-        painter.setPen(QPen(highlighted ? kNodeHighlight : kNodeBorder, highlighted ? 2 : 1));
+        painter.setBrush(QBrush(Theme::current().node_fill));
+        painter.setPen(QPen(highlighted ? Theme::current().node_highlight : Theme::current().node_border, highlighted ? 2 : 1));
         painter.drawRoundedRect(box, 5, 5);
-        painter.setPen(kNodeText);
+        painter.setPen(Theme::current().node_text);
         const QString label = QStringLiteral("bb_%1\n%2 bytes")
                                   .arg(node.address)
                                   .arg(node.size);

@@ -1,5 +1,7 @@
 #include "decompiler_view.h"
 
+#include "theme.h"
+
 #include <QFontDatabase>
 #include <QKeyEvent>
 #include <QMouseEvent>
@@ -9,30 +11,21 @@
 namespace {
 
 constexpr int kMargin = 8;
-const QColor kBackground("#101419");
-const QColor kDefaultText("#d6dee8");
-const QColor kVariable("#e5c07b");
-const QColor kFunctionName("#61afef");
-const QColor kOperator("#56b6c2");
-const QColor kKeyword("#c678dd");
-const QColor kHighlight("#3a4a5a");
-const QColor kCursorLine("#2a3542");
-const QColor kEmptyText("#7e8996");
 
 QColor colorForKind(const QString &kind) {
     if (kind == QStringLiteral("Variable")) {
-        return kVariable;
+        return Theme::current().variable;
     }
     if (kind == QStringLiteral("FuncName")) {
-        return kFunctionName;
+        return Theme::current().function_name;
     }
     if (kind == QStringLiteral("Operator") || kind == QStringLiteral("Syntax")) {
-        return kOperator;
+        return Theme::current().operator_;
     }
     if (kind == QStringLiteral("Keyword") || kind == QStringLiteral("Type")) {
-        return kKeyword;
+        return Theme::current().keyword;
     }
-    return kDefaultText;
+    return Theme::current().operands;
 }
 
 }  // namespace
@@ -144,7 +137,7 @@ const TokenView *DecompilerView::tokenAt(const QPoint &pos,
 
 void DecompilerView::paintEvent(QPaintEvent *) {
     QPainter painter(this);
-    painter.fillRect(rect(), kBackground);
+    painter.fillRect(rect(), Theme::current().background);
     painter.setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
     const QFontMetrics metrics = painter.fontMetrics();
     const int line_height = qMax(1, metrics.lineSpacing());
@@ -152,7 +145,7 @@ void DecompilerView::paintEvent(QPaintEvent *) {
     const int visible = qMax(1, (height() - 2 * kMargin) / line_height);
 
     if (lines_.isEmpty()) {
-        painter.setPen(kEmptyText);
+        painter.setPen(Theme::current().empty_text);
         painter.drawText(kMargin, kMargin + metrics.ascent(),
                          pending_message_.isEmpty()
                              ? QStringLiteral("No decompilation loaded")
@@ -166,14 +159,14 @@ void DecompilerView::paintEvent(QPaintEvent *) {
         bool line_highlighted = false;
         if (i == cursor_line_) {
             painter.fillRect(QRect(0, y - metrics.ascent(), width(), line_height),
-                             kCursorLine);
+                             Theme::current().cursor_line);
         }
         int x = kMargin + static_cast<int>(line.indent) * char_w;
         for (const TokenView &token : line.tokens) {
             if (!highlight_address_.isEmpty() && token.address == highlight_address_) {
                 painter.fillRect(QRect(x, y - metrics.ascent(),
                                        qMax(1, token.text.size() * char_w), line_height),
-                                 kHighlight);
+                                 Theme::current().highlight);
                 line_highlighted = true;
             }
             painter.setPen(colorForKind(token.kind));
@@ -186,7 +179,7 @@ void DecompilerView::paintEvent(QPaintEvent *) {
                 if (token.kind == QStringLiteral("Variable") &&
                     token.text == highlight_symbol_) {
                     painter.fillRect(QRect(0, y - metrics.ascent(), width(), line_height),
-                                     kHighlight);
+                                     Theme::current().highlight);
                     break;
                 }
             }

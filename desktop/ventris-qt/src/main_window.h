@@ -14,6 +14,7 @@ class HexCanvas;
 class ListingCanvas;
 class NavigationController;
 class QInputDialog;
+class QDialog;
 class QLabel;
 class QTimer;
 class QLineEdit;
@@ -66,6 +67,7 @@ private:
     int beginJob(const QString &label);
     void finishJob(int index, bool ok, const QString &detail);
     void cancelJob();
+    void showCommandPalette();
     void setStatus(const QString &message, bool error = false);
     void restoreWorkspace();
     void saveWorkspace();

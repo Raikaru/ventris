@@ -7,6 +7,7 @@
 #include "hex_canvas.h"
 #include "listing_canvas.h"
 #include "strings_table_model.h"
+#include "theme.h"
 #include "navigation_controller.h"
 #include "json_util.h"
 
@@ -16,6 +17,7 @@
 #include <QKeySequence>
 #include <QInputDialog>
 #include <QShortcut>
+#include <functional>
 #include <QMenu>
 #include <QTimer>
 #include <QJsonArray>
@@ -217,6 +219,11 @@ MainWindow::MainWindow(const QString &project, const QString &program, const QSt
             dialog.resize(420, 480);
             dialog.exec();
         });
+        // Command palette (Ctrl+Shift+P): every action reachable here.
+        auto *palette_shortcut =
+            new QShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+P")), this);
+        connect(palette_shortcut, &QShortcut::activated, this,
+                &MainWindow::showCommandPalette);
         connect(decompiler_, &DecompilerView::renameRequested, this,
                 [this](const QString &address, const QString &current_name) {
                     QInputDialog dialog(this);
@@ -927,6 +934,89 @@ void MainWindow::loadHexAt(const QString &address) {
                      });
 }
 
+void MainWindow::showCommandPalette() {
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("Command palette"));
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *filter_edit = new QLineEdit(&dialog);
+    filter_edit->setPlaceholderText(QStringLiteral("Type a command"));
+    auto *list = new QListWidget(&dialog);
+    layout->addWidget(filter_edit);
+    layout->addWidget(list, 1);
+
+    struct Command {
+        QString name;
+        std::function<void()> run;
+    };
+    const QVector<Command> commands = {
+        {QStringLiteral("Go to address (G)"), [this]() {
+             QInputDialog input(this);
+             input.setWindowTitle(QStringLiteral("Go to address"));
+             input.setLabelText(QStringLiteral("Address (hex):"));
+             input.setTextValue(address_edit_->text());
+             if (input.exec() == QDialog::Accepted && !input.textValue().trimmed().isEmpty()) {
+                 navigation_->goTo(input.textValue().trimmed(), true);
+             }
+         }},
+        {QStringLiteral("Go to function (Ctrl+P)"), [this]() { loadFacts(); }},
+        {QStringLiteral("Decompile current address"), [this]() { decompile(); }},
+        {QStringLiteral("Load listing at current address"), [this]() { loadListing(); }},
+        {QStringLiteral("Show xrefs for current address"), [this]() { loadXrefs(); }},
+        {QStringLiteral("Refresh function list"), [this]() { function_model_->refresh(); }},
+        {QStringLiteral("Undo last command (Ctrl+Z)"), [this]() { undoCommand(); }},
+        {QStringLiteral("Import native binary"), [this]() { importNative(); }},
+        {QStringLiteral("Open program"), [this]() { openProgram(); }},
+        {QStringLiteral("Toggle bytes column (Ctrl+B)"), [this]() {
+             listing_canvas_->setBytesVisible(!listing_canvas_->bytesVisible());
+         }},
+        {QStringLiteral("Show function graph (Space)"), [this]() {
+             loadGraph();
+             graph_dock_->raise();
+         }},
+        {QStringLiteral("Cancel selected job"), [this]() { cancelJob(); }},
+        {QStringLiteral("Theme: dark"), [this]() {
+             Theme::setName(QStringLiteral("dark"));
+             setStatus(QStringLiteral("theme set to dark (repaints on next paint)"), false);
+         }},
+        {QStringLiteral("Theme: light"), [this]() {
+             Theme::setName(QStringLiteral("light"));
+             setStatus(QStringLiteral("theme set to light"), false);
+         }},
+        {QStringLiteral("Theme: high contrast"), [this]() {
+             Theme::setName(QStringLiteral("contrast"));
+             setStatus(QStringLiteral("theme set to high contrast"), false);
+         }},
+    };
+    for (const Command &command : commands) {
+        list->addItem(command.name);
+    }
+    connect(filter_edit, &QLineEdit::textChanged, list, [list](const QString &text) {
+        const QString needle = text.toLower();
+        for (int i = 0; i < list->count(); ++i) {
+            list->item(i)->setHidden(!list->item(i)->text().toLower().contains(needle));
+        }
+        for (int i = 0; i < list->count(); ++i) {
+            if (!list->item(i)->isHidden()) {
+                list->setCurrentRow(i);
+                break;
+            }
+        }
+    });
+    connect(list, &QListWidget::itemActivated, this,
+            [&dialog, &commands, list](QListWidgetItem *item) {
+                dialog.accept();
+                for (const Command &command : commands) {
+                    if (command.name == item->text()) {
+                        command.run();
+                        return;
+                    }
+                }
+            });
+    filter_edit->setFocus();
+    dialog.resize(460, 420);
+    dialog.exec();
+}
+
 void MainWindow::loadGraph() {
     if (binary_edit_->text().isEmpty() || address_edit_->text().isEmpty()) {
         return;
@@ -1498,7 +1588,7 @@ void MainWindow::cancelJob() {
 void MainWindow::setStatus(const QString &message, bool error) {
         status_->setText(message);
         status_->setStyleSheet(error ? QStringLiteral("color:#e06c75")
-                                     : QStringLiteral("color:#98c379"));
+                                     : QStringLiteral("color:#98c379"));  // theme: status
     }
 
 void MainWindow::restoreWorkspace() {

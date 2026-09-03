@@ -1,5 +1,7 @@
 #include "hex_canvas.h"
 
+#include "theme.h"
+
 #include <QFontDatabase>
 #include <QKeyEvent>
 #include <QMouseEvent>
@@ -10,13 +12,6 @@ namespace {
 
 constexpr int kMargin = 8;
 constexpr int kBytesPerRow = 16;
-const QColor kBackground("#101419");
-const QColor kOffsetColumn("#79b8ff");
-const QColor kHexText("#d6dee8");
-const QColor kAsciiText("#8fa8bf");
-const QColor kPointer("#56b6c2");
-const QColor kCursorLine("#2a3542");
-const QColor kEmptyText("#7e8996");
 
 }  // namespace
 
@@ -127,7 +122,7 @@ void HexCanvas::ensureWindowAround(int row) {
 
 void HexCanvas::paintEvent(QPaintEvent *) {
     QPainter painter(this);
-    painter.fillRect(rect(), kBackground);
+    painter.fillRect(rect(), Theme::current().background);
     painter.setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
     const QFontMetrics metrics = painter.fontMetrics();
     const int line = qMax(1, metrics.lineSpacing());
@@ -136,7 +131,7 @@ void HexCanvas::paintEvent(QPaintEvent *) {
     const int rows = bytes_.size() / kBytesPerRow;
 
     if (bytes_.isEmpty()) {
-        painter.setPen(kEmptyText);
+        painter.setPen(Theme::current().empty_text);
         painter.drawText(kMargin, kMargin + metrics.ascent(),
                          QStringLiteral("No bytes loaded"));
         return;
@@ -149,10 +144,10 @@ void HexCanvas::paintEvent(QPaintEvent *) {
         }
         const int y = kMargin + r * line + metrics.ascent();
         if (row == cursor_) {
-            painter.fillRect(QRect(0, y - metrics.ascent(), width(), line), kCursorLine);
+            painter.fillRect(QRect(0, y - metrics.ascent(), width(), line), Theme::current().cursor_line);
         }
         int x = kMargin;
-        painter.setPen(kOffsetColumn);
+        painter.setPen(Theme::current().offset_column);
         const quint64 offset = base_offset_ + static_cast<quint64>(row) * kBytesPerRow;
         painter.drawText(x, y, QStringLiteral("0x%1").arg(offset, 8, 16, QLatin1Char('0')));
         x += 12 * char_w;
@@ -163,7 +158,7 @@ void HexCanvas::paintEvent(QPaintEvent *) {
                 break;
             }
             const bool pointer = (c % 8 == 0) && !pointerAt(row, c).isEmpty();
-            painter.setPen(pointer ? kPointer : kHexText);
+            painter.setPen(pointer ? Theme::current().pointer : Theme::current().hex_text);
             painter.drawText(x, y,
                              QStringLiteral("%1").arg(static_cast<quint8>(bytes_.at(index)),
                                                       2, 16, QLatin1Char('0')));
@@ -173,7 +168,7 @@ void HexCanvas::paintEvent(QPaintEvent *) {
             }
         }
         x += char_w;
-        painter.setPen(kAsciiText);
+        painter.setPen(Theme::current().ascii_text);
         QString ascii;
         for (int c = 0; c < kBytesPerRow; ++c) {
             const int index = row * kBytesPerRow + c;
