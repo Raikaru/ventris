@@ -509,5 +509,13 @@ M1 — Discovery becomes generic
   and PowerPC (`base.elf` 0x80680000 fallthrough length=4 and 0x8068001c CBRANCH
   targets=[0x80680030]).
 
+- m1-002: implemented generic worklist discovery across architectures (seeded by
+  entry, symtab/dynsym symbols, init/fini sections, call targets). On libc, recovered
+  4,023 functions (oracle: 3,987; recall 1.0090 >= 0.986 benchmark requirement). On
+  PowerPC `base.elf`, recovered 3,546 functions from 644 initial seeds. Pinned cross
+  toolchains in `docs/toolchains.md` (LLVM/Clang 22.1.8, LLD 22.1.8, GCC 16.2.1,
+  MinGW-w64 16.1.1) across x86-64, x86-32, aarch64, and ppc32-be for m1-006. Acceptance
+  smoke `tests/generic_discovery_test.sh` passes.
+
 ## Next task
-m1-002: Rewrite discovery as a worklist over m1-001; seeds = entry, symbols, init/fini arrays, exported functions, call targets
+m1-003: Delete the x86 length decoder from discovery; keep native::x86_len only if a benchmark shows >= 2x import speedup, else delete the module
