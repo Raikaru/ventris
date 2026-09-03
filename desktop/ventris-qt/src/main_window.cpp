@@ -287,6 +287,46 @@ MainWindow::MainWindow(const QString &project, const QString &program, const QSt
             program_edit_->setText(name_dialog.textValue().trimmed());
             importNative();
         });
+        // Phase 4 surfaces: signature search and vtable recovery.
+        auto *search_menu = menuBar()->addMenu(QStringLiteral("&Search"));
+        search_menu->addAction(QStringLiteral("Byte-pattern &signature…"), this,
+                               [this]() { showSignatureSearch(); });
+        search_menu->addAction(QStringLiteral("Recover &vtables"), this, [this]() {
+            if (binary_edit_->text().isEmpty()) {
+                setStatus(QStringLiteral("no binary loaded"), true);
+                return;
+            }
+            const int job = beginJob(QStringLiteral("vtable recovery"));
+            bridge_->request(
+                QJsonObject{{"method", "recover_vtables"},
+                            {"binary", binary_edit_->text()},
+                            {"limit", 512}},
+                [this, job](const QJsonObject &response) {
+                    QString error;
+                    if (!successful(response, &error)) {
+                        finishJob(job, false, error);
+                        return;
+                    }
+                    vtables_->setRowCount(0);
+                    const QJsonArray rows = response.value("result").toArray();
+                    for (const QJsonValue &value : rows) {
+                        const QJsonObject row = value.toObject();
+                        const int index = vtables_->rowCount();
+                        vtables_->insertRow(index);
+                        const QStringList targets =
+                            row.value("targets").toVariant().toStringList();
+                        vtables_->setItem(index, 0,
+                                          new QTableWidgetItem(QStringLiteral("0x") +
+                                                               row.value("address").toString()));
+                        vtables_->setItem(index, 1,
+                                          new QTableWidgetItem(QString::number(targets.size())));
+                        vtables_->setItem(index, 2,
+                                          new QTableWidgetItem(targets.join(QStringLiteral(", "))));
+                    }
+                    finishJob(job, true,
+                              QStringLiteral("%1 vtables recovered").arg(rows.size()));
+                });
+        });
         connect(decompiler_, &DecompilerView::renameRequested, this,
                 [this](const QString &address, const QString &current_name) {
                     QInputDialog dialog(this);
@@ -577,6 +617,25 @@ MainWindow::MainWindow(const QString &project, const QString &program, const QSt
         jobs_dock->setObjectName(QStringLiteral("analysisJobsDock"));
         jobs_dock->setWidget(jobs_panel);
         addDockWidget(Qt::BottomDockWidgetArea, jobs_dock);
+
+        vtables_ = new QTableWidget(0, 3, this);
+        vtables_->setObjectName(QStringLiteral("vtablesView"));
+        vtables_->setHorizontalHeaderLabels(
+            {QStringLiteral("Address"), QStringLiteral("Entries"), QStringLiteral("Targets")});
+        vtables_->horizontalHeader()->setStretchLastSection(true);
+        vtables_->verticalHeader()->setVisible(false);
+        vtables_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        connect(vtables_, &QTableWidget::itemDoubleClicked, this,
+                [this](QTableWidgetItem *item) {
+                    const int row = item->row();
+                    if (auto *first = vtables_->item(row, 0)) {
+                        navigation_->goTo(first->text(), true);
+                    }
+                });
+        auto *vtables_dock = new QDockWidget(QStringLiteral("Vtables"), this);
+        vtables_dock->setObjectName(QStringLiteral("vtablesDock"));
+        vtables_dock->setWidget(vtables_);
+        addDockWidget(Qt::RightDockWidgetArea, vtables_dock);
 
         connect(navigation_, &NavigationController::addressChanged, this,
                 [this](const QString &address) {
@@ -996,6 +1055,59 @@ void MainWindow::loadHexAt(const QString &address) {
                          finishJob(job, true,
                                    QStringLiteral("%1 bytes").arg(bytes.size()));
                      });
+}
+
+void MainWindow::showSignatureSearch() {
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("Byte-pattern signature search"));
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *pattern_edit = new QLineEdit(&dialog);
+    pattern_edit->setPlaceholderText(QStringLiteral("Pattern: E8 ?? ?? ?? ??"));
+    auto *list = new QListWidget(&dialog);
+    layout->addWidget(pattern_edit);
+    layout->addWidget(list, 1);
+    connect(pattern_edit, &QLineEdit::returnPressed, this, [this, &dialog, pattern_edit, list]() {
+        const QString pattern = pattern_edit->text().trimmed();
+        if (pattern.isEmpty()) {
+            return;
+        }
+        list->clear();
+        list->addItem(QStringLiteral("searching…"));
+        bridge_->request(
+            QJsonObject{{"method", "search_bytes"},
+                        {"binary", binary_edit_->text()},
+                        {"pattern", pattern},
+                        {"limit", 512}},
+            [this, list, pattern](const QJsonObject &response) {
+                list->clear();
+                QString error;
+                if (!successful(response, &error)) {
+                    list->addItem(QStringLiteral("error: ") + error);
+                    return;
+                }
+                const QJsonArray rows = response.value("result").toArray();
+                for (const QJsonValue &value : rows) {
+                    const QJsonObject row = value.toObject();
+                    auto *item = new QListWidgetItem(addressText(row.value("address")));
+                    item->setData(Qt::UserRole, addressText(row.value("address")));
+                    list->addItem(item);
+                }
+                if (rows.isEmpty()) {
+                    list->addItem(QStringLiteral("no matches for ") + pattern);
+                }
+            });
+    });
+    connect(list, &QListWidget::itemActivated, this,
+            [this, &dialog](QListWidgetItem *item) {
+                const QString address = item->data(Qt::UserRole).toString();
+                if (!address.isEmpty()) {
+                    dialog.accept();
+                    navigation_->goTo(address, true);
+                }
+            });
+    pattern_edit->setFocus();
+    dialog.resize(420, 420);
+    dialog.exec();
 }
 
 void MainWindow::showCommandPalette() {

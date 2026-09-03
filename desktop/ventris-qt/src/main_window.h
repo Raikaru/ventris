@@ -73,6 +73,7 @@ private:
     void cancelJob();
     void showCommandPalette();
     void checkOnboardingGate();
+    void showSignatureSearch();
     void setStatus(const QString &message, bool error = false);
     void restoreWorkspace();
     void saveWorkspace();
@@ -114,6 +115,7 @@ private:
     GraphCanvas *graph_canvas_ = nullptr;
     QDockWidget *graph_dock_ = nullptr;
     QMenu *recent_menu_ = nullptr;
+    QTableWidget *vtables_ = nullptr;
     DecompilerView *decompiler_ = nullptr;
     QLabel *status_ = nullptr;
     HexCanvas *hex_canvas_ = nullptr;
