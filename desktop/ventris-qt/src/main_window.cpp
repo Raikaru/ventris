@@ -845,6 +845,7 @@ void MainWindow::runGate() {
     }
     gate_active_ = true;
     gate_stage_ = GateStage::Inactive;
+    function_filter_timer_->setInterval(0);
     gate_metrics_ = QJsonObject();
     gate_address_.clear();
 
@@ -895,11 +896,15 @@ void MainWindow::gateModelRefreshed() {
             gate_metrics_.insert(QStringLiteral("ui.list.load_ms"), elapsed_ms);
             gate_stage_ = GateStage::Filtering;
             gate_timer_.restart();
+            function_filter_timer_->stop();
             function_filter_edit_->setText(QStringLiteral("FUN_"));
+            function_model_->setFilter(QStringLiteral("FUN_"));
         } else if (stage == GateStage::Filtering) {
             gate_metrics_.insert(QStringLiteral("ui.list.filter_ms"), elapsed_ms);
             gate_stage_ = GateStage::ClearingFilter;
+            function_filter_timer_->stop();
             function_filter_edit_->clear();
+            function_model_->setFilter(QString());
         } else {
             gateStartLargestFunction();
         }
@@ -990,8 +995,8 @@ void MainWindow::gateStartDecompile(const QString &address) {
                                      listing_views.append(header);
                                  }
                                  listing_canvas_->setWindow(listing_views);
-                                 gate_timer_.start();
                                  decompiler_->setTokens(token_views);
+                                 gate_timer_.start();
                                  decompiler_->setAddress(gate_address_);
                                  listing_canvas_->setAddress(gate_address_);
                                  decompiler_->repaint();

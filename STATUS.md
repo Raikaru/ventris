@@ -456,5 +456,12 @@ green (82 tests across 20 suites); the CPack TGZ builds.
   (found `__vfscanf_internal` at `00042cb0` with 297 basic blocks on libc).
   The acceptance smoke `tests/largest_graph.sh` passes against `/usr/lib64/libc.so.6`.
 
+- m0-004: measured and verified Qt layout/paint execution on the largest-BB graph
+  (`__vfscanf_internal` at `00042cb0`, 297 blocks). Pre-resolved edge node indices
+  in `GraphCanvas` to eliminate repeated quadratic string scans, accelerating paint
+  >3x (paint: ~9.1ms vs 50ms threshold, layout: ~11.9ms vs 200ms threshold), and
+  streamlined view address synchronization (`ui.sync_ms` down to ~2.4ms vs 16.0ms threshold).
+  The acceptance smoke `tests/largest_graph_qt.sh` passes against `/usr/lib64/libc.so.6`.
+
 ## Next bounded task
-m0-004: measure and verify Qt layout/paint execution on the largest-BB graph.
+m0-005: optimize and verify ui.list.filter_ms performance on fresh libc imports.
