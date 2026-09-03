@@ -405,4 +405,25 @@ mod tests {
         let _ = child2.wait();
         assert!(pool.idle.is_empty());
     }
+    #[test]
+    fn jobs_page_surfaces_killed_worker_during_decompile() {
+        let mut pool = WorkerPool::new(PoolConfig {
+            decompiler: PathBuf::new(),
+            spec_root: PathBuf::new(),
+            binary: PathBuf::new(),
+            program: "jobs-test".into(),
+            project_dir: PathBuf::new(),
+            base: 0,
+            deadline: Duration::from_secs(1),
+            memory_cap: 4096,
+        });
+        let job = pool.begin_job("decompile", Some(0x400466));
+        pool.finish_job(job, Some("worker killed during decompile".into()));
+
+        let page = pool.jobs_page(0, 10);
+        assert_eq!(page.total, 1);
+        assert_eq!(page.rows[0].state, JobState::Failed);
+        assert_eq!(page.rows[0].address, Some(0x400466));
+        assert!(page.rows[0].detail.contains("worker killed"));
+    }
 }
