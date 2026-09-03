@@ -287,33 +287,42 @@ pub fn console_discover(
     for _ in 0..2 {
         read_until_prompt(&mut reader)?;
     }
-    let mut pending_seeds: Vec<u64> = seeds.to_vec();
+    // The initial seed list is uncapped (import may have found thousands of
+    // functions); discovery processes at most the first 64 per the same
+    // budget that caps seeds discovered mid-round.
+    let mut pending_seeds: Vec<u64> = seeds.iter().copied().take(64).collect();
     let mut all: Vec<(u64, u64)> = Vec::new();
     let mut calls: Vec<(u64, u64)> = Vec::new();
     let mut seen: Vec<u64> = Vec::new();
     let mut rounds = 0;
+    // Discovery budget: large binaries (libc-class) disassemble slowly per
+    // function; the in-Rust walk already covers the closure, so the console
+    // pass stops on time rather than blocking imports for minutes.
+    let budget = std::time::Duration::from_secs(60);
+    let deadline = std::time::Instant::now() + budget;
     while !pending_seeds.is_empty() && rounds < 8 {
         rounds += 1;
         let this_round = std::mem::take(&mut pending_seeds);
-        let mut pending: Vec<String> = Vec::new();
         for (i, s) in this_round.iter().enumerate() {
-            pending.push(format!("map function {s:#x} f{i}"));
-            pending.push(format!("load function f{i}"));
-            pending.push("disassemble".into());
+            if std::time::Instant::now() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return derive_functions(all, calls);
+            }
+            let script = format!(
+                "map function {s:#x} f{i}\nload function f{i}\ndisassemble\n"
+            );
+            stdin
+                .write_all(script.as_bytes())
+                .and_then(|_| stdin.flush())
+                .map_err(|e| NativeRuntimeError(format!("console write: {e}")))?;
             all.push((*s, 0));
-        }
-        let expected_prompts = this_round.len() * 3;
-        let script = pending.join("\n") + "\n";
-        stdin
-            .write_all(script.as_bytes())
-            .and_then(|_| stdin.flush())
-            .map_err(|e| NativeRuntimeError(format!("console write: {e}")))?;
-        let mut last_addr: Option<u64> = None;
-        // One prompt per command; each chunk carries the echoed command and
-        // its output, terminated by the next prompt.
-        for _ in 0..expected_prompts {
-            let chunk = read_until_prompt(&mut reader)?;
-            for line_buf in chunk.lines() {
+            let mut last_addr: Option<u64> = None;
+            // One prompt per command; each chunk carries the echoed command
+            // and its output, terminated by the next prompt.
+            for _ in 0..3 {
+                let chunk = read_until_prompt(&mut reader)?;
+                for line_buf in chunk.lines() {
                 let line = line_buf.trim_end();
                 let line = line.strip_prefix("[decomp]> ").unwrap_or(line);
                 if line.is_empty() {
@@ -324,8 +333,12 @@ pub fn console_discover(
                         if let Ok(addr) = u64::from_str_radix(addr_s.trim(), 16) {
                             last_addr = Some(addr);
                             // ELF startup convention: right before the indirect
-                            // __libc_start_main GOT call, RDI holds main.
-                            if tail.contains("MOV") && tail.contains("RDI") {
+                            // __libc_start_main GOT call, RDI holds main. Capped
+                            // like the CALL handler: on libc-class binaries every
+                            // MOV RDI immediate would otherwise become a seed.
+                            if tail.contains("MOV") && tail.contains("RDI")
+                                && pending_seeds.len() < 64
+                            {
                                 let mov_line = tail.split(',').nth(1).unwrap_or("");
                                 for tok in mov_line.split_whitespace() {
                                     if let Ok(t) = u64::from_str_radix(
@@ -364,10 +377,20 @@ pub fn console_discover(
                     }
                 }
             }
+            }
         }
     }
+    let _ = stdin.write_all(b"\n");
+    let _ = stdin.flush();
     drop(stdin);
     let _ = child.wait();
+    derive_functions(all, calls)
+}
+
+/// Derives function sizes from the sorted discovered entry list.
+fn derive_functions(all: Vec<(u64, u64)>, calls: Vec<(u64, u64)>)
+    -> Result<(Vec<(u64, u64)>, Vec<(u64, u64)>)>
+{
     let mut funcs: Vec<(u64, u64)> = Vec::new();
     let mut sorted: Vec<u64> = all.iter().map(|(a, _)| *a).collect();
     sorted.sort_unstable();

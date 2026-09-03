@@ -343,9 +343,11 @@ fn run_inner(args: &[String]) -> Result<(), String> {
             let program = args.get(2).ok_or("functions needs a program name")?.clone();
             let offset: u64 = flag(args, "--offset").and_then(|v| v.parse().ok()).unwrap_or(0);
             let limit: u64 = flag(args, "--limit").and_then(|v| v.parse().ok()).unwrap_or(0);
+            let filter = flag(args, "--filter");
+            let sort = flag(args, "--sort");
             let rows = if limit > 0 {
                 let page = core
-                    .functions_page(&program, offset, limit, None, None)
+                    .functions_page(&program, offset, limit, filter.as_deref(), sort.as_deref())
                     .map_err(|e| e.to_string())?;
                 println!("-- paged {}..{} of {:?} (rev {})", page.offset, page.offset + page.rows.len() as u64, page.total, page.revision);
                 page.rows
