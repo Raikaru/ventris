@@ -494,8 +494,12 @@ green (82 tests across 20 suites); the CPack TGZ builds.
   `jobs_dock`, `vtables_dock`) and extracted `gate_runner`. App behavior
   unchanged per m0-001; acceptance smoke `tests/main_window_split_test.py` passes.
 
+- m0-010: added `scripts/gen_support_matrix.py` to regenerate the README support
+  matrix from committed gate files, preventing manual overclaiming; added CI
+  staleness check and acceptance test `tests/support_matrix_test.py`.
+
 ## Current milestone
-M0 — Honest floor
+M0 — Honest floor (all tasks m0-001 through m0-010 implemented; final ui.install.ok verification awaits 3-OS CI on tag)
 
 ## Next task
-m0-010: scripts/gen_support_matrix.py regenerates the README matrix from gate files; CI fails if README matrix is stale
+m1-001: Console request: flow(addr) -> {fallthrough, targets[], kind} from pcode (BRANCH, CBRANCH, BRANCHIND, CALL, CALLIND, RETURN) for any loaded language

@@ -168,7 +168,7 @@ RUNS=3 VENTRIS_SLA=... ./benchmarks/gate.sh # memory/perf gates
 | Input | Structural native import | Native flow/decode/decompile |
 |---|---|---|
 | ELF x86-64 | supported | **supported and gated** |
-| PE32+ x86-64 | supported | **supported and gated** |
+| PE32+ x86-64 | supported | in progress |
 | ELF AARCH64 LE64 | supported | selected SLEIGH bundle required; not parity-gated |
 | ELF ARM LE32 | supported | selected SLEIGH bundle required; not parity-gated |
 | ELF MIPS LE32 | supported | selected SLEIGH bundle required; not parity-gated |
