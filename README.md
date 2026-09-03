@@ -92,7 +92,9 @@ methods by `read`, `write`, `types`, and `native` permissions. The optional
 mutation opt-in.
 
 `lre-debug` provides isolated GDB/LLDB read commands (backtrace, registers,
-and bounded memory reads) through fresh child processes with deadlines.
+and bounded memory reads) through fresh child processes with deadlines. Its
+read-only `DolphinGdb` client speaks acknowledged GDB RSP for live target
+memory; the Core/API/Qt `memory_live` surface reuses that connection.
 `trace_events` stores an ordered timeline; `collab_ops` stores idempotent
 Lamport/actor-ordered operations and explicit apply state, so API clients can
 share durable analysis changes without sharing SQLite connections.
@@ -131,6 +133,10 @@ RUNS=3 VENTRIS_SLA=... ./benchmarks/gate.sh # memory/perf gates
   browsing/reopen/rename; SLEIGH disassembly via the pinned console;
   decompilation via the raw-SLEIGH worker — token-identical to the Ghidra
   bridge oracle on the pinned fixtures (differential test).
+- **Targeted GameCube sample (`Agent Under Fire`, GQFE78 `base.elf`)**:
+  native ELF32 big-endian PowerPC import and JVM-free e500 decompilation
+  are verified with the matching vendored SLEIGH bundle. Prototype edits
+  are applied through the worker and appear in decompiler tokens.
 - **Gate numbers (tiny ELF fixture, this machine)**: Stage-4 workflow peak
   RSS 39.9 MB (3-run median) vs the 375 MiB stock-Ghidra baseline; median
   end-to-end wall 0.32 s vs 10.83 s stock. See
@@ -159,10 +165,6 @@ RUNS=3 VENTRIS_SLA=... ./benchmarks/gate.sh # memory/perf gates
 
 ## Support matrix
 
-The architecture catalog reads the installed Ghidra `.ldefs` files and
-`lre-cli architectures` reports the exact language ids available locally.
-Native structural import selects these language ids from ELF `e_machine`:
-
 | Input | Structural native import | Native flow/decode/decompile |
 |---|---|---|
 | ELF x86-64 | supported | **supported and gated** |
@@ -171,13 +173,13 @@ Native structural import selects these language ids from ELF `e_machine`:
 | ELF ARM LE32 | supported | selected SLEIGH bundle required; not parity-gated |
 | ELF MIPS LE32 | supported | selected SLEIGH bundle required; not parity-gated |
 | ELF RISC-V LE64 | supported | selected SLEIGH bundle required; not parity-gated |
-| ELF PowerPC LE32/LE64 | supported | selected SLEIGH bundle required; not parity-gated |
+| ELF PowerPC LE32/LE64 | supported | e500 BE32 parity verified on Agent Under Fire; broader targets not gated |
 
 The fallback flow walker and PE parser are x86-64-specific. Non-x86 ELF
 imports preserve mappings, symbols, and the entry point for a matching
 `VENTRIS_LANGUAGE`, `VENTRIS_LANGUAGE_DIR`, and `VENTRIS_SLA` worker bundle;
-cross-architecture decompile parity is not claimed yet. The catalog itself
-was exercised against the pinned Ghidra installation.
+the Agent Under Fire e500 bundle is the currently verified non-x86 target.
+The catalog itself was exercised against the pinned Ghidra installation.
 
 ## Packaging and desktop status
 
@@ -185,9 +187,11 @@ was exercised against the pinned Ghidra installation.
 configuration. `packaging/sbom.py` emits an SPDX 2.3 dependency inventory;
 `packaging/update_manifest.py` creates release artifact size/SHA-256 metadata;
 `packaging/verify_update.py` verifies downloaded artifacts before use.
-The local environment used for this status report has no Qt 6 development
-package, so CMake configure and visual UI verification remain unavailable
-here. CI is the authoritative cross-platform Qt build.
+This workstation has Qt 6 development files; CMake configure and the
+`ventris-qt` target build pass locally, and the app has an offscreen launch
+smoke check. CI remains authoritative for the cross-platform package.
+CMake configure and visual UI verification remain unavailable on machines
+without the Qt development package.
 
 Known limits remain: indirect-only CRT helpers (`_init`,
 `register_tm_clones`, PLT shims) are not recovered by native discovery; PE
@@ -195,4 +199,6 @@ discovery uses the entry walk (closure granularity differs from Ghidra's
 analyzer: 310 vs 138 on the fixture); the x86-64 worker needs `VENTRIS_SLA`
 and a patched `ghidra_opt`; the API HTTP listener is localhost-oriented and
 does not provide authentication; the Python plugin host is the capability
-boundary for untrusted scripts.
+boundary for untrusted scripts. The live overlay was also smoke-tested against
+Dolphin 2606a's real GDB stub using the Agent Under Fire RVZ. A live read at
+0x80000000 returned the game ID bytes `GW7E69`.

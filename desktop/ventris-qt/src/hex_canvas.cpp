@@ -28,6 +28,14 @@ void HexCanvas::setWindow(quint64 base_offset, const QByteArray &bytes) {
     update();
 }
 
+void HexCanvas::setLiveSource(bool live) {
+    if (live_source_ == live) {
+        return;
+    }
+    live_source_ = live;
+    update();
+}
+
 void HexCanvas::setAddress(const QString &address) {
     bool ok = false;
     const quint64 target = address.toULongLong(&ok, 16);
@@ -125,6 +133,10 @@ void HexCanvas::paintEvent(QPaintEvent *) {
     painter.fillRect(rect(), Theme::current().background);
     painter.setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
     const QFontMetrics metrics = painter.fontMetrics();
+    const QString source = live_source_ ? QStringLiteral("LIVE") : QStringLiteral("FILE");
+    painter.setPen(live_source_ ? Theme::current().pointer : Theme::current().offset_column);
+    painter.drawText(width() - metrics.horizontalAdvance(source) - kMargin,
+                     kMargin + metrics.ascent(), source);
     const int line = qMax(1, metrics.lineSpacing());
     const int char_w = metrics.horizontalAdvance(QLatin1Char('0'));
     const int visible = visibleRows();

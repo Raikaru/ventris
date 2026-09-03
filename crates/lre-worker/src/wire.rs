@@ -136,6 +136,8 @@ pub mod attr {
     pub const ID: u32 = 9;
     /// ATTRIB_NAME (marshal.cc:1245).
     pub const NAME: u32 = 14;
+    /// ATTRIB_LABEL (jumptable.cc:23; shared marshaling id).
+    pub const LABEL: u32 = 131;
     /// ATTRIB_OFFSET (marshal.cc:1247).
     pub const OFFSET: u32 = 16;
     /// ATTRIB_SIZE (marshal.cc:1252).

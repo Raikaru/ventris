@@ -211,6 +211,22 @@ impl ApiService {
                     "bytes": bytes,
                 }))
             }
+            "memory_live" => {
+                let endpoint = string_param(params, "endpoint")?;
+                let address = address_param(params, "address")?;
+                require_ram(&address)?;
+                let size = usize::try_from(u64_param(params, "size")?.unwrap_or(64))
+                    .map_err(|_| DispatchError::Request("size is too large".into()))?;
+                let bytes = self
+                    .core
+                    .read_memory_live(&endpoint, address.offset, size)?;
+                Ok(json!({
+                    "address": address,
+                    "size": bytes.len(),
+                    "source": "live",
+                    "bytes": bytes,
+                }))
+            }
             "listing" => {
                 let binary = path_param(params, "binary")?;
                 let start = address_param(params, "start")?;
@@ -582,6 +598,7 @@ fn write_http(stream: &mut TcpStream, status: &str, body: &str) -> Result<(), Ap
 mod tests {
     use super::*;
     use std::path::Path;
+    use std::io::{Read, Write};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn service() -> ApiService {
@@ -646,6 +663,59 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(response.contains(r#""api":1"#));
         assert!(response.contains(r#""service":"lre-core""#));
+    }
+    #[test]
+    fn live_memory_dispatch_returns_target_bytes() {
+        fn frame(payload: &[u8]) -> Vec<u8> {
+            let checksum = payload.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte));
+            let mut result = vec![b'$'];
+            result.extend_from_slice(payload);
+            result.extend_from_slice(format!("#{checksum:02x}").as_bytes());
+            result
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1];
+            stream.read_exact(&mut request).unwrap();
+            assert_eq!(request[0], b'$');
+            let mut payload = Vec::new();
+            loop {
+                let mut byte = [0u8; 1];
+                stream.read_exact(&mut byte).unwrap();
+                if byte[0] == b'#' {
+                    break;
+                }
+                payload.push(byte[0]);
+            }
+            let mut checksum = [0u8; 2];
+            stream.read_exact(&mut checksum).unwrap();
+            assert_eq!(payload, b"m10,2");
+            stream.write_all(b"+").unwrap();
+            stream.write_all(&frame(b"0102")).unwrap();
+            let mut ack = [0u8; 1];
+            stream.read_exact(&mut ack).unwrap();
+            assert_eq!(ack[0], b'+');
+        });
+
+        let request = serde_json::json!({
+            "api": 1,
+            "id": "live",
+            "method": "memory_live",
+            "params": {
+                "endpoint": endpoint.to_string(),
+                "address": "10",
+                "size": 2
+            }
+        });
+        let response: Value = serde_json::from_str(&service().handle_line(&request.to_string())).unwrap();
+        server.join().unwrap();
+        assert_eq!(response["result"]["source"], "live");
+        assert_eq!(response["result"]["size"], 2);
+        assert_eq!(response["result"]["bytes"], serde_json::json!([1, 2]));
+        assert!(response.get("error").is_none());
     }
 
 }

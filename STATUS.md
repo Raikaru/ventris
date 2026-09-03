@@ -12,12 +12,14 @@ workflow baseline (39.6 MB peak vs 375 MiB stock; see gate numbers below and
   bookmarks/patches, typed data manager and propagation, a versioned
   stdio/HTTP API, a dependency-free SDK and console, an isolated
   permissioned plugin host, and an AI tool adapter.
-- Phase 9 surfaces now include isolated GDB/LLDB read backends, durable trace
-  timeline events, and a deterministic, idempotent collaboration operation
-  log exposed by Core/API/Qt/SDK.
+- Phase 9 surfaces now include isolated GDB/LLDB read backends, a read-only
+  Dolphin GDB-RSP memory client for the live overlay, durable trace timeline
+  events, and a deterministic, idempotent collaboration operation log exposed
+  by Core/API/Qt/SDK.
 - Native ELF64 structural import selects Ghidra language ids for x86-64,
-  AARCH64, ARM, MIPS, RISC-V, and PowerPC. The fallback flow walker and
-  currently gated worker workflow remain x86-64-specific.
+  AARCH64, ARM, MIPS, RISC-V, and PowerPC. The fallback flow walker remains
+  x86-64-specific; the worker workflow is verified for x86-64 and the
+  Agent Under Fire PPC e500 target with matching SLEIGH/spec bundles.
 - `lre-cli architectures --project DIR` scans the installed `.ldefs` catalog.
   Non-x86 native decompile parity is not claimed without a matching compiled
   SLEIGH language and normalized specification bundle.
@@ -25,8 +27,8 @@ workflow baseline (39.6 MB peak vs 375 MiB stock; see gate numbers below and
   SPDX 2.3 SBOM; `update_manifest.py` and `verify_update.py` produce and
   validate release artifact metadata.
 - `.github/workflows/ci.yml` is the cross-platform build/test definition.
-  The current workstation lacks Qt 6 development files, so the Qt configure
-  and visual smoke path is CI-only here.
+  The Qt 6 development files are available on this workstation; the Qt
+  configure, target build, and offscreen launch smoke path run locally.
 
 ## Completed and verified
 - Scrap of the old partial-decompiler-port architecture; pinned Ghidra
@@ -37,7 +39,8 @@ workflow baseline (39.6 MB peak vs 375 MiB stock; see gate numbers below and
   dump_specs. Written against verified Ghidra sources only.
 - Rust workspace: lre-model, lre-db (SQLite WAL+FK, schema_version=1,
   revision-stamped mutations), lre-core (CoreService facade),
-  lre-cli, lre-worker. 14/14 unit tests pass.
+  lre-cli, lre-worker, and lre-debug. `cargo test --workspace`: 78 tests
+  pass across 20 suites.
 - E2E proven on x86-64 ELF fixture (gcc -O0, 12.6 KB):
   - import: 15 functions, 34 xrefs, 93 symbols persisted with
     provenance `ghidra-bridge / 12.1.3`
@@ -405,9 +408,7 @@ decompilation render (malloc_printerr decompiled JVM-free); the Qt app
 runs the libc project offscreen without crashing; `cargo test
 --workspace` is green (20 suites); the CPack TGZ builds.
 
-Engine-gated follow-ups (each blocks one roadmap exit criterion):
-- Worker prototype injection: type/prototype edits persist in the store
-  but the decompiler does not consume them yet (worker-004 follow-up).
+- Engine-gated follow-ups (each blocks one roadmap exit criterion):
 - Listing function-header/BB-separator rows need a `kind` field on
   `ListingRow` from the console source.
 - Pool-level job status (idle workers, restarts, memory caps) needs
@@ -420,14 +421,21 @@ Engine-gated follow-ups (each blocks one roadmap exit criterion):
   SLA, language dir, and spec bundle from the program's stored language
   id; the PPC e500 bundle is vendored; base.elf __start decompiles
   JVM-free with zero configuration. x86 unchanged.
-  Remaining gates, both scoped: (1) prototype injection into the
-  decompiler is a protocol extension — a new worker command encoding a
-  function shell with a signature (ELEM_FUNCTIONSHELL decode is
-  name-only today; full signatures need the Funcdata structure);
-  (2) the live-target memory overlay needs a Dolphin read backend in
-  lre-debug (GDB remote stub or /proc mem reader).
+  - Prototype injection is complete: the worker sends a packed function
+    shell, the native command parses and applies the full C prototype to
+    `FuncProto`, renames the loaded function, clears analysis, and the
+    Agent Under Fire PPC target smoke renders the edited name and params.
+  - Live-target memory overlay is complete at the transport, Core/API,
+    and Qt layers: `lre-debug` implements read-only GDB RSP memory reads,
+    Core reuses a bounded connection, and the hex canvas exposes a live
+    endpoint toggle and source marker. A deterministic local RSP server
+    verifies acknowledgements, checksum rejection, target errors, bounds,
+    connection reuse, and the two-byte read path. A real Dolphin validation
+    now also passes: Dolphin 2606a, headless `Null` backend, and the Agent
+    Under Fire RVZ served GDB port 24689; `memory_live` read 16 bytes at
+    `0x80000000`, beginning with `47 57 37 45 36 39` (`GW7E69`).
 
 ## Next bounded task
-Native getPcode server (SLEIGH pcode generation for
-GhidraTranslate::oneInstruction): the last gap between the protocol
-worker and a fully JVM-free decompile of the supported workflow.
+Listing row kinds: carry function-header and basic-block separator metadata
+from the core listing model so the Qt surface can render structural rows
+without inferring them from text.

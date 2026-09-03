@@ -8,7 +8,6 @@
 use crate::wire::{self, burst, encode_burst, encode_string_stream};
 use crate::{NativeWorker, Result, WorkerError};
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -75,6 +74,8 @@ pub struct ProgramProvider {
     pub external_names: HashMap<u64, String>,
     /// String data indexed by address for getStringData.
     pub strings: HashMap<u64, String>,
+    /// Entry address -> prototype signature override (from the store).
+    pub prototypes: HashMap<u64, String>,
     /// Track which space index `ram` occupies once the tspec registers it.
     pub ram_space_index: i64,
     /// Register space index from the tspec (x86-64: 4).
@@ -98,6 +99,7 @@ impl ProgramProvider {
             datatypes: HashMap::new(),
             external_names: HashMap::new(),
             strings: HashMap::new(),
+            prototypes: HashMap::new(),
             ram_space_index: 3,
             register_space_index: 4,
             registers: HashMap::new(),

@@ -25,6 +25,9 @@ public:
     /// Centers the view on `address` (requests a window when outside).
     void setAddress(const QString &address);
     void setRegions(const QVector<MemoryRegionView> &regions);
+    /// Switches the visible source marker between file and live target data.
+    void setLiveSource(bool live);
+    bool liveSource() const { return live_source_; }
     QSize sizeHint() const override;
 
 signals:
@@ -48,6 +51,7 @@ private:
     QString pointerAt(int row, int byte_column) const;
 
     QByteArray bytes_;
+    bool live_source_ = false;
     quint64 base_offset_ = 0;
     int cursor_ = 0;
     QVector<MemoryRegionView> regions_;

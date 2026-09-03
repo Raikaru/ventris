@@ -12,8 +12,10 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
-use crate::provider::{decode_addr_element, ProgramProvider};
-use crate::wire::{burst, decode_burst, encode_burst, encode_string_stream, encode_addr_element};
+use crate::provider::ProgramProvider;
+use crate::wire::{burst, decode_burst, encode_addr_element};
+#[cfg(test)]
+use crate::wire::{encode_burst, encode_string_stream};
 
 /// Worker failure.
 #[derive(Debug, thiserror::Error)]
@@ -49,6 +51,8 @@ pub struct NativeWorker {
     pub(crate) stdin: Option<ChildStdin>,
     pub(crate) stdout: ChildStdout,
     pub(crate) out_buf: Vec<u8>,
+    /// Architecture slot returned by registerProgram.
+    arch_id: i32,
     /// Path passed to ghidra_opt for diagnostics.
     pub binary: PathBuf,
 }
@@ -72,6 +76,7 @@ impl NativeWorker {
             .ok_or_else(|| WorkerError::Process("no stdout".into()))?;
         Ok(Self {
             child: std::sync::Arc::new(std::sync::Mutex::new(Some(child))),
+            arch_id: 0,
             stdin: Some(stdin),
             stdout,
             out_buf: Vec::new(),
@@ -104,8 +109,9 @@ impl NativeWorker {
     }
 
     /// Sends `registerProgram` with the four spec XML documents the pinned
-    /// ArchitectureGhidra::buildSpecFile expects (pspec, cspec, tspec,
-    /// corespec, in that order — see RegisterProgram::loadParameters).
+    /// ArchitectureGhidra::buildSpecFile expects plus a packed function-shell
+    /// document. The empty shell document preserves the old lazy symbol
+    /// lookup behavior for pooled callers.
     ///
     /// The native program queries are answered by `provider` during
     /// registration (getBytes, getRegister, ...) exactly as during any
@@ -118,12 +124,120 @@ impl NativeWorker {
         tspec: &str,
         corespec: &str,
     ) -> Result<()> {
-        let _ = self.run_command(
+        let shell = Self::encode_function_shell_doc(provider.ram_space_index as u32, &[]);
+        self.register_program_with_shell(provider, pspec, cspec, tspec, corespec, &shell)
+    }
+
+    /// Sends `registerProgram` with one or more preloaded function shells.
+    /// Shells are symbol-table backed by the native process, which lets the
+    /// subsequent `setFunctionSignature` command apply a full C prototype.
+    pub fn register_program_with_shell(
+        &mut self,
+        provider: &mut ProgramProvider,
+        pspec: &str,
+        cspec: &str,
+        tspec: &str,
+        corespec: &str,
+        function_shell: &[u8],
+    ) -> Result<()> {
+        let response = self.run_command(
             provider,
             "registerProgram",
-            &[pspec.as_bytes(), cspec.as_bytes(), tspec.as_bytes(), corespec.as_bytes()],
+            &[
+                pspec.as_bytes(),
+                cspec.as_bytes(),
+                tspec.as_bytes(),
+                corespec.as_bytes(),
+                function_shell,
+            ],
         )?;
+        self.arch_id = std::str::from_utf8(&response)
+            .ok()
+            .and_then(|value| value.trim().parse().ok())
+            .ok_or_else(|| WorkerError::Protocol("registerProgram returned no architecture id".into()))?;
         Ok(())
+    }
+
+    /// Applies a C declaration to a preloaded function through the native
+    /// decompiler's own prototype parser.
+    pub fn set_function_signature(
+        &mut self,
+        provider: &mut ProgramProvider,
+        function_address: u64,
+        function_name: &str,
+        signature: &str,
+    ) -> Result<()> {
+        let arch_id = self.arch_id.to_string();
+        let address = format!("{function_address:x}");
+        let signature = signature.trim();
+        let normalized = if signature.ends_with(';') {
+            signature.to_owned()
+        } else {
+            format!("{signature};")
+        };
+        let response = self.run_command(
+            provider,
+            "setFunctionSignature",
+            &[
+                arch_id.as_bytes(),
+                function_name.as_bytes(),
+                normalized.as_bytes(),
+                address.as_bytes(),
+            ],
+        )?;
+        if !response.is_empty() {
+            return Err(WorkerError::Decompiler(
+                String::from_utf8_lossy(&response).trim().to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Encodes the packed document accepted as registerProgram's fifth
+    /// parameter. Entries are `(RAM address, function name, byte size)`.
+    pub fn encode_function_shell_doc(
+        space_index: u32,
+        entries: &[(u64, &str, u64)],
+    ) -> Vec<u8> {
+        let mut doc = Vec::new();
+        crate::wire::encode_header(&mut doc, crate::wire::ELEMENT_START, crate::wire::elem::DOC);
+        for (offset, name, size) in entries {
+            crate::wire::encode_header(
+                &mut doc,
+                crate::wire::ELEMENT_START,
+                crate::wire::elem::MAPSYM,
+            );
+            crate::wire::encode_header(
+                &mut doc,
+                crate::wire::ELEMENT_START,
+                crate::wire::elem::FUNCTIONSHELL,
+            );
+            crate::wire::encode_string_attribute(&mut doc, crate::wire::attr::NAME, name.as_bytes());
+            crate::wire::encode_string_attribute(&mut doc, crate::wire::attr::LABEL, name.as_bytes());
+            crate::wire::encode_header(
+                &mut doc,
+                crate::wire::ELEMENT_END,
+                crate::wire::elem::FUNCTIONSHELL,
+            );
+            crate::wire::encode_addr_element_size(&mut doc, space_index, *offset, *size);
+            crate::wire::encode_header(
+                &mut doc,
+                crate::wire::ELEMENT_START,
+                crate::wire::elem::RANGELIST,
+            );
+            crate::wire::encode_header(
+                &mut doc,
+                crate::wire::ELEMENT_END,
+                crate::wire::elem::RANGELIST,
+            );
+            crate::wire::encode_header(
+                &mut doc,
+                crate::wire::ELEMENT_END,
+                crate::wire::elem::MAPSYM,
+            );
+        }
+        crate::wire::encode_header(&mut doc, crate::wire::ELEMENT_END, crate::wire::elem::DOC);
+        doc
     }
 
     /// Frame shape per DecompileProcess.sendCommandTimeout (Java client):
@@ -139,7 +253,8 @@ impl NativeWorker {
     ) -> Result<Vec<u8>> {
         let mut addr = Vec::new();
         encode_addr_element(&mut addr, space_index, offset);
-        self.run_command(provider, "decompileAt", &[b"0", &addr])
+        let arch_id = self.arch_id.to_string();
+        self.run_command(provider, "decompileAt", &[arch_id.as_bytes(), &addr])
     }
 
     /// Selects the decompiler action root (Java: `setAction "decompile" ""`),
@@ -151,10 +266,11 @@ impl NativeWorker {
         action: &str,
         print: &str,
     ) -> Result<()> {
+        let arch_id = self.arch_id.to_string();
         let _ = self.run_command(
             provider,
             "setAction",
-            &[b"0", action.as_bytes(), print.as_bytes()],
+            &[arch_id.as_bytes(), action.as_bytes(), print.as_bytes()],
         )?;
         Ok(())
     }
@@ -410,7 +526,8 @@ mod tests {
 
     #[test]
     fn register_program_frame_shape() {
-        // Frame: burst(2) "registerProgram" 4 string streams burst(3).
+        // Frame: burst(2) "registerProgram" 4 XML streams, one packed
+        // function-shell stream, then burst(3).
         let mut buf = Vec::new();
         encode_burst(&mut buf, burst::COMMAND_OPEN);
         encode_string_stream(&mut buf, b"registerProgram");
@@ -418,6 +535,7 @@ mod tests {
         encode_string_stream(&mut buf, b"<c/>");
         encode_string_stream(&mut buf, b"<t/>");
         encode_string_stream(&mut buf, b"<k/>");
+        encode_string_stream(&mut buf, &NativeWorker::encode_function_shell_doc(3, &[]));
         encode_burst(&mut buf, burst::COMMAND_CLOSE);
         // Spot-check the ordering of markers.
         assert_eq!(&buf[3..4], &[burst::COMMAND_OPEN]);

@@ -56,6 +56,9 @@ pub enum CoreError {
     /// Bridge layer failure.
     #[error("bridge: {0}")]
     Bridge(#[from] bridge::BridgeError),
+    /// Live-memory debugger transport failure.
+    #[error("debug: {0}")]
+    Debug(#[from] lre_debug::DebugError),
     /// Filesystem or environment problem outside db/bridge.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
@@ -79,6 +82,11 @@ pub enum CoreError {
 /// Convenience alias with the error defaulted per project convention.
 pub type Result<T, E = CoreError> = std::result::Result<T, E>;
 
+struct LiveMemoryConnection {
+    endpoint: String,
+    client: lre_debug::DolphinGdb,
+}
+
 /// The Core API: one authoritative semantic surface (spec 8.1).
 ///
 /// A GUI would call this in-process; the CLI does exactly that; the bridge is
@@ -91,6 +99,8 @@ pub struct Core {
     /// the CLI's scroll pattern is single-binary; `ProgramSession` (the
     /// sessionful image layer) supersedes it for interactive consumers.
     native_cache: std::cell::RefCell<Option<(PathBuf, std::sync::Arc<session::ProgramImage>)>>,
+    /// Reusable read-only Dolphin GDB connection for live-memory overlays.
+    live_memory: std::cell::RefCell<Option<LiveMemoryConnection>>,
     /// Immutable runtime configuration (env-derived by default).
     config: session::RuntimeConfig,
 }
@@ -104,6 +114,7 @@ impl Core {
             db,
             db_path: project_dir.to_path_buf(),
             native_cache: std::cell::RefCell::new(None),
+            live_memory: std::cell::RefCell::new(None),
             config: session::RuntimeConfig::from_env(),
         })
     }
@@ -116,6 +127,7 @@ impl Core {
             db,
             db_path: project_dir.to_path_buf(),
             native_cache: std::cell::RefCell::new(None),
+            live_memory: std::cell::RefCell::new(None),
             config,
         })
     }
@@ -953,6 +965,7 @@ impl Core {
                 cache.as_ref().unwrap().1.clone()
             }
         };
+
         image
             .read(vaddr, size as u64)
             .ok_or_else(|| {
@@ -963,6 +976,40 @@ impl Core {
             })
     }
 
+    /// Reads live target memory through Dolphin's GDB stub.
+    ///
+    /// The TCP connection is reused for successive viewport reads at the
+    /// same endpoint. A failed request drops the connection so the next
+    /// request starts cleanly.
+    pub fn read_memory_live(
+        &self,
+        endpoint: &str,
+        address: u64,
+        size: usize,
+    ) -> Result<Vec<u8>> {
+        let endpoint = endpoint.trim();
+        let mut cached = self.live_memory.borrow_mut();
+        let reconnect = cached
+            .as_ref()
+            .map(|connection| connection.endpoint != endpoint)
+            .unwrap_or(true);
+        if reconnect {
+            let client = lre_debug::DolphinGdb::connect(endpoint)?;
+            *cached = Some(LiveMemoryConnection {
+                endpoint: endpoint.to_string(),
+                client,
+            });
+        }
+        let result = cached
+            .as_mut()
+            .expect("live-memory connection initialized")
+            .client
+            .read_memory(address, size);
+        if result.is_err() {
+            *cached = None;
+        }
+        result.map_err(CoreError::from)
+    }
     /// Opens a program session: the binary mapped once, regions derived,
     /// metadata captured. Every interactive view and worker shares the
     /// image; repeated reads never re-parse or re-discover the file.
@@ -1069,6 +1116,8 @@ fn parse_function_sort(text: &str) -> Result<(lre_db::FunctionSort, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -1121,5 +1170,59 @@ mod tests {
         assert!(core.apply_collaboration_op("p", "rename-1").unwrap());
         assert_eq!(core.functions("p").unwrap()[0].name, "main");
         assert!(!core.apply_collaboration_op("p", "rename-1").unwrap());
+    }
+    #[test]
+    fn live_memory_reuses_dolphin_connection() {
+        fn frame(payload: &[u8]) -> Vec<u8> {
+            let checksum = payload.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte));
+            let mut result = Vec::with_capacity(payload.len() + 5);
+            result.push(b'$');
+            result.extend_from_slice(payload);
+            result.extend_from_slice(format!("#{checksum:02x}").as_bytes());
+            result
+        }
+
+        fn read_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
+            let mut start = [0u8; 1];
+            stream.read_exact(&mut start).unwrap();
+            assert_eq!(start[0], b'$');
+            let mut payload = Vec::new();
+            loop {
+                let mut byte = [0u8; 1];
+                stream.read_exact(&mut byte).unwrap();
+                if byte[0] == b'#' {
+                    break;
+                }
+                payload.push(byte[0]);
+            }
+            let mut checksum = [0u8; 2];
+            stream.read_exact(&mut checksum).unwrap();
+            payload
+        }
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let endpoint = listener.local_addr().unwrap().to_string();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            for (request, response) in [(b"m10,2".as_slice(), b"0102".as_slice()),
+                                         (b"m20,2".as_slice(), b"a0b0".as_slice())] {
+                assert_eq!(read_request(&mut stream), request);
+                stream.write_all(b"+").unwrap();
+                stream.write_all(&frame(response)).unwrap();
+                let mut ack = [0u8; 1];
+                stream.read_exact(&mut ack).unwrap();
+                assert_eq!(ack[0], b'+');
+            }
+        });
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let project = std::env::temp_dir().join(format!("ventris-core-live-{nonce}"));
+        let core = Core::open(&project).unwrap();
+        assert_eq!(core.read_memory_live(&endpoint, 0x10, 2).unwrap(), vec![1, 2]);
+        assert_eq!(core.read_memory_live(&endpoint, 0x20, 2).unwrap(), vec![0xa0, 0xb0]);
+        server.join().unwrap();
     }
 }

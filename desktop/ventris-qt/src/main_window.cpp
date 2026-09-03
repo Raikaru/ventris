@@ -13,6 +13,7 @@
 
 #include <QDockWidget>
 #include <QGridLayout>
+#include <QHBoxLayout>
 #include <QHeaderView>
 #include <QKeySequence>
 #include <QInputDialog>
@@ -425,6 +426,23 @@ MainWindow::MainWindow(const QString &project, const QString &program, const QSt
             {QStringLiteral("Name"), QStringLiteral("Start"), QStringLiteral("Size"),
              QStringLiteral("Permissions"), QStringLiteral("Source")});
         hex_canvas_ = new HexCanvas(memory_panel);
+        auto *live_controls = new QHBoxLayout();
+        live_memory_ = new QCheckBox(QStringLiteral("Live target"), memory_panel);
+        live_endpoint_edit_ = new QLineEdit(QStringLiteral("127.0.0.1:24689"), memory_panel);
+        live_endpoint_edit_->setPlaceholderText(QStringLiteral("Dolphin GDB endpoint"));
+        live_endpoint_edit_->setEnabled(false);
+        live_controls->addWidget(live_memory_);
+        live_controls->addWidget(live_endpoint_edit_, 1);
+        connect(live_memory_, &QCheckBox::toggled, this, [this](bool live) {
+            hex_canvas_->setLiveSource(live);
+            live_endpoint_edit_->setEnabled(live);
+            loadHex();
+        });
+        connect(live_endpoint_edit_, &QLineEdit::editingFinished, this, [this]() {
+            if (live_memory_->isChecked()) {
+                loadHex();
+            }
+        });
         connect(hex_canvas_, &HexCanvas::addressSelected, this,
                 [this](const QString &address, bool record) {
                     navigation_->goTo(address, record);
@@ -434,6 +452,7 @@ MainWindow::MainWindow(const QString &project, const QString &program, const QSt
                     loadHexAt(QStringLiteral("0x%1").arg(offset, 0, 16));
                 });
         memory_layout->addWidget(memory_regions_, 1);
+        memory_layout->addLayout(live_controls);
         memory_layout->addWidget(hex_canvas_, 1);
         auto *memory_dock = new QDockWidget(QStringLiteral("Memory map / hex"), this);
         memory_dock->setObjectName(QStringLiteral("memoryDock"));
@@ -1026,15 +1045,22 @@ void MainWindow::loadHex() {
 }
 
 void MainWindow::loadHexAt(const QString &address) {
-    if (address.isEmpty() || binary_edit_->text().isEmpty()) {
+    const bool live = live_memory_ && live_memory_->isChecked();
+    if (address.isEmpty() || (!live && binary_edit_->text().isEmpty())) {
         return;
     }
     const int job = beginJob(QStringLiteral("hex %1").arg(address));
-    bridge_->request(QJsonObject{{"method", "memory"},
-                                 {"binary", binary_edit_->text()},
-                                 {"address", address},
-                                 {"size", 4096}},
-                     [this, job, address](const QJsonObject &response) {
+    QJsonObject request{{"method", live ? QStringLiteral("memory_live")
+                                       : QStringLiteral("memory")},
+                        {"address", address},
+                        {"size", 4096}};
+    if (live) {
+        request.insert(QStringLiteral("endpoint"), live_endpoint_edit_->text().trimmed());
+    } else {
+        request.insert(QStringLiteral("binary"), binary_edit_->text());
+    }
+    bridge_->request(request,
+                     [this, job, address, live](const QJsonObject &response) {
                          QString error;
                          if (!successful(response, &error)) {
                              finishJob(job, false, error);
@@ -1053,7 +1079,9 @@ void MainWindow::loadHexAt(const QString &address) {
                          hex_canvas_->setWindow(ok ? base : 0, bytes);
                          hex_canvas_->setAddress(address);
                          finishJob(job, true,
-                                   QStringLiteral("%1 bytes").arg(bytes.size()));
+                                   QStringLiteral("%1: %2 bytes")
+                                       .arg(live ? QStringLiteral("live") : QStringLiteral("file"))
+                                       .arg(bytes.size()));
                      });
 }
 
@@ -1614,8 +1642,11 @@ void MainWindow::savePrototype() {
                     finishJob(job, false, error);
                     return;
                 }
+                decompile_cache_.remove(program_edit_->text() + QLatin1Char('|') +
+                                         address_edit_->text());
                 loadTypes();
-                finishJob(job, true, QStringLiteral("prototype saved"));
+                decompile();
+                finishJob(job, true, QStringLiteral("prototype saved; decompiling"));
             });
     }
 

@@ -107,6 +107,8 @@ private:
     StringsTableModel *strings_model_ = nullptr;
     QTableWidget *search_results_ = nullptr;
     QTableWidget *memory_regions_ = nullptr;
+    QCheckBox *live_memory_ = nullptr;
+    QLineEdit *live_endpoint_edit_ = nullptr;
     QTableWidget *bookmarks_ = nullptr;
     QTableWidget *patches_ = nullptr;
     QListWidget *jobs_ = nullptr;

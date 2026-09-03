@@ -8,6 +8,7 @@ description = "CoreService facade: project state, Core API, bridge orchestration
 [dependencies]
 lre-model = { path = "../lre-model" }
 lre-db = { path = "../lre-db" }
+lre-debug = { path = "../lre-debug" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 base64 = { workspace = true }

@@ -363,6 +363,23 @@ fn dispatch(core: &Core, request: &Value) -> Result<Value, String> {
                 "bytes_hex": bytes.iter().map(|b| format!("{b:02x}")).collect::<String>(),
             }))
         }
+        "memory_live" => {
+            let endpoint = required_string(request, "endpoint")?;
+            let address = required_address(request, "address")?;
+            require_ram(&address)?;
+            let size = optional_u64(request, "size")?.unwrap_or(64);
+            let size = usize::try_from(size).map_err(|_| "size is too large".to_string())?;
+            let bytes = core
+                .read_memory_live(&endpoint, address.offset, size)
+                .map_err(|e| e.to_string())?;
+            Ok(json!({
+                "address": address,
+                "size": bytes.len(),
+                "source": "live",
+                "endpoint": endpoint,
+                "bytes_hex": bytes.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+            }))
+        }
         "rename" => {
             let program = required_string(request, "program")?;
             let address = required_address(request, "address")?;

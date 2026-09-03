@@ -1,12 +1,15 @@
 --- decompiler/ghidra_arch.cc
 +++ b/decompiler/ghidra_arch.cc
-@@ -22,4 +22,5 @@
+@@ -21,6 +21,7 @@
+ #include "comment_ghidra.hh"
  #include "string_ghidra.hh"
  #include "cpool_ghidra.hh"
 +#include "sleigh.hh"
  #include "inject_ghidra.hh"
  
-@@ -296,4 +297,19 @@
+ namespace ghidra {
+@@ -295,6 +296,21 @@
+ Translate *ArchitectureGhidra::buildTranslator(DocumentStorage &store)
  
  {
 +  const char *slafile = getenv("VENTRIS_SLA");
@@ -26,7 +29,9 @@
 +  }
    return new GhidraTranslate(this);
  }
-@@ -370,5 +386,13 @@
+ 
+@@ -369,7 +385,15 @@
+ void ArchitectureGhidra::buildContext(DocumentStorage &store)
  
  {
 -  context = new ContextGhidra(this);
@@ -41,9 +46,197 @@
 +  }
  }
  
+ void ArchitectureGhidra::buildSymbols(DocumentStorage &store)
+--- decompiler/ghidra_process.hh
++++ b/decompiler/ghidra_process.hh
+@@ -101,20 +101,36 @@
+ ///
+ /// An id is assigned to the program, and an Architecture object for the program
+ /// is created and initialized. This must be issued before any other command.
+-/// The command expects four XML document parameters:
++/// The command expects four XML document parameters plus one packed document:
+ ///   - The processor specification
+ ///   - The compiler specification
+ ///   - The stripped down \<sleigh> tag describing address spaces for the program
+ ///   - The \<coretypes> tag describing the built-in datatypes for the program
++//   - A <doc> containing optional <mapsym><functionshell> entries
+ class RegisterProgram : public GhidraCommand {
+   string pspec;				///< Processor specification to configure with
+   string cspec;				///< Compiler specification to configure with
+   string tspec;				///< Configuration (address-spaces) for the Translate object
+   string corespec;			///< A description of core data-types for the TypeFactory object
++  string functionShell;			///< Preloaded function shells for prototype overrides
+   virtual void loadParameters(void);
+   virtual void sendResult(void);
+ public:
+   int4 archid;				///< Resulting id of the program to send back
++  virtual void rawAction(void);
++};
++
++/// \brief Apply a C prototype to a preloaded function.
++///
++/// The function shell is installed during registerProgram so the function's
++/// prototype is symbol-table backed. This command uses the decompiler's own
++/// C declaration parser and invalidates derived analysis after the update.
++class SetFunctionSignature : public GhidraCommand {
++  string functionName;
++  string signature;
++  string functionAddress;
++  virtual void loadParameters(void);
++public:
+   virtual void rawAction(void);
+ };
+ 
+--- decompiler/ghidra_process.cc
++++ b/decompiler/ghidra_process.cc
+@@ -14,6 +14,7 @@
+  * limitations under the License.
+  */
+ #include "ghidra_process.hh"
++#include "database_ghidra.hh"
+ #include "flow.hh"
+ #include "blockaction.hh"
+ 
+@@ -170,6 +171,7 @@
+   ArchitectureGhidra::readStringStream(sin,cspec);
+   ArchitectureGhidra::readStringStream(sin,tspec);
+   ArchitectureGhidra::readStringStream(sin,corespec);
++  ArchitectureGhidra::readStringStream(sin,functionShell);
+ }
+ 
+ 
+@@ -192,6 +194,24 @@
+ 
+   DocumentStorage store;	// temp storage of initialization xml docs
+   ghidra->init(store);
++
++  if (!functionShell.empty()) {
++    istringstream input(functionShell);
++    PackedDecode decoder(ghidra);
++    decoder.ingestStream(input);
++    uint4 docId = decoder.openElement(ELEM_DOC);
++    while (decoder.peekElement() != 0) {
++      uint4 elemId = decoder.peekElement();
++      if (elemId != ELEM_MAPSYM)
++	throw LowlevelError("Unknown function shell tag");
++      ScopeGhidra *scope = dynamic_cast<ScopeGhidra *>(ghidra->symboltab->getGlobalScope());
++      if (scope == (ScopeGhidra *)0)
++	throw LowlevelError("Global scope is not Ghidra-backed");
++      scope->addMapSymToCache(decoder);
++    }
++    decoder.closeElement(docId);
++  }
++
+   if (open == -1) {
+     open = archlist.size();
+     archlist.push_back((ArchitectureGhidra *)0);
+@@ -207,6 +227,49 @@
+   sout << dec << archid;
+   sout.write("\000\000\001\017",4);
+   GhidraCommand::sendResult();
++}
++
++void SetFunctionSignature::loadParameters(void)
++
++{
++  GhidraCommand::loadParameters();
++  ArchitectureGhidra::readStringStream(sin,functionName);
++  ArchitectureGhidra::readStringStream(sin,signature);
++  ArchitectureGhidra::readStringStream(sin,functionAddress);
++}
++
++void SetFunctionSignature::rawAction(void)
++
++{
++  istringstream input(signature);
++  PrototypePieces pieces;
++  parse_protopieces(pieces,input,ghidra);
++  string requestedName = pieces.name;
++  if (functionName.empty())
++    functionName = requestedName;
++  if (functionName.empty())
++    throw ParseError("Prototype has no function name");
++  if (requestedName.empty()) {
++    requestedName = functionName;
++    pieces.name = functionName;
++  }
++  istringstream addressInput(functionAddress);
++  uintb offset = 0;
++  addressInput >> hex >> offset;
++  if (addressInput.fail())
++    throw ParseError("Bad function address: " + functionAddress);
++  Address functionAddressValue(ghidra->getDefaultCodeSpace(),offset);
++  Funcdata *fd = ghidra->symboltab->getGlobalScope()->findFunction(functionAddressValue);
++  if (fd == (Funcdata *)0)
++    throw ParseError("Unknown function address: " + functionAddress);
++  fd->getFuncProto().setPieces(pieces);
++  if (requestedName != functionName) {
++    ScopeGhidra *ghidraScope = dynamic_cast<ScopeGhidra *>(ghidra->symboltab->getGlobalScope());
++    if (ghidraScope == (ScopeGhidra *)0)
++      throw LowlevelError("Global scope is not Ghidra-backed");
++    ghidraScope->renameFunction(fd->getSymbol(),requestedName);
++  }
++  ghidra->clearAnalysis(fd);
+ }
+ 
+ void DeregisterProgram::loadParameters(void)
+@@ -497,6 +554,7 @@
+ 
+ {
+   commandmap["registerProgram"] = new RegisterProgram();
++  commandmap["setFunctionSignature"] = new SetFunctionSignature();
+   commandmap["deregisterProgram"] = new DeregisterProgram();
+   commandmap["flushNative"] = new FlushNative();
+   commandmap["decompileAt"] = new DecompileAt();
+--- decompiler/database_ghidra.hh
++++ b/decompiler/database_ghidra.hh
+@@ -66,6 +66,8 @@
+   /// can reset to it before decompiling a new function.
+   void lockDefaultProperties(void) { flagbaseDefault = ghidra->symboltab->getProperties(); cacheDirty = false; }
+   virtual ~ScopeGhidra(void);
++  Symbol *addMapSymToCache(Decoder &decoder) const;
++  void renameFunction(FunctionSymbol *sym,const string &newname) const;
+   virtual void clear(void);
+   virtual SymbolEntry *addSymbol(const string &nm,Datatype *ct,
+ 				 const Address &addr,const Address &usepoint);
+--- decompiler/database_ghidra.cc
++++ b/decompiler/database_ghidra.cc
+@@ -32,6 +32,19 @@
+   ghidra = g;
+   cache = new ScopeInternal(0,"",g,this);
+   cacheDirty = false;
++}
++
++Symbol *ScopeGhidra::addMapSymToCache(Decoder &decoder) const
++
++{
++  return cache->addMapSym(decoder);
++}
++
++void ScopeGhidra::renameFunction(FunctionSymbol *sym,const string &newname) const
++
++{
++  cache->renameSymbol(sym,newname);
++  sym->getFunction()->setName(newname);
+ }
+ 
+ ScopeGhidra::~ScopeGhidra(void)
+--- decompiler/funcdata.hh
++++ b/decompiler/funcdata.hh
+@@ -137,7 +137,8 @@
+ public:
+   Funcdata(const string &nm,const string &disp,Scope *conf,const Address &addr,FunctionSymbol *sym,int4 sz=0);	///< Constructor
+   ~Funcdata(void);							///< Destructor
+-  const string &getName(void) const { return name; }			///< Get the function's local symbol name
++  const string &getName(void) const { return name; }
++  void setName(const string &nm) { name = nm; displayName = nm; }	///< Rename the function for output			///< Get the function's local symbol name
+   const string &getDisplayName(void) const { return displayName; }	///< Get the name to display in output
+   const Address &getAddress(void) const { return baseaddr; }		///< Get the entry point address
+   int4 getSize(void) const { return size; }				///< Get the function body size in bytes
 --- decompiler/Makefile
 +++ b/decompiler/Makefile
-@@ -261,9 +261,9 @@
+@@ -260,11 +260,11 @@
+ test: decomp_test_dbg
  	./decomp_test_dbg
  
 -ghidra_dbg:	$(GHIDRA_DBG_OBJS)
@@ -58,3 +251,4 @@
 +	$(CXX) $(OPT_CXXFLAGS) $(ADDITIONAL_FLAGS) $(MAKE_STATIC) $(ARCH_TYPE)  -o ghidra_opt $(GHIDRA_OPT_OBJS) $(SLEIGH:%=ghi_opt/%.o) ghi_opt/inject_sleigh.o -lz
  
  sleigh_dbg:	$(SLEIGH_DBG_OBJS)
+ 	$(CXX) $(DBG_CXXFLAGS) $(ADDITIONAL_FLAGS) $(MAKE_STATIC) $(ARCH_TYPE) -o sleigh_dbg $(SLEIGH_DBG_OBJS) $(LNK)

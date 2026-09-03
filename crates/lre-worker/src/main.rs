@@ -5,11 +5,8 @@
 //! (`lre-db`) plus the raw binary via a read-only file mapping. This is the
 //! no-JVM replacement for the Stage-1 bridge, per ADR-0001.
 
-use lre_db::ProjectDb;
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-pub use lre_worker::{decode_addr_element, spec_dir, ProgramProvider};
+use std::io::Write;
+use std::path::Path;
 
 /// the spec dir, and decompiles one function of a program in the store.
 ///
@@ -97,6 +94,13 @@ fn run(
     for datatype in db.datatypes(pid)? {
         provider.datatypes.insert(datatype.name, datatype.definition);
     }
+    for prototype in db.prototypes(pid)? {
+        if !prototype.signature.is_empty() {
+            provider
+                .prototypes
+                .insert(prototype.function.offset, prototype.signature);
+        }
+    }
     for string in db.strings(pid)? {
         provider.strings.insert(string.address.offset, string.value);
     }
@@ -105,7 +109,38 @@ fn run(
         .map_err(|e| lre_worker::WorkerError::Setup(e.to_string()))?;
     let specs = lre_worker::load_specs(Path::new(lang_dir))?;
     let mut worker = lre_worker::NativeWorker::launch(Path::new(ghidra_opt))?;
-    worker.register_program(&mut provider, &specs.0, &specs.1, &specs.2, &specs.3)?;
+    let function_shell = provider
+        .function_names
+        .get(&offset)
+        .map(|name| {
+            let size = provider.function_sizes.get(&offset).copied().unwrap_or(8);
+            lre_worker::NativeWorker::encode_function_shell_doc(
+                provider.ram_space_index as u32,
+                &[(offset, name.as_str(), size)],
+            )
+        })
+        .unwrap_or_else(|| {
+            lre_worker::NativeWorker::encode_function_shell_doc(
+                provider.ram_space_index as u32,
+                &[],
+            )
+        });
+    worker.register_program_with_shell(
+        &mut provider,
+        &specs.0,
+        &specs.1,
+        &specs.2,
+        &specs.3,
+        &function_shell,
+    )?;
+    if let Some(signature) = provider.prototypes.get(&offset).cloned() {
+        let function_name = provider
+            .function_names
+            .get(&offset)
+            .cloned()
+            .ok_or_else(|| lre_worker::WorkerError::Setup("prototype target has no function name".into()))?;
+        worker.set_function_signature(&mut provider, offset, &function_name, &signature)?;
+    }
     worker.set_action(&mut provider, "decompile", "")?;
     let ram = provider.ram_space_index as u32;
     let raw = worker.decompile_at(&mut provider, ram, offset)?;
@@ -130,7 +165,6 @@ fn run(
     let c_text: String = tokens.iter().map(|token| token.text.as_str()).collect();
     if std::env::var_os("WORKER_DUMP").is_some() {
         let mut f = std::fs::File::create("/tmp/ctext_dump.txt").unwrap();
-        use std::io::Write as _;
         let _ = f.write_all(c_text.as_bytes());
     }
     println!("{c_text}");
