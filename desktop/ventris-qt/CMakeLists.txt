@@ -64,6 +64,28 @@ add_executable(ventris-qt
     src/hex_canvas.cpp
     src/main_window.h
     src/main_window.cpp
+    src/functions_dock.h
+    src/functions_dock.cpp
+    src/decompiler_dock.h
+    src/decompiler_dock.cpp
+    src/facts_dock.h
+    src/facts_dock.cpp
+    src/memory_dock.h
+    src/memory_dock.cpp
+    src/graph_dock.h
+    src/graph_dock.cpp
+    src/analyst_dock.h
+    src/analyst_dock.cpp
+    src/types_dock.h
+    src/types_dock.cpp
+    src/xrefs_dock.h
+    src/xrefs_dock.cpp
+    src/jobs_dock.h
+    src/jobs_dock.cpp
+    src/vtables_dock.h
+    src/vtables_dock.cpp
+    src/gate_runner.h
+    src/gate_runner.cpp
 )
 add_dependencies(ventris-qt ventris-rust-bridge)
 target_include_directories(ventris-qt PRIVATE

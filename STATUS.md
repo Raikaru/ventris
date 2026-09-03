@@ -470,10 +470,11 @@ green (82 tests across 20 suites); the CPack TGZ builds.
   The acceptance smoke `tests/filter_latency.sh` passes against `/usr/lib64/libc.so.6`,
   and `benchmarks/reports/ui-gate.json` now records all 5 numeric metrics passing.
 
-- m0-006: added package installation smoke test `tests/package_install_smoke.sh`
+- m0-004: added package installation smoke test `tests/package_install_smoke.sh`
   building the CPack release archive, extracting to a clean prefix, and running
   the gate on libc with install evaluation enabled. All six metrics pass within
-  thresholds (`ui.install.ok: true`, `passed: true`).
+  thresholds (`ui.install.ok: true`, `passed: true`). Final README matrix
+  citation is deferred until verified on three-OS CI.
 
 - m0-007: recovered RIP-relative data xrefs (`InstrInfo::rip_data` over `[rip + disp32]`),
   full near/short conditional branch kinds, and CRT helpers (`_init`, `_fini`, and
@@ -487,9 +488,14 @@ green (82 tests across 20 suites); the CPack TGZ builds.
   II.1 human reservations. Added CI check (`tests/agents_policy_test.py`) in
   `.github/workflows/ci.yml` asserting the verbatim loop is present. Acceptance
   smoke `tests/agents_policy_test.py` passes.
+- m0-006: split `main_window.cpp` from 2,195 lines down to 377 lines (<= 400 lines)
+  across 10 modular dock classes (`functions_dock`, `decompiler_dock`, `facts_dock`,
+  `memory_dock`, `graph_dock`, `analyst_dock`, `types_dock`, `xrefs_dock`,
+  `jobs_dock`, `vtables_dock`) and extracted `gate_runner`. App behavior
+  unchanged per m0-001; acceptance smoke `tests/main_window_split_test.py` passes.
 
 ## Current milestone
 M0 — Honest floor
 
 ## Next task
-m0-006: Split main_window.cpp: one *_dock.cpp per dock, main_window.cpp <= 400 lines
+m0-010: scripts/gen_support_matrix.py regenerates the README matrix from gate files; CI fails if README matrix is stale

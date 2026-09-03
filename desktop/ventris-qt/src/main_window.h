@@ -1,38 +1,32 @@
 #pragma once
 
-#include <QElapsedTimer>
-#include <QJsonObject>
+#include <QHash>
 #include <QMainWindow>
+#include <QPair>
+#include <QVector>
 
 #include "views.h"
-#include <QSet>
-#include <QStringList>
 
+class AnalystDock;
 class CoreBridge;
-class DecompilerView;
-class FunctionTableModel;
-class GraphCanvas;
-class HexCanvas;
+class DecompilerDock;
+class FactsDock;
+class FunctionsDock;
+class GateRunner;
+class GraphDock;
+class JobsDock;
 class ListingCanvas;
+class MemoryDock;
 class NavigationController;
-class QInputDialog;
-class QCheckBox;
-class QDialog;
-class QFileDialog;
-class QFileInfo;
-class QLabel;
-class QTimer;
-class QLineEdit;
-class QListWidget;
-class QMenu;
-class QPlainTextEdit;
-class QTableView;
-class StringsTableModel;
-class QTableWidget;
+class TypesDock;
+class VtablesDock;
+class XrefsDock;
 
-/// Root window: owns the CoreBridge, every dock, and the workspace
-/// persistence. Navigation state moves to NavigationController in Phase 0;
-/// dock construction moves to per-dock widgets through Phase 1.
+class QLabel;
+class QLineEdit;
+class QMenu;
+
+/// Root window: owns the CoreBridge, dock coordination, and workspace persistence.
 class MainWindow final : public QMainWindow {
     Q_OBJECT
 
@@ -40,62 +34,52 @@ public:
     explicit MainWindow(const QString &project, const QString &program,
                         const QString &binary, const QString &address,
                         QWidget *parent = nullptr);
+    ~MainWindow() override;
+
     /// Runs the deterministic offscreen UI gate and exits the application.
     void runGate();
-    ~MainWindow() override;
+
+    // Getters for modular docks and controllers
+    FunctionsDock *functionsDock() const { return functions_dock_; }
+    DecompilerDock *decompilerDock() const { return decompiler_dock_; }
+    GraphDock *graphDock() const { return graph_dock_; }
+    ListingCanvas *listingCanvas() const { return listing_canvas_; }
+    NavigationController *navigation() const { return navigation_; }
+    QString program() const;
+    QString binary() const;
 
 private slots:
     void importNative();
     void openProgram();
     void decompile();
     void loadListing();
-    void loadXrefs();
-    void loadMemory();
-    void loadFacts();
     void loadListingAt(const QString &address);
     void listingContextMenu(const QPoint &global_pos, const QString &address);
-    void loadHex();
-    void loadHexAt(const QString &address);
     void renameFunctionAt(const QString &address, const QString &name);
     void loadProgramPanels();
-    void loadGraph();
-    void loadAnalystData();
-    void setBookmark();
-    void setPatch();
-    void loadTypes();
-    void saveTypeDefinition();
-    void saveTypeField();
-    void savePrototype();
-    void saveStackVariable();
-    void propagateTypes();
     void renameFunction();
     void applyComment();
     void undoCommand();
 
 private:
-    int beginJob(const QString &label);
-    void finishJob(int index, bool ok, const QString &detail);
-    void refreshJobs();
-    void cancelJob();
     void showCommandPalette();
     void checkOnboardingGate();
     void showSignatureSearch();
     void setStatus(const QString &message, bool error = false);
     void restoreWorkspace();
     void saveWorkspace();
-    void gateModelRefreshed();
-    void gateStartLargestFunction();
-    void gateStartDecompile(const QString &address);
-    void gateStartGraph();
-    void finishGate(bool ok, const QString &detail = {});
 
     CoreBridge *bridge_;
     QString program_;
     QString binary_;
     QString address_;
     NavigationController *navigation_;
+    GateRunner *gate_runner_ = nullptr;
+
     QHash<QString, QPair<qint64, QVector<TokenView>>> decompile_cache_;
     quint64 decompile_generation_ = 0;
+
+    // Controls
     QLineEdit *project_edit_ = nullptr;
     QLineEdit *program_edit_ = nullptr;
     QLineEdit *binary_edit_ = nullptr;
@@ -104,62 +88,21 @@ private:
     QLineEdit *comment_edit_ = nullptr;
     QLineEdit *comment_kind_edit_ = nullptr;
     QLineEdit *search_edit_ = nullptr;
-    QLineEdit *bookmark_edit_ = nullptr;
-    QLineEdit *patch_original_edit_ = nullptr;
-    QTableView *functions_ = nullptr;
-    QLineEdit *function_filter_edit_ = nullptr;
-    QTimer *function_filter_timer_ = nullptr;
-    QLineEdit *patch_new_edit_ = nullptr;
-    FunctionTableModel *function_model_ = nullptr;
-    QTableWidget *xrefs_to_ = nullptr;
-    QTableWidget *xrefs_from_ = nullptr;
-    QTableWidget *symbols_ = nullptr;
-    QTableView *strings_ = nullptr;
-    StringsTableModel *strings_model_ = nullptr;
-    QTableWidget *search_results_ = nullptr;
-    QTableWidget *memory_regions_ = nullptr;
-    QCheckBox *live_memory_ = nullptr;
-    QLineEdit *live_endpoint_edit_ = nullptr;
-    QTableWidget *bookmarks_ = nullptr;
-    QTableWidget *patches_ = nullptr;
-    QListWidget *jobs_ = nullptr;
-    QLabel *jobs_summary_ = nullptr;
-    QSet<int> cancelled_jobs_;
-    ListingCanvas *listing_canvas_ = nullptr;
-    GraphCanvas *graph_canvas_ = nullptr;
-    QDockWidget *graph_dock_ = nullptr;
-    QMenu *recent_menu_ = nullptr;
-    QTableWidget *vtables_ = nullptr;
-    DecompilerView *decompiler_ = nullptr;
     QLabel *status_ = nullptr;
-    HexCanvas *hex_canvas_ = nullptr;
-    QLineEdit *type_name_edit_ = nullptr;
-    QLineEdit *type_kind_edit_ = nullptr;
-    QLineEdit *type_size_edit_ = nullptr;
-    QLineEdit *type_alignment_edit_ = nullptr;
-    QLineEdit *type_definition_edit_ = nullptr;
-    QLineEdit *field_ordinal_edit_ = nullptr;
-    QLineEdit *type_base_edit_ = nullptr;
-    QLineEdit *field_name_edit_ = nullptr;
-    QLineEdit *field_offset_edit_ = nullptr;
-    QLineEdit *field_size_edit_ = nullptr;
-    QLineEdit *field_type_edit_ = nullptr;
-    QLineEdit *prototype_signature_edit_ = nullptr;
-    QLineEdit *calling_convention_edit_ = nullptr;
-    QLineEdit *stack_name_edit_ = nullptr;
-    QLineEdit *stack_storage_edit_ = nullptr;
-    QLineEdit *stack_type_edit_ = nullptr;
-    QLineEdit *stack_offset_edit_ = nullptr;
-    QLineEdit *stack_size_edit_ = nullptr;
-    QTableWidget *types_ = nullptr;
-    QTableWidget *type_fields_ = nullptr;
-    QTableWidget *prototypes_ = nullptr;
-    QTableWidget *stack_variables_ = nullptr;
-    QTableWidget *type_links_ = nullptr;
-    enum class GateStage { Inactive, LoadingList, Filtering, ClearingFilter };
-    bool gate_active_ = false;
-    GateStage gate_stage_ = GateStage::Inactive;
-    QElapsedTimer gate_timer_;
-    QJsonObject gate_metrics_;
-    QString gate_address_;
+    QMenu *recent_menu_ = nullptr;
+
+    // Central Listing
+    ListingCanvas *listing_canvas_ = nullptr;
+
+    // Modular Docks
+    FunctionsDock *functions_dock_ = nullptr;
+    DecompilerDock *decompiler_dock_ = nullptr;
+    FactsDock *facts_dock_ = nullptr;
+    MemoryDock *memory_dock_ = nullptr;
+    GraphDock *graph_dock_ = nullptr;
+    AnalystDock *analyst_dock_ = nullptr;
+    TypesDock *types_dock_ = nullptr;
+    XrefsDock *xrefs_dock_ = nullptr;
+    JobsDock *jobs_dock_ = nullptr;
+    VtablesDock *vtables_dock_ = nullptr;
 };

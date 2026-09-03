@@ -168,9 +168,8 @@ impl ProgramImage {
         })?;
         // Region derivation reuses the native parser (sections -> ranges;
         // flags preserved so discovery classification still sees them).
-        let imp: NativeImport = crate::native::load_native(binary)?;
-        let regions = imp
-            .mappings
+        let mappings = crate::native::load_native_mappings(binary)?;
+        let regions = mappings
             .iter()
             .map(|m| MemoryRegion {
                 vaddr: m.vaddr,

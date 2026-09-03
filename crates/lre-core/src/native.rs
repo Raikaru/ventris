@@ -800,6 +800,20 @@ pub fn pe_image_base(data: &[u8]) -> Option<u64> {
     u64_at(data, pe_off + 48).ok()
 }
 
+/// Loads `<binary>` mappings without running discovery or sweep passes.
+pub fn load_native_mappings(binary: &Path) -> Result<Vec<Mapping>> {
+    let data = std::fs::read(binary)
+        .map_err(|e| ImportError::Bad(format!("{}: {e}", binary.display())))?;
+    let imp = if data.get(0..4) == Some(b"\x7fELF") {
+        import_elf(&data)?
+    } else if data.get(0..2) == Some(b"MZ") {
+        import_pe(&data)?
+    } else {
+        return err("unsupported format (ELF/PE expected)");
+    };
+    Ok(imp.mappings)
+}
+
 /// Loads `<binary>` natively: parses the format, sweeps calls.
 pub fn load_native(binary: &Path) -> Result<NativeImport> {
     let data = std::fs::read(binary)
