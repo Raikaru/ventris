@@ -481,5 +481,15 @@ green (82 tests across 20 suites); the CPack TGZ builds.
   pipeline. Recovered 11,282 `DATA` xrefs on libc and all 4 xref kinds on tiny_bin.
   The acceptance smoke `tests/data_xrefs.sh` passes.
 
-## Next bounded task
-All scheduled M0 milestones (m0-001 through m0-007: UI gates, largest-BB graph, list filter, package smoke, data xrefs/CRT) are complete.
+- m0-009: added `CONTRIBUTING.md` with explicit clean-room policy (no proprietary
+  or leaked material; citation rules; docs/third-party.md) and gate-file rule.
+  Updated `AGENTS.md` with the verbatim Section II.0 operating loop and Section
+  II.1 human reservations. Added CI check (`tests/agents_policy_test.py`) in
+  `.github/workflows/ci.yml` asserting the verbatim loop is present. Acceptance
+  smoke `tests/agents_policy_test.py` passes.
+
+## Current milestone
+M0 — Honest floor
+
+## Next task
+m0-006: Split main_window.cpp: one *_dock.cpp per dock, main_window.cpp <= 400 lines
