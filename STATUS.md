@@ -520,10 +520,18 @@ M1 — Discovery becomes generic
   glibc/libgcc sysroots via `tools/fetch_cross_sysroots.py` so m1-006 can build
   real (non-freestanding) PIE binaries with PLT and dynamic relocations.
   Acceptance `tests/generic_discovery_test.sh` passes.
-
-- m1-003-a (in progress): split the x86-64 hand decoder behind a feature
+- m1-003-a: split the x86-64 hand decoder behind a `x86_decoder` feature
   flag. Acceptance test `tests/m1-003_x86_flow.sh` is committed and currently
-  fails: with `x86_decoder` disabled, `flow_discover` and `sweep_calls` do not
+  fails: with the feature disabled, console flow is not yet wired, producing
+  fn.precision=1.0000 and fn.recall=0.9965 against the hand-decoder baseline.
+
+- m1-003-b: implemented `ConsoleSession` in `lre-core/src/native_runtime.rs`.
+  It spawns `decomp_native` once, loads a binary, and answers many `flow`
+  requests over the same stdio pipe. Unit test
+  `native_runtime::tests::console_session_persists_multiple_flows` passes.
+
+## Next task
+m1-003-c
   wire the console flow path, producing fn.precision=1.0000 and
   fn.recall=0.9965 against the hand-decoder baseline on /usr/lib64/libc.so.6.
 
@@ -536,4 +544,4 @@ M1 — Discovery becomes generic
   keep/delete `disasm.rs`.
 
 ## Next task
-m1-003-b
+m1-003-c

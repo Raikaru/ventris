@@ -710,6 +710,122 @@ fn parse_flow_output(stdout: &str, expected_addr: u64) -> Result<FlowResult> {
     }
     err(format!("console produced no FLOW line: {stdout}"))
 }
+/// Persistent SLEIGH console session (m1-003-b).
+///
+/// Spawns `decomp_native` once and reuses the process for many `flow`
+/// requests, avoiding the per-instruction spawn cost that makes the
+/// one-shot `console_flow` unsuitable for whole-binary discovery.
+pub struct ConsoleSession {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    reader: std::io::BufReader<std::process::ChildStdout>,
+    language_id: String,
+}
+
+impl ConsoleSession {
+    /// Spawn the console and wait for the first interactive prompt.
+    pub fn new(cfg: &RuntimeConfig) -> Result<Self> {
+        let console = find_console(cfg)?;
+        let ghroot = cfg.ghidra_install.to_string_lossy().into_owned();
+        let langs = cfg.language_dir.to_string_lossy().into_owned();
+
+        let mut child = Command::new(&console)
+            .arg("-s")
+            .arg(&langs)
+            .env("SLEIGHHOME", &ghroot)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| NativeRuntimeError(format!("console spawn: {e}")))?;
+
+        let stdin = child.stdin.take().expect("console stdin");
+        let stdout = child.stdout.take().expect("console stdout");
+        let mut reader = std::io::BufReader::new(stdout);
+
+        // The console prints an initial "[decomp]> " prompt.
+        let _ = read_until_prompt(&mut reader)?;
+
+        Ok(Self {
+            child,
+            stdin,
+            reader,
+            language_id: cfg.language_id.clone(),
+        })
+    }
+
+    /// Load a binary and, for non-x86 targets, set the image base so virtual
+    /// addresses line up with the BFD load (vaddr - file_off of the first mapping).
+    pub fn load(&mut self, binary: &Path, base: u64) -> Result<()> {
+        let target = bfd_target_for(&self.language_id, binary)?;
+        let script = if self.language_id.starts_with("x86:") {
+            format!("load file {} {}\n", target, binary.display())
+        } else {
+            format!(
+                "load file {} {}\nadjust vma 0x{:x}\n",
+                target,
+                binary.display(),
+                base
+            )
+        };
+        self.send(&script)?;
+
+        // One prompt per command written (load + optional adjust).
+        let prompts = if self.language_id.starts_with("x86:") { 1 } else { 2 };
+        for _ in 0..prompts {
+            let _ = read_until_prompt(&mut self.reader)?;
+        }
+        Ok(())
+    }
+
+    /// Ask the console for the control-flow of one instruction.
+    pub fn flow(&mut self, address: u64) -> Result<FlowResult> {
+        let script = format!("flow 0x{:x}\n", address);
+        self.send(&script)?;
+        let chunk = read_until_prompt(&mut self.reader)?;
+
+        // A bad address is not a session error; the caller needs a length to
+        // step forward in a linear sweep.
+        if chunk.contains("Low-level ERROR") {
+            return Ok(FlowResult {
+                address,
+                length: 1,
+                fallthrough: Some(address + 1),
+                targets: Vec::new(),
+                kind: FlowKind::Bad,
+            });
+        }
+
+        parse_flow_output(&chunk, address)
+    }
+
+    /// Same as `flow` but never fails: unparseable/missing output becomes a
+    /// length-1 `Bad` result so a walk can continue.
+    pub fn try_flow(&mut self, address: u64) -> FlowResult {
+        self.flow(address).unwrap_or(FlowResult {
+            address,
+            length: 1,
+            fallthrough: Some(address + 1),
+            targets: Vec::new(),
+            kind: FlowKind::Bad,
+        })
+    }
+
+    /// Close stdin and wait for the child to exit.
+    pub fn quit(mut self) -> Result<()> {
+        let _ = self.send("quit\n");
+        let _ = self.child.wait();
+        Ok(())
+    }
+
+    fn send(&mut self, s: &str) -> Result<()> {
+        use std::io::Write as _;
+        self.stdin
+            .write_all(s.as_bytes())
+            .and_then(|_| self.stdin.flush())
+            .map_err(|e| NativeRuntimeError(format!("console write: {e}")))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -745,5 +861,29 @@ mod tests {
             assert_eq!(flow_cbranch.fallthrough, Some(0x80680020));
             assert_eq!(flow_cbranch.targets, vec![0x80680030]);
         }
+    }
+
+    #[test]
+    fn console_session_persists_multiple_flows() {
+        let cfg = RuntimeConfig::from_env();
+        let x86_bin = Path::new("../../tests/fixtures-src/tiny_bin");
+        let mut session = ConsoleSession::new(&cfg).expect("console session");
+        let mappings = crate::native::load_native_mappings(x86_bin).unwrap_or_default();
+        let base = mappings
+            .first()
+            .map(|m| m.vaddr.wrapping_sub(m.file_off))
+            .unwrap_or(0);
+        session.load(x86_bin, base).expect("load tiny_bin");
+
+        let flow_ret = session.flow(0x400479).expect("x86 ret flow");
+        assert_eq!(flow_ret.kind, FlowKind::Return);
+        assert_eq!(flow_ret.length, 1);
+
+        let flow_fall = session.flow(0x400466).expect("x86 fall flow");
+        assert_eq!(flow_fall.kind, FlowKind::Fallthrough);
+        assert_eq!(flow_fall.length, 1);
+        assert_eq!(flow_fall.fallthrough, Some(0x400467));
+
+        session.quit().unwrap();
     }
 }
