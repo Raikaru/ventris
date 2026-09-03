@@ -374,6 +374,18 @@ impl Core {
     }
 
     /// Lists discovered strings from the durable project store.
+    /// Paged strings (Phase 2.3).
+    pub fn strings_page(
+        &self,
+        program: &str,
+        offset: u64,
+        limit: u64,
+    ) -> Result<lre_model::Page<StringRow>> {
+        let id = self.db.program_id(program)?;
+        let (rows, total, revision) = self.db.strings_page(id, offset, limit)?;
+        Ok(lre_model::Page { rows, offset, total, revision })
+    }
+
     pub fn strings(&self, program: &str) -> Result<Vec<StringRow>> {
         let id = self.db.program_id(program)?;
         Ok(self.db.strings(id)?)

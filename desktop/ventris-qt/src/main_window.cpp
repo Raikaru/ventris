@@ -5,6 +5,7 @@
 #include "function_table_model.h"
 #include "graph_canvas.h"
 #include "listing_canvas.h"
+#include "strings_table_model.h"
 #include "navigation_controller.h"
 #include "json_util.h"
 
@@ -260,9 +261,27 @@ MainWindow::MainWindow(const QString &project, const QString &program, const QSt
         symbols_->setHorizontalHeaderLabels(
             {QStringLiteral("Address"), QStringLiteral("Name"), QStringLiteral("Source"),
              QStringLiteral("External")});
-        strings_ = new QTableWidget(0, 3, facts_tabs);
-        strings_->setHorizontalHeaderLabels(
-            {QStringLiteral("Address"), QStringLiteral("Kind"), QStringLiteral("Value")});
+        strings_model_ = new StringsTableModel(bridge_, facts_tabs);
+        strings_ = new QTableView(facts_tabs);
+        strings_->setObjectName(QStringLiteral("stringsView"));
+        strings_->setModel(strings_model_);
+        strings_->setSelectionBehavior(QAbstractItemView::SelectRows);
+        strings_->setSelectionMode(QAbstractItemView::SingleSelection);
+        strings_->horizontalHeader()->setStretchLastSection(true);
+        strings_->verticalHeader()->setVisible(false);
+        connect(strings_, &QTableView::doubleClicked, this, [this](const QModelIndex &index) {
+            const QString address =
+                strings_model_->data(strings_model_->index(index.row(), 0)).toString();
+            navigation_->goTo(address, true);
+        });
+        connect(strings_, &QTableView::clicked, this, [this](const QModelIndex &index) {
+            const QString address =
+                strings_model_->data(strings_model_->index(index.row(), 0)).toString();
+            address_edit_->setText(address);
+            loadXrefs();
+        });
+        connect(strings_model_, &StringsTableModel::requestError, this,
+                [this](const QString &message) { setStatus(message, true); });
         search_results_ = new QTableWidget(0, 4, facts_tabs);
         search_results_->setHorizontalHeaderLabels(
             {QStringLiteral("Address"), QStringLiteral("Kind"), QStringLiteral("Name"),
@@ -541,6 +560,7 @@ MainWindow::MainWindow(const QString &project, const QString &program, const QSt
         } else if (!program_.isEmpty()) {
             function_model_->setProgram(program_);
             navigation_->setProgram(program_);
+            strings_model_->setProgram(program_);
         }
         restoreWorkspace();
     }
@@ -568,6 +588,7 @@ void MainWindow::importNative() {
                              finishJob(job, true, QStringLiteral("imported %1").arg(program));
                              function_model_->setProgram(program);
                              navigation_->setProgram(program);
+                             strings_model_->setProgram(program);
                          });
     }
 
@@ -584,6 +605,7 @@ void MainWindow::openProgram() {
                              finishJob(job, true, QStringLiteral("opened %1").arg(program));
                              function_model_->setProgram(program);
                              navigation_->setProgram(program);
+                             strings_model_->setProgram(program);
                          });
     }
 
@@ -770,30 +792,6 @@ void MainWindow::loadFacts() {
                                                        row.value("external").toBool() ? "yes" : "no"));
                              }
                              finishJob(job, true, QStringLiteral("%1 symbols").arg(rows.size()));
-                         });
-
-        job = beginJob(QStringLiteral("strings"));
-        bridge_->request(QJsonObject{{"method", "strings"}, {"program", program}},
-                         [this, job](const QJsonObject &response) {
-                             QString error;
-                             if (!successful(response, &error)) {
-                                 finishJob(job, false, error);
-                                 return;
-                             }
-                             const QJsonArray rows = response.value("result").toArray();
-                             strings_->setRowCount(0);
-                             for (const QJsonValue &value : rows) {
-                                 const QJsonObject row = value.toObject();
-                                 const int index = strings_->rowCount();
-                                 strings_->insertRow(index);
-                                 strings_->setItem(index, 0,
-                                                   new QTableWidgetItem(addressText(row.value("address"))));
-                                 strings_->setItem(index, 1,
-                                                   new QTableWidgetItem(row.value("kind").toString()));
-                                 strings_->setItem(index, 2,
-                                                   new QTableWidgetItem(row.value("value").toString()));
-                             }
-                             finishJob(job, true, QStringLiteral("%1 strings").arg(rows.size()));
                          });
 
         job = beginJob(QStringLiteral("search"));

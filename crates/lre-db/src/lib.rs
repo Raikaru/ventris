@@ -782,6 +782,35 @@ impl ProjectDb {
             .collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// Paged strings (Phase 2.3): a bounded window + total + revision,
+    /// ordered by address like the full listing.
+    pub fn strings_page(
+        &self,
+        program: ProgramId,
+        offset: u64,
+        limit: u64,
+    ) -> Result<(Vec<StringRow>, Option<u64>, u64)> {
+        let total: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM strings WHERE program_id = ?1",
+            params![program.0],
+            |r| r.get(0),
+        )?;
+        let mut stmt = self.conn.prepare(
+            "SELECT address, value, kind FROM strings
+             WHERE program_id = ?1 ORDER BY address, value LIMIT ?2 OFFSET ?3",
+        )?;
+        let rows = stmt
+            .query_map(params![program.0, limit, offset], |row| {
+                Ok(StringRow {
+                    address: addr_from_cell(row.get(0)?),
+                    value: row.get(1)?,
+                    kind: row.get(2)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok((rows, Some(total as u64), self.revision(program)?))
+    }
+
     /// Searches durable names, strings, comments, and data types. The query
     /// is bounded by `limit` and never loads native bytes or starts a worker.
     pub fn search(&self, program: ProgramId, term: &str, limit: u64) -> Result<Vec<SearchHit>> {

@@ -18,6 +18,7 @@ class QLineEdit;
 class QListWidget;
 class QPlainTextEdit;
 class QTableView;
+class StringsTableModel;
 class QTableWidget;
 
 /// Root window: owns the CoreBridge, every dock, and the workspace
@@ -90,7 +91,8 @@ private:
     QTableWidget *xrefs_to_ = nullptr;
     QTableWidget *xrefs_from_ = nullptr;
     QTableWidget *symbols_ = nullptr;
-    QTableWidget *strings_ = nullptr;
+    QTableView *strings_ = nullptr;
+    StringsTableModel *strings_model_ = nullptr;
     QTableWidget *search_results_ = nullptr;
     QTableWidget *memory_regions_ = nullptr;
     QTableWidget *bookmarks_ = nullptr;

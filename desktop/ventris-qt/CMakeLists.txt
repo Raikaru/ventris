@@ -56,6 +56,8 @@ add_executable(ventris-qt
     src/decompiler_view.cpp
     src/navigation_controller.h
     src/navigation_controller.cpp
+    src/strings_table_model.h
+    src/strings_table_model.cpp
     src/main_window.h
     src/main_window.cpp
 )

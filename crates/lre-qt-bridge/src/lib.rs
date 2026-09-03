@@ -224,6 +224,12 @@ fn dispatch(core: &Core, request: &Value) -> Result<Value, String> {
             let program = required_string(request, "program")?;
             to_value(core.strings(&program))
         }
+        "strings_page" => {
+            let program = required_string(request, "program")?;
+            let offset = optional_u64(request, "offset")?.unwrap_or(0);
+            let limit = optional_u64(request, "limit")?.unwrap_or(256);
+            to_value(core.strings_page(&program, offset, limit))
+        }
         "search" => {
             let program = required_string(request, "program")?;
             let term = required_string(request, "term")?;
