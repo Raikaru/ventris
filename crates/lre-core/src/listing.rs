@@ -148,4 +148,30 @@ mod tests {
         let w = window(&FakeSource, &start, 4, 5.0).unwrap();
         assert_eq!(w.overscan, 4); // capped at 1.0 fraction
     }
+    #[test]
+    fn console_fixture_preserves_structural_row_kinds() {
+        let fixture = concat!(
+            "Function main: 0x00400000\n",
+            "Block 0x00400000\n",
+            "Label loc_00400000: 0x00400000\n",
+            "0x00400000: PUSH RBP\n",
+            "Data 0x00401000: .byte 0x00\n",
+            "Block 0x00400005\n",
+            "0x00400005: RET\n",
+        );
+        let rows = parse_console_listing(fixture);
+        let kinds = rows.iter().map(|row| row.kind).collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            vec![
+                lre_model::ListingRowKind::FunctionHeader,
+                lre_model::ListingRowKind::BbSeparator,
+                lre_model::ListingRowKind::Label,
+                lre_model::ListingRowKind::Instruction,
+                lre_model::ListingRowKind::Data,
+                lre_model::ListingRowKind::BbSeparator,
+                lre_model::ListingRowKind::Instruction,
+            ]
+        );
+    }
 }
