@@ -560,3 +560,28 @@ pub fn console_seeds(imp: &NativeImport) -> Vec<u64> {
         .filter(|a| *a != 0 && in_code(*a))
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pcode_flow_x86_and_ppc() {
+        let cfg = RuntimeConfig::from_env();
+        let x86_bin = Path::new("../../tests/fixtures-src/tiny_bin");
+        let flow_ret = console_flow(&cfg, x86_bin, 0x400479).expect("x86 ret flow");
+        assert_eq!(flow_ret.kind, FlowKind::Return);
+        assert_eq!(flow_ret.fallthrough, None);
+
+        let ppc_bin = Path::new("/home/raikaru/Projects/agent-under-fire/orig/GQFE78/files/base.elf");
+        if ppc_bin.is_file() {
+            let mut ppc_cfg = cfg.clone();
+            ppc_cfg.language_id = "PowerPC:BE:32:e500".into();
+            ppc_cfg.language_dir = ppc_cfg
+                .ghidra_install
+                .join("Ghidra/Processors/PowerPC/data/languages");
+            let flow_ppc = console_flow(&ppc_cfg, ppc_bin, 0x80003100).expect("ppc flow");
+            assert_eq!(flow_ppc.length, 4);
+        }
+    }
+}
