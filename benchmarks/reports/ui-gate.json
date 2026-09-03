@@ -1,7 +1,7 @@
 {
   "gate": "ui",
   "milestone": "M0",
-  "commit": "1553f28b91a1950f9c6b40b4841980a3c318ee15",
+  "commit": "02eb05e02774b558eae7977ac2d5351abc219cc1",
   "date": "2026-09-03",
   "machine": {
     "os": "Linux-7.1.12-200.fc44.x86_64-x86_64-with-glibc2.43",
@@ -14,11 +14,11 @@
       "sha256": "01cccbe278d898add05282986a9346d4dda4b3d2b84bc496f9c04c66016528db",
       "status": "fail",
       "metrics": {
-        "ui.list.load_ms": 18.809912,
-        "ui.list.filter_ms": 261.119713,
-        "ui.sync_ms": 60.694163,
-        "ui.graph.layout_ms": 11.456883,
-        "ui.graph.paint_ms": 18.160067,
+        "ui.list.load_ms": 11.820639,
+        "ui.list.filter_ms": 5.688481,
+        "ui.sync_ms": 2.148793,
+        "ui.graph.layout_ms": 11.707645,
+        "ui.graph.paint_ms": 8.040818,
         "ui.install.ok": false
       },
       "thresholds": {

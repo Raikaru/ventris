@@ -57,6 +57,7 @@ private slots:
     void loadHex();
     void loadHexAt(const QString &address);
     void renameFunctionAt(const QString &address, const QString &name);
+    void loadProgramPanels();
     void loadGraph();
     void loadAnalystData();
     void setBookmark();

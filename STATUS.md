@@ -420,10 +420,10 @@ green (82 tests across 20 suites); the CPack TGZ builds.
   separators, the API default-overscan smoke returned structural rows, and
   the Qt target built and launched offscreen without a crash.
 - UI gate baseline (`benchmarks/reports/ui-gate.json`) now records the
-  frozen II.2 schema and three-run libc metrics: load 18.810 ms, filter
-  261.120 ms, sync 60.694 ms, graph layout 11.457 ms, graph paint
-  18.160 ms. The report is intentionally `passed: false`: filter and sync
-  exceed the frozen thresholds, and fresh-install validation is not local.
+  frozen II.2 schema and three-run libc metrics: load 11.821 ms, filter
+  5.688 ms, sync 2.149 ms, graph layout 11.708 ms, graph paint
+  8.041 ms. All five numeric UI metrics pass their frozen thresholds;
+  fresh-install validation is not local.
 - m0-002 instrumentation now records all six frozen UI fields on libc
   (`ui.list.load_ms`, `ui.list.filter_ms`, `ui.sync_ms`, `ui.graph.layout_ms`,
   `ui.graph.paint_ms`, and `ui.install.ok`); the acceptance smoke confirms
@@ -463,5 +463,12 @@ green (82 tests across 20 suites); the CPack TGZ builds.
   streamlined view address synchronization (`ui.sync_ms` down to ~2.4ms vs 16.0ms threshold).
   The acceptance smoke `tests/largest_graph_qt.sh` passes against `/usr/lib64/libc.so.6`.
 
+- m0-005: decoupled auxiliary panel loading from `FunctionTableModel::refreshed`
+  into `loadProgramPanels()`, eliminating queue contention in `CoreBridge` during
+  filtering. `ui.list.filter_ms` on fresh libc imports dropped from ~416ms to 5.69ms
+  (median of 3 runs, threshold 100.0ms), and `ui.sync_ms` reduced to 2.15ms (threshold 16.0ms).
+  The acceptance smoke `tests/filter_latency.sh` passes against `/usr/lib64/libc.so.6`,
+  and `benchmarks/reports/ui-gate.json` now records all 5 numeric metrics passing.
+
 ## Next bounded task
-m0-005: optimize and verify ui.list.filter_ms performance on fresh libc imports.
+m0-006: verify fresh-install packaging smoke and full UI gate pass.

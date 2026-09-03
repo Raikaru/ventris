@@ -732,11 +732,6 @@ MainWindow::MainWindow(const QString &project, const QString &program, const QSt
             setStatus(QStringLiteral("%1 functions (revision %2)")
                           .arg(function_model_->total())
                           .arg(function_model_->revision()));
-            loadFacts();
-            loadMemory();
-            loadGraph();
-            loadAnalystData();
-            loadTypes();
         });
         if (!bridge_->startupError().isEmpty()) {
             setStatus(bridge_->startupError(), true);
@@ -744,6 +739,7 @@ MainWindow::MainWindow(const QString &project, const QString &program, const QSt
             function_model_->setProgram(program_);
             navigation_->setProgram(program_);
             strings_model_->setProgram(program_);
+            loadProgramPanels();
         }
         checkOnboardingGate();
         restoreWorkspace();
@@ -755,6 +751,13 @@ MainWindow::~MainWindow() {
         bridge_->shutdown();
     }
 // private slots:
+void MainWindow::loadProgramPanels() {
+    loadFacts();
+    loadMemory();
+    loadGraph();
+    loadAnalystData();
+    loadTypes();
+}
 
 void MainWindow::importNative() {
         const int job = beginJob(QStringLiteral("native import"));
@@ -774,6 +777,7 @@ void MainWindow::importNative() {
                              function_model_->setProgram(program);
                              navigation_->setProgram(program);
                              strings_model_->setProgram(program);
+                             loadProgramPanels();
                          });
     }
 
@@ -791,6 +795,7 @@ void MainWindow::openProgram() {
                              function_model_->setProgram(program);
                              navigation_->setProgram(program);
                              strings_model_->setProgram(program);
+                             loadProgramPanels();
                          });
     }
 
@@ -867,7 +872,6 @@ void MainWindow::runGate() {
                          }
                          const QString program = program_edit_->text();
                          navigation_->setProgram(program);
-                         strings_model_->setProgram(program);
                          gate_stage_ = GateStage::LoadingList;
                          gate_timer_.start();
                          function_model_->setProgram(program);
