@@ -384,6 +384,37 @@ workflow baseline (39.6 MB peak vs 375 MiB stock; see gate numbers below and
 - Worker protocol: getComments answered safely (empty response; the C++
   guards the decode, comment_ghidra.cc:46).
 
+## UI roadmap (2026-09-02, v0.5.0)
+
+Phases 0-3 of the desktop roadmap are implemented and tagged `v0.5.0`
+(31 commits, qt-001..qt-021 + core-008..core-011). Phase 0 split the
+1,914-line `main.cpp` into one file per class with typed views; Phase 1
+finished the core loop (server-side filter/sort on `functions_page`,
+inline rename + undo, virtualized listing over core-007 windows with
+operand jumps and a context menu, paint-based token decompiler with
+hit testing and a revision-keyed cache, two-tab xrefs with containing-
+function resolution, go-to dialogs, per-project session persistence);
+Phase 2 added BB-graph extraction + layered layout in core, a
+virtualized hex canvas with pointer detection, paged strings, and job
+surfacing with cancel; Phase 3 added themes, the command palette,
+project management, the first-run gate dialog, and CPack packaging.
+
+Verified on this machine: libc (2.48 MB) imports in 4.5 s with 4,023
+functions; server-side filter answers in 20-30 ms; listing windows and
+decompilation render (malloc_printerr decompiled JVM-free); the Qt app
+runs the libc project offscreen without crashing; `cargo test
+--workspace` is green (20 suites); the CPack TGZ builds.
+
+Engine-gated follow-ups (each blocks one roadmap exit criterion):
+- Worker prototype injection: type/prototype edits persist in the store
+  but the decompiler does not consume them yet (worker-004 follow-up).
+- Listing function-header/BB-separator rows need a `kind` field on
+  `ListingRow` from the console source.
+- Pool-level job status (idle workers, restarts, memory caps) needs
+  WorkerPool wired into the decompile path.
+- Phase 4 (game-first surfaces) is scoped by the roadmap to wait for a
+  concrete target game/engine.
+
 ## Next bounded task
 Native getPcode server (SLEIGH pcode generation for
 GhidraTranslate::oneInstruction): the last gap between the protocol
