@@ -521,5 +521,19 @@ M1 — Discovery becomes generic
   real (non-freestanding) PIE binaries with PLT and dynamic relocations.
   Acceptance `tests/generic_discovery_test.sh` passes.
 
+- m1-003-a (in progress): split the x86-64 hand decoder behind a feature
+  flag. Acceptance test `tests/m1-003_x86_flow.sh` is committed and currently
+  fails: with `x86_decoder` disabled, `flow_discover` and `sweep_calls` do not
+  wire the console flow path, producing fn.precision=1.0000 and
+  fn.recall=0.9965 against the hand-decoder baseline on /usr/lib64/libc.so.6.
+
+## Sub-tasks (m1-003)
+- m1-003-a: split `x86_decoder` feature and add failing acceptance test.
+- m1-003-b: implement persistent SLEIGH console session for x86-64.
+- m1-003-c: wire `sweep_calls` and `flow_discover` to use console flow when
+  `x86_decoder` is off.
+- m1-003-d: benchmark the two paths on libc and the x86-64 corpus and decide
+  keep/delete `disasm.rs`.
+
 ## Next task
-m1-003: Delete the x86 length decoder from discovery; keep native::x86_len only if a benchmark shows >= 2x import speedup, else delete the module
+m1-003-b

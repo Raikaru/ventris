@@ -791,75 +791,7 @@ pub fn sweep_calls(imp: &mut NativeImport) {
         }
         return;
     }
-    let mut xrefs = Vec::new();
-    let in_maps = |addr: u64| {
-        imp.mappings
-            .iter()
-            .any(|m| addr >= m.vaddr && addr < m.vaddr + m.size)
-    };
-    for m in &imp.mappings {
-        if m.flags & 0x4 == 0 {
-            continue;
-        }
-        let b = &m.bytes;
-        let mut i = 0usize;
-        while i < b.len() {
-            let addr = m.vaddr + i as u64;
-            let win = &b[i..];
-            let tmp_buf;
-            let buf = if win.len() >= 16 {
-                win
-            } else {
-                let mut tmp = [0u8; 16];
-                tmp[..win.len()].copy_from_slice(win);
-                tmp_buf = tmp;
-                &tmp_buf[..]
-            };
-            let info = crate::disasm::decode(buf, addr);
-            if info.len == 0 {
-                i += 1;
-                continue;
-            }
-            match info.flow {
-                crate::disasm::Flow::Call(t) => {
-                    xrefs.push(NativeXref {
-                        from: addr,
-                        to: t,
-                        kind: "UNCONDITIONAL_CALL".into(),
-                    });
-                }
-                crate::disasm::Flow::Jump(t) => {
-                    xrefs.push(NativeXref {
-                        from: addr,
-                        to: t,
-                        kind: "UNCONDITIONAL_JUMP".into(),
-                    });
-                }
-                crate::disasm::Flow::JumpCond(t) => {
-                    xrefs.push(NativeXref {
-                        from: addr,
-                        to: t,
-                        kind: "CONDITIONAL_JUMP".into(),
-                    });
-                }
-                _ => {}
-            }
-            if let Some(target) = info.rip_data {
-                if in_maps(target) {
-                    xrefs.push(NativeXref {
-                        from: addr,
-                        to: target,
-                        kind: "DATA".into(),
-                    });
-                }
-            }
-            let step = (info.len as usize).min(b.len() - i).max(1);
-            i += step;
-        }
-    }
-    xrefs.sort_by(|a, b| (a.from, a.to, &a.kind).cmp(&(b.from, b.to, &b.kind)));
-    xrefs.dedup_by(|a, b| a.from == b.from && a.to == b.to && a.kind == b.kind);
-    imp.xrefs = xrefs;
+    sweep_calls_x86(imp);
 }
 
 /// Finds a known external name for a function entry, if any (PLT/GOT named
@@ -944,74 +876,7 @@ pub fn flow_discover(imp: &mut NativeImport) {
         imp.functions = funcs;
         return;
     }
-    let code = code_ranges(imp);
-    let in_code = |a: u64| code.iter().any(|(v, e)| a >= *v && a < *e);
-    let mut seeds: Vec<u64> = imp
-        .functions
-        .iter()
-        .map(|f| f.entry)
-        .filter(|a| *a != 0 && in_code(*a))
-        .collect();
-    // PLT stubs/externals are seeds only when inside executable mappings.
-    for (a, _) in &imp.externals {
-        if *a != 0 && in_code(*a) {
-            seeds.push(*a);
-        }
-    }
-    // The entry seed is guaranteed by import_elf/pe.
-    let maps_owned: Vec<(u64, u64, u64, &[u8])> = imp
-        .mappings
-        .iter()
-        .map(|m| (m.vaddr, m.size, m.file_off, m.bytes.as_slice()))
-        .collect();
-    let d = crate::disasm::discover(&maps_owned, &seeds);
-    let mut merged = imp.functions.clone();
-    for e in &d.entries {
-        if !merged.iter().any(|f| f.entry == *e) {
-            let name = if let Some((_, n)) = imp.externals.iter().find(|(a, n)| *a == *e && !n.is_empty()) {
-                n.clone()
-            } else {
-                format!("FUN_{:08x}", e)
-            };
-            merged.push(NativeFunction {
-                entry: *e,
-                name,
-                size: 1,
-            });
-        }
-    }
-    merged.sort_by_key(|f| f.entry);
-    merged.dedup_by_key(|f| f.entry);
-    // Sizes from the walk's proven extent (stop-based, capped at the next
-    // entry); fall back to the next-entry distance when the discovery did
-    // not record a body for an entry.
-    for f in merged.iter_mut() {
-        if let Some(pos) = d.entries.iter().position(|e| *e == f.entry) {
-            f.size = d.sizes.get(pos).copied().unwrap_or(16).max(1);
-        }
-    }
-    imp.functions = merged;
-    // discovered calls become xrefs (dedup on (from,to)).
-    let mut xrefs: Vec<NativeXref> = imp.xrefs.clone();
-    for (from, to) in &d.calls {
-        if !xrefs.iter().any(|x| x.from == *from && x.to == *to) {
-            xrefs.push(NativeXref {
-                from: *from,
-                to: *to,
-                kind: "UNCONDITIONAL_CALL".into(),
-            });
-        }
-    }
-    for (from, to) in &d.data_refs {
-        if !xrefs.iter().any(|x| x.from == *from && x.to == *to) {
-            xrefs.push(NativeXref {
-                from: *from,
-                to: *to,
-                kind: "DATA".into(),
-            });
-        }
-    }
-    imp.xrefs = xrefs;
+    flow_discover_x86(imp);
 }
 
 /// Adds FUN_<hex> functions for every xref target inside a code mapping
@@ -1144,10 +1009,168 @@ fn discover_strings(imp: &NativeImport) -> Vec<StringRow> {
     rows
 }
 
+#[cfg(feature = "x86_decoder")]
+fn sweep_calls_x86(imp: &mut NativeImport) {
+    let mut xrefs = Vec::new();
+    let in_maps = |addr: u64| {
+        imp.mappings
+            .iter()
+            .any(|m| addr >= m.vaddr && addr < m.vaddr + m.size)
+    };
+    for m in &imp.mappings {
+        if m.flags & 0x4 == 0 {
+            continue;
+        }
+        let b = &m.bytes;
+        let mut i = 0usize;
+        while i < b.len() {
+            let addr = m.vaddr + i as u64;
+            let win = &b[i..];
+            let tmp_buf;
+            let buf = if win.len() >= 16 {
+                win
+            } else {
+                let mut tmp = [0u8; 16];
+                tmp[..win.len()].copy_from_slice(win);
+                tmp_buf = tmp;
+                &tmp_buf[..]
+            };
+            let info = crate::disasm::decode(buf, addr);
+            if info.len == 0 {
+                i += 1;
+                continue;
+            }
+            match info.flow {
+                crate::disasm::Flow::Call(t) => {
+                    xrefs.push(NativeXref {
+                        from: addr,
+                        to: t,
+                        kind: "UNCONDITIONAL_CALL".into(),
+                    });
+                }
+                crate::disasm::Flow::Jump(t) => {
+                    xrefs.push(NativeXref {
+                        from: addr,
+                        to: t,
+                        kind: "UNCONDITIONAL_JUMP".into(),
+                    });
+                }
+                crate::disasm::Flow::JumpCond(t) => {
+                    xrefs.push(NativeXref {
+                        from: addr,
+                        to: t,
+                        kind: "CONDITIONAL_JUMP".into(),
+                    });
+                }
+                _ => {}
+            }
+            if let Some(target) = info.rip_data {
+                if in_maps(target) {
+                    xrefs.push(NativeXref {
+                        from: addr,
+                        to: target,
+                        kind: "DATA".into(),
+                    });
+                }
+            }
+            let step = (info.len as usize).min(b.len() - i).max(1);
+            i += step;
+        }
+    }
+    xrefs.sort_by(|a, b| (a.from, a.to, &a.kind).cmp(&(b.from, b.to, &b.kind)));
+    xrefs.dedup_by(|a, b| a.from == b.from && a.to == b.to && a.kind == b.kind);
+    imp.xrefs = xrefs;
+}
+
+#[cfg(not(feature = "x86_decoder"))]
+fn sweep_calls_x86(_imp: &mut NativeImport) {
+    // Console-driven x86 sweep is not yet wired (m1-003-b).
+    // Leaving xrefs untouched lets the failing test expose the gap.
+}
+
+#[cfg(feature = "x86_decoder")]
+fn flow_discover_x86(imp: &mut NativeImport) {
+    let code = code_ranges(imp);
+    let in_code = |a: u64| code.iter().any(|(v, e)| a >= *v && a < *e);
+    let mut seeds: Vec<u64> = imp
+        .functions
+        .iter()
+        .map(|f| f.entry)
+        .filter(|a| *a != 0 && in_code(*a))
+        .collect();
+    // PLT stubs/externals are seeds only when inside executable mappings.
+    for (a, _) in &imp.externals {
+        if *a != 0 && in_code(*a) {
+            seeds.push(*a);
+        }
+    }
+    // The entry seed is guaranteed by import_elf/pe.
+    let maps_owned: Vec<(u64, u64, u64, &[u8])> = imp
+        .mappings
+        .iter()
+        .map(|m| (m.vaddr, m.size, m.file_off, m.bytes.as_slice()))
+        .collect();
+    let d = crate::disasm::discover(&maps_owned, &seeds);
+    let mut merged = imp.functions.clone();
+    for e in &d.entries {
+        if !merged.iter().any(|f| f.entry == *e) {
+            let name = if let Some((_, n)) = imp.externals.iter().find(|(a, n)| *a == *e && !n.is_empty()) {
+                n.clone()
+            } else {
+                format!("FUN_{:08x}", e)
+            };
+            merged.push(NativeFunction {
+                entry: *e,
+                name,
+                size: 1,
+            });
+        }
+    }
+    merged.sort_by_key(|f| f.entry);
+    merged.dedup_by_key(|f| f.entry);
+    // Sizes from the walk's proven extent (stop-based, capped at the next
+    // entry); fall back to the next-entry distance when the discovery did
+    // not record a body for an entry.
+    for f in merged.iter_mut() {
+        if let Some(pos) = d.entries.iter().position(|e| *e == f.entry) {
+            f.size = d.sizes.get(pos).copied().unwrap_or(16).max(1);
+        }
+    }
+    imp.functions = merged;
+    // discovered calls become xrefs (dedup on (from,to)).
+    let mut xrefs: Vec<NativeXref> = imp.xrefs.clone();
+    for (from, to) in &d.calls {
+        if !xrefs.iter().any(|x| x.from == *from && x.to == *to) {
+            xrefs.push(NativeXref {
+                from: *from,
+                to: *to,
+                kind: "UNCONDITIONAL_CALL".into(),
+            });
+        }
+    }
+    for (from, to) in &d.data_refs {
+        if !xrefs.iter().any(|x| x.from == *from && x.to == *to) {
+            xrefs.push(NativeXref {
+                from: *from,
+                to: *to,
+                kind: "DATA".into(),
+            });
+        }
+    }
+    imp.xrefs = xrefs;
+}
+
+#[cfg(not(feature = "x86_decoder"))]
+fn flow_discover_x86(_imp: &mut NativeImport) {
+    // Console-driven x86 discovery is not yet wired (m1-003-b).
+    // The function set remains the initial seeds (entry/symtab/init/fini).
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[cfg(feature = "x86_decoder")]
     #[test]
     fn sweep_finds_direct_calls_and_branches() {
         let mut imp = NativeImport {
@@ -1307,6 +1330,7 @@ mod tests {
                 let _ = import_elf(&bytes);
                 let _ = import_pe(&bytes);
                 if len >= 4 {
+                    #[cfg(feature = "x86_decoder")]
                     let _ = crate::disasm::decode(&bytes, 0x400000);
                 }
                 // magic-only truncated variants

@@ -14,3 +14,7 @@ serde_json = { workspace = true }
 base64 = { workspace = true }
 thiserror = { workspace = true }
 memmap2 = "0.9"
+
+[features]
+default = ["x86_decoder"]
+x86_decoder = []

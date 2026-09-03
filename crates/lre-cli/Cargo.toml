@@ -12,7 +12,11 @@ path = "src/main.rs"
 [dependencies]
 lre-model = { path = "../lre-model" }
 lre-db = { path = "../lre-db" }
-lre-core = { path = "../lre-core" }
+lre-core = { path = "../lre-core", default-features = false }
 serde = { workspace = true }
 serde_json = { workspace = true }
 base64 = { workspace = true }
+
+[features]
+default = ["x86_decoder"]
+x86_decoder = ["lre-core/x86_decoder"]
