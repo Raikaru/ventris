@@ -49,6 +49,26 @@ struct ListingRowView {
     }
 };
 
+/// One memory region row (section table): name, range, permissions.
+struct MemoryRegionView {
+    QString name;
+    QString start;
+    quint64 start_offset = 0;
+    quint64 size = 0;
+    QString permissions;
+
+    static MemoryRegionView fromJson(const QJsonObject &row) {
+        MemoryRegionView view;
+        view.name = row.value("name").toString();
+        view.start = addressText(row.value("start"));
+        view.start_offset = row.value("start").toObject().value("offset")
+                                .toVariant().toULongLong();
+        view.size = row.value("size").toVariant().toULongLong();
+        view.permissions = row.value("permissions").toString();
+        return view;
+    }
+};
+
 /// One decompiler token (WORKER-004): text, token kind, and the entity
 /// address when the packed document carried one. Break tokens end a line
 /// and carry the next line's indent.

@@ -4,6 +4,7 @@
 #include "decompiler_view.h"
 #include "function_table_model.h"
 #include "graph_canvas.h"
+#include "hex_canvas.h"
 #include "listing_canvas.h"
 #include "strings_table_model.h"
 #include "navigation_controller.h"
@@ -300,11 +301,17 @@ MainWindow::MainWindow(const QString &project, const QString &program, const QSt
         memory_regions_->setHorizontalHeaderLabels(
             {QStringLiteral("Name"), QStringLiteral("Start"), QStringLiteral("Size"),
              QStringLiteral("Permissions"), QStringLiteral("Source")});
-        hex_view_ = new QPlainTextEdit(memory_panel);
-        hex_view_->setReadOnly(true);
-        hex_view_->setPlaceholderText(QStringLiteral("Select an address to inspect bytes"));
+        hex_canvas_ = new HexCanvas(memory_panel);
+        connect(hex_canvas_, &HexCanvas::addressSelected, this,
+                [this](const QString &address, bool record) {
+                    navigation_->goTo(address, record);
+                });
+        connect(hex_canvas_, &HexCanvas::windowNeeded, this,
+                [this](quint64 offset) {
+                    loadHexAt(QStringLiteral("0x%1").arg(offset, 0, 16));
+                });
         memory_layout->addWidget(memory_regions_, 1);
-        memory_layout->addWidget(hex_view_, 1);
+        memory_layout->addWidget(hex_canvas_, 1);
         auto *memory_dock = new QDockWidget(QStringLiteral("Memory map / hex"), this);
         memory_dock->setObjectName(QStringLiteral("memoryDock"));
         memory_dock->setWidget(memory_panel);
@@ -836,6 +843,8 @@ void MainWindow::loadMemory() {
                                  return;
                              }
                              const QJsonArray rows = response.value("result").toArray();
+                             QVector<MemoryRegionView> regions;
+                             regions.reserve(rows.size());
                              memory_regions_->setRowCount(0);
                              for (const QJsonValue &value : rows) {
                                  const QJsonObject row = value.toObject();
@@ -855,6 +864,7 @@ void MainWindow::loadMemory() {
                                  memory_regions_->setItem(index, 4,
                                                    new QTableWidgetItem(row.value("source").toString()));
                              }
+                             hex_canvas_->setRegions(regions);
                              finishJob(job, true,
                                        QStringLiteral("%1 memory regions").arg(rows.size()));
                              loadHex();
@@ -862,30 +872,40 @@ void MainWindow::loadMemory() {
     }
 
 void MainWindow::loadHex() {
-        const int job = beginJob(QStringLiteral("hex %1").arg(address_edit_->text()));
-        bridge_->request(QJsonObject{{"method", "memory"},
-                                     {"binary", binary_edit_->text()},
-                                     {"address", address_edit_->text()},
-                                     {"size", 128}},
-                         [this, job](const QJsonObject &response) {
-                             QString error;
-                             if (!successful(response, &error)) {
-                                 finishJob(job, false, error);
-                                 return;
-                             }
-                             const QJsonObject result = response.value("result").toObject();
-                             const QString bytes = result.value("bytes_hex").toString();
-                             QString output;
-                             for (int offset = 0; offset < bytes.size(); offset += 32) {
-                                 output += QStringLiteral("%1  %2\n")
-                                               .arg(address_edit_->text())
-                                               .arg(bytes.mid(offset, 32).toUpper());
-                             }
-                             hex_view_->setPlainText(output);
-                             finishJob(job, true,
-                                       QStringLiteral("%1 bytes").arg(bytes.size() / 2));
-                         });
+    loadHexAt(address_edit_->text());
+}
+
+void MainWindow::loadHexAt(const QString &address) {
+    if (address.isEmpty() || binary_edit_->text().isEmpty()) {
+        return;
     }
+    const int job = beginJob(QStringLiteral("hex %1").arg(address));
+    bridge_->request(QJsonObject{{"method", "memory"},
+                                 {"binary", binary_edit_->text()},
+                                 {"address", address},
+                                 {"size", 4096}},
+                     [this, job, address](const QJsonObject &response) {
+                         QString error;
+                         if (!successful(response, &error)) {
+                             finishJob(job, false, error);
+                             return;
+                         }
+                         const QJsonObject result = response.value("result").toObject();
+                         const QString hex = result.value("bytes_hex").toString();
+                         QByteArray bytes;
+                         bytes.reserve(hex.size() / 2);
+                         for (int i = 0; i + 1 < hex.size(); i += 2) {
+                             bytes.append(static_cast<char>(
+                                 hex.mid(i, 2).toInt(nullptr, 16)));
+                         }
+                         bool ok = false;
+                         const quint64 base = address.toULongLong(&ok, 16);
+                         hex_canvas_->setWindow(ok ? base : 0, bytes);
+                         hex_canvas_->setAddress(address);
+                         finishJob(job, true,
+                                   QStringLiteral("%1 bytes").arg(bytes.size()));
+                     });
+}
 
 void MainWindow::loadGraph() {
         const int job = beginJob(QStringLiteral("function graph"));

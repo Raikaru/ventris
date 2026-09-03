@@ -9,6 +9,7 @@ class CoreBridge;
 class DecompilerView;
 class FunctionTableModel;
 class GraphCanvas;
+class HexCanvas;
 class ListingCanvas;
 class NavigationController;
 class QInputDialog;
@@ -44,6 +45,7 @@ private slots:
     void loadListingAt(const QString &address);
     void listingContextMenu(const QPoint &global_pos, const QString &address);
     void loadHex();
+    void loadHexAt(const QString &address);
     void renameFunctionAt(const QString &address, const QString &name);
     void loadGraph();
     void loadAnalystData();
@@ -102,7 +104,7 @@ private:
     GraphCanvas *graph_canvas_ = nullptr;
     DecompilerView *decompiler_ = nullptr;
     QLabel *status_ = nullptr;
-    QPlainTextEdit *hex_view_ = nullptr;
+    HexCanvas *hex_canvas_ = nullptr;
     QLineEdit *type_name_edit_ = nullptr;
     QLineEdit *type_kind_edit_ = nullptr;
     QLineEdit *type_size_edit_ = nullptr;
