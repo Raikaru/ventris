@@ -8,6 +8,7 @@ pub mod bridge;
 pub mod architecture;
 pub mod disasm;
 pub mod graph;
+pub mod sigscan;
 pub mod listing;
 pub mod native;
 pub mod native_runtime;
@@ -198,6 +199,63 @@ impl Core {
             row.bytes = bytes[..len].iter().map(|b| format!("{b:02x}")).collect();
         }
         Ok(window)
+    }
+
+    /// Byte-pattern signature search over all mappings (Phase 4).
+    pub fn search_bytes(
+        &self,
+        binary: &std::path::Path,
+        pattern: &str,
+        limit: u64,
+    ) -> Result<Vec<lre_model::SearchHit>> {
+        let imp = native::load_native(binary)?;
+        let parsed = sigscan::parse_pattern(pattern)
+            .ok_or_else(|| CoreError::Collaboration(format!("bad pattern: {pattern}")))?;
+        let hits = sigscan::search_bytes(&imp.mappings, &parsed, limit as usize);
+        Ok(hits
+            .into_iter()
+            .map(|hit| lre_model::SearchHit {
+                address: Some(lre_model::Address::ram(hit.address)),
+                kind: "bytes".into(),
+                name: pattern.to_string(),
+                context: String::new(),
+            })
+            .collect())
+    }
+
+    /// Vtable recovery over data mappings (Phase 4): runs of pointers into
+    /// executable ranges. Pointer size and endianness follow the import.
+    pub fn recover_vtables(
+        &self,
+        binary: &std::path::Path,
+        limit: u64,
+    ) -> Result<Vec<serde_json::Value>> {
+        let imp = native::load_native(binary)?;
+        let big_endian = !imp.language.contains(":LE:");
+        let pointer_size = if imp.language.contains(":64:") { 8 } else { 4 };
+        let code_ranges: Vec<(u64, u64)> = imp
+            .mappings
+            .iter()
+            .filter(|m| m.flags & 0x4 != 0)
+            .map(|m| (m.vaddr, m.vaddr + m.size))
+            .collect();
+        let vtables = sigscan::recover_vtables(
+            &imp.mappings,
+            &code_ranges,
+            pointer_size,
+            big_endian,
+            3,
+            limit as usize,
+        );
+        Ok(vtables
+            .into_iter()
+            .map(|v| {
+                serde_json::json!({
+                    "address": format!("{:x}", v.address),
+                    "targets": v.targets.iter().map(|t| format!("{t:x}")).collect::<Vec<_>>(),
+                })
+            })
+            .collect())
     }
 
     /// Basic-block graph of the function at `address` with layered layout

@@ -101,6 +101,202 @@ fn u64_at(b: &[u8], o: usize) -> Result<u64> {
         .map(|s| u64::from_le_bytes(s.try_into().unwrap()))
         .ok_or(ImportError::Bad("truncated".into()))
 }
+fn u16_be_at(b: &[u8], o: usize) -> Result<u16> {
+    b.get(o..o + 2)
+        .map(|s| u16::from_be_bytes([s[0], s[1]]))
+        .ok_or(ImportError::Bad("truncated".into()))
+}
+fn u32_be_at(b: &[u8], o: usize) -> Result<u32> {
+    b.get(o..o + 4)
+        .map(|s| u32::from_be_bytes([s[0], s[1], s[2], s[3]]))
+        .ok_or(ImportError::Bad("truncated".into()))
+}
+
+// ---- ELF32 ----------------------------------------------------------------
+
+/// ELF32 section parse (40-byte Shdr), either endianness.
+fn parse_elf32_sections(data: &[u8], be: bool) -> Result<(Vec<ElfSection>, Vec<u8>)> {
+    let rd32 = |o: usize| -> Result<u32> {
+        if be {
+            u32_be_at(data, o)
+        } else {
+            u32_at(data, o)
+        }
+    };
+    let rd16 = |o: usize| -> Result<u16> {
+        if be {
+            u16_be_at(data, o)
+        } else {
+            u16_at(data, o)
+        }
+    };
+    let shentsize = rd16(46)? as usize;
+    let shnum = rd16(48)? as usize;
+    let shoff = rd32(32)? as usize;
+    let shstrndx = rd16(50)? as usize;
+    if shoff == 0 || shnum == 0 {
+        return err("ELF32 has no section headers");
+    }
+    let mut sections = Vec::new();
+    for i in 0..shnum {
+        let hdr = shoff + i * shentsize;
+        if hdr + 40 > data.len() {
+            break;
+        }
+        sections.push(ElfSection {
+            name: String::new(),
+            typ: rd32(hdr + 4)?,
+            flags: rd32(hdr + 8)? as u64,
+            addr: rd32(hdr + 12)? as u64,
+            off: rd32(hdr + 16)? as u64,
+            size: rd32(hdr + 20)? as u64,
+            link: rd32(hdr + 24)?,
+        });
+    }
+    // shstrtab content for names.
+    let mut shstr = Vec::new();
+    if let Some(s) = sections.get(shstrndx) {
+        shstr = data
+            .get(s.off as usize..s.off as usize + s.size as usize)
+            .unwrap_or(&[])
+            .to_vec();
+    }
+    for section in &mut sections {
+        let name_off = rd32(shoff + 0)?; // placeholder, replaced below
+        let _ = name_off;
+    }
+    // Names: re-walk with stored offsets (Shdr sh_name at +0).
+    let mut name_offs = Vec::new();
+    for i in 0..sections.len() {
+        name_offs.push(rd32(shoff + i * shentsize)? as usize);
+    }
+    for (section, name_off) in sections.iter_mut().zip(name_offs) {
+        section.name = shstr
+            .get(name_off..)
+            .and_then(|r| r.split(|c| *c == 0).next())
+            .map(|r| String::from_utf8_lossy(r).into_owned())
+            .unwrap_or_default();
+    }
+    Ok((sections, shstr))
+}
+
+/// ELF32 import (Phase 4 target: GameCube PowerPC BE, PS2 MIPS BE).
+/// Symbols come from SHT_SYMTAB (16-byte Elf32_Sym); the x86 GOT-stub scan
+/// and RELA processing do not apply and are skipped.
+fn import_elf32(data: &[u8], be: bool) -> Result<NativeImport> {
+    let rd32 = |o: usize| -> Result<u32> {
+        if be {
+            u32_be_at(data, o)
+        } else {
+            u32_at(data, o)
+        }
+    };
+    let rd16 = |o: usize| -> Result<u16> {
+        if be {
+            u16_be_at(data, o)
+        } else {
+            u16_at(data, o)
+        }
+    };
+    let language = elf_language(rd16(18)?, be)?;
+    let entry = rd32(24)? as u64;
+    let (sections, _shstr) = parse_elf32_sections(data, be)?;
+
+    let mut mappings = Vec::new();
+    for s in sections.iter() {
+        if s.flags & 0x2 == 0 || s.size == 0 {
+            continue;
+        }
+        let b = data
+            .get(s.off as usize..s.off as usize + s.size as usize)
+            .unwrap_or(&[]);
+        mappings.push(Mapping {
+            vaddr: s.addr,
+            size: s.size,
+            file_off: s.off,
+            flags: s.flags,
+            bytes: b.to_vec(),
+        });
+    }
+    if mappings.is_empty() {
+        return err("ELF has no allocated sections");
+    }
+
+    let mut functions = Vec::new();
+    let mut externals = Vec::new();
+    // SHT_SYMTAB (2) and SHT_DYNSYM (11): 16-byte Elf32_Sym.
+    for s in sections.iter().filter(|s| s.typ == 2 || s.typ == 11) {
+        let strtab = sections
+            .get(s.link as usize)
+            .map(|t| {
+                data.get(t.off as usize..t.off as usize + t.size as usize)
+                    .unwrap_or(&[])
+                    .to_vec()
+            })
+            .unwrap_or_default();
+        let count = s.size as usize / 16;
+        for i in 0..count {
+            let hdr = s.off as usize + i * 16;
+            if hdr + 16 > data.len() {
+                break;
+            }
+            let name_off = rd32(hdr)? as usize;
+            let info = data[hdr + 12];
+            let shndx = rd16(hdr + 14)?;
+            let value = rd32(hdr + 4)? as u64;
+            let size = rd32(hdr + 8)? as u64;
+            let name = strtab
+                .get(name_off..)
+                .and_then(|r| r.split(|c| *c == 0).next())
+                .map(|r| String::from_utf8_lossy(r).into_owned())
+                .unwrap_or_default();
+            let typ = info & 0xf;
+            if typ == 2 && value != 0 && !name.is_empty() {
+                functions.push(NativeFunction {
+                    entry: value,
+                    name: name.clone(),
+                    size: size.max(1),
+                });
+            }
+            if shndx == 0 && !name.is_empty() {
+                externals.push((0, name.clone()));
+            }
+        }
+    }
+    // init/fini arrays: ELF32 carries 4-byte pointers.
+    for s in sections.iter().filter(|s| s.typ == 14 || s.typ == 15) {
+        let n = s.size as usize / 4;
+        for i in 0..n {
+            let off = s.off as usize + i * 4;
+            if let Ok(v) = rd32(off) {
+                let v = v as u64;
+                if v != 0 && !functions.iter().any(|f| f.entry == v) {
+                    functions.push(NativeFunction {
+                        entry: v,
+                        name: format!("FUN_{v:08x}"),
+                        size: 1,
+                    });
+                }
+            }
+        }
+    }
+    if entry != 0 && !functions.iter().any(|f| f.entry == entry) {
+        functions.push(NativeFunction {
+            entry,
+            name: "_entry".into(),
+            size: 1,
+        });
+    }
+    functions.sort_by_key(|f| f.entry);
+    Ok(NativeImport {
+        format: "elf32".into(),
+        language,
+        mappings,
+        functions,
+        xrefs: Vec::new(),
+        externals,
+    })
+}
 
 // ---- ELF64 ----------------------------------------------------------------
 
@@ -158,16 +354,26 @@ fn parse_elf_sections(data: &[u8]) -> Result<(Vec<ElfSection>, Vec<u8>)> {
     Ok((sections, shstr))
 }
 
-fn elf_language(machine: u16) -> Result<String> {
-    match machine {
-        0x03e => Ok("x86:LE:64:default".into()),
-        0x0b7 => Ok("AARCH64:LE:64:v8A".into()),
-        0x028 => Ok("ARM:LE:32:v7".into()),
-        0x008 => Ok("MIPS:LE:32:default".into()),
-        0x0f3 => Ok("RISCV:LE:64:default".into()),
-        0x014 => Ok("PowerPC:LE:32:default".into()),
-        0x015 => Ok("PowerPC:LE:64:default".into()),
-        other => err(format!("unsupported ELF machine {other:#x}")),
+fn elf_language(machine: u16, big_endian: bool) -> Result<String> {
+    let (le, be) = if big_endian {
+        ("BE", "LE")
+    } else {
+        ("LE", "BE")
+    };
+    let _ = be;
+    match (machine, big_endian) {
+        (0x03e, false) => Ok("x86:LE:64:default".into()),
+        (0x0b7, false) => Ok("AARCH64:LE:64:v8A".into()),
+        (0x028, false) => Ok("ARM:LE:32:v7".into()),
+        (0x028, true) => Ok("ARM:BE:32:v7".into()),
+        (0x008, false) => Ok("MIPS:LE:32:default".into()),
+        (0x008, true) => Ok("MIPS:BE:32:default".into()),
+        (0x0f3, false) => Ok("RISCV:LE:64:default".into()),
+        (0x014, false) => Ok("PowerPC:LE:32:default".into()),
+        (0x014, true) => Ok("PowerPC:BE:32:default".into()),
+        (0x015, false) => Ok("PowerPC:LE:64:default".into()),
+        (0x015, true) => Ok("PowerPC:BE:64:default".into()),
+        (other, _) => err(format!("unsupported ELF machine {other:#x}")),
     }
 }
 
@@ -180,10 +386,14 @@ pub fn import_elf(data: &[u8]) -> Result<NativeImport> {
     if data.len() < 6 {
         return err("truncated ELF header");
     }
+    if data[4] == 1 {
+        // ELF32: GameCube/PS2-class images (PowerPC/MIPS, either endian).
+        return import_elf32(data, data[5] == 2);
+    }
     if data[4] != 2 || data[5] != 1 {
         return err("ELF64 little-endian expected");
     }
-    let language = elf_language(u16_at(data, 18)?)?;
+    let language = elf_language(u16_at(data, 18)?, false)?;
     let entry = u64_at(data, 24)?;
     let (sections, _shstr) = parse_elf_sections(data)?;
 
@@ -760,9 +970,9 @@ mod tests {
 
     #[test]
     fn architecture_selection_and_flow_guard_are_explicit() {
-        assert_eq!(elf_language(0x0b7).unwrap(), "AARCH64:LE:64:v8A");
-        assert_eq!(elf_language(0x0f3).unwrap(), "RISCV:LE:64:default");
-        assert!(elf_language(0xffff).is_err());
+        assert_eq!(elf_language(0x0b7, false).unwrap(), "AARCH64:LE:64:v8A");
+        assert_eq!(elf_language(0x0f3, false).unwrap(), "RISCV:LE:64:default");
+        assert!(elf_language(0xffff, false).is_err());
 
         let mut arm = NativeImport {
             language: "AARCH64:LE:64:v8A".into(),

@@ -236,6 +236,17 @@ fn dispatch(core: &Core, request: &Value) -> Result<Value, String> {
             let limit = optional_u64(request, "limit")?.unwrap_or(256);
             to_value(core.search(&program, &term, limit))
         }
+        "search_bytes" => {
+            let binary = required_path(request, "binary")?;
+            let pattern = required_string(request, "pattern")?;
+            let limit = optional_u64(request, "limit")?.unwrap_or(256);
+            to_value(core.search_bytes(&binary, &pattern, limit))
+        }
+        "recover_vtables" => {
+            let binary = required_path(request, "binary")?;
+            let limit = optional_u64(request, "limit")?.unwrap_or(256);
+            to_value(core.recover_vtables(&binary, limit))
+        }
         "function_bb_graph" => {
             let binary = required_path(request, "binary")?;
             let address = required_string(request, "address")?;
