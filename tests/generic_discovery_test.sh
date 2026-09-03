@@ -4,7 +4,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-CLI="${LRE_CLI:-$ROOT/target/debug/lre-cli}"
+if [ -x "$ROOT/target/release/lre-cli" ]; then
+    CLI="${LRE_CLI:-$ROOT/target/release/lre-cli}"
+else
+    CLI="${LRE_CLI:-$ROOT/target/debug/lre-cli}"
+fi
 LIBC_BIN="${1:-/usr/lib64/libc.so.6}"
 PPC_BIN="/home/raikaru/Projects/agent-under-fire/orig/GQFE78/files/base.elf"
 
@@ -61,4 +65,4 @@ print(f"PPC base.elf: recovered {count} functions (> 644 initial seeds)")
 PY
 fi
 
-print("m1-002 acceptance: pass")
+echo "m1-002 acceptance: pass"

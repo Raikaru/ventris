@@ -700,8 +700,84 @@ pub fn code_ranges(imp: &NativeImport) -> Vec<(u64, u64)> {
 }
 
 /// Sweeps mappings for direct call rel32 / jcc rel32 targets (x86-64).
+pub fn sweep_ppc_calls(imp: &mut NativeImport) {
+    let mut xrefs = Vec::new();
+    let in_maps = |addr: u64| {
+        imp.mappings
+            .iter()
+            .any(|m| addr >= m.vaddr && addr < m.vaddr + m.size)
+    };
+    for m in &imp.mappings {
+        if m.flags & 0x4 == 0 {
+            continue;
+        }
+        let b = &m.bytes;
+        let mut i = 0usize;
+        while i + 4 <= b.len() {
+            let addr = m.vaddr + i as u64;
+            let word = u32::from_be_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
+            let op = word >> 26;
+            if op == 18 {
+                let aa = (word & 2) != 0;
+                let lk = (word & 1) != 0;
+                let mut li = (word & 0x03fffffc) as i32;
+                if li & 0x02000000 != 0 {
+                    li |= !0x03fffffc;
+                }
+                let target = if aa {
+                    li as i64 as u64
+                } else {
+                    addr.wrapping_add(li as i64 as u64)
+                };
+                if in_maps(target) {
+                    xrefs.push(NativeXref {
+                        from: addr,
+                        to: target,
+                        kind: if lk {
+                            "UNCONDITIONAL_CALL".into()
+                        } else {
+                            "UNCONDITIONAL_JUMP".into()
+                        },
+                    });
+                }
+            } else if op == 16 {
+                let aa = (word & 2) != 0;
+                let lk = (word & 1) != 0;
+                let mut bd = (word & 0xfffc) as i32;
+                if bd & 0x8000 != 0 {
+                    bd |= !0xfffc;
+                }
+                let target = if aa {
+                    bd as i64 as u64
+                } else {
+                    addr.wrapping_add(bd as i64 as u64)
+                };
+                if in_maps(target) {
+                    xrefs.push(NativeXref {
+                        from: addr,
+                        to: target,
+                        kind: if lk {
+                            "UNCONDITIONAL_CALL".into()
+                        } else {
+                            "CONDITIONAL_JUMP".into()
+                        },
+                    });
+                }
+            }
+            i += 4;
+        }
+    }
+    xrefs.sort_by(|a, b| (a.from, a.to, &a.kind).cmp(&(b.from, b.to, &b.kind)));
+    xrefs.dedup_by(|a, b| a.from == b.from && a.to == b.to && a.kind == b.kind);
+    imp.xrefs.extend(xrefs);
+}
+
+/// Sweeps mappings for direct call rel32 / jcc rel32 targets (x86-64).
 pub fn sweep_calls(imp: &mut NativeImport) {
     if !imp.language.is_empty() && !imp.language.starts_with("x86:") {
+        if imp.language.starts_with("PowerPC:") {
+            sweep_ppc_calls(imp);
+        }
         return;
     }
     let mut xrefs = Vec::new();
@@ -838,8 +914,23 @@ pub fn flow_discover(imp: &mut NativeImport) {
         return;
     }
     if !imp.language.is_empty() && !imp.language.starts_with("x86:") {
-        // The byte walker is x86-specific; non-x86 imports retain symbols
-        // and the entry point until their selected SLEIGH consumer runs.
+        close_call_targets(imp);
+        let code = code_ranges(imp);
+        let mut funcs = imp.functions.clone();
+        funcs.sort_by_key(|f| f.entry);
+        funcs.dedup_by_key(|f| f.entry);
+        for i in 0..funcs.len() {
+            let cur = funcs[i].entry;
+            let next = funcs.get(i + 1).map(|f| f.entry);
+            let limit = code
+                .iter()
+                .find(|(start, end)| cur >= *start && cur < *end)
+                .map(|(_, end)| *end)
+                .unwrap_or(cur + 16);
+            let sz = next.unwrap_or(limit).min(limit).saturating_sub(cur);
+            funcs[i].size = sz.max(4);
+        }
+        imp.functions = funcs;
         return;
     }
     let code = code_ranges(imp);
