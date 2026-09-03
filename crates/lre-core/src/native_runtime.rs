@@ -48,20 +48,34 @@ pub fn ghidra_dir() -> PathBuf {
         })
 }
 
+fn find_console(cfg: &RuntimeConfig) -> Result<PathBuf> {
+    if let Some(ref p) = cfg.console_path {
+        if p.is_file() {
+            return Ok(p.clone());
+        }
+    }
+    if let Ok(val) = std::env::var("VENTRIS_CONSOLE") {
+        let p = PathBuf::from(val);
+        if p.is_file() {
+            return Ok(p);
+        }
+    }
+    for candidate in [
+        PathBuf::from("native/build/decomp_native"),
+        PathBuf::from("../../native/build/decomp_native"),
+        PathBuf::from("../native/build/decomp_native"),
+    ] {
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    err("SLEIGH console missing: build native/build_console.sh (needs binutils-devel) or configure console_path")
+}
+
 fn console_output(cfg: &RuntimeConfig, binary: &Path, address: &str) -> Result<String> {
-    let console = cfg
-        .console_path
-        .clone()
-        .unwrap_or_else(|| PathBuf::from("native/build/decomp_native"));
+    let console = find_console(cfg)?;
     let ghroot = cfg.ghidra_install.to_string_lossy().into_owned();
     let langs = cfg.language_dir.to_string_lossy().into_owned();
-    if !console.is_file() {
-        return err(format!(
-            "SLEIGH console missing: {} — build native/build_console.sh \
-             (needs binutils-devel) or configure console_path",
-            console.display()
-        ));
-    }
     let hex_addr = if address.starts_with("0x") {
         address.to_string()
     } else {
@@ -532,20 +546,21 @@ fn read_until_prompt(
 /// must be a BFD name, never a Ghidra language id.
 fn bfd_target_for(language_id: &str, binary: &Path) -> Result<String> {
     use std::io::Read as _;
-    let mut magic = [0u8; 2];
+    let mut magic = [0u8; 4];
     let mut file = std::fs::File::open(binary)
         .map_err(|e| NativeRuntimeError(format!("bfd target probe: {e}")))?;
     let got = file
         .read(&mut magic)
         .map_err(|e| NativeRuntimeError(format!("bfd target probe: {e}")))?;
-    let pe = got == 2 && &magic == b"MZ";
+    if got >= 2 && &magic[..2] == b"MZ" {
+        let sixty_four = language_id.contains(":64:");
+        return Ok(if sixty_four { "pei-x86-64".into() } else { "pei-i386".into() });
+    }
+    if language_id.starts_with("PowerPC:") {
+        return Ok("PowerPC:BE:32:default".into());
+    }
     let sixty_four = language_id.contains(":64:");
-    Ok(match (pe, sixty_four) {
-        (true, true) => "pei-x86-64".into(),
-        (true, false) => "pei-i386".into(),
-        (false, true) => "elf64-x86-64".into(),
-        (false, false) => "elf32-i386".into(),
-    })
+    Ok(if sixty_four { "elf64-x86-64".into() } else { "elf32-i386".into() })
 }
 
 /// Convenience: seeds for the console discovery rounds from an import
@@ -561,6 +576,140 @@ pub fn console_seeds(imp: &NativeImport) -> Vec<u64> {
         .collect()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum FlowKind {
+    Branch,
+    CBranch,
+    BranchInd,
+    Call,
+    CallInd,
+    Return,
+    Fallthrough,
+    Bad,
+    Unimpl,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FlowResult {
+    pub address: u64,
+    pub length: u8,
+    pub fallthrough: Option<u64>,
+    pub targets: Vec<u64>,
+    pub kind: FlowKind,
+}
+
+pub fn console_flow(cfg: &RuntimeConfig, binary: &Path, address: u64) -> Result<FlowResult> {
+    let console = find_console(cfg)?;
+    let ghroot = cfg.ghidra_install.to_string_lossy().into_owned();
+    let langs = cfg.language_dir.to_string_lossy().into_owned();
+
+    let target = bfd_target_for(&cfg.language_id, binary)?;
+    let mappings = crate::native::load_native_mappings(binary).unwrap_or_default();
+    let adjust_vma = mappings
+        .iter()
+        .find(|m| address >= m.vaddr && address < m.vaddr + m.size)
+        .or_else(|| mappings.first())
+        .map(|m| m.vaddr.wrapping_sub(m.file_off))
+        .unwrap_or(0);
+
+    let script = if cfg.language_id.starts_with("x86:") {
+        format!(
+            "load file {} {}\nflow 0x{:x}\nquit\n",
+            target,
+            binary.display(),
+            address
+        )
+    } else {
+        format!(
+            "load file {} {}\nadjust vma 0x{:x}\nflow 0x{:x}\nquit\n",
+            target,
+            binary.display(),
+            adjust_vma,
+            address
+        )
+    };
+    let mut child = Command::new(&console)
+        .arg("-s")
+        .arg(&langs)
+        .env("SLEIGHHOME", &ghroot)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| NativeRuntimeError(format!("console spawn: {e}")))?;
+
+    use std::io::Write as _;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| NativeRuntimeError("console stdin".into()))?
+        .write_all(script.as_bytes())
+        .map_err(|e| NativeRuntimeError(format!("console write: {e}")))?;
+
+    let out = child
+        .wait_with_output()
+        .map_err(|e| NativeRuntimeError(format!("console wait: {e}")))?;
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    parse_flow_output(&stdout, address)
+}
+
+fn parse_address_token(text: &str) -> Option<u64> {
+    let clean = text.trim().trim_start_matches(|c: char| c.is_alphabetic() || c == ':');
+    let hex = clean.trim_start_matches("0x");
+    (!hex.is_empty()).then(|| u64::from_str_radix(hex, 16).ok()).flatten()
+}
+
+fn parse_flow_output(stdout: &str, expected_addr: u64) -> Result<FlowResult> {
+    for line in stdout.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("FLOW ") {
+            let mut addr = expected_addr;
+            let mut length = 1u8;
+            let mut fallthrough = None;
+            let mut kind = FlowKind::Fallthrough;
+            let mut targets = Vec::new();
+
+            for part in rest.split_whitespace() {
+                if let Some(val) = part.strip_prefix("len=") {
+                    length = val.parse().unwrap_or(1);
+                } else if let Some(val) = part.strip_prefix("fall=") {
+                    if val != "none" {
+                        fallthrough = parse_address_token(val);
+                    }
+                } else if let Some(val) = part.strip_prefix("kind=") {
+                    kind = match val {
+                        "BRANCH" => FlowKind::Branch,
+                        "CBRANCH" => FlowKind::CBranch,
+                        "BRANCHIND" => FlowKind::BranchInd,
+                        "CALL" => FlowKind::Call,
+                        "CALLIND" => FlowKind::CallInd,
+                        "RETURN" => FlowKind::Return,
+                        "BAD" => FlowKind::Bad,
+                        "UNIMPL" => FlowKind::Unimpl,
+                        _ => FlowKind::Fallthrough,
+                    };
+                } else if let Some(val) = part.strip_prefix("targets=") {
+                    for t in val.split(',') {
+                        if let Some(target_addr) = parse_address_token(t) {
+                            targets.push(target_addr);
+                        }
+                    }
+                } else if let Some(a) = parse_address_token(part) {
+                    addr = a;
+                }
+            }
+            return Ok(FlowResult {
+                address: addr,
+                length,
+                fallthrough,
+                targets,
+                kind,
+            });
+        }
+    }
+    err(format!("console produced no FLOW line: {stdout}"))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -572,16 +721,29 @@ mod tests {
         let flow_ret = console_flow(&cfg, x86_bin, 0x400479).expect("x86 ret flow");
         assert_eq!(flow_ret.kind, FlowKind::Return);
         assert_eq!(flow_ret.fallthrough, None);
+        assert_eq!(flow_ret.length, 1);
+
+        let flow_fall = console_flow(&cfg, x86_bin, 0x400466).expect("x86 add flow");
+        assert_eq!(flow_fall.kind, FlowKind::Fallthrough);
+        assert_eq!(flow_fall.fallthrough, Some(0x400467));
 
         let ppc_bin = Path::new("/home/raikaru/Projects/agent-under-fire/orig/GQFE78/files/base.elf");
         if ppc_bin.is_file() {
             let mut ppc_cfg = cfg.clone();
-            ppc_cfg.language_id = "PowerPC:BE:32:e500".into();
+            ppc_cfg.language_id = "PowerPC:BE:32:default".into();
             ppc_cfg.language_dir = ppc_cfg
                 .ghidra_install
                 .join("Ghidra/Processors/PowerPC/data/languages");
-            let flow_ppc = console_flow(&ppc_cfg, ppc_bin, 0x80003100).expect("ppc flow");
-            assert_eq!(flow_ppc.length, 4);
+            let flow_fall = console_flow(&ppc_cfg, ppc_bin, 0x80680000).expect("ppc fallthrough flow");
+            assert_eq!(flow_fall.length, 4);
+            assert_eq!(flow_fall.kind, FlowKind::Fallthrough);
+            assert_eq!(flow_fall.fallthrough, Some(0x80680004));
+
+            let flow_cbranch = console_flow(&ppc_cfg, ppc_bin, 0x8068001c).expect("ppc cbranch flow");
+            assert_eq!(flow_cbranch.length, 4);
+            assert_eq!(flow_cbranch.kind, FlowKind::CBranch);
+            assert_eq!(flow_cbranch.fallthrough, Some(0x80680020));
+            assert_eq!(flow_cbranch.targets, vec![0x80680030]);
         }
     }
 }

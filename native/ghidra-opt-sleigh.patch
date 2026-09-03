@@ -1,4 +1,94 @@
---- decompiler/ghidra_arch.cc
+diff --git a/decompiler/Makefile b/decompiler/Makefile
+index 61ebba3..ee3b0e5 100644
+--- a/decompiler/Makefile
++++ b/decompiler/Makefile
+@@ -260,11 +260,11 @@ decomp_test_dbg:	$(TEST_DEBUG_OBJS)
+ test: decomp_test_dbg
+ 	./decomp_test_dbg
+ 
+-ghidra_dbg:	$(GHIDRA_DBG_OBJS)
+-	$(CXX) $(DBG_CXXFLAGS) $(ADDITIONAL_FLAGS) $(MAKE_STATIC) $(ARCH_TYPE) -o ghidra_dbg $(GHIDRA_DBG_OBJS)
++ghidra_dbg:	$(GHIDRA_DBG_OBJS) $(SLEIGH:%=ghi_opt/%.o) ghi_opt/inject_sleigh.o
++	$(CXX) $(DBG_CXXFLAGS) $(ADDITIONAL_FLAGS) $(MAKE_STATIC) $(ARCH_TYPE) -o ghidra_dbg $(GHIDRA_DBG_OBJS) $(SLEIGH:%=ghi_opt/%.o) ghi_opt/inject_sleigh.o -lz
+ 
+-ghidra_opt:	$(GHIDRA_OPT_OBJS)
+-	$(CXX) $(OPT_CXXFLAGS) $(ADDITIONAL_FLAGS) $(MAKE_STATIC) $(ARCH_TYPE)  -o ghidra_opt $(GHIDRA_OPT_OBJS)
++ghidra_opt:	$(GHIDRA_OPT_OBJS) $(SLEIGH:%=ghi_opt/%.o) ghi_opt/inject_sleigh.o
++	$(CXX) $(OPT_CXXFLAGS) $(ADDITIONAL_FLAGS) $(MAKE_STATIC) $(ARCH_TYPE)  -o ghidra_opt $(GHIDRA_OPT_OBJS) $(SLEIGH:%=ghi_opt/%.o) ghi_opt/inject_sleigh.o -lz
+ 
+ sleigh_dbg:	$(SLEIGH_DBG_OBJS)
+ 	$(CXX) $(DBG_CXXFLAGS) $(ADDITIONAL_FLAGS) $(MAKE_STATIC) $(ARCH_TYPE) -o sleigh_dbg $(SLEIGH_DBG_OBJS) $(LNK)
+diff --git a/decompiler/consolemain.cc b/decompiler/consolemain.cc
+index 87c13b8..b1b59a7 100644
+--- a/decompiler/consolemain.cc
++++ b/decompiler/consolemain.cc
+@@ -58,7 +58,11 @@ void IfcLoadFile::execute(istream &s)
+   else
+     target = "default";
+ 
+-  ArchitectureCapability *capa = ArchitectureCapability::findCapability(filename);
++  ArchitectureCapability *capa = (ArchitectureCapability *)0;
++  if (target.find(':') != string::npos)
++    capa = ArchitectureCapability::getCapability("raw");
++  if (capa == (ArchitectureCapability *)0)
++    capa = ArchitectureCapability::findCapability(filename);
+   if (capa == (ArchitectureCapability *)0)
+     throw IfaceExecutionError("Unable to recognize imagefile "+filename);
+   dcp->conf = capa->buildArchitecture(filename,target,status->optr);
+diff --git a/decompiler/database_ghidra.cc b/decompiler/database_ghidra.cc
+index 7e7e59c..b983096 100644
+--- a/decompiler/database_ghidra.cc
++++ b/decompiler/database_ghidra.cc
+@@ -34,6 +34,19 @@ ScopeGhidra::ScopeGhidra(ArchitectureGhidra *g)
+   cacheDirty = false;
+ }
+ 
++Symbol *ScopeGhidra::addMapSymToCache(Decoder &decoder) const
++
++{
++  return cache->addMapSym(decoder);
++}
++
++void ScopeGhidra::renameFunction(FunctionSymbol *sym,const string &newname) const
++
++{
++  cache->renameSymbol(sym,newname);
++  sym->getFunction()->setName(newname);
++}
++
+ ScopeGhidra::~ScopeGhidra(void)
+ 
+ {
+diff --git a/decompiler/database_ghidra.hh b/decompiler/database_ghidra.hh
+index 7b8c5f8..6b355a5 100644
+--- a/decompiler/database_ghidra.hh
++++ b/decompiler/database_ghidra.hh
+@@ -66,6 +66,8 @@ public:
+   /// can reset to it before decompiling a new function.
+   void lockDefaultProperties(void) { flagbaseDefault = ghidra->symboltab->getProperties(); cacheDirty = false; }
+   virtual ~ScopeGhidra(void);
++  Symbol *addMapSymToCache(Decoder &decoder) const;
++  void renameFunction(FunctionSymbol *sym,const string &newname) const;
+   virtual void clear(void);
+   virtual SymbolEntry *addSymbol(const string &nm,Datatype *ct,
+ 				 const Address &addr,const Address &usepoint);
+diff --git a/decompiler/funcdata.hh b/decompiler/funcdata.hh
+index db85597..1e9529c 100644
+--- a/decompiler/funcdata.hh
++++ b/decompiler/funcdata.hh
+@@ -137,7 +137,8 @@ class Funcdata {
+ public:
+   Funcdata(const string &nm,const string &disp,Scope *conf,const Address &addr,FunctionSymbol *sym,int4 sz=0);	///< Constructor
+   ~Funcdata(void);							///< Destructor
+-  const string &getName(void) const { return name; }			///< Get the function's local symbol name
++  const string &getName(void) const { return name; }
++  void setName(const string &nm) { name = nm; displayName = nm; }	///< Rename the function for output			///< Get the function's local symbol name
+   const string &getDisplayName(void) const { return displayName; }	///< Get the name to display in output
+   const Address &getAddress(void) const { return baseaddr; }		///< Get the entry point address
+   int4 getSize(void) const { return size; }				///< Get the function body size in bytes
+diff --git a/decompiler/ghidra_arch.cc b/decompiler/ghidra_arch.cc
+index 813d955..6296c29 100644
+--- a/decompiler/ghidra_arch.cc
 +++ b/decompiler/ghidra_arch.cc
 @@ -21,6 +21,7 @@
  #include "comment_ghidra.hh"
@@ -8,7 +98,7 @@
  #include "inject_ghidra.hh"
  
  namespace ghidra {
-@@ -295,6 +296,21 @@
+@@ -295,6 +296,21 @@ PcodeInjectLibrary *ArchitectureGhidra::buildPcodeInjectLibrary(void)
  Translate *ArchitectureGhidra::buildTranslator(DocumentStorage &store)
  
  {
@@ -30,7 +120,7 @@
    return new GhidraTranslate(this);
  }
  
-@@ -369,7 +385,15 @@
+@@ -369,7 +385,15 @@ void ArchitectureGhidra::buildConstantPool(DocumentStorage &store)
  void ArchitectureGhidra::buildContext(DocumentStorage &store)
  
  {
@@ -47,47 +137,9 @@
  }
  
  void ArchitectureGhidra::buildSymbols(DocumentStorage &store)
---- decompiler/ghidra_process.hh
-+++ b/decompiler/ghidra_process.hh
-@@ -101,20 +101,36 @@
- ///
- /// An id is assigned to the program, and an Architecture object for the program
- /// is created and initialized. This must be issued before any other command.
--/// The command expects four XML document parameters:
-+/// The command expects four XML document parameters plus one packed document:
- ///   - The processor specification
- ///   - The compiler specification
- ///   - The stripped down \<sleigh> tag describing address spaces for the program
- ///   - The \<coretypes> tag describing the built-in datatypes for the program
-+//   - A <doc> containing optional <mapsym><functionshell> entries
- class RegisterProgram : public GhidraCommand {
-   string pspec;				///< Processor specification to configure with
-   string cspec;				///< Compiler specification to configure with
-   string tspec;				///< Configuration (address-spaces) for the Translate object
-   string corespec;			///< A description of core data-types for the TypeFactory object
-+  string functionShell;			///< Preloaded function shells for prototype overrides
-   virtual void loadParameters(void);
-   virtual void sendResult(void);
- public:
-   int4 archid;				///< Resulting id of the program to send back
-+  virtual void rawAction(void);
-+};
-+
-+/// \brief Apply a C prototype to a preloaded function.
-+///
-+/// The function shell is installed during registerProgram so the function's
-+/// prototype is symbol-table backed. This command uses the decompiler's own
-+/// C declaration parser and invalidates derived analysis after the update.
-+class SetFunctionSignature : public GhidraCommand {
-+  string functionName;
-+  string signature;
-+  string functionAddress;
-+  virtual void loadParameters(void);
-+public:
-   virtual void rawAction(void);
- };
- 
---- decompiler/ghidra_process.cc
+diff --git a/decompiler/ghidra_process.cc b/decompiler/ghidra_process.cc
+index a93aa00..9ba9404 100644
+--- a/decompiler/ghidra_process.cc
 +++ b/decompiler/ghidra_process.cc
 @@ -14,6 +14,7 @@
   * limitations under the License.
@@ -97,7 +149,7 @@
  #include "flow.hh"
  #include "blockaction.hh"
  
-@@ -170,6 +171,7 @@
+@@ -170,6 +171,7 @@ void RegisterProgram::loadParameters(void)
    ArchitectureGhidra::readStringStream(sin,cspec);
    ArchitectureGhidra::readStringStream(sin,tspec);
    ArchitectureGhidra::readStringStream(sin,corespec);
@@ -105,7 +157,7 @@
  }
  
  
-@@ -192,6 +194,24 @@
+@@ -192,6 +194,24 @@ void RegisterProgram::rawAction(void)
  
    DocumentStorage store;	// temp storage of initialization xml docs
    ghidra->init(store);
@@ -130,12 +182,10 @@
    if (open == -1) {
      open = archlist.size();
      archlist.push_back((ArchitectureGhidra *)0);
-@@ -207,6 +227,49 @@
-   sout << dec << archid;
-   sout.write("\000\000\001\017",4);
+@@ -209,6 +229,49 @@ void RegisterProgram::sendResult(void)
    GhidraCommand::sendResult();
-+}
-+
+ }
+ 
 +void SetFunctionSignature::loadParameters(void)
 +
 +{
@@ -177,10 +227,12 @@
 +    ghidraScope->renameFunction(fd->getSymbol(),requestedName);
 +  }
 +  ghidra->clearAnalysis(fd);
- }
- 
++}
++
  void DeregisterProgram::loadParameters(void)
-@@ -497,6 +554,7 @@
+ 
+ {
+@@ -497,6 +560,7 @@ void GhidraDecompCapability::initialize(void)
  
  {
    commandmap["registerProgram"] = new RegisterProgram();
@@ -188,73 +240,64 @@
    commandmap["deregisterProgram"] = new DeregisterProgram();
    commandmap["flushNative"] = new FlushNative();
    commandmap["decompileAt"] = new DecompileAt();
---- decompiler/database_ghidra.hh
-+++ b/decompiler/database_ghidra.hh
-@@ -66,6 +66,8 @@
-   /// can reset to it before decompiling a new function.
-   void lockDefaultProperties(void) { flagbaseDefault = ghidra->symboltab->getProperties(); cacheDirty = false; }
-   virtual ~ScopeGhidra(void);
-+  Symbol *addMapSymToCache(Decoder &decoder) const;
-+  void renameFunction(FunctionSymbol *sym,const string &newname) const;
-   virtual void clear(void);
-   virtual SymbolEntry *addSymbol(const string &nm,Datatype *ct,
- 				 const Address &addr,const Address &usepoint);
---- decompiler/database_ghidra.cc
-+++ b/decompiler/database_ghidra.cc
-@@ -32,6 +32,19 @@
-   ghidra = g;
-   cache = new ScopeInternal(0,"",g,this);
-   cacheDirty = false;
-+}
-+
-+Symbol *ScopeGhidra::addMapSymToCache(Decoder &decoder) const
-+
-+{
-+  return cache->addMapSym(decoder);
-+}
-+
-+void ScopeGhidra::renameFunction(FunctionSymbol *sym,const string &newname) const
-+
-+{
-+  cache->renameSymbol(sym,newname);
-+  sym->getFunction()->setName(newname);
- }
- 
- ScopeGhidra::~ScopeGhidra(void)
---- decompiler/funcdata.hh
-+++ b/decompiler/funcdata.hh
-@@ -137,7 +137,8 @@
+diff --git a/decompiler/ghidra_process.hh b/decompiler/ghidra_process.hh
+index db72be5..a6b4bd2 100644
+--- a/decompiler/ghidra_process.hh
++++ b/decompiler/ghidra_process.hh
+@@ -101,16 +101,18 @@ public:
+ ///
+ /// An id is assigned to the program, and an Architecture object for the program
+ /// is created and initialized. This must be issued before any other command.
+-/// The command expects four XML document parameters:
++/// The command expects four XML document parameters plus one packed document:
+ ///   - The processor specification
+ ///   - The compiler specification
+ ///   - The stripped down \<sleigh> tag describing address spaces for the program
+ ///   - The \<coretypes> tag describing the built-in datatypes for the program
++//   - A <doc> containing optional <mapsym><functionshell> entries
+ class RegisterProgram : public GhidraCommand {
+   string pspec;				///< Processor specification to configure with
+   string cspec;				///< Compiler specification to configure with
+   string tspec;				///< Configuration (address-spaces) for the Translate object
+   string corespec;			///< A description of core data-types for the TypeFactory object
++  string functionShell;			///< Preloaded function shells for prototype overrides
+   virtual void loadParameters(void);
+   virtual void sendResult(void);
  public:
-   Funcdata(const string &nm,const string &disp,Scope *conf,const Address &addr,FunctionSymbol *sym,int4 sz=0);	///< Constructor
-   ~Funcdata(void);							///< Destructor
--  const string &getName(void) const { return name; }			///< Get the function's local symbol name
-+  const string &getName(void) const { return name; }
-+  void setName(const string &nm) { name = nm; displayName = nm; }	///< Rename the function for output			///< Get the function's local symbol name
-   const string &getDisplayName(void) const { return displayName; }	///< Get the name to display in output
-   const Address &getAddress(void) const { return baseaddr; }		///< Get the entry point address
-   int4 getSize(void) const { return size; }				///< Get the function body size in bytes
---- decompiler/Makefile
-+++ b/decompiler/Makefile
-@@ -260,11 +260,11 @@
- test: decomp_test_dbg
- 	./decomp_test_dbg
+@@ -118,6 +120,20 @@ public:
+   virtual void rawAction(void);
+ };
  
--ghidra_dbg:	$(GHIDRA_DBG_OBJS)
--	$(CXX) $(DBG_CXXFLAGS) $(ADDITIONAL_FLAGS) $(MAKE_STATIC) $(ARCH_TYPE) -o ghidra_dbg $(GHIDRA_DBG_OBJS)
--
--ghidra_opt:	$(GHIDRA_OPT_OBJS)
--	$(CXX) $(OPT_CXXFLAGS) $(ADDITIONAL_FLAGS) $(MAKE_STATIC) $(ARCH_TYPE)  -o ghidra_opt $(GHIDRA_OPT_OBJS)
-+ghidra_dbg:	$(GHIDRA_DBG_OBJS) $(SLEIGH:%=ghi_opt/%.o) ghi_opt/inject_sleigh.o
-+	$(CXX) $(DBG_CXXFLAGS) $(ADDITIONAL_FLAGS) $(MAKE_STATIC) $(ARCH_TYPE) -o ghidra_dbg $(GHIDRA_DBG_OBJS) $(SLEIGH:%=ghi_opt/%.o) ghi_opt/inject_sleigh.o -lz
++/// \brief Apply a C prototype to a preloaded function.
++///
++/// The function shell is installed during registerProgram so the function's
++/// prototype is symbol-table backed. This command uses the decompiler's own
++/// C declaration parser and invalidates derived analysis after the update.
++class SetFunctionSignature : public GhidraCommand {
++  string functionName;
++  string signature;
++  string functionAddress;
++  virtual void loadParameters(void);
++public:
++  virtual void rawAction(void);
++};
 +
-+ghidra_opt:	$(GHIDRA_OPT_OBJS) $(SLEIGH:%=ghi_opt/%.o) ghi_opt/inject_sleigh.o
-+	$(CXX) $(OPT_CXXFLAGS) $(ADDITIONAL_FLAGS) $(MAKE_STATIC) $(ARCH_TYPE)  -o ghidra_opt $(GHIDRA_OPT_OBJS) $(SLEIGH:%=ghi_opt/%.o) ghi_opt/inject_sleigh.o -lz
- 
- sleigh_dbg:	$(SLEIGH_DBG_OBJS)
- 	$(CXX) $(DBG_CXXFLAGS) $(ADDITIONAL_FLAGS) $(MAKE_STATIC) $(ARCH_TYPE) -o sleigh_dbg $(SLEIGH_DBG_OBJS) $(LNK)
---- decompiler/ifacedecomp.cc
+ /// \brief Command to \b release all resources associated with a Program (executable) in the decompiler
+ ///
+ /// The command frees the ArchitectureGhidra object (recursively affecting all resources)
+diff --git a/decompiler/ifacedecomp.cc b/decompiler/ifacedecomp.cc
+index e62ab6a..7603acb 100644
+--- a/decompiler/ifacedecomp.cc
 +++ b/decompiler/ifacedecomp.cc
-@@ -829,6 +829,18 @@
+@@ -63,6 +63,7 @@ void IfaceDecompCapability::registerCommands(IfaceStatus *status)
+   status->registerCom(new IfcMapconvert(),"map","convert");
+   status->registerCom(new IfcMapunionfacet(), "map", "unionfacet");
+   status->registerCom(new IfcPrintdisasm(),"disassemble");
++  status->registerCom(new IfcFlow(),"flow");
+   status->registerCom(new IfcDecompile(),"decompile");
+   status->registerCom(new IfcDump(),"dump");
+   status->registerCom(new IfcDumpbinary(),"binary");
+@@ -829,6 +830,18 @@ void IfcPrintdisasm::execute(istream &s)
    }
    IfaceAssemblyEmit assem(status->fileoptr,10);
    while(size > 0) {
@@ -270,6 +313,131 @@
 +        }
 +      }
 +    }
-    int4 sz;
-    sz = glb->translate->printAssembly(assem,addr);
-    addr = addr + sz;
+     int4 sz;
+     sz = glb->translate->printAssembly(assem,addr);
+     addr = addr + sz;
+@@ -836,6 +849,108 @@ void IfcPrintdisasm::execute(istream &s)
+   }
+ }
+ 
++void IfcFlow::execute(istream &s)
++
++{
++  if (dcp->conf == (Architecture *)0)
++    throw IfaceExecutionError("No architecture loaded");
++
++  Address addr;
++  int4 size;
++  addr = parse_machaddr(s,size,*dcp->conf->types);
++
++  class FlowPcodeEmit : public PcodeEmit {
++  public:
++    struct Op {
++      OpCode opc;
++      Address target;
++      bool has_target;
++      Op(void) : opc(CPUI_COPY), has_target(false) {}
++    };
++    vector<Op> ops;
++    virtual void dump(const Address &a,OpCode opc,VarnodeData *outvar,VarnodeData *vars,int4 isize) {
++      Op op;
++      op.opc = opc;
++      op.has_target = false;
++      if (isize > 0 && vars[0].space != (AddrSpace *)0) {
++        if (vars[0].space->getType() == IPTR_CONSTANT) {
++          op.target = Address(a.getSpace(),vars[0].offset);
++          op.has_target = true;
++        } else if (vars[0].space->getType() == IPTR_PROCESSOR) {
++          op.target = Address(vars[0].space,vars[0].offset);
++          op.has_target = true;
++        }
++      }
++      ops.push_back(op);
++    }
++  };
++
++  FlowPcodeEmit emitter;
++  int4 length = 0;
++  try {
++    length = dcp->conf->translate->oneInstruction(emitter,addr);
++  } catch(BadDataError &err) {
++    *status->fileoptr << "FLOW " << addr.getShortcut() << "0x" << hex << addr.getOffset() << " len=1 fall=none kind=BAD targets=" << endl;
++    return;
++  } catch(UnimplError &err) {
++    *status->fileoptr << "FLOW " << addr.getShortcut() << "0x" << hex << addr.getOffset() << " len=1 fall=none kind=UNIMPL targets=" << endl;
++    return;
++  }
++
++  string kind = "FALLTHROUGH";
++  bool has_fallthrough = true;
++  vector<Address> targets;
++
++  for(size_t i=0;i<emitter.ops.size();++i) {
++    OpCode opc = emitter.ops[i].opc;
++    switch(opc) {
++      case CPUI_BRANCH:
++        kind = "BRANCH";
++        has_fallthrough = false;
++        if (emitter.ops[i].has_target) targets.push_back(emitter.ops[i].target);
++        break;
++      case CPUI_CBRANCH:
++        kind = "CBRANCH";
++        has_fallthrough = true;
++        if (emitter.ops[i].has_target) targets.push_back(emitter.ops[i].target);
++        break;
++      case CPUI_BRANCHIND:
++        kind = "BRANCHIND";
++        has_fallthrough = false;
++        break;
++      case CPUI_CALL:
++        kind = "CALL";
++        has_fallthrough = true;
++        if (emitter.ops[i].has_target) targets.push_back(emitter.ops[i].target);
++        break;
++      case CPUI_CALLIND:
++        kind = "CALLIND";
++        has_fallthrough = true;
++        break;
++      case CPUI_RETURN:
++        kind = "RETURN";
++        has_fallthrough = false;
++        break;
++      default:
++        break;
++    }
++  }
++
++  *status->fileoptr << "FLOW " << addr.getShortcut() << "0x" << hex << addr.getOffset() << " len=" << dec << length;
++  if (has_fallthrough) {
++    Address fall = addr + length;
++    *status->fileoptr << " fall=" << fall.getShortcut() << "0x" << hex << fall.getOffset();
++  } else {
++    *status->fileoptr << " fall=none";
++  }
++  *status->fileoptr << " kind=" << kind << " targets=";
++  for(size_t i=0;i<targets.size();++i) {
++    if (i > 0) *status->fileoptr << ",";
++    *status->fileoptr << targets[i].getShortcut() << "0x" << hex << targets[i].getOffset();
++  }
++  *status->fileoptr << endl;
++}
++
+ /// \class IfcDump
+ /// \brief Display bytes in the load image: `dump <address+size>`
+ ///
+diff --git a/decompiler/ifacedecomp.hh b/decompiler/ifacedecomp.hh
+index 5958f67..1eb9d55 100644
+--- a/decompiler/ifacedecomp.hh
++++ b/decompiler/ifacedecomp.hh
+@@ -203,6 +203,11 @@ public:
+   virtual void execute(istream &s);
+ };
+ 
++class IfcFlow : public IfaceDecompCommand {
++public:
++  virtual void execute(istream &s);
++};
++
+ class IfcDump : public IfaceDecompCommand {
+ public:
+   virtual void execute(istream &s);

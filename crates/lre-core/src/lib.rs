@@ -220,6 +220,11 @@ impl Core {
         }
         Ok(window)
     }
+    /// Single-instruction control-flow resolution from p-code (m1-001).
+    pub fn console_flow(&self, binary: &Path, address: u64) -> Result<native_runtime::FlowResult> {
+        Ok(native_runtime::console_flow(&self.config, binary, address)?)
+    }
+
 
     /// Byte-pattern signature search over all mappings (Phase 4).
     pub fn search_bytes(
