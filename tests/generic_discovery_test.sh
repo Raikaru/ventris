@@ -23,25 +23,31 @@ trap 'rm -rf "$PROJECT"' EXIT
 # Step 1: Import libc and verify function count matches or exceeds recall >= 0.986 (>= 3931 functions)
 VENTRIS_GENERIC_DISCOVERY=1 "$CLI" import-native "$LIBC_BIN" --name libc --project "$PROJECT" >/dev/null
 
-python3 - "$PROJECT/project.sqlite" <<'PY'
-import sqlite3, sys
+python3 - "$PROJECT/project.sqlite" "$ROOT/oracle/01cccbe278d898add05282986a9346d4dda4b3d2b84bc496f9c04c66016528db.json" <<'PY'
+import json, sqlite3, sys
 
 db_path = sys.argv[1]
+oracle_path = sys.argv[2]
+with open(oracle_path) as f:
+    oracle = {entry.lower().zfill(8) for entry in json.load(f)["entries"]}
+
 conn = sqlite3.connect(db_path)
 cur = conn.cursor()
 
-cur.execute("SELECT count(*) FROM functions WHERE program_id = (SELECT id FROM programs WHERE name = 'libc')")
-count = cur.fetchone()[0]
+cur.execute("SELECT entry FROM functions WHERE program_id = (SELECT id FROM programs WHERE name = 'libc')")
+native = {row[0].lower().zfill(8) for row in cur.fetchall()}
 
-# Oracle has 3,987 functions. 0.986 recall requires >= 3,931 functions.
-ORACLE_COUNT = 3987
-MIN_RECALL_COUNT = int(ORACLE_COUNT * 0.986)
+matched = native & oracle
+precision = len(matched) / len(native) if native else 0.0
+recall = len(matched) / len(oracle) if oracle else 0.0
 
-if count < MIN_RECALL_COUNT:
-    sys.exit(f"FAIL: recovered {count} functions on libc; expected >= {MIN_RECALL_COUNT} (recall >= 0.986)")
+if recall < 0.986:
+    sys.exit(f"FAIL: fn.recall = {recall:.4f} ({len(matched)}/{len(oracle)}) < 0.986 requirement")
 
-recall = count / ORACLE_COUNT
-print(f"libc: recovered {count} functions (recall = {recall:.4f} >= 0.986)")
+if precision < 0.980:
+    sys.exit(f"FAIL: fn.precision = {precision:.4f} ({len(matched)}/{len(native)}) < 0.980 requirement")
+
+print(f"libc: fn.precision = {precision:.4f} ({len(matched)}/{len(native)}), fn.recall = {recall:.4f} ({len(matched)}/{len(oracle)}) >= 0.986")
 PY
 
 # Step 2: If PPC base.elf exists, verify generic discovery finds PPC functions beyond initial seeds

@@ -528,12 +528,23 @@ pub fn import_elf(data: &[u8]) -> Result<NativeImport> {
                 ]);
                 let got = (m.vaddr + i as u64 + 6).wrapping_add(disp as u64);
                 if let Some((_, rname)) = relocs.iter().find(|(o, _)| *o == got) {
-                    let addr = m.vaddr + i as u64;
+                    // .plt.sec on x86-64 is endbr64 (f3 0f 1e fa, 4 bytes) followed
+                    // by the indirect jmp. Align the entry to the start of the stub.
+                    let mut stub_off = i;
+                    let mut stub_size = 6;
+                    if i >= 4
+                        && (m.bytes[i - 4..i] == [0xf3, 0x0f, 0x1e, 0xfa]
+                            || m.bytes[i - 4..i] == [0xf3, 0x0f, 0x1e, 0xfb])
+                    {
+                        stub_off = i - 4;
+                        stub_size = 10;
+                    }
+                    let addr = m.vaddr + stub_off as u64;
                     if !seen_got.iter().any(|(a, _)| *a == addr) {
                         functions.push(NativeFunction {
                             entry: addr,
                             name: rname.clone(),
-                            size: 6,
+                            size: stub_size,
                         });
                         externals.push((got, rname.clone()));
                         seen_got.push((addr, rname.clone()));

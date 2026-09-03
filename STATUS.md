@@ -510,12 +510,16 @@ M1 — Discovery becomes generic
   targets=[0x80680030]).
 
 - m1-002: implemented generic worklist discovery across architectures (seeded by
-  entry, symtab/dynsym symbols, init/fini sections, call targets). On libc, recovered
-  4,023 functions (oracle: 3,987; recall 1.0090 >= 0.986 benchmark requirement). On
-  PowerPC `base.elf`, recovered 3,546 functions from 644 initial seeds. Pinned cross
-  toolchains in `docs/toolchains.md` (LLVM/Clang 22.1.8, LLD 22.1.8, GCC 16.2.1,
-  MinGW-w64 16.1.1) across x86-64, x86-32, aarch64, and ppc32-be for m1-006. Acceptance
-  smoke `tests/generic_discovery_test.sh` passes.
+  entry, symtab/dynsym symbols, init/fini sections, call targets). On libc, set
+  metrics against the stored oracle are fn.precision=0.9967 (3,953/3,966) and
+  fn.recall=0.9915 (3,953/3,987), satisfying the >= 0.986 recall requirement and
+  correcting the previous "count ratio 1.0090" misstatement. The residual 13
+  native-only functions are switch-case / PLT-nop false positives from disassembly
+  over-seeding. PowerPC `base.elf` recovered 3,546 functions from 644 initial seeds.
+  Pinned host toolchains in `docs/toolchains.md` and installed per-target Debian
+  glibc/libgcc sysroots via `tools/fetch_cross_sysroots.py` so m1-006 can build
+  real (non-freestanding) PIE binaries with PLT and dynamic relocations.
+  Acceptance `tests/generic_discovery_test.sh` passes.
 
 ## Next task
 m1-003: Delete the x86 length decoder from discovery; keep native::x86_len only if a benchmark shows >= 2x import speedup, else delete the module
