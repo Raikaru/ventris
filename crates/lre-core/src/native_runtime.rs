@@ -356,7 +356,7 @@ pub fn console_discover(
     binary: &Path,
     seeds: &[u64],
 ) -> Result<(Vec<(u64, u64)>, Vec<(u64, u64)>)> {
-    use std::io::{BufReader, Read as _, Write as _};
+    use std::io::{BufReader, Write as _};
     let console = cfg
         .console_path
         .clone()
@@ -781,11 +781,36 @@ impl ConsoleSession {
     pub fn flow(&mut self, address: u64) -> Result<FlowResult> {
         let script = format!("flow 0x{:x}\n", address);
         self.send(&script)?;
-        let chunk = read_until_prompt(&mut self.reader)?;
 
-        // A bad address is not a session error; the caller needs a length to
-        // step forward in a linear sweep.
-        if chunk.contains("Low-level ERROR") {
+        use std::io::{BufRead as _, Read as _};
+        // The console echoes the command; read and discard it.
+        let mut echo = String::new();
+        if self
+            .reader
+            .read_line(&mut echo)
+            .map_err(|e| NativeRuntimeError(format!("console read: {e}")))?
+            == 0
+        {
+            return err("console closed before flow output");
+        }
+
+        let mut line = String::new();
+        let n = self
+            .reader
+            .read_line(&mut line)
+            .map_err(|e| NativeRuntimeError(format!("console read: {e}")))?;
+        if n == 0 {
+            return err("console closed before flow output");
+        }
+
+        // Every command is followed by the prompt "[decomp]> " (no newline).
+        let mut prompt = [0u8; 10];
+        self.reader
+            .read_exact(&mut prompt)
+            .map_err(|e| NativeRuntimeError(format!("console prompt: {e}")))?;
+
+        // Bad addresses produce a "Low-level ERROR" line and no FLOW.
+        if line.contains("Low-level ERROR") {
             return Ok(FlowResult {
                 address,
                 length: 1,
@@ -795,7 +820,7 @@ impl ConsoleSession {
             });
         }
 
-        parse_flow_output(&chunk, address)
+        parse_flow_output(&line, address)
     }
 
     /// Same as `flow` but never fails: unparseable/missing output becomes a

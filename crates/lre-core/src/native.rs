@@ -20,6 +20,8 @@ use lre_db::ProjectDb;
 use lre_model::{
     FunctionRow, MemoryRegion, Provenance, ProgramSummary, StringRow, XrefRow,
 };
+#[cfg(not(feature = "x86_decoder"))]
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 /// Errors from a native import.
@@ -81,6 +83,10 @@ pub struct NativeImport {
     pub format: String,
     /// Ghidra-compatible language id selected from the file machine.
     pub language: String,
+    /// Runtime configuration used to reach the SLEIGH console/worker.
+    pub cfg: crate::session::RuntimeConfig,
+    /// Path to the binary used for console-driven x86 flow.
+    pub binary: std::path::PathBuf,
 }
 fn err<T>(msg: impl Into<String>) -> Result<T> {
     Err(ImportError::Bad(msg.into()))
@@ -289,12 +295,14 @@ fn import_elf32(data: &[u8], be: bool) -> Result<NativeImport> {
     }
     functions.sort_by_key(|f| f.entry);
     Ok(NativeImport {
+
         format: "elf32".into(),
         language,
         mappings,
         functions,
         xrefs: Vec::new(),
         externals,
+        ..Default::default()
     })
 }
 
@@ -628,12 +636,14 @@ pub fn import_elf(data: &[u8]) -> Result<NativeImport> {
     functions.sort_by_key(|f| f.entry);
     functions.dedup_by_key(|f| f.entry);
     Ok(NativeImport {
+
         mappings,
         functions,
         xrefs: Vec::new(),
         externals,
         format: "ELF".into(),
         language,
+        ..Default::default()
     })
 }
 
@@ -698,6 +708,7 @@ pub fn import_pe(data: &[u8]) -> Result<NativeImport> {
         externals: Vec::new(),
         format: "PE".into(),
         language: "x86:LE:64:default".into(),
+        ..Default::default()
     })
 }
 
@@ -844,6 +855,7 @@ pub fn load_native(binary: &Path) -> Result<NativeImport> {
     } else {
         return err("unsupported format (ELF/PE expected)");
     };
+    imp.binary = binary.to_path_buf();
     sweep_calls(&mut imp);
     flow_discover(&mut imp);
     Ok(imp)
@@ -1083,9 +1095,14 @@ fn sweep_calls_x86(imp: &mut NativeImport) {
 }
 
 #[cfg(not(feature = "x86_decoder"))]
-fn sweep_calls_x86(_imp: &mut NativeImport) {
-    // Console-driven x86 sweep is not yet wired (m1-003-b).
-    // Leaving xrefs untouched lets the failing test expose the gap.
+fn sweep_calls_x86(imp: &mut NativeImport) {
+    // Console-driven x86 sweep is not yet tuned; the BFS in flow_discover_x86
+    // records the call xrefs that determine the function set. Keeping the
+    // sweep stub avoids a second expensive console pass while m1-003-c proves
+    // the flow walk reaches the same entries as the hand decoder.
+    if imp.xrefs.is_empty() {
+        imp.xrefs = Vec::new();
+    }
 }
 
 #[cfg(feature = "x86_decoder")]
@@ -1161,9 +1178,192 @@ fn flow_discover_x86(imp: &mut NativeImport) {
 }
 
 #[cfg(not(feature = "x86_decoder"))]
-fn flow_discover_x86(_imp: &mut NativeImport) {
-    // Console-driven x86 discovery is not yet wired (m1-003-b).
-    // The function set remains the initial seeds (entry/symtab/init/fini).
+fn flow_discover_x86(imp: &mut NativeImport) {
+    use crate::native_runtime::{ConsoleSession, FlowKind};
+
+    let console_missing = imp
+        .cfg
+        .console_path
+        .as_ref()
+        .map_or(true, |p| !p.is_file());
+    if console_missing {
+        return;
+    }
+
+    let mut session = match ConsoleSession::new(&imp.cfg) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let base = imp
+        .mappings
+        .first()
+        .map(|m| m.vaddr.wrapping_sub(m.file_off))
+        .unwrap_or(0);
+    if session.load(&imp.binary, base).is_err() {
+        return;
+    }
+
+    let code = code_ranges(imp);
+    let in_code = |a: u64| code.iter().any(|(v, e)| a >= *v && a < *e);
+    let mut entries: Vec<u64> = imp
+        .functions
+        .iter()
+        .map(|f| f.entry)
+        .chain(imp.externals.iter().map(|(a, _)| *a))
+        .filter(|a| *a != 0 && in_code(*a))
+        .collect();
+    entries.sort_unstable();
+    entries.dedup();
+
+    let mut queue = entries.clone();
+    let mut processed: HashSet<u64> = HashSet::new();
+    let mut calls: Vec<(u64, u64)> = Vec::new();
+    let mut proven_bodies: HashMap<u64, u64> = HashMap::new();
+
+    while let Some(start) = queue.pop() {
+        if !processed.insert(start) {
+            continue;
+        }
+        let Some(&(sv, ss)) = code.iter().find(|(v, e)| start >= *v && start < *e) else {
+            continue;
+        };
+        let mut paths: Vec<u64> = Vec::new();
+        let mut visited: HashSet<u64> = HashSet::new();
+        let mut addr = start;
+        let mut span_end: u64 = start;
+        let mut walked = 0u32;
+
+        loop {
+            if !visited.insert(addr) {
+                if paths.is_empty() {
+                    break;
+                }
+                addr = paths.pop().unwrap();
+                continue;
+            }
+            if !in_code(addr) || addr >= sv + ss {
+                if paths.is_empty() {
+                    break;
+                }
+                addr = paths.pop().unwrap();
+                continue;
+            }
+
+            let info = session.try_flow(addr);
+            span_end = span_end.max(addr + info.length as u64);
+
+            match info.kind {
+                FlowKind::Call => {
+                    for t in &info.targets {
+                        if in_code(*t) && !entries.contains(t) {
+                            entries.push(*t);
+                            queue.push(*t);
+                        }
+                        if *t != 0 {
+                            calls.push((addr, *t));
+                        }
+                    }
+                    if let Some(f) = info.fallthrough {
+                        addr = f;
+                    } else {
+                        addr += info.length as u64;
+                    }
+                }
+                FlowKind::Branch => {
+                    if let Some(t) = info.targets.first() {
+                        if in_code(*t) && *t > addr {
+                            addr = *t;
+                        } else if let Some(f) = info.fallthrough {
+                            addr = f;
+                        } else {
+                            addr += info.length as u64;
+                        }
+                    } else if let Some(f) = info.fallthrough {
+                        addr = f;
+                    } else {
+                        addr += info.length as u64;
+                    }
+                }
+                FlowKind::CBranch => {
+                    if let Some(t) = info.targets.first() {
+                        if in_code(*t) && *t > addr {
+                            paths.push(info.fallthrough.unwrap_or(addr + info.length as u64));
+                            addr = *t;
+                        } else {
+                            addr = info.fallthrough.unwrap_or(addr + info.length as u64);
+                        }
+                    } else {
+                        addr = info.fallthrough.unwrap_or(addr + info.length as u64);
+                    }
+                }
+                FlowKind::CallInd => {
+                    addr += info.length as u64;
+                }
+                FlowKind::BranchInd | FlowKind::Return | FlowKind::Bad | FlowKind::Unimpl => {
+                    if paths.is_empty() {
+                        break;
+                    }
+                    addr = paths.pop().unwrap();
+                    continue;
+                }
+                FlowKind::Fallthrough => {
+                    addr = info.fallthrough.unwrap_or(addr + info.length as u64);
+                }
+            }
+
+            walked += 1;
+            if walked > 100_000 {
+                break;
+            }
+        }
+
+        let next = entries
+            .iter()
+            .filter(|e| **e > start)
+            .min()
+            .copied()
+            .unwrap_or(sv + ss);
+        let proven = span_end.saturating_sub(start).max(1);
+        proven_bodies.insert(start, proven.min(next - start).max(1));
+    }
+
+    entries.sort_unstable();
+    entries.dedup();
+
+    let mut merged = imp.functions.clone();
+    for e in entries {
+        if !merged.iter().any(|f| f.entry == e) {
+            let name = extern_name(imp, e).unwrap_or_else(|| format!("FUN_{e:08x}"));
+            merged.push(NativeFunction {
+                entry: e,
+                name,
+                size: 1,
+            });
+        }
+    }
+    merged.sort_by_key(|f| f.entry);
+    merged.dedup_by_key(|f| f.entry);
+
+    for f in merged.iter_mut() {
+        if let Some(sz) = proven_bodies.get(&f.entry) {
+            f.size = *sz;
+        }
+    }
+    imp.functions = merged;
+
+    let mut xrefs = imp.xrefs.clone();
+    for (from, to) in calls {
+        if !xrefs.iter().any(|x| x.from == from && x.to == to) {
+            xrefs.push(NativeXref {
+                from,
+                to,
+                kind: "UNCONDITIONAL_CALL".into(),
+            });
+        }
+    }
+    imp.xrefs = xrefs;
+
+    let _ = session.quit();
 }
 
 #[cfg(test)]

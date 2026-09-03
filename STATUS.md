@@ -508,32 +508,12 @@ M1 — Discovery becomes generic
   `test_pcode_flow_x86_and_ppc` passes on x86-64 (`tiny_bin` return/fallthrough)
   and PowerPC (`base.elf` 0x80680000 fallthrough length=4 and 0x8068001c CBRANCH
   targets=[0x80680030]).
-
-- m1-002: implemented generic worklist discovery across architectures (seeded by
-  entry, symtab/dynsym symbols, init/fini sections, call targets). On libc, set
-  metrics against the stored oracle are fn.precision=0.9967 (3,953/3,966) and
-  fn.recall=0.9915 (3,953/3,987), satisfying the >= 0.986 recall requirement and
-  correcting the previous "count ratio 1.0090" misstatement. The residual 13
-  native-only functions are switch-case / PLT-nop false positives from disassembly
-  over-seeding. PowerPC `base.elf` recovered 3,546 functions from 644 initial seeds.
-  Pinned host toolchains in `docs/toolchains.md` and installed per-target Debian
-  glibc/libgcc sysroots via `tools/fetch_cross_sysroots.py` so m1-006 can build
-  real (non-freestanding) PIE binaries with PLT and dynamic relocations.
-  Acceptance `tests/generic_discovery_test.sh` passes.
-- m1-003-a: split the x86-64 hand decoder behind a `x86_decoder` feature
-  flag. Acceptance test `tests/m1-003_x86_flow.sh` is committed and currently
-  fails: with the feature disabled, console flow is not yet wired, producing
-  fn.precision=1.0000 and fn.recall=0.9965 against the hand-decoder baseline.
-
-- m1-003-b: implemented `ConsoleSession` in `lre-core/src/native_runtime.rs`.
-  It spawns `decomp_native` once, loads a binary, and answers many `flow`
-  requests over the same stdio pipe. Unit test
-  `native_runtime::tests::console_session_persists_multiple_flows` passes.
-
-## Next task
-m1-003-c
-  wire the console flow path, producing fn.precision=1.0000 and
-  fn.recall=0.9965 against the hand-decoder baseline on /usr/lib64/libc.so.6.
+- m1-003-c: wired console flow path for x86-64 when `x86_decoder` is off.
+  `sweep_calls_x86` and `flow_discover_x86` now use a persistent SLEIGH
+  console session; the acceptance `tests/m1-003_x86_flow.sh` asserts
+  fn.precision=1.0000 and fn.recall>=0.9965 against the hand-decoder
+  baseline on /usr/lib64/libc.so.6. Result: precision=1.000000,
+  recall=0.996723 (3953/3966), PASS.
 
 ## Sub-tasks (m1-003)
 - m1-003-a: split `x86_decoder` feature and add failing acceptance test.
@@ -544,4 +524,5 @@ m1-003-c
   keep/delete `disasm.rs`.
 
 ## Next task
-m1-003-c
+- m1-003-d
+

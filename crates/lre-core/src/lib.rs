@@ -864,6 +864,7 @@ impl Core {
     /// stripped), and store writes with native provenance.
     pub fn import_native(&self, binary: &Path, name: &str) -> Result<ProgramSummary> {
         let mut imp = native::load_native(binary)?;
+        imp.cfg = self.config.clone();
         // SLEIGH-first (review CORE-008): when the pinned console is
         // available its disassembly is the primary flow source; the in-Rust
         // two-path walk (already run by load_native) is the fallback /
