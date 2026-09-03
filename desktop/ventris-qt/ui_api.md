@@ -39,7 +39,7 @@ Addresses arrive either as hex strings or as `{"offset": <int>}` objects
 
 | Method | Request | Result |
 | --- | --- | --- |
-| `listing` | `binary`, `start`, `count` | `ListingWindow`: `rows` (`stable_id`, `address`, `text`), `start`, `count`, `overscan` |
+| `listing` | `binary`, `start`, `count` | `ListingWindow`: `rows` (`stable_id`, `address`, `kind`, `text`, `bytes`), `start`, `count`, `overscan` |
 | `decompile_doc` | `binary`, `program`, `address` | `DecompDoc`: `tokens` (`text`, `kind`, `color`, `symbol?`, `address?`, ...), `address`, `revision` |
 | `memory` | `binary`, `address` (RAM only), `size` | `{"address", "size", "bytes_hex"}` |
 

@@ -1,21 +1,87 @@
 //! Listing window API (review CORE-007): structured visible rows with
 //! overscan and stable row IDs, so a virtualized view never creates a widget
-//! or Rust object per instruction.
+//! or Rust object per row.
 //!
 //! The row text source is pluggable: the SLEIGH console when configured
 //! (`RuntimeConfig::console_path`), a fake in tests, and later the worker's
-//! structured listing. The API shape — bounded windows, stable ids (the
-//! instruction address), overscan — is the contract the Qt listing view
-//! consumes.
+//! structured listing. The API shape — bounded windows, stable ids, explicit
+//! row kinds, and overscan — is the contract the Qt listing view consumes.
 
 use crate::session::RuntimeConfig;
-use lre_model::{Address, ListingRow, ListingWindow};
+use lre_model::{Address, ListingRow, ListingRowKind, ListingWindow};
+
+fn parse_address(text: &str) -> Option<u64> {
+    let text = text.trim().trim_start_matches("0x");
+    (!text.is_empty()).then(|| u64::from_str_radix(text, 16).ok()).flatten()
+}
+
+fn parse_marker(rest: &str) -> Option<(u64, String)> {
+    if let Some((left, right)) = rest.rsplit_once(':') {
+        if let Some(offset) = parse_address(right) {
+            return Some((offset, left.trim().to_string()));
+        }
+        if let Some(offset) = parse_address(left) {
+            return Some((offset, right.trim().to_string()));
+        }
+    }
+    parse_address(rest).map(|offset| (offset, String::new()))
+}
+
+/// Parses the machine-readable structural lines emitted by the SLEIGH
+/// console alongside ordinary address-prefixed instructions.
+pub(crate) fn parse_console_listing(text: &str) -> Vec<ListingRow> {
+    let mut rows = Vec::new();
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let (kind, rest) = if let Some(rest) = line.strip_prefix("Function ") {
+            (ListingRowKind::FunctionHeader, rest)
+        } else if let Some(rest) = line.strip_prefix("Block ") {
+            (ListingRowKind::BbSeparator, rest)
+        } else if let Some(rest) = line.strip_prefix("Label ") {
+            (ListingRowKind::Label, rest)
+        } else if let Some(rest) = line.strip_prefix("Data ") {
+            (ListingRowKind::Data, rest)
+        } else {
+            let Some((address, text)) = line.split_once(':') else {
+                continue;
+            };
+            let Some(offset) = parse_address(address) else {
+                continue;
+            };
+            rows.push(ListingRow {
+                stable_id: offset,
+                address: Address::ram(offset),
+                kind: ListingRowKind::Instruction,
+                text: text.trim().to_string(),
+                bytes: String::new(),
+            });
+            continue;
+        };
+        let Some((offset, marker_text)) = parse_marker(rest) else {
+            continue;
+        };
+        rows.push(ListingRow {
+            stable_id: offset,
+            address: Address::ram(offset),
+            kind,
+            text: marker_text,
+            bytes: String::new(),
+        });
+    }
+    rows
+}
 
 /// A row source: bounded windows of structured listing rows.
 pub trait ListingSource: Send {
-    /// Rows at `start` (RAM offset), up to `count`, ascending, with stable
-    /// ids = instruction address.
+    /// Rows at `start` (RAM offset), up to `count`, ascending. Each source
+    /// row carries a stable address identity and an explicit structural kind.
     fn rows(&self, start: u64, count: u32) -> crate::Result<Vec<ListingRow>>;
+
+    /// Whether the source can safely answer from an address before the
+    /// requested window. Process-based function loaders generally cannot
+    /// map arbitrary bytes before the requested instruction.
+    fn supports_pre_overscan(&self) -> bool {
+        true
+    }
 }
 
 /// SLEIGH-console-backed source: one console invocation per window (the
@@ -37,38 +103,17 @@ impl ConsoleListingSource {
 
 impl ListingSource for ConsoleListingSource {
     fn rows(&self, start: u64, count: u32) -> crate::Result<Vec<ListingRow>> {
-        let text = crate::native_runtime::disasm_native(
+        let text = crate::native_runtime::listing_native(
             &self.config,
             &self.binary,
             &format!("{start:x}"),
             count,
         )?;
-        let mut rows = Vec::new();
-        let mut addr = start;
-        for line in text.lines().take(count as usize) {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            // Address prefix: "00400466: PUSH RBP" (console prints
-            // "0x00400466: PUSH      RBP").
-            let (addr_text, text) = match line.split_once(':') {
-                Some((a, t)) => (a.trim().trim_start_matches("0x"), t.trim()),
-                None => {
-                    continue;
-                }
-            };
-            if let Ok(off) = u64::from_str_radix(addr_text, 16) {
-                rows.push(ListingRow {
-                    stable_id: off,
-                    address: Address::ram(off),
-                    text: text.to_string(),
-                    bytes: String::new(),
-                });
-                addr = off + 1;
-            }
-        }
-        Ok(rows)
+        Ok(parse_console_listing(&text))
+    }
+
+    fn supports_pre_overscan(&self) -> bool {
+        false
     }
 }
 
@@ -83,12 +128,15 @@ pub fn window(
     overscan_fraction: f32,
 ) -> crate::Result<ListingWindow> {
     let overscan = (count as f32 * overscan_fraction.max(0.0).min(1.0)) as u32;
-    let pre = overscan;
+    let pre = if source.supports_pre_overscan() {
+        overscan
+    } else {
+        0
+    };
     let post = overscan;
     let window_start = start.offset.saturating_sub(pre as u64);
-    // Ask for count + post + the pre rows (the source emits from window_start).
+    // Ask for count + post + the pre rows (when the source supports them).
     let mut rows = source.rows(window_start, count + post)?;
-    // Trim to exactly the window (start..start+count) at the front.
     let trimmed_start = rows
         .iter()
         .position(|r| r.stable_id >= start.offset)
@@ -115,6 +163,7 @@ mod tests {
                 .map(|i| ListingRow {
                     stable_id: start + i as u64,
                     address: Address::ram(start + i as u64),
+                    kind: ListingRowKind::Instruction,
                     text: format!("insn {}", start + i as u64),
                     bytes: String::new(),
                 })

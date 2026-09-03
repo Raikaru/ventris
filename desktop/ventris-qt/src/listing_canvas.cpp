@@ -40,6 +40,12 @@ QString hexTokenAtColumn(const QString &text, int column) {
     return ok ? token : QString();
 }
 
+bool isSelectableRow(const ListingRowView &row) {
+    return row.kind == QStringLiteral("instruction") ||
+           row.kind == QStringLiteral("data") ||
+           row.kind == QStringLiteral("label");
+}
+
 }  // namespace
 
 ListingCanvas::ListingCanvas(QWidget *parent) : QWidget(parent) {
@@ -57,11 +63,17 @@ void ListingCanvas::setAddress(const QString &address) {
     if (address.isEmpty()) {
         return;
     }
-    for (int i = 0; i < rows_.size(); ++i) {
-        if (rows_.at(i).address == address) {
-            cursor_ = i;
-            update();
-            return;
+    // Structural rows share the address of their first instruction. Prefer
+    // the instruction so navigation never lands on a non-code marker.
+    for (int pass = 0; pass < 2; ++pass) {
+        for (int i = 0; i < rows_.size(); ++i) {
+            const ListingRowView &row = rows_.at(i);
+            if (row.address == address &&
+                (pass == 1 || row.kind == QStringLiteral("instruction"))) {
+                cursor_ = i;
+                update();
+                return;
+            }
         }
     }
     // Not in this window: ask for a window anchored at the address. The
@@ -105,11 +117,25 @@ QString ListingCanvas::addressAt(int row) const {
 }
 
 void ListingCanvas::moveCursor(int delta, bool record) {
-    if (rows_.isEmpty()) {
+    if (rows_.isEmpty() || delta == 0) {
         return;
     }
-    const int target = qBound(0, cursorIndex() + delta, rows_.size() - 1);
-    if (target == cursorIndex() && cursorIndex() >= 0) {
+    const int direction = delta < 0 ? -1 : 1;
+    int remaining = delta < 0 ? -delta : delta;
+    int target = cursor_;
+    if (target < 0) {
+        target = direction > 0 ? -1 : rows_.size();
+    }
+    while (remaining-- > 0) {
+        do {
+            target += direction;
+        } while (target >= 0 && target < rows_.size() &&
+                 !isSelectableRow(rows_.at(target)));
+    }
+    if (target < 0 || target >= rows_.size()) {
+        return;
+    }
+    if (target == cursor_) {
         return;
     }
     cursor_ = target;
@@ -142,6 +168,18 @@ void ListingCanvas::paintEvent(QPaintEvent *) {
         if (i == cursorIndex()) {
             painter.fillRect(QRect(0, y - metrics.ascent(), width(), line), Theme::current().cursor_line);
         }
+        if (row.kind == QStringLiteral("function_header")) {
+            painter.setPen(Theme::current().function_name);
+            painter.drawText(kMargin, y,
+                             QStringLiteral("Function %1 @ %2").arg(row.text, row.address));
+            continue;
+        }
+        if (row.kind == QStringLiteral("bb_separator")) {
+            painter.setPen(Theme::current().empty_text);
+            painter.drawText(kMargin, y,
+                             QStringLiteral("---- basic block %1 ----").arg(row.address));
+            continue;
+        }
         int x = kMargin;
         painter.setPen(Theme::current().address_column);
         painter.drawText(x, y, row.address.leftJustified(kAddressWidth, QLatin1Char(' ')));
@@ -152,6 +190,16 @@ void ListingCanvas::paintEvent(QPaintEvent *) {
             x += (kBytesWidth + 2) * char_w;
         }
         // Syntax coloring: mnemonic vs operands, jump targets highlighted.
+        if (row.kind == QStringLiteral("label")) {
+            painter.setPen(Theme::current().jump_target);
+            painter.drawText(x, y, row.text + QLatin1Char(':'));
+            continue;
+        }
+        if (row.kind == QStringLiteral("data")) {
+            painter.setPen(Theme::current().bytes_column);
+            painter.drawText(x, y, row.text);
+            continue;
+        }
         const QString text = row.text;
         const int mnemonic_end = text.indexOf(QLatin1Char(' '));
         painter.setPen(Theme::current().mnemonic);

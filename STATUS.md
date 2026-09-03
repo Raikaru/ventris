@@ -404,15 +404,18 @@ project management, the first-run gate dialog, and CPack packaging.
 
 Verified on this machine: libc (2.48 MB) imports in 4.5 s with 4,023
 functions; server-side filter answers in 20-30 ms; listing windows and
-decompilation render (malloc_printerr decompiled JVM-free); the Qt app
-runs the libc project offscreen without crashing; `cargo test
---workspace` is green (20 suites); the CPack TGZ builds.
+decompilation render (malloc_printerr decompiled JVM-free); the Qt app runs
+the libc project offscreen without crashing; `cargo test --workspace` is
+green (79 tests across 20 suites); the CPack TGZ builds.
 
-- Engine-gated follow-ups (each blocks one roadmap exit criterion):
-- Listing function-header/BB-separator rows need a `kind` field on
-  `ListingRow` from the console source.
+- Remaining engine-gated follow-up:
 - Pool-level job status (idle workers, restarts, memory caps) needs
   WorkerPool wired into the decompile path.
+- Listing rows now carry explicit `function_header`, `bb_separator`, `label`,
+  `data`, and `instruction` kinds from the core model. The parser acceptance
+  fixture covers all five kinds; native console smoke emitted four basic-block
+  separators, the API default-overscan smoke returned structural rows, and
+  the Qt target built and launched offscreen without a crash.
 - Phase 4 (game-first surfaces): the target arrived (007 Agent Under
   Fire, GameCube GQFE78). ELF32 BE PowerPC import landed (644 functions
   with symbols from base.elf), the first two Phase 4 surfaces ship
@@ -436,6 +439,5 @@ runs the libc project offscreen without crashing; `cargo test
     `0x80000000`, beginning with `47 57 37 45 36 39` (`GW7E69`).
 
 ## Next bounded task
-Listing row kinds: carry function-header and basic-block separator metadata
-from the core listing model so the Qt surface can render structural rows
-without inferring them from text.
+Pool-level job status: wire `WorkerPool` into the decompile path and expose
+idle workers, restart, and memory-cap state.

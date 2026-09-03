@@ -252,3 +252,24 @@
  
  sleigh_dbg:	$(SLEIGH_DBG_OBJS)
  	$(CXX) $(DBG_CXXFLAGS) $(ADDITIONAL_FLAGS) $(MAKE_STATIC) $(ARCH_TYPE) -o sleigh_dbg $(SLEIGH_DBG_OBJS) $(LNK)
+--- decompiler/ifacedecomp.cc
++++ b/decompiler/ifacedecomp.cc
+@@ -829,6 +829,18 @@
+   }
+   IfaceAssemblyEmit assem(status->fileoptr,10);
+   while(size > 0) {
++    if (dcp->fd != (Funcdata *)0) {
++      const BlockGraph &basic_blocks = dcp->fd->getBasicBlocks();
++      for (int4 i=0;i<basic_blocks.getSize();++i) {
++        const Address block_start = basic_blocks.getBlock(i)->getStart();
++        if (block_start == addr) {
++          *status->fileoptr << "Block ";
++          block_start.printRaw(*status->fileoptr);
++          *status->fileoptr << endl;
++          break;
++        }
++      }
++    }
+    int4 sz;
+    sz = glb->translate->printAssembly(assem,addr);
+    addr = addr + sz;

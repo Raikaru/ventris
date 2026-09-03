@@ -200,6 +200,9 @@ impl Core {
         // length, the mapped image gives the bytes. Rows whose bytes cannot
         // be read stay empty rather than failing the window.
         for row in &mut window.rows {
+            if row.kind != lre_model::ListingRowKind::Instruction {
+                continue;
+            }
             let bytes = self
                 .mem_native(binary, row.address.offset, 16)
                 .unwrap_or_default();

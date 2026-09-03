@@ -243,17 +243,30 @@ pub struct DecompDoc {
     pub revision: u64,
 }
 
+/// Structural row kinds emitted by the core listing source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ListingRowKind {
+    Instruction,
+    FunctionHeader,
+    BbSeparator,
+    Data,
+    Label,
+}
+
 /// One listing row (CORE-007): stable id (= instruction address),
-/// typed address, and the rendered text a virtualized view shows.
+/// typed address, structural kind, and rendered text a virtualized view shows.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct ListingRow {
-    /// Stable row identity: the instruction address offset.
+    /// Stable row identity: the source address offset.
     pub stable_id: u64,
     pub address: Address,
-    /// Rendered mnemonic + operands.
+    /// Structural kind from the listing source.
+    pub kind: ListingRowKind,
+    /// Rendered mnemonic + operands or structural label.
     pub text: String,
     /// Raw instruction bytes as hex; empty when the source cannot read
-    /// the image.
+    /// the image or the row is not an instruction.
     pub bytes: String,
 }
 

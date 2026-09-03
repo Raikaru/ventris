@@ -48,9 +48,7 @@ pub fn ghidra_dir() -> PathBuf {
         })
 }
 
-/// Performat `disasm-native`: one function mapped + disassembled by the
-/// SLEIGH console, returned as the console's listing text.
-pub fn disasm_native(cfg: &RuntimeConfig, binary: &Path, address: &str, count: u32) -> Result<String> {
+fn console_output(cfg: &RuntimeConfig, binary: &Path, address: &str) -> Result<String> {
     let console = cfg
         .console_path
         .clone()
@@ -101,20 +99,65 @@ pub fn disasm_native(cfg: &RuntimeConfig, binary: &Path, address: &str, count: u
     let out = child
         .wait_with_output()
         .map_err(|e| NativeRuntimeError(format!("console wait: {e}")))?;
-    let text = String::from_utf8_lossy(&out.stdout);
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn instruction_line(line: &str) -> bool {
+    let Some((address, _)) = line.trim().split_once(':') else {
+        return false;
+    };
+    let address = address.trim().trim_start_matches("0x");
+    !address.is_empty() && u64::from_str_radix(address, 16).is_ok()
+}
+
+fn structural_line(line: &str) -> bool {
+    let line = line.trim();
+    line.starts_with("Function ")
+        || line.starts_with("Block ")
+        || line.starts_with("Label ")
+        || line.starts_with("Data ")
+}
+
+fn filtered_listing(output: &str, count: u32, include_structural: bool) -> Vec<String> {
+    let mut instructions = 0u32;
     let mut lines = Vec::new();
-    for line in text.lines() {
-        if line.trim_start().starts_with(|c: char| c.is_ascii_hexdigit() || c == ':') {
-            lines.push(line.to_string());
+    for line in output.lines() {
+        let is_instruction = instruction_line(line);
+        let is_structural = include_structural && structural_line(line);
+        if !is_instruction && !is_structural {
+            continue;
         }
+        if is_instruction {
+            if instructions >= count {
+                break;
+            }
+            instructions += 1;
+        }
+        lines.push(line.to_string());
     }
+    lines
+}
+
+/// Performs `disasm-native`: one function mapped + disassembled by the
+/// SLEIGH console, returning only address-prefixed instruction lines.
+pub fn disasm_native(cfg: &RuntimeConfig, binary: &Path, address: &str, count: u32) -> Result<String> {
+    let output = console_output(cfg, binary, address)?;
+    let lines = filtered_listing(&output, count, false);
     if lines.is_empty() {
-        return err(format!(
-            "console produced no listing: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+        return err("console produced no listing");
     }
-    Ok(lines.into_iter().take(count as usize).collect::<Vec<_>>().join("\n"))
+    Ok(lines.join("\n"))
+}
+
+/// Runs the same console request as `disasm_native`, preserving structural
+/// marker lines for the Core listing parser.
+pub fn listing_native(cfg: &RuntimeConfig, binary: &Path, address: &str, count: u32) -> Result<String> {
+    let output = console_output(cfg, binary, address)?;
+    let lines = filtered_listing(&output, count, true);
+    if !lines.iter().any(|line| instruction_line(line)) {
+        return err("console produced no listing");
+    }
+    Ok(lines.join("\n"))
 }
 
 /// Resolves the decompile inputs for a program language id: the compiled

@@ -16,6 +16,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+PATCH="$ROOT/native/ghidra-opt-sleigh.patch"
 if [ ! -r /usr/include/bfd.h ]; then
     echo "missing bfd.h — the console links the BFD load image." >&2
     echo "install binutils-devel (dnf: 'sudo dnf install binutils-devel';" >&2
@@ -35,6 +36,10 @@ done
 BUILD=$(mktemp -d /tmp/ghidra-console-build.XXXXXX)
 trap 'rm -rf "$BUILD"' EXIT
 cp -r "$ROOT/third_party/ghidra/decompiler" "$BUILD/decompiler"
+cp "$PATCH" "$BUILD/apply.patch"
+git -C "$BUILD" init -q
+git -C "$BUILD" add -A
+git -C "$BUILD" apply --whitespace=nowarn --ignore-space-change "$BUILD/apply.patch"
 
 cd "$BUILD/decompiler"
 # Fedora's libbfd (binutils 2.4x) pulls in zstd for compressed sections;
