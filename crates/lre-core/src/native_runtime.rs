@@ -48,7 +48,7 @@ pub fn ghidra_dir() -> PathBuf {
         })
 }
 
-fn find_console(cfg: &RuntimeConfig) -> Result<PathBuf> {
+pub fn find_console(cfg: &RuntimeConfig) -> Result<PathBuf> {
     if let Some(ref p) = cfg.console_path {
         if p.is_file() {
             return Ok(p.clone());
@@ -842,10 +842,11 @@ impl ConsoleSession {
             return Ok(Vec::new());
         }
         use std::io::{BufRead as _, Read as _};
-
-        let mut script = String::from("flow");
+        use std::fmt::Write as _;
+        let mut script = String::with_capacity(addresses.len() * 12 + 8);
+        script.push_str("flow");
         for addr in addresses {
-            script.push_str(&format!(" 0x{:x}", addr));
+            let _ = write!(script, " 0x{:x}", addr);
         }
         script.push('\n');
         self.send(&script)?;
@@ -931,6 +932,15 @@ impl ConsoleSession {
             .map_err(|e| NativeRuntimeError(format!("console write: {e}")))
     }
 }
+impl Drop for ConsoleSession {
+    fn drop(&mut self) {
+        use std::io::Write as _;
+        let _ = self.stdin.write_all(b"quit\n");
+        let _ = self.stdin.flush();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -939,13 +949,22 @@ mod tests {
     #[test]
     fn test_pcode_flow_x86_and_ppc() {
         let cfg = RuntimeConfig::from_env();
-        let x86_bin = Path::new("../../tests/fixtures-src/tiny_bin");
-        let flow_ret = console_flow(&cfg, x86_bin, 0x400479).expect("x86 ret flow");
+        if find_console(&cfg).is_err() {
+            eprintln!("SKIP: SLEIGH console not available");
+            return;
+        }
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let x86_bin = manifest_dir.join("../../tests/fixtures-src/tiny_bin");
+        if !x86_bin.is_file() {
+            eprintln!("SKIP: tiny_bin not present");
+            return;
+        }
+        let flow_ret = console_flow(&cfg, &x86_bin, 0x400479).expect("x86 ret flow");
         assert_eq!(flow_ret.kind, FlowKind::Return);
         assert_eq!(flow_ret.fallthrough, None);
         assert_eq!(flow_ret.length, 1);
 
-        let flow_fall = console_flow(&cfg, x86_bin, 0x400466).expect("x86 add flow");
+        let flow_fall = console_flow(&cfg, &x86_bin, 0x400466).expect("x86 add flow");
         assert_eq!(flow_fall.kind, FlowKind::Fallthrough);
         assert_eq!(flow_fall.fallthrough, Some(0x400467));
 
@@ -972,14 +991,23 @@ mod tests {
     #[test]
     fn console_session_persists_multiple_flows() {
         let cfg = RuntimeConfig::from_env();
-        let x86_bin = Path::new("../../tests/fixtures-src/tiny_bin");
+        if find_console(&cfg).is_err() {
+            eprintln!("SKIP: SLEIGH console not available");
+            return;
+        }
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let x86_bin = manifest_dir.join("../../tests/fixtures-src/tiny_bin");
+        if !x86_bin.is_file() {
+            eprintln!("SKIP: tiny_bin not present");
+            return;
+        }
         let mut session = ConsoleSession::new(&cfg).expect("console session");
-        let mappings = crate::native::load_native_mappings(x86_bin).unwrap_or_default();
+        let mappings = crate::native::load_native_mappings(&x86_bin).unwrap_or_default();
         let base = mappings
             .first()
             .map(|m| m.vaddr.wrapping_sub(m.file_off))
             .unwrap_or(0);
-        session.load(x86_bin, base).expect("load tiny_bin");
+        session.load(&x86_bin, base).expect("load tiny_bin");
 
         let flow_ret = session.flow(0x400479).expect("x86 ret flow");
         assert_eq!(flow_ret.kind, FlowKind::Return);

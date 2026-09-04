@@ -94,12 +94,17 @@ impl RuntimeConfig {
             .map(PathBuf::from)
             .ok()
             .or_else(|| {
-                let p = PathBuf::from("native/build/decomp_native");
-                if p.is_file() {
-                    Some(p)
-                } else {
-                    None
+                for candidate in [
+                    PathBuf::from("native/build/decomp_native"),
+                    PathBuf::from("../../native/build/decomp_native"),
+                    PathBuf::from("../native/build/decomp_native"),
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../native/build/decomp_native"),
+                ] {
+                    if candidate.is_file() {
+                        return Some(candidate);
+                    }
                 }
+                None
             });
         let sla_path = std::env::var("VENTRIS_SLA")
             .ok()

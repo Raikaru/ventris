@@ -754,21 +754,31 @@ pub fn import_pe(data: &[u8]) -> Result<NativeImport> {
 
     let (entry_rva, image_base, reloc_dir_offset) = match (machine, magic) {
         (0x8664, 0x20b) => {
-            if opt_size < 160 {
-                return err(format!("PE32+ optional header size {opt_size} too small (>= 160 expected)"));
+            if opt_size < 112 {
+                return err(format!("PE32+ optional header size {opt_size} too small (>= 112 expected)"));
             }
             let entry_rva = u32_at(data, opt + 16)? as u64;
             let image_base = u64_at(data, opt + 24)?;
-            let reloc_offset = opt + 152;
+            let num_rva_sizes = u32_at(data, opt + 108)? as usize;
+            let reloc_offset = if num_rva_sizes > 5 && opt_size >= 160 {
+                Some(opt + 152)
+            } else {
+                None
+            };
             (entry_rva, image_base, reloc_offset)
         }
         (0x014c, 0x10b) => {
-            if opt_size < 144 {
-                return err(format!("PE32 optional header size {opt_size} too small (>= 144 expected)"));
+            if opt_size < 96 {
+                return err(format!("PE32 optional header size {opt_size} too small (>= 96 expected)"));
             }
             let entry_rva = u32_at(data, opt + 16)? as u64;
             let image_base = u32_at(data, opt + 28)? as u64;
-            let reloc_offset = opt + 136;
+            let num_rva_sizes = u32_at(data, opt + 92)? as usize;
+            let reloc_offset = if num_rva_sizes > 5 && opt_size >= 144 {
+                Some(opt + 136)
+            } else {
+                None
+            };
             (entry_rva, image_base, reloc_offset)
         }
         (0x8664, other) => {
@@ -828,8 +838,13 @@ pub fn import_pe(data: &[u8]) -> Result<NativeImport> {
     }];
 
     // Parse base relocations from Data Directory 5 (.reloc)
-    let reloc_dir_rva = u32_at(data, reloc_dir_offset).unwrap_or(0) as u64;
-    let reloc_dir_size = u32_at(data, reloc_dir_offset + 4).unwrap_or(0) as usize;
+    let (reloc_dir_rva, reloc_dir_size) = if let Some(offset) = reloc_dir_offset {
+        let rva = u32_at(data, offset).unwrap_or(0) as u64;
+        let size = u32_at(data, offset + 4).unwrap_or(0) as usize;
+        (rva, size)
+    } else {
+        (0, 0)
+    };
 
     let reloc_raw_data: Option<&[u8]> = if reloc_dir_rva > 0 && reloc_dir_size > 0 {
         raw_sections.iter().find_map(|s| {
@@ -1156,7 +1171,7 @@ pub fn load_native(binary: &Path) -> Result<NativeImport> {
     } else {
         return err("unsupported format (ELF/PE expected)");
     };
-    imp.binary = binary.to_path_buf();
+    imp.binary = binary.canonicalize().unwrap_or_else(|_| binary.to_path_buf());
     imp.cfg = crate::session::RuntimeConfig::from_env();
     imp.cfg.language_id = imp.language.clone();
     sweep_calls(&mut imp);
@@ -1198,7 +1213,7 @@ pub fn flow_discover(imp: &mut NativeImport) {
 /// (the direct-call closure; mirrors Ghidra's FUN_ naming).
 pub fn close_call_targets(imp: &mut NativeImport) {
     for x in &imp.xrefs {
-        if x.kind == "DATA" {
+        if !x.kind.contains("CALL") {
             continue;
         }
         let in_code = imp
@@ -1650,28 +1665,20 @@ pub fn flow_discover_console(imp: &mut NativeImport) {
     entries.sort_unstable();
     entries.dedup();
 
-    // Helper to read a little-endian u64 from a mapped address.
-    let read_u64_at = |addr: u64| -> Option<u64> {
-        imp.mappings.iter().find_map(|m| {
-            if addr >= m.vaddr && addr + 8 <= m.vaddr + m.size {
-                let off = (addr - m.vaddr) as usize;
-                Some(u64::from_le_bytes(m.bytes[off..off + 8].try_into().ok()?))
-            } else {
-                None
-            }
-        })
-    };
     let mut calls: Vec<(u64, u64)> = Vec::new();
     let mut proven_bodies: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
+    let mut addr_origin: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
+    for &s in &entries {
+        addr_origin.insert(s, s);
+    }
     let mut visited: HashSet<u64> = HashSet::new();
     let mut active: Vec<u64> = entries.clone();
-
     while !active.is_empty() {
         // Deduplicate and filter unvisited addresses inside executable mappings.
         active.sort_unstable();
         active.dedup();
         let to_query: Vec<u64> = active
-            .into_iter()
+            .drain(..)
             .filter(|a| *a != 0 && in_code(*a) && visited.insert(*a))
             .collect();
         if to_query.is_empty() {
@@ -1683,26 +1690,35 @@ pub fn flow_discover_console(imp: &mut NativeImport) {
         for chunk in to_query.chunks(1024) {
             let flows = session.try_flow_batch(chunk);
             for (addr, info) in chunk.iter().copied().zip(flows) {
+                let origin = addr_origin.get(&addr).copied().unwrap_or(addr);
+                let span = addr + info.length as u64;
+                proven_bodies
+                    .entry(origin)
+                    .and_modify(|e| *e = (*e).max(span))
+                    .or_insert(span);
+
                 match info.kind {
                     FlowKind::Call => {
                         for t in &info.targets {
                             if in_code(*t) && !entries.contains(t) {
                                 entries.push(*t);
+                                addr_origin.insert(*t, *t);
                                 next_active.push(*t);
                             }
                             if *t != 0 {
                                 calls.push((addr, *t));
                             }
                         }
-                        if let Some(f) = info.fallthrough {
-                            next_active.push(f);
-                        } else {
-                            next_active.push(addr + info.length as u64);
+                        let fall = info.fallthrough.unwrap_or(addr + info.length as u64);
+                        if in_code(fall) && !visited.contains(&fall) {
+                            addr_origin.entry(fall).or_insert(origin);
+                            next_active.push(fall);
                         }
                     }
                     FlowKind::Branch => {
                         if let Some(t) = info.targets.first() {
                             if in_code(*t) && !visited.contains(t) {
+                                addr_origin.entry(*t).or_insert(origin);
                                 next_active.push(*t);
                             }
                         }
@@ -1710,48 +1726,27 @@ pub fn flow_discover_console(imp: &mut NativeImport) {
                     FlowKind::CBranch => {
                         if let Some(t) = info.targets.first() {
                             if in_code(*t) && !visited.contains(t) {
+                                addr_origin.entry(*t).or_insert(origin);
                                 next_active.push(*t);
                             }
                         }
                         let fall = info.fallthrough.unwrap_or(addr + info.length as u64);
                         if in_code(fall) && !visited.contains(&fall) {
+                            addr_origin.entry(fall).or_insert(origin);
                             next_active.push(fall);
                         }
                     }
                     FlowKind::CallInd => {
-                        for m in &imp.mappings {
-                            if m.flags & 0x4 == 0 || addr < m.vaddr || addr >= m.vaddr + m.size {
-                                continue;
-                            }
-                            let off = (addr - m.vaddr) as usize;
-                            let mut tmp_queue = Vec::new();
-                            crate::disasm::maybe_seed_entry(&m.bytes, m.vaddr, off, &mut entries, &mut tmp_queue);
-                            for t in tmp_queue {
-                                next_active.push(t);
-                            }
-                            let dec = crate::disasm::decode(&m.bytes[off..], addr);
-                            if let Some(ptr) = dec.rip_data {
-                                if let Some(target) = read_u64_at(ptr) {
-                                    if in_code(target) && !entries.contains(&target) {
-                                        entries.push(target);
-                                        next_active.push(target);
-                                    }
-                                    if target != 0 {
-                                        calls.push((addr, target));
-                                    }
-                                }
-                            }
-                            break;
-                        }
-                        if let Some(f) = info.fallthrough {
-                            next_active.push(f);
-                        } else {
-                            next_active.push(addr + info.length as u64);
+                        let fall = info.fallthrough.unwrap_or(addr + info.length as u64);
+                        if in_code(fall) && !visited.contains(&fall) {
+                            addr_origin.entry(fall).or_insert(origin);
+                            next_active.push(fall);
                         }
                     }
                     FlowKind::Fallthrough => {
                         let fall = info.fallthrough.unwrap_or(addr + info.length as u64);
                         if in_code(fall) && !visited.contains(&fall) {
+                            addr_origin.entry(fall).or_insert(origin);
                             next_active.push(fall);
                         }
                     }
@@ -1762,39 +1757,22 @@ pub fn flow_discover_console(imp: &mut NativeImport) {
         active = next_active;
     }
     // Explicit known-extents containment: combine initial function extents and discovered boundaries
-    let mut extents_map: std::collections::HashMap<u64, u64> = imp
+    let mut extents: Vec<(u64, u64)> = imp
         .functions
         .iter()
         .filter(|f| f.size > 1)
         .map(|f| (f.entry, f.size))
         .collect();
-
-    let mut sorted_entries = entries.clone();
-    sorted_entries.sort_unstable();
-    sorted_entries.dedup();
-    for i in 0..sorted_entries.len() {
-        let cur = sorted_entries[i];
-        let next = sorted_entries.get(i + 1).copied();
-        let limit = code
-            .iter()
-            .find(|(start, end)| cur >= *start && cur < *end)
-            .map(|(_, end)| *end)
-            .unwrap_or(cur + 16);
-        let sz = next.unwrap_or(limit).min(limit).saturating_sub(cur);
-        if sz > 1 {
-            extents_map
-                .entry(cur)
-                .and_modify(|existing| {
-                    if *existing > 1 {
-                        *existing = (*existing).min(sz);
-                    } else {
-                        *existing = sz;
-                    }
-                })
-                .or_insert(sz);
+    for (&origin, &span_end) in &proven_bodies {
+        let proven_sz = span_end.saturating_sub(origin);
+        if proven_sz > 1 {
+            if let Some(existing) = extents.iter_mut().find(|(e, _)| *e == origin) {
+                existing.1 = if existing.1 > 1 { existing.1.min(proven_sz) } else { proven_sz };
+            } else {
+                extents.push((origin, proven_sz));
+            }
         }
     }
-    let extents: Vec<(u64, u64)> = extents_map.into_iter().collect();
     let filter_ctx = CandidateFilterContext {
         mappings: &imp.mappings,
         known_extents: &extents,
@@ -1821,14 +1799,15 @@ pub fn flow_discover_console(imp: &mut NativeImport) {
             for &r in &confirmed_relocs {
                 if !entries.contains(&r) {
                     entries.push(r);
+                    addr_origin.insert(r, r);
                 }
             }
-            active = confirmed_relocs;
-            while !active.is_empty() {
-                active.sort_unstable();
-                active.dedup();
-                let to_query: Vec<u64> = active
-                    .into_iter()
+            let mut reloc_active = confirmed_relocs;
+            while !reloc_active.is_empty() {
+                reloc_active.sort_unstable();
+                reloc_active.dedup();
+                let to_query: Vec<u64> = reloc_active
+                    .drain(..)
                     .filter(|a| *a != 0 && in_code(*a) && visited.insert(*a))
                     .collect();
                 if to_query.is_empty() {
@@ -1838,26 +1817,35 @@ pub fn flow_discover_console(imp: &mut NativeImport) {
                 for chunk in to_query.chunks(1024) {
                     let flows = session.try_flow_batch(chunk);
                     for (addr, info) in chunk.iter().copied().zip(flows) {
+                        let origin = addr_origin.get(&addr).copied().unwrap_or(addr);
+                        let span = addr + info.length as u64;
+                        proven_bodies
+                            .entry(origin)
+                            .and_modify(|e| *e = (*e).max(span))
+                            .or_insert(span);
+
                         match info.kind {
                             FlowKind::Call => {
                                 for t in &info.targets {
                                     if in_code(*t) && !entries.contains(t) {
                                         entries.push(*t);
+                                        addr_origin.insert(*t, *t);
                                         next_active.push(*t);
                                     }
                                     if *t != 0 {
                                         calls.push((addr, *t));
                                     }
                                 }
-                                if let Some(f) = info.fallthrough {
-                                    next_active.push(f);
-                                } else {
-                                    next_active.push(addr + info.length as u64);
+                                let fall = info.fallthrough.unwrap_or(addr + info.length as u64);
+                                if in_code(fall) && !visited.contains(&fall) {
+                                    addr_origin.entry(fall).or_insert(origin);
+                                    next_active.push(fall);
                                 }
                             }
                             FlowKind::Branch => {
                                 if let Some(t) = info.targets.first() {
                                     if in_code(*t) && !visited.contains(t) {
+                                        addr_origin.entry(*t).or_insert(origin);
                                         next_active.push(*t);
                                     }
                                 }
@@ -1865,17 +1853,20 @@ pub fn flow_discover_console(imp: &mut NativeImport) {
                             FlowKind::CBranch => {
                                 if let Some(t) = info.targets.first() {
                                     if in_code(*t) && !visited.contains(t) {
+                                        addr_origin.entry(*t).or_insert(origin);
                                         next_active.push(*t);
                                     }
                                 }
                                 let fall = info.fallthrough.unwrap_or(addr + info.length as u64);
                                 if in_code(fall) && !visited.contains(&fall) {
+                                    addr_origin.entry(fall).or_insert(origin);
                                     next_active.push(fall);
                                 }
                             }
                             FlowKind::Fallthrough => {
                                 let fall = info.fallthrough.unwrap_or(addr + info.length as u64);
                                 if in_code(fall) && !visited.contains(&fall) {
+                                    addr_origin.entry(fall).or_insert(origin);
                                     next_active.push(fall);
                                 }
                             }
@@ -1883,7 +1874,7 @@ pub fn flow_discover_console(imp: &mut NativeImport) {
                         }
                     }
                 }
-                active = next_active;
+                reloc_active = next_active;
             }
         }
     }
@@ -1906,8 +1897,8 @@ pub fn flow_discover_console(imp: &mut NativeImport) {
     merged.dedup_by_key(|f| f.entry);
 
     for f in merged.iter_mut() {
-        if let Some(sz) = proven_bodies.get(&f.entry) {
-            f.size = *sz;
+        if let Some(span_end) = proven_bodies.get(&f.entry) {
+            f.size = span_end.saturating_sub(f.entry).max(1);
         }
     }
     imp.functions = merged;
@@ -2329,17 +2320,54 @@ mod tests {
 
     #[test]
     fn test_pe32_fixture_import_and_discovery() {
-        let path = std::path::Path::new("tests/fixtures-src/tiny_pe32.exe");
-        if !path.is_file() {
-            return;
-        }
-        let imp = load_native(path).expect("tiny_pe32 must load cleanly");
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let path = manifest_dir.join("../../tests/fixtures-src/tiny_pe32.exe");
+        assert!(path.is_file(), "committed fixture must exist at {}", path.display());
+        let imp = load_native(&path).expect("tiny_pe32 must load cleanly");
         assert_eq!(imp.format, "PE");
         assert_eq!(imp.language, "x86:LE:32:default");
-        assert_eq!(pe_image_base(&std::fs::read(path).unwrap()), Some(0x400000));
+        assert_eq!(pe_image_base(&std::fs::read(&path).unwrap()), Some(0x400000));
         assert!(imp.functions.iter().any(|f| f.entry == 0x401400));
         assert!(imp.xrefs.iter().any(|x| x.provenance == "native-import:pe-reloc"));
-        assert!(imp.functions.len() >= 10);
+        if crate::native_runtime::find_console(&imp.cfg).is_ok() {
+            assert!(imp.functions.len() >= 10, "console discovery should find >= 10 functions, got {}", imp.functions.len());
+        } else {
+            assert!(!imp.functions.is_empty(), "entry function must be present");
+        }
+    }
+
+    #[test]
+    fn test_relocation_only_code_function_is_promoted() {
+        use crate::native_runtime::{FlowKind, FlowResult};
+        // Setup: Function 0x1000 has flow-proven extent 0x1000..0x1020 (size 32).
+        // Candidate 0x1040 is a relocation-only code target in executable mapping.
+        // Candidate 0x1040 decodes to a valid Return instruction (not pad, not bad).
+        // Next entry is 0x1100 (old next-entry-distance would have said 0x1000..0x1100).
+        let mappings = vec![Mapping {
+            vaddr: 0x1000,
+            size: 0x200,
+            file_off: 0,
+            flags: 0x4, // executable
+            bytes: vec![0x90; 0x200],
+        }];
+        let initial_seeds = HashSet::from([0x1000, 0x1100]);
+        // Flow-proven extents:
+        let extents = vec![(0x1000, 32), (0x1100, 32)];
+        let filter_ctx = CandidateFilterContext {
+            mappings: &mappings,
+            known_extents: &extents,
+            initial_seeds: &initial_seeds,
+        };
+
+        // Candidate 0x1040 is in the gap (0x1020..0x1100), not inside [0x1001, 0x1020).
+        let promoted = filter_candidate(0x1040, &filter_ctx, |addr| FlowResult {
+            address: addr,
+            length: 1,
+            fallthrough: None,
+            targets: Vec::new(),
+            kind: FlowKind::Return,
+        });
+        assert!(promoted, "relocation-only code function at 0x1040 must be promoted when outside flow-proven extent");
     }
     #[test]
     fn regression_load_native_pe32_data_to_data_relocation_never_becomes_function() {
@@ -2442,8 +2470,18 @@ mod tests {
         b2[0x98..0x9a].copy_from_slice(&0x20bu16.to_le_bytes()); // magic 0x20b
         let res2 = import_pe(&b2);
         assert!(res2.is_err(), "undersized PE32+ optional header must return Err");
-    }
 
+        // Also test opt_size too small for PE32 (e.g. 40 < 96)
+        let mut b3 = vec![0u8; 0x200];
+        b3[0..2].copy_from_slice(b"MZ");
+        b3[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        b3[0x80..0x84].copy_from_slice(b"PE\0\0");
+        b3[0x84..0x86].copy_from_slice(&0x014cu16.to_le_bytes()); // i386
+        b3[0x94..0x96].copy_from_slice(&40u16.to_le_bytes()); // opt_size 40 < 96
+        b3[0x98..0x9a].copy_from_slice(&0x10bu16.to_le_bytes()); // magic 0x10b
+        let res3 = import_pe(&b3);
+        assert!(res3.is_err(), "undersized PE32 optional header must return Err");
+    }
     #[test]
     fn regression_pe_truncated_section_table_returns_error() {
         let mut b = vec![0u8; 0x200];
