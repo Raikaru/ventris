@@ -224,7 +224,7 @@ fn import_elf32(data: &[u8], be: bool) -> Result<NativeImport> {
             u16_at(data, o)
         }
     };
-    let language = elf_language(rd16(18)?, be)?;
+    let language = elf_language(rd16(18)?, be, rd32(36)?)?;
     let entry = rd32(24)? as u64;
     let (sections, _shstr) = parse_elf32_sections(data, be)?;
 
@@ -382,18 +382,16 @@ fn parse_elf_sections(data: &[u8]) -> Result<(Vec<ElfSection>, Vec<u8>)> {
     Ok((sections, shstr))
 }
 
-fn elf_language(machine: u16, big_endian: bool) -> Result<String> {
-    let (le, be) = if big_endian {
-        ("BE", "LE")
-    } else {
-        ("LE", "BE")
-    };
-    let _ = be;
+fn elf_language(machine: u16, big_endian: bool, flags: u32) -> Result<String> {
+    // ARM ELF EF_ARM_BE8: big-endian data, little-endian instructions.
+    // The pinned ARM.ldefs calls this variant v7LEInstruction.
+    const EF_ARM_BE8: u32 = 0x0080_0000;
     match (machine, big_endian) {
         (0x03e, false) => Ok("x86:LE:64:default".into()),
         (0x003, false) => Ok("x86:LE:32:default".into()),
         (0x0b7, false) => Ok("AARCH64:LE:64:v8A".into()),
         (0x028, false) => Ok("ARM:LE:32:v7".into()),
+        (0x028, true) if flags & EF_ARM_BE8 != 0 => Ok("ARM:LEBE:32:v7LEInstruction".into()),
         (0x028, true) => Ok("ARM:BE:32:v7".into()),
         (0x008, false) => Ok("MIPS:LE:32:default".into()),
         (0x008, true) => Ok("MIPS:BE:32:default".into()),
@@ -422,7 +420,7 @@ pub fn import_elf(data: &[u8]) -> Result<NativeImport> {
     if data[4] != 2 || data[5] != 1 {
         return err("ELF64 little-endian expected");
     }
-    let language = elf_language(u16_at(data, 18)?, false)?;
+    let language = elf_language(u16_at(data, 18)?, false, u32_at(data, 48)?)?;
     let entry = u64_at(data, 24)?;
     let (sections, _shstr) = parse_elf_sections(data)?;
 
@@ -2020,9 +2018,9 @@ mod tests {
 
     #[test]
     fn architecture_selection_and_flow_guard_are_explicit() {
-        assert_eq!(elf_language(0x0b7, false).unwrap(), "AARCH64:LE:64:v8A");
-        assert_eq!(elf_language(0x0f3, false).unwrap(), "RISCV:LE:64:default");
-        assert!(elf_language(0xffff, false).is_err());
+        assert_eq!(elf_language(0x0b7, false, 0).unwrap(), "AARCH64:LE:64:v8A");
+        assert_eq!(elf_language(0x0f3, false, 0).unwrap(), "RISCV:LE:64:default");
+        assert!(elf_language(0xffff, false, 0).is_err());
 
         let mut arm = NativeImport {
             language: "AARCH64:LE:64:v8A".into(),

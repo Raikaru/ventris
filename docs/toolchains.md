@@ -166,3 +166,23 @@ requires the pinned installation metadata and current bridge sources.
 The m1-007 gate requires all **20 ELF entries**, with zero allowed skips; the
 separate five MSVC entries are outside the original m1-007 acceptance scope.
 The committed generation report is `benchmarks/reports/m1-007.json`.
+
+## Native language selection (`m1-008`)
+
+`python3 tests/m1-008_languages.py` checks six native imports against the pinned
+Ghidra `.ldefs` entries and compiled SLA files: ELF32 i386, ARM little-endian,
+ARM BE32, ARM BE8, the existing PE32 fixture, and an ELF64 x86-64 control.
+It requires Clang/LLD, Rust and the Ghidra installation metadata; it does not
+launch the Java bridge. Compiler probes and import databases are temporary;
+the committed corpus matrix is unchanged.
+
+ARM ELF `EF_ARM_BE8` (`0x00800000`, defined in the public ELF SDK header
+`elf.h`) denotes big-endian data with little-endian instructions. Selection
+uses this flag rather than `EI_DATA` alone: the pinned `ARM.ldefs` entry is
+`ARM:LEBE:32:v7LEInstruction`, with `instructionEndian="little"`. Ordinary
+big-endian ARM remains `ARM:BE:32:v7`; ELF32 i386 and PE32 remain
+`x86:LE:32:default`. This verifies language selection, not ARM decompile parity.
+
+`--update-report` explicitly writes `benchmarks/reports/m1-008.json`; normal
+runs leave the working tree unchanged. All six cases must pass, with zero
+allowed skips.

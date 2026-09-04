@@ -70,6 +70,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -85,6 +87,7 @@ jobs:
       - name: Generate and validate all 20 ELF oracles
         run: |
           python3 tests/m1-007_oracle_test.py
+          python3 tests/m1-008_languages.py
           git diff --exit-code
           test -z "$(git ls-files --others --exclude-standard)"
 
