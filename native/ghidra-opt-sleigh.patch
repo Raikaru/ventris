@@ -286,7 +286,7 @@ index db72be5..a6b4bd2 100644
  ///
  /// The command frees the ArchitectureGhidra object (recursively affecting all resources)
 diff --git a/decompiler/ifacedecomp.cc b/decompiler/ifacedecomp.cc
-index e62ab6a..7603acb 100644
+index e62ab6a..6d42a2d 100644
 --- a/decompiler/ifacedecomp.cc
 +++ b/decompiler/ifacedecomp.cc
 @@ -63,6 +63,7 @@ void IfaceDecompCapability::registerCommands(IfaceStatus *status)
@@ -316,7 +316,7 @@ index e62ab6a..7603acb 100644
      int4 sz;
      sz = glb->translate->printAssembly(assem,addr);
      addr = addr + sz;
-@@ -836,6 +849,108 @@ void IfcPrintdisasm::execute(istream &s)
+@@ -836,6 +849,117 @@ void IfcPrintdisasm::execute(istream &s)
    }
  }
  
@@ -325,10 +325,6 @@ index e62ab6a..7603acb 100644
 +{
 +  if (dcp->conf == (Architecture *)0)
 +    throw IfaceExecutionError("No architecture loaded");
-+
-+  Address addr;
-+  int4 size;
-+  addr = parse_machaddr(s,size,*dcp->conf->types);
 +
 +  class FlowPcodeEmit : public PcodeEmit {
 +  public:
@@ -356,70 +352,83 @@ index e62ab6a..7603acb 100644
 +    }
 +  };
 +
-+  FlowPcodeEmit emitter;
-+  int4 length = 0;
-+  try {
-+    length = dcp->conf->translate->oneInstruction(emitter,addr);
-+  } catch(BadDataError &err) {
-+    *status->fileoptr << "FLOW " << addr.getShortcut() << "0x" << hex << addr.getOffset() << " len=1 fall=none kind=BAD targets=" << endl;
-+    return;
-+  } catch(UnimplError &err) {
-+    *status->fileoptr << "FLOW " << addr.getShortcut() << "0x" << hex << addr.getOffset() << " len=1 fall=none kind=UNIMPL targets=" << endl;
-+    return;
-+  }
-+
-+  string kind = "FALLTHROUGH";
-+  bool has_fallthrough = true;
-+  vector<Address> targets;
-+
-+  for(size_t i=0;i<emitter.ops.size();++i) {
-+    OpCode opc = emitter.ops[i].opc;
-+    switch(opc) {
-+      case CPUI_BRANCH:
-+        kind = "BRANCH";
-+        has_fallthrough = false;
-+        if (emitter.ops[i].has_target) targets.push_back(emitter.ops[i].target);
-+        break;
-+      case CPUI_CBRANCH:
-+        kind = "CBRANCH";
-+        has_fallthrough = true;
-+        if (emitter.ops[i].has_target) targets.push_back(emitter.ops[i].target);
-+        break;
-+      case CPUI_BRANCHIND:
-+        kind = "BRANCHIND";
-+        has_fallthrough = false;
-+        break;
-+      case CPUI_CALL:
-+        kind = "CALL";
-+        has_fallthrough = true;
-+        if (emitter.ops[i].has_target) targets.push_back(emitter.ops[i].target);
-+        break;
-+      case CPUI_CALLIND:
-+        kind = "CALLIND";
-+        has_fallthrough = true;
-+        break;
-+      case CPUI_RETURN:
-+        kind = "RETURN";
-+        has_fallthrough = false;
-+        break;
-+      default:
-+        break;
++  while (true) {
++    s >> ws;
++    if (s.eof() || s.peek() == -1) break;
++    Address addr;
++    int4 size;
++    try {
++      addr = parse_machaddr(s,size,*dcp->conf->types);
++    } catch(...) {
++      break;
 +    }
-+  }
++    if (addr.isInvalid()) break;
 +
-+  *status->fileoptr << "FLOW " << addr.getShortcut() << "0x" << hex << addr.getOffset() << " len=" << dec << length;
-+  if (has_fallthrough) {
-+    Address fall = addr + length;
-+    *status->fileoptr << " fall=" << fall.getShortcut() << "0x" << hex << fall.getOffset();
-+  } else {
-+    *status->fileoptr << " fall=none";
++    FlowPcodeEmit emitter;
++    int4 length = 0;
++    try {
++      length = dcp->conf->translate->oneInstruction(emitter,addr);
++    } catch(BadDataError &err) {
++      *status->fileoptr << "FLOW " << addr.getShortcut() << "0x" << hex << addr.getOffset() << " len=1 fall=none kind=BAD targets=" << endl;
++      continue;
++    } catch(UnimplError &err) {
++      *status->fileoptr << "FLOW " << addr.getShortcut() << "0x" << hex << addr.getOffset() << " len=1 fall=none kind=UNIMPL targets=" << endl;
++      continue;
++    }
++
++    string kind = "FALLTHROUGH";
++    bool has_fallthrough = true;
++    vector<Address> targets;
++
++    for(size_t i=0;i<emitter.ops.size();++i) {
++      OpCode opc = emitter.ops[i].opc;
++      switch(opc) {
++        case CPUI_BRANCH:
++          kind = "BRANCH";
++          has_fallthrough = false;
++          if (emitter.ops[i].has_target) targets.push_back(emitter.ops[i].target);
++          break;
++        case CPUI_CBRANCH:
++          kind = "CBRANCH";
++          has_fallthrough = true;
++          if (emitter.ops[i].has_target) targets.push_back(emitter.ops[i].target);
++          break;
++        case CPUI_BRANCHIND:
++          kind = "BRANCHIND";
++          has_fallthrough = false;
++          break;
++        case CPUI_CALL:
++          kind = "CALL";
++          has_fallthrough = true;
++          if (emitter.ops[i].has_target) targets.push_back(emitter.ops[i].target);
++          break;
++        case CPUI_CALLIND:
++          kind = "CALLIND";
++          has_fallthrough = true;
++          break;
++        case CPUI_RETURN:
++          kind = "RETURN";
++          has_fallthrough = false;
++          break;
++        default:
++          break;
++      }
++    }
++
++    *status->fileoptr << "FLOW " << addr.getShortcut() << "0x" << hex << addr.getOffset() << " len=" << dec << length;
++    if (has_fallthrough) {
++      Address fall = addr + length;
++      *status->fileoptr << " fall=" << fall.getShortcut() << "0x" << hex << fall.getOffset();
++    } else {
++      *status->fileoptr << " fall=none";
++    }
++    *status->fileoptr << " kind=" << kind << " targets=";
++    for(size_t i=0;i<targets.size();++i) {
++      if (i > 0) *status->fileoptr << ",";
++      *status->fileoptr << targets[i].getShortcut() << "0x" << hex << targets[i].getOffset();
++    }
++    *status->fileoptr << endl;
 +  }
-+  *status->fileoptr << " kind=" << kind << " targets=";
-+  for(size_t i=0;i<targets.size();++i) {
-+    if (i > 0) *status->fileoptr << ",";
-+    *status->fileoptr << targets[i].getShortcut() << "0x" << hex << targets[i].getOffset();
-+  }
-+  *status->fileoptr << endl;
 +}
 +
  /// \class IfcDump

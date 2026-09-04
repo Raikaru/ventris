@@ -1349,9 +1349,6 @@ fn flow_discover_x86(imp: &mut NativeImport) {
     entries.sort_unstable();
     entries.dedup();
 
-    let mut queue = entries.clone();
-    let mut processed: HashSet<u64> = HashSet::new();
-    let mut calls: Vec<(u64, u64)> = Vec::new();
 
     // Helper to read a little-endian u64 from a mapped address.
     let read_u64_at = |addr: u64| -> Option<u64> {
@@ -1364,142 +1361,104 @@ fn flow_discover_x86(imp: &mut NativeImport) {
             }
         })
     };
-    let mut proven_bodies: HashMap<u64, u64> = HashMap::new();
 
-    while let Some(start) = queue.pop() {
-        if !processed.insert(start) {
-            continue;
+    let mut visited: HashSet<u64> = HashSet::new();
+    let mut active: Vec<u64> = entries.clone();
+
+    while !active.is_empty() {
+        // Deduplicate and filter unvisited addresses inside executable mappings.
+        active.sort_unstable();
+        active.dedup();
+        let to_query: Vec<u64> = active
+            .into_iter()
+            .filter(|a| *a != 0 && in_code(*a) && visited.insert(*a))
+            .collect();
+        if to_query.is_empty() {
+            break;
         }
-        let Some(&(sv, ss)) = code.iter().find(|(v, e)| start >= *v && start < *e) else {
-            continue;
-        };
-        let mut paths: Vec<u64> = Vec::new();
-        let mut visited: HashSet<u64> = HashSet::new();
-        let mut addr = start;
-        let mut span_end: u64 = start;
-        let mut walked = 0u32;
 
-        loop {
-            if !visited.insert(addr) {
-                if paths.is_empty() {
-                    break;
-                }
-                addr = paths.pop().unwrap();
-                continue;
-            }
-            if !in_code(addr) || addr >= sv + ss {
-                if paths.is_empty() {
-                    break;
-                }
-                addr = paths.pop().unwrap();
-                continue;
-            }
-
-            let info = session.try_flow(addr);
-            span_end = span_end.max(addr + info.length as u64);
-
-            match info.kind {
-                FlowKind::Call => {
-                    for t in &info.targets {
-                        if in_code(*t) && !entries.contains(t) {
-                            entries.push(*t);
-                            queue.push(*t);
-                        }
-                        if *t != 0 {
-                            calls.push((addr, *t));
-                        }
-                    }
-                    if let Some(f) = info.fallthrough {
-                        addr = f;
-                    } else {
-                        addr += info.length as u64;
-                    }
-                }
-                FlowKind::Branch => {
-                    if let Some(t) = info.targets.first() {
-                        if in_code(*t) && *t > addr {
-                            addr = *t;
-                        } else if let Some(f) = info.fallthrough {
-                            addr = f;
-                        } else {
-                            addr += info.length as u64;
-                        }
-                    } else if let Some(f) = info.fallthrough {
-                        addr = f;
-                    } else {
-                        addr += info.length as u64;
-                    }
-                }
-                FlowKind::CBranch => {
-                    if let Some(t) = info.targets.first() {
-                        if in_code(*t) && *t > addr {
-                            paths.push(info.fallthrough.unwrap_or(addr + info.length as u64));
-                            addr = *t;
-                        } else {
-                            addr = info.fallthrough.unwrap_or(addr + info.length as u64);
-                        }
-                    } else {
-                        addr = info.fallthrough.unwrap_or(addr + info.length as u64);
-                    }
-                }
-                FlowKind::CallInd => {
-                    // Mirror the hand decoder's behaviour: an indirect call may
-                    // carry its first argument in RDI (e.g. _start ->
-                    // __libc_start_main with `main` in %rdi). Decode the local
-                    // mapping bytes so we can seed that caller entry, and also
-                    // follow any RIP-relative function pointer.
-                    for m in &imp.mappings {
-                        if m.flags & 0x4 == 0 || addr < m.vaddr || addr >= m.vaddr + m.size {
-                            continue;
-                        }
-                        let off = (addr - m.vaddr) as usize;
-                        crate::disasm::maybe_seed_entry(&m.bytes, m.vaddr, off, &mut entries, &mut queue);
-                        let dec = crate::disasm::decode(&m.bytes[off..], addr);
-                        if let Some(ptr) = dec.rip_data {
-                            if let Some(target) = read_u64_at(ptr) {
-                                if in_code(target) && !entries.contains(&target) {
-                                    entries.push(target);
-                                    queue.push(target);
-                                }
-                                if target != 0 {
-                                    calls.push((addr, target));
-                                }
+        let mut next_active: Vec<u64> = Vec::new();
+        // Query in chunks of 256
+        for chunk in to_query.chunks(256) {
+            let flows = session.try_flow_batch(chunk);
+            for (addr, info) in chunk.iter().copied().zip(flows) {
+                match info.kind {
+                    FlowKind::Call => {
+                        for t in &info.targets {
+                            if in_code(*t) && !entries.contains(t) {
+                                entries.push(*t);
+                                next_active.push(*t);
+                            }
+                            if *t != 0 {
+                                calls.push((addr, *t));
                             }
                         }
-                        break;
+                        if let Some(f) = info.fallthrough {
+                            next_active.push(f);
+                        } else {
+                            next_active.push(addr + info.length as u64);
+                        }
                     }
-                    if let Some(f) = info.fallthrough {
-                        addr = f;
-                    } else {
-                        addr += info.length as u64;
+                    FlowKind::Branch => {
+                        if let Some(t) = info.targets.first() {
+                            if in_code(*t) && !visited.contains(t) {
+                                next_active.push(*t);
+                            }
+                        }
                     }
-                }
-                FlowKind::BranchInd | FlowKind::Return | FlowKind::Bad | FlowKind::Unimpl => {
-                    if paths.is_empty() {
-                        break;
+                    FlowKind::CBranch => {
+                        if let Some(t) = info.targets.first() {
+                            if in_code(*t) && !visited.contains(t) {
+                                next_active.push(*t);
+                            }
+                        }
+                        let fall = info.fallthrough.unwrap_or(addr + info.length as u64);
+                        if in_code(fall) && !visited.contains(&fall) {
+                            next_active.push(fall);
+                        }
                     }
-                    addr = paths.pop().unwrap();
-                    continue;
+                    FlowKind::CallInd => {
+                        for m in &imp.mappings {
+                            if m.flags & 0x4 == 0 || addr < m.vaddr || addr >= m.vaddr + m.size {
+                                continue;
+                            }
+                            let off = (addr - m.vaddr) as usize;
+                            let mut tmp_queue = Vec::new();
+                            crate::disasm::maybe_seed_entry(&m.bytes, m.vaddr, off, &mut entries, &mut tmp_queue);
+                            for t in tmp_queue {
+                                next_active.push(t);
+                            }
+                            let dec = crate::disasm::decode(&m.bytes[off..], addr);
+                            if let Some(ptr) = dec.rip_data {
+                                if let Some(target) = read_u64_at(ptr) {
+                                    if in_code(target) && !entries.contains(&target) {
+                                        entries.push(target);
+                                        next_active.push(target);
+                                    }
+                                    if target != 0 {
+                                        calls.push((addr, target));
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                        if let Some(f) = info.fallthrough {
+                            next_active.push(f);
+                        } else {
+                            next_active.push(addr + info.length as u64);
+                        }
+                    }
+                    FlowKind::Fallthrough => {
+                        let fall = info.fallthrough.unwrap_or(addr + info.length as u64);
+                        if in_code(fall) && !visited.contains(&fall) {
+                            next_active.push(fall);
+                        }
+                    }
+                    FlowKind::BranchInd | FlowKind::Return | FlowKind::Bad | FlowKind::Unimpl => {}
                 }
-                FlowKind::Fallthrough => {
-                    addr = info.fallthrough.unwrap_or(addr + info.length as u64);
-                }
-            }
-
-            walked += 1;
-            if walked > 100_000 {
-                break;
             }
         }
-
-        let next = entries
-            .iter()
-            .filter(|e| **e > start)
-            .min()
-            .copied()
-            .unwrap_or(sv + ss);
-        let proven = span_end.saturating_sub(start).max(1);
-        proven_bodies.insert(start, proven.min(next - start).max(1));
+        active = next_active;
     }
 
     entries.sort_unstable();

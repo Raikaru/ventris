@@ -836,6 +836,85 @@ impl ConsoleSession {
             kind: FlowKind::Bad,
         })
     }
+    /// Queries control-flow for multiple addresses in a single batch request.
+    pub fn flow_batch(&mut self, addresses: &[u64]) -> Result<Vec<FlowResult>> {
+        if addresses.is_empty() {
+            return Ok(Vec::new());
+        }
+        use std::io::{BufRead as _, Read as _};
+
+        let mut script = String::from("flow");
+        for addr in addresses {
+            script.push_str(&format!(" 0x{:x}", addr));
+        }
+        script.push('\n');
+        self.send(&script)?;
+
+        // Read and discard echo line
+        let mut echo = String::new();
+        if self
+            .reader
+            .read_line(&mut echo)
+            .map_err(|e| NativeRuntimeError(format!("console read echo: {e}")))?
+            == 0
+        {
+            return err("console closed before flow_batch output");
+        }
+
+        let mut results = Vec::with_capacity(addresses.len());
+        for &addr in addresses {
+            let mut line = String::new();
+            let n = self
+                .reader
+                .read_line(&mut line)
+                .map_err(|e| NativeRuntimeError(format!("console read line: {e}")))?;
+            if n == 0 {
+                return err("console closed during flow_batch output");
+            }
+
+            if line.contains("Low-level ERROR") {
+                results.push(FlowResult {
+                    address: addr,
+                    length: 1,
+                    fallthrough: Some(addr + 1),
+                    targets: Vec::new(),
+                    kind: FlowKind::Bad,
+                });
+            } else {
+                results.push(parse_flow_output(&line, addr).unwrap_or(FlowResult {
+                    address: addr,
+                    length: 1,
+                    fallthrough: Some(addr + 1),
+                    targets: Vec::new(),
+                    kind: FlowKind::Bad,
+                }));
+            }
+        }
+
+        // Read trailing prompt "[decomp]> "
+        let mut prompt = [0u8; 10];
+        self.reader
+            .read_exact(&mut prompt)
+            .map_err(|e| NativeRuntimeError(format!("console prompt: {e}")))?;
+
+        Ok(results)
+    }
+
+    /// Same as `flow_batch` but never errors, returning fallback results on failure.
+    pub fn try_flow_batch(&mut self, addresses: &[u64]) -> Vec<FlowResult> {
+        self.flow_batch(addresses).unwrap_or_else(|_| {
+            addresses
+                .iter()
+                .map(|&addr| FlowResult {
+                    address: addr,
+                    length: 1,
+                    fallthrough: Some(addr + 1),
+                    targets: Vec::new(),
+                    kind: FlowKind::Bad,
+                })
+                .collect()
+        })
+    }
 
     /// Close stdin and wait for the child to exit.
     pub fn quit(mut self) -> Result<()> {
