@@ -94,3 +94,16 @@ clang --target=powerpc-linux-gnu \
   -L third_party/sysroots/powerpc/usr/lib/gcc-cross/powerpc-linux-gnu/12 \
   -fuse-ld=lld -O2 -fPIE -pie src.c -o ppc32_pie.bin
 ```
+
+## Corpus verification and lock maintenance
+
+`bash tests/m1-006_corpus.sh` checks the full 25-entry matrix; only the five
+MSVC entries may be skipped on a non-Windows host. `--msvc-only` requires all
+five MSVC entries to build. The gate rebuilds the CLI and keeps its manifest,
+report, binaries and import database in a temporary directory.
+
+`--update-report` explicitly replaces `benchmarks/reports/m1-006.json`.
+`python3 scripts/gen_corpus.py --update-lock` refreshes source digests only;
+it preserves every recipe and matrix entry and does not build binaries.
+Recipe changes are reviewed edits to `tests/corpus.lock.json`. Per-run binary
+hashes belong in the generated manifest, not the cross-host recipe lock.

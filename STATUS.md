@@ -586,16 +586,18 @@ M1 — Discovery becomes generic
   primaries lack .symtab and twins contain function symbols (plain_o0 stripped).
   Added machine 0x3 (EM_386) to elf_language in lre-core, enabling native ELF32 x86 import.
   All 20 binaries import cleanly natively: x86-64 (8..408 functions), i386 (6..14 functions),
-  aarch64 (3..11 functions), and powerpc (9..408 functions). Added read-only reproducible
-  gate tests/m1-006_corpus.sh (builds lre-cli, validates against temporary lock, checks source/artifact
-  hashes, entry coverage, symbols, architectures, endianness, and native imports) and committed
-  gate report benchmarks/reports/m1-006.json (including local MSVC skips with reasons).
+  aarch64 (3..5 functions), and powerpc (9..408 functions). Gate outputs and import
+  databases are temporary; source digests, artifact hashes, recipes, unique matrix entries,
+  independently counted symbols, twin identity and native imports are checked.
+  Committed report: benchmarks/reports/m1-006.json (local MSVC skips with reasons).
   Added dedicated Windows CI job (corpus-windows with MSVC activation) and Linux CI job (corpus-linux).
 
 ## m1-006 corrective sub-tasks
 - m1-006-a: reject missing/duplicate entries; enforce recipes, hashes and isolated
   gate outputs; preserve the recipe schema in explicit lock updates.
   Acceptance: `tests/m1-006_integrity_test.py`.
+  Verified: 3 integrity tests (8 manifest mutations), 97 workspace tests,
+  legacy corpus 5/5 and m1-006 Linux corpus 20/20; only 5 local MSVC skips allowed.
 - m1-006-b: replace C++ exception stubs with real cross-target runtimes; execute
   the exception/TLS fixture on supported hosts. Acceptance: corpus gate runtime checks.
 - m1-006-c: validate PDB streams, symbols and exact CodeView association; use

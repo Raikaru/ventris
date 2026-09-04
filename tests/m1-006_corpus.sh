@@ -6,7 +6,7 @@
 # Requirements (Gate contract):
 # 1. Read-only and reproducible: writes per-run manifest and report under temporary directory; leaves git diff empty
 # 2. Compares generated artifacts against authoritative invariants in tests/corpus.lock.json
-# 3. Builds lre-cli if missing so it works from a clean checkout
+# 3. Rebuilds lre-cli so the gate exercises current sources, even with a populated target directory
 # 4. Validates source hashes, artifact hashes, exact entry coverage, symbol counts, architectures, endianness, PE/ELF twin identity, and native imports
 # 5. Supports --update-report / UPDATE_REPORT=1 to explicitly update benchmarks/reports/m1-006.json
 set -euo pipefail
@@ -41,10 +41,10 @@ if [ -n "${VCToolsInstallDir:-}" ]; then
     fi
 fi
 
-# 2. Build lre-cli inside the gate if not already built so it works from a clean checkout
-if [ ! -f "$CLI" ]; then
-    echo "Building lre-cli..."
-    cargo build -p lre-cli --quiet
+# Build current sources, independent of the caller's working directory.
+cargo build --manifest-path "$ROOT/Cargo.toml" -p lre-cli --quiet
+if [ -f "$ROOT/target/debug/lre-cli.exe" ]; then
+    CLI="$ROOT/target/debug/lre-cli.exe"
 fi
 
 # 3. Check committed sources and committed lock exist
@@ -68,12 +68,13 @@ fi
 # Parse flags
 UPDATE_REPORT="${UPDATE_REPORT:-0}"
 ARCH_ARGS=()
+MODE=normal
 for arg in "$@"; do
-    if [ "$arg" = "--update-report" ]; then
-        UPDATE_REPORT=1
-    else
-        ARCH_ARGS+=("$arg")
-    fi
+    case "$arg" in
+        --update-report) UPDATE_REPORT=1 ;;
+        --msvc-only) MODE=msvc; ARCH_ARGS=(--msvc-only) ;;
+        *) echo "Unsupported gate argument: $arg" >&2; exit 2 ;;
+    esac
 done
 
 # 4. Run generator into a temporary output directory with a temporary manifest file
@@ -87,7 +88,7 @@ echo "Running corpus generator..."
 
 # 5. Run python verification against authoritative lock and generate gate report
 echo "Validating multi-architecture corpus artifacts against authoritative lock..."
-"$PYTHON_BIN" - "$COMMITTED_LOCK" "$MANIFEST_PATH" "$OUT_DIR" "$CLI" "$TEMP_REPORT_PATH" <<'EOF'
+"$PYTHON_BIN" - "$COMMITTED_LOCK" "$MANIFEST_PATH" "$OUT_DIR" "$CLI" "$TEMP_REPORT_PATH" "$MODE" <<'EOF'
 import hashlib
 import json
 import os
@@ -102,6 +103,11 @@ manifest_path = Path(sys.argv[2])
 out_dir = Path(sys.argv[3])
 cli_path = Path(sys.argv[4])
 temp_report_path = Path(sys.argv[5])
+mode = sys.argv[6]
+assert mode in ("normal", "msvc"), "Invalid gate mode"
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(committed_lock_path.parent.parent / "scripts"))
+from gen_corpus import count_symtab_functions
 
 with open(committed_lock_path, "r") as f:
     authoritative_lock = json.load(f)
@@ -117,25 +123,49 @@ for src_name, info in authoritative_lock["sources"].items():
     with open(p, "rb") as f:
         actual_hash = hashlib.sha256(f.read()).hexdigest()
     assert actual_hash == info["sha256"], f"Source hash mismatch for {src_name}"
+    assert p.stat().st_size == info["size"], f"Source size mismatch for {src_name}"
+assert run_manifest["sources"] == authoritative_lock["sources"], "Source manifest mismatch"
 
 # 2. Build map of authoritative expectations keyed by (architecture, variant)
 auth_entries = {}
 for e in authoritative_lock["entries"]:
-    auth_entries[(e["architecture"], e["variant"])] = e
+    key = (e["architecture"], e["variant"])
+    assert key not in auth_entries, f"Duplicate lock entry: {key}"
+    auth_entries[key] = e
+lock_keys = {(a, v) for a in authoritative_lock["expected_architectures"]
+             for v in authoritative_lock["expected_variants"]}
+assert set(auth_entries) == lock_keys, "Lock matrix is incomplete"
 
-# 3. Assert exact expected architecture x variant entry set
-selected_archs = run_manifest["selected_architectures"]
-if selected_archs == ["msvc"]:
-    expected_keys = {( "msvc", v ) for v in authoritative_lock["expected_variants"]}
-else:
-    expected_keys = {
-        (a, v)
-        for a in authoritative_lock["expected_architectures"]
-        for v in authoritative_lock["expected_variants"]
-    }
+# Gate mode comes from the invocation, never from untrusted manifest metadata.
+selected_archs = ["msvc"] if mode == "msvc" else authoritative_lock["expected_architectures"]
+assert run_manifest["selected_architectures"] == selected_archs, "Selected architecture mismatch"
+expected_keys = {(a, v) for a in selected_archs for v in authoritative_lock["expected_variants"]}
+actual_keys = [(e["architecture"], e["variant"]) for e in run_manifest["entries"]]
+assert len(actual_keys) == len(set(actual_keys)), "Duplicate manifest entry"
+assert set(actual_keys) == expected_keys, "Entry coverage mismatch"
 
-actual_keys = {(e["architecture"], e["variant"]) for e in run_manifest["entries"]}
-assert actual_keys == expected_keys, f"Entry coverage mismatch: expected {sorted(expected_keys)} got {sorted(actual_keys)}"
+# Reject metadata corruption before invoking the importer.
+for entry in run_manifest["entries"]:
+    key = (entry["architecture"], entry["variant"])
+    auth = auth_entries[key]
+    status = entry["status"]
+    if status == "skipped":
+        assert mode == "normal" and sys.platform != "win32" and key[0] == "msvc", f"Required entry skipped: {key}"
+        assert entry.get("reason", "").strip(), f"Missing skip reason: {key}"
+        continue
+    assert status == "ok", f"Invalid entry status: {key}"
+    for field in ("endian", "format", "command"):
+        assert entry[field] == auth[field], f"{field} mismatch for {key}"
+    for field in ("binary", "unstripped_twin", "symbol_artifact"):
+        if field not in auth:
+            continue
+        name = auth[field]
+        assert Path(name).name == name and name not in ("", ".", ".."), "Invalid artifact name"
+        assert entry[field] == name, f"{field} mismatch for {key}"
+        artifact = out_dir / name
+        assert artifact.is_file(), f"Missing artifact: {name}"
+        digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        assert digest == entry[field + "_sha256"], f"Artifact hash mismatch: {name}"
 
 # Helpers for PE / ELF validation
 def parse_pe(data):
@@ -284,12 +314,13 @@ for entry in run_manifest["entries"]:
         assert ".symtab" not in b_sec_names, f"Primary {bin_path.name} must lack .symtab"
         assert ".symtab" in t_sec_names, f"Twin {twin_path.name} must contain .symtab"
 
-        sym_count = entry.get("symbol_count", 0)
+        sym_count = count_symtab_functions(twin_path)
+        assert sym_count == entry["symbol_count"], f"Incorrect symbol count for {twin_path.name}"
         min_sym = auth.get("min_symbols", 1)
         assert sym_count >= min_sym, f"Symbol count {sym_count} < expected minimum {min_sym} in {twin_path.name}"
 
         # Assert identical loadable code
-        assert len(b_exec) == len(t_exec), f"Executable segment count mismatch for {bin_path.name}"
+        assert b_exec and len(b_exec) == len(t_exec), f"Executable segment count mismatch for {bin_path.name}"
         for (v1, b1), (v2, b2) in zip(b_exec, t_exec):
             assert v1 == v2, f"Executable vaddr mismatch {v1:#x} != {v2:#x}"
             assert b1 == b2, f"Loadable code at {v1:#x} must be bit-for-bit identical between stripped and unstripped twin"
@@ -343,7 +374,7 @@ for entry in run_manifest["entries"]:
             assert b_data[s_bin["raw_off"]:s_bin["raw_off"] + s_bin["raw_size"]] == t_data[s_twin["raw_off"]:s_twin["raw_off"] + s_twin["raw_size"]], f"Executable code bytes mismatch in PE section {s_bin['name']}"
 
     # Native import verification
-    res = subprocess.run([str(cli_path), "import-native", str(bin_path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    res = subprocess.run([str(cli_path), "import-native", str(bin_path), "--project", str(out_dir / "project")], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     assert res.returncode == 0, f"import-native failed on {bin_path.name}: {res.stderr.decode()}"
     stdout = res.stdout.decode()
     exp_lang = auth["expected_language"]
@@ -371,7 +402,7 @@ report = {
     "total_entries": len(run_manifest["entries"]),
     "passed_entries": passed,
     "skipped_entries": skipped,
-    "pass": (passed > 0 and (passed + skipped) == len(run_manifest["entries"])),
+    "pass": passed == (5 if mode == "msvc" else len(expected_keys) - skipped),
     "entries": report_entries,
 }
 

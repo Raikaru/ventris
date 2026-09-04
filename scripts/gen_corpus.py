@@ -11,8 +11,8 @@ Builds 5 corpus variants across target architectures:
 Each entry produces an unstripped twin containing symbol tables (or PDB for MSVC)
 and derives the primary release binary by stripping a copy of the twin, ensuring
 code addresses and loadable code segments remain identical.
-Emits a per-run manifest under --out-dir without modifying the committed lockfile
-unless --update-lock is explicitly requested.
+Emits a per-run manifest under --out-dir. --update-lock refreshes only source
+digests in the recipe lock; matrix and recipes remain explicitly maintained.
 """
 
 import argparse
@@ -451,7 +451,7 @@ def main():
     parser.add_argument("--lock", type=Path, default=ROOT / "tests" / "corpus.lock.json",
                         help="Path to authoritative corpus lock file.")
     parser.add_argument("--update-lock", action="store_true",
-                        help="Explicitly update the committed lock file with current hashes.")
+                        help="Refresh source digests only, preserving matrix and recipes; do not build.")
     parser.add_argument("--architectures", type=str, default="x86_64,i386,aarch64,powerpc,msvc",
                         help="Comma-separated list of architectures to build (or 'msvc').")
     parser.add_argument("--msvc-only", action="store_true",
@@ -459,6 +459,18 @@ def main():
     parser.add_argument("--skip-sysroots", action="store_true",
                         help="Skip checking/fetching cross sysroots.")
     args = parser.parse_args()
+
+    with open(args.lock, "r") as f:
+        lock_expectations = json.load(f)
+    if args.update_lock:
+        for name in lock_expectations["sources"]:
+            source = CORPUS_SRC / name
+            lock_expectations["sources"][name] = {
+                "sha256": sha256_file(source), "size": source.stat().st_size,
+            }
+        args.lock.write_text(json.dumps(lock_expectations, indent=2) + "\n")
+        print(f"Updated source digests in authoritative lock: {args.lock}")
+        return
 
     selected_archs = ["msvc"] if args.msvc_only else [a.strip() for a in args.architectures.split(",") if a.strip()]
 
@@ -470,9 +482,6 @@ def main():
     if needs_cross and not args.skip_sysroots and sys.platform != "win32":
         ensure_sysroots()
 
-    # Load authoritative lock for expectations
-    with open(args.lock, "r") as f:
-        lock_expectations = json.load(f)
 
     manifest_data = {
         "schema_version": 1,
@@ -557,7 +566,7 @@ def main():
 
             if is_windows and has_cl:
                 src_file = CORPUS_SRC / var_cfg["source"]
-                msvc_flags = ["/O2"] if "o2" in var_name or "pie" in var_name else ["/Od"]
+                msvc_flags = ["/O1"] if var_name == "many_o2" else (["/Od"] if var_name == "plain_o0" else ["/O2"])
                 if var_cfg["is_cpp"]:
                     msvc_flags.append("/EHsc")
                 
@@ -596,7 +605,7 @@ def main():
                     "format": "pe",
                     "variant": var_name,
                     "status": "skipped",
-                    "reason": "MSVC requires Windows host with Visual Studio (verified via Windows CI)",
+                    "reason": "MSVC requires Windows host with Visual Studio",
                     "binary": f"{base_name}.exe",
                     "unstripped_twin": f"{base_name}.unstripped.exe",
                     "symbol_artifact": f"{base_name}.pdb",
@@ -608,11 +617,6 @@ def main():
         json.dump(manifest_data, f, indent=2)
     print(f"Wrote per-run artifact manifest: {manifest_path}")
 
-    # Explicit lockfile update only when requested
-    if args.update_lock:
-        with open(args.lock, "w") as f:
-            json.dump(manifest_data, f, indent=2)
-        print(f"Updated authoritative lock: {args.lock}")
 
 
 if __name__ == "__main__":

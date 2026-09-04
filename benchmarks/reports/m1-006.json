@@ -11,7 +11,7 @@
       "status": "ok",
       "endian": "little",
       "format": "elf",
-      "functions_discovered": 6,
+      "functions_discovered": 10,
       "symbols_in_twin": 12,
       "expected_language": "x86:LE:64:default"
     },
@@ -21,7 +21,7 @@
       "status": "ok",
       "endian": "little",
       "format": "elf",
-      "functions_discovered": 6,
+      "functions_discovered": 9,
       "symbols_in_twin": 12,
       "expected_language": "x86:LE:64:default"
     },
@@ -31,7 +31,7 @@
       "status": "ok",
       "endian": "little",
       "format": "elf",
-      "functions_discovered": 7,
+      "functions_discovered": 8,
       "symbols_in_twin": 12,
       "expected_language": "x86:LE:64:default"
     },
@@ -41,7 +41,7 @@
       "status": "ok",
       "endian": "little",
       "format": "elf",
-      "functions_discovered": 6,
+      "functions_discovered": 9,
       "symbols_in_twin": 19,
       "expected_language": "x86:LE:64:default"
     },
@@ -51,7 +51,7 @@
       "status": "ok",
       "endian": "little",
       "format": "elf",
-      "functions_discovered": 6,
+      "functions_discovered": 408,
       "symbols_in_twin": 410,
       "expected_language": "x86:LE:64:default"
     },
@@ -209,31 +209,31 @@
       "architecture": "msvc",
       "variant": "plain_o0",
       "status": "skipped",
-      "reason": "MSVC requires Windows host with Visual Studio (verified via Windows CI)"
+      "reason": "MSVC requires Windows host with Visual Studio"
     },
     {
       "architecture": "msvc",
       "variant": "plain_o2",
       "status": "skipped",
-      "reason": "MSVC requires Windows host with Visual Studio (verified via Windows CI)"
+      "reason": "MSVC requires Windows host with Visual Studio"
     },
     {
       "architecture": "msvc",
       "variant": "plain_pie",
       "status": "skipped",
-      "reason": "MSVC requires Windows host with Visual Studio (verified via Windows CI)"
+      "reason": "MSVC requires Windows host with Visual Studio"
     },
     {
       "architecture": "msvc",
       "variant": "cpp_o2",
       "status": "skipped",
-      "reason": "MSVC requires Windows host with Visual Studio (verified via Windows CI)"
+      "reason": "MSVC requires Windows host with Visual Studio"
     },
     {
       "architecture": "msvc",
       "variant": "many_o2",
       "status": "skipped",
-      "reason": "MSVC requires Windows host with Visual Studio (verified via Windows CI)"
+      "reason": "MSVC requires Windows host with Visual Studio"
     }
   ]
 }
