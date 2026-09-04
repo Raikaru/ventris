@@ -1,0 +1,217 @@
+{
+  "task": "m1-008b",
+  "commit": "6e1bae6dcf392307c2a1dd217ab188856a64614e",
+  "date": "2026-09-04",
+  "method": "Fresh bridge function names; primary ELF section ownership and aligned words in .init_array/.fini_array/.data/.rodata/.data.rel.ro; LLVM direct control-flow disassembly. No oracle entries filtered.",
+  "limitation": "No selected-data or direct transfer reference is not proof of global unreachability; exception metadata and dynamic references are not classified as absent.",
+  "corpus": [
+    {
+      "id": "x86_64_plain_o0",
+      "sha256": "ec6f8b8aa9e8579fbc0dd2235b939b1e30f943a398a46bb63b5cd65cb05ff4cd",
+      "missing": [
+        {
+          "entry": "002015c0",
+          "ghidra_name": "FUN_002015c0",
+          "section": ".text",
+          "classification": "no_static_code_or_selected_data_reference",
+          "data_references": [],
+          "direct_transfers": []
+        },
+        {
+          "entry": "00201710",
+          "ghidra_name": "FUN_00201710",
+          "section": ".plt",
+          "classification": "direct_control_flow_referenced",
+          "data_references": [],
+          "direct_transfers": [
+            {
+              "source": "20172b",
+              "instruction": "jmp"
+            }
+          ]
+        },
+        {
+          "entry": "00204000",
+          "ghidra_name": "__libc_start_main",
+          "section": null,
+          "classification": "out_of_image_external",
+          "data_references": [],
+          "direct_transfers": []
+        },
+        {
+          "entry": "00204008",
+          "ghidra_name": "__gmon_start__",
+          "section": null,
+          "classification": "out_of_image_external",
+          "data_references": [],
+          "direct_transfers": []
+        },
+        {
+          "entry": "00204020",
+          "ghidra_name": "printf",
+          "section": null,
+          "classification": "out_of_image_external",
+          "data_references": [],
+          "direct_transfers": []
+        }
+      ],
+      "extra": []
+    },
+    {
+      "id": "x86_64_cpp_o2",
+      "sha256": "1fb36ba4a74eef85054eba808fbc12b975a614ee431a9e79a9339cae8c11367d",
+      "missing": [
+        {
+          "entry": "002018c0",
+          "ghidra_name": "FUN_002018c0",
+          "section": ".text",
+          "classification": "no_static_code_or_selected_data_reference",
+          "data_references": [],
+          "direct_transfers": []
+        },
+        {
+          "entry": "00201980",
+          "ghidra_name": "FUN_00201980",
+          "section": ".text",
+          "classification": "no_static_code_or_selected_data_reference",
+          "data_references": [],
+          "direct_transfers": []
+        },
+        {
+          "entry": "002019a0",
+          "ghidra_name": "FUN_002019a0",
+          "section": ".text",
+          "classification": "no_static_code_or_selected_data_reference",
+          "data_references": [],
+          "direct_transfers": []
+        },
+        {
+          "entry": "00201a70",
+          "ghidra_name": "FUN_00201a70",
+          "section": ".text",
+          "classification": "no_static_code_or_selected_data_reference",
+          "data_references": [],
+          "direct_transfers": []
+        },
+        {
+          "entry": "00201ab0",
+          "ghidra_name": "FUN_00201ab0",
+          "section": ".plt",
+          "classification": "direct_control_flow_referenced",
+          "data_references": [],
+          "direct_transfers": [
+            {
+              "source": "201acb",
+              "instruction": "jmp"
+            },
+            {
+              "source": "201adb",
+              "instruction": "jmp"
+            },
+            {
+              "source": "201aeb",
+              "instruction": "jmp"
+            },
+            {
+              "source": "201afb",
+              "instruction": "jmp"
+            },
+            {
+              "source": "201b0b",
+              "instruction": "jmp"
+            },
+            {
+              "source": "201b1b",
+              "instruction": "jmp"
+            },
+            {
+              "source": "201b2b",
+              "instruction": "jmp"
+            }
+          ]
+        },
+        {
+          "entry": "00201b20",
+          "ghidra_name": "__gxx_personality_v0",
+          "section": ".plt",
+          "classification": "no_static_code_or_selected_data_reference",
+          "data_references": [],
+          "direct_transfers": []
+        },
+        {
+          "entry": "00204000",
+          "ghidra_name": "__libc_start_main",
+          "section": null,
+          "classification": "out_of_image_external",
+          "data_references": [],
+          "direct_transfers": []
+        },
+        {
+          "entry": "00204008",
+          "ghidra_name": "__gmon_start__",
+          "section": null,
+          "classification": "out_of_image_external",
+          "data_references": [],
+          "direct_transfers": []
+        },
+        {
+          "entry": "00204020",
+          "ghidra_name": "__cxa_allocate_exception",
+          "section": null,
+          "classification": "out_of_image_external",
+          "data_references": [],
+          "direct_transfers": []
+        },
+        {
+          "entry": "00204028",
+          "ghidra_name": "__cxa_throw",
+          "section": null,
+          "classification": "out_of_image_external",
+          "data_references": [],
+          "direct_transfers": []
+        },
+        {
+          "entry": "00204030",
+          "ghidra_name": "__isoc23_strtol",
+          "section": null,
+          "classification": "out_of_image_external",
+          "data_references": [],
+          "direct_transfers": []
+        },
+        {
+          "entry": "00204038",
+          "ghidra_name": "printf",
+          "section": null,
+          "classification": "out_of_image_external",
+          "data_references": [],
+          "direct_transfers": []
+        },
+        {
+          "entry": "00204040",
+          "ghidra_name": "__cxa_begin_catch",
+          "section": null,
+          "classification": "out_of_image_external",
+          "data_references": [],
+          "direct_transfers": []
+        },
+        {
+          "entry": "00204048",
+          "ghidra_name": "__cxa_end_catch",
+          "section": null,
+          "classification": "out_of_image_external",
+          "data_references": [],
+          "direct_transfers": []
+        },
+        {
+          "entry": "00204050",
+          "ghidra_name": "__gxx_personality_v0",
+          "section": null,
+          "classification": "out_of_image_external",
+          "data_references": [],
+          "direct_transfers": []
+        }
+      ],
+      "extra": []
+    }
+  ]
+}

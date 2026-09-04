@@ -1,0 +1,96 @@
+{
+  "gate": "m1-008b",
+  "milestone": "M1",
+  "commit": "fa029a655749f13824d8f85cf6dfc107dfe83112",
+  "date": "2026-09-04",
+  "machine": {
+    "os": "Linux-7.1.12-200.fc44.x86_64-x86_64-with-glibc2.43",
+    "cpu": "x86_64"
+  },
+  "corpus": [
+    {
+      "id": "x86_64_plain_o0",
+      "status": "fail",
+      "metrics": {
+        "fn.recall": 0.6666666666666666,
+        "fn.precision": 1.0
+      },
+      "thresholds": {
+        "fn.recall": 0.98
+      },
+      "runs": 1,
+      "sha256": "ec6f8b8aa9e8579fbc0dd2235b939b1e30f943a398a46bb63b5cd65cb05ff4cd",
+      "oracle": "oracle/ec6f8b8aa9e8579fbc0dd2235b939b1e30f943a398a46bb63b5cd65cb05ff4cd.json",
+      "oracle_sha256": "9efb9ecd53db25aeafd6f031326859c3e38c957e99d85687075d35128a7b7123",
+      "oracle_entries_outside_executable_sections": [
+        "00204000",
+        "00204008",
+        "00204020"
+      ],
+      "native_functions": 10,
+      "oracle_functions": 15,
+      "matched_functions": 10,
+      "missing_entries": [
+        "002015c0",
+        "00201710",
+        "00204000",
+        "00204008",
+        "00204020"
+      ],
+      "extra_entries": []
+    },
+    {
+      "id": "x86_64_cpp_o2",
+      "status": "fail",
+      "metrics": {
+        "fn.recall": 0.4827586206896552,
+        "fn.precision": 1.0
+      },
+      "thresholds": {
+        "fn.recall": 0.98
+      },
+      "runs": 1,
+      "sha256": "1fb36ba4a74eef85054eba808fbc12b975a614ee431a9e79a9339cae8c11367d",
+      "oracle": "oracle/1fb36ba4a74eef85054eba808fbc12b975a614ee431a9e79a9339cae8c11367d.json",
+      "oracle_sha256": "b8a28a14abd73bf6d00b71c3006ff5daa1863c0d96f4faef1970c88d711cd6e5",
+      "oracle_entries_outside_executable_sections": [
+        "00204000",
+        "00204008",
+        "00204020",
+        "00204028",
+        "00204030",
+        "00204038",
+        "00204040",
+        "00204048",
+        "00204050"
+      ],
+      "native_functions": 14,
+      "oracle_functions": 29,
+      "matched_functions": 14,
+      "missing_entries": [
+        "002018c0",
+        "00201980",
+        "002019a0",
+        "00201a70",
+        "00201ab0",
+        "00201b20",
+        "00204000",
+        "00204008",
+        "00204020",
+        "00204028",
+        "00204030",
+        "00204038",
+        "00204040",
+        "00204048",
+        "00204050"
+      ],
+      "extra_entries": []
+    }
+  ],
+  "summary": {
+    "pass": 0,
+    "fail": 2,
+    "skipped": 0
+  },
+  "passed": false
+}
