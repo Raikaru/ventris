@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""m1-008b: x86-64 plain_o0/cpp_o2 recall against unchanged m1-007 references."""
+"""m1-008b: x86-64 plain_o0/cpp_o2 recall using approved code-functions-v1 views."""
 import argparse
 from datetime import datetime, timezone
 import json
@@ -15,6 +15,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 from gen_oracle import digest, provenance, validate_reference
+from gen_function_scoring import POLICY, expected_view, validate_view
 
 
 def main():
@@ -52,8 +53,15 @@ def main():
                     "binary_size": binary.stat().st_size, **producer, "address_basis": "ghidra"})
                 row["oracle"] = str(reference_path.relative_to(ROOT))
                 row["oracle_sha256"] = digest(reference_path)
-                oracle = {int(a, 16) for a in reference["entries"]}
-                # No filtering: every committed oracle entry remains in the denominator.
+                view_path = ROOT / "oracle/scoring-v1" / reference_path.name
+                view = json.loads(view_path.read_text())
+                validate_view(view, reference, expected_view(binary, reference_path))
+                row.update(scoring_policy=POLICY, scoring_view=str(view_path.relative_to(ROOT)),
+                           scoring_view_sha256=digest(view_path),
+                           raw_oracle_functions=len(reference["entries"]),
+                           excluded_functions=len(view["excluded"]))
+                oracle = {int(a, 16) for a in view["entries"]}
+                # Keep every scored entry, including unreferenced code and real PLT stubs.
                 data = binary.read_bytes()
                 assert data[:6] == b"\x7fELF\x02\x01"
                 shoff = struct.unpack_from("<Q", data, 40)[0]
@@ -80,13 +88,13 @@ def main():
             except (AssertionError, ValueError, KeyError, struct.error, sqlite3.Error) as error:
                 row.update(status="fail", reason=str(error))
             rows.append(row)
-        report = {"gate": "m1-008b", "milestone": "M1",
+        report = {"gate": "m1-008b", "milestone": "M1", "scoring_policy": POLICY,
                   "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
                   "date": datetime.now(timezone.utc).date().isoformat(),
                   "machine": {"os": platform.platform(), "cpu": platform.machine()},
                   "corpus": rows, "summary": {s: sum(r["status"] == s for r in rows) for s in ("pass", "fail", "skipped")},
                   "passed": all(r["status"] == "pass" for r in rows)}
-        destination = ROOT / "benchmarks/reports/m1-008b.json" if args.update_report else work / "report.json"
+        destination = ROOT / "benchmarks/reports/m1-008b-v1.json" if args.update_report else work / "report.json"
         destination.write_text(json.dumps(report, indent=2) + "\n")
         print(json.dumps(report, indent=2))
         return 0 if report["passed"] else 1
