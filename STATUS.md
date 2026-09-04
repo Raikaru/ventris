@@ -511,20 +511,24 @@ M1 — Discovery becomes generic
 
 - m1-005: implemented PE base relocations (.reloc directory 5, IMAGE_REL_BASED_DIR64/HIGHLOW),
   entry point calculation fix (opt + 16), strict PE machine/magic pair validation without mock fallbacks
-  (PE32+ AMD64 0x8664/0x20b and PE32 i386 0x014c/0x10b; typed errors on truncated fields), and durable
+  (PE32+ AMD64 0x8664/0x20b and PE32 i386 0x014c/0x10b; typed errors on truncated fields, parsing
+  NumberOfRvaAndSizes before accessing directory 5 without requiring six directories), and durable
   store writes of relocated pointers as data xrefs with provenance (`native-import:pe-reloc`, independent
   of whether targets land in executable code). Extracted candidate filtering to pure helper
   `CandidateFilterContext` / `filter_candidate` with unit tests verifying rejection of internal and out-of-code
-  candidates under `--no-default-features`. Containment uses both initial function extents and discovered
-  `d.entries / d.sizes` (size-1 stripped entries cannot disable containment). Console-only path explores
+  candidates under `--no-default-features`. Containment uses actual flow-proven extents (`proven_bodies`
+  tracked from instruction spans during BFS walk; size-1 stripped entries cannot disable containment;
+  positive regression test confirms relocation-only code functions in gaps are promoted). Console-only path explores
   trusted seeds first and rejects relocation candidates already visited inside those bodies. Guarded x86-64
-  hand decoder against x86-32, propagating detected language into `ConsoleSession` and BFD selection (`pei-i386`).
+  hand decoder against x86-32, propagating detected language into `ConsoleSession` and BFD selection (`pei-i386`),
+  routing PE32 through console-backed flow confirmation. Restored deterministic console child process cleanup
+  via `impl Drop for ConsoleSession`. Restricted `close_call_targets` strictly to call xrefs (never branches or DATA).
   Added real 32-bit x86 PE32 test fixture (`tests/fixtures-src/tiny_pe32.exe`) testing language (`x86:LE:32:default`),
-  ImageBase (`0x400000`), entry point (`0x401400`), HIGHLOW relocations, data xrefs, and discovery.
+  ImageBase (`0x400000`), entry point (`0x401400`), HIGHLOW relocations, data xrefs, and discovery using CARGO_MANIFEST_DIR.
+  Added load_native regression proving a PE32 data-to-data relocation remains an xref and never becomes a function.
   On `tiny_pe` unstripped twin (123 oracle symbols): 33 discovered, overlap 33, p=1.0000, r=0.2683;
   on `dispatch` unstripped twin (125 oracle symbols): 35 discovered, overlap 35, p=1.0000, r=0.2800.
   Acceptance tests `tests/m1-005_pe_relocs.sh` and `tests/m1-003_benchmark.sh` pass (PASS).
-
 - m1-003-f: hand decoder candidate pre-pass confirmed by batched flow; achieves
   fn.precision=1.0000 and exact set equality (3,953/3,953) on libc describing hand-versus-console
   parity (neither Bad nor Unimpl, with pad and body containment checks; no opcode blacklists).

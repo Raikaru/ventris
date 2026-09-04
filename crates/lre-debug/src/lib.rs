@@ -539,7 +539,8 @@ mod tests {
 
     #[test]
     fn timeout_rejects_zero() {
-        let backend = DebugBackend::new(BackendKind::Gdb, "/bin/sh").unwrap();
+        let exe = std::env::current_exe().unwrap();
+        let backend = DebugBackend::new(BackendKind::Gdb, &exe).unwrap();
         assert!(matches!(
             backend.with_timeout(Duration::ZERO),
             Err(DebugError::Timeout(Duration::ZERO))

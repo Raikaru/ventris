@@ -1666,12 +1666,12 @@ pub fn flow_discover_console(imp: &mut NativeImport) {
     entries.dedup();
 
     let mut calls: Vec<(u64, u64)> = Vec::new();
-    let mut proven_bodies: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
-    let mut addr_origin: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
+    let mut proven_bodies: std::collections::HashMap<u64, u64> = std::collections::HashMap::with_capacity(4096);
+    let mut addr_origin: std::collections::HashMap<u64, u64> = std::collections::HashMap::with_capacity(32768);
     for &s in &entries {
         addr_origin.insert(s, s);
     }
-    let mut visited: HashSet<u64> = HashSet::new();
+    let mut visited: HashSet<u64> = HashSet::with_capacity(32768);
     let mut active: Vec<u64> = entries.clone();
     while !active.is_empty() {
         // Deduplicate and filter unvisited addresses inside executable mappings.
