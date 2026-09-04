@@ -54,7 +54,7 @@ if not r["passed"]:
     sys.exit(f"FAIL: passed is false; reason: {r['decision'].get('reason')}")
 
 # The decision rule must be present in STATUS.md as a number and a sentence.
-status = (ROOT := Path(sys.argv[1]).parent.parent / "STATUS.md").read_text()
+status = Path(sys.argv[1]).parent.parent.parent.joinpath("STATUS.md").read_text()
 if "m1-003-d" not in status:
     sys.exit("FAIL: m1-003-d outcome not recorded in STATUS.md")
 

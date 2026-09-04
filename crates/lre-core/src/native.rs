@@ -1218,6 +1218,18 @@ fn flow_discover_x86(imp: &mut NativeImport) {
     let mut queue = entries.clone();
     let mut processed: HashSet<u64> = HashSet::new();
     let mut calls: Vec<(u64, u64)> = Vec::new();
+
+    // Helper to read a little-endian u64 from a mapped address.
+    let read_u64_at = |addr: u64| -> Option<u64> {
+        imp.mappings.iter().find_map(|m| {
+            if addr >= m.vaddr && addr + 8 <= m.vaddr + m.size {
+                let off = (addr - m.vaddr) as usize;
+                Some(u64::from_le_bytes(m.bytes[off..off + 8].try_into().ok()?))
+            } else {
+                None
+            }
+        })
+    };
     let mut proven_bodies: HashMap<u64, u64> = HashMap::new();
 
     while let Some(start) = queue.pop() {
@@ -1297,7 +1309,36 @@ fn flow_discover_x86(imp: &mut NativeImport) {
                     }
                 }
                 FlowKind::CallInd => {
-                    addr += info.length as u64;
+                    // Mirror the hand decoder's behaviour: an indirect call may
+                    // carry its first argument in RDI (e.g. _start ->
+                    // __libc_start_main with `main` in %rdi). Decode the local
+                    // mapping bytes so we can seed that caller entry, and also
+                    // follow any RIP-relative function pointer.
+                    for m in &imp.mappings {
+                        if m.flags & 0x4 == 0 || addr < m.vaddr || addr >= m.vaddr + m.size {
+                            continue;
+                        }
+                        let off = (addr - m.vaddr) as usize;
+                        crate::disasm::maybe_seed_entry(&m.bytes, m.vaddr, off, &mut entries, &mut queue);
+                        let dec = crate::disasm::decode(&m.bytes[off..], addr);
+                        if let Some(ptr) = dec.rip_data {
+                            if let Some(target) = read_u64_at(ptr) {
+                                if in_code(target) && !entries.contains(&target) {
+                                    entries.push(target);
+                                    queue.push(target);
+                                }
+                                if target != 0 {
+                                    calls.push((addr, target));
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    if let Some(f) = info.fallthrough {
+                        addr = f;
+                    } else {
+                        addr += info.length as u64;
+                    }
                 }
                 FlowKind::BranchInd | FlowKind::Return | FlowKind::Bad | FlowKind::Unimpl => {
                     if paths.is_empty() {

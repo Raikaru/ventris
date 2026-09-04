@@ -464,7 +464,7 @@ pub fn discover(maps: &[(u64, u64, u64, &[u8])], seeds: &[u64]) -> Discovery {
 /// inside the code mapping. Byte-level heuristic scan (backwards,
 /// closest match wins) — the same convention Ghidra's entry-point
 /// recovery uses.
-fn maybe_seed_entry(
+pub(crate) fn maybe_seed_entry(
     bytes: &[u8],
     map_vaddr: u64,
     off: usize,

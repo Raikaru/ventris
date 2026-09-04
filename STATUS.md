@@ -502,6 +502,8 @@ green (82 tests across 20 suites); the CPack TGZ builds.
 M1 — Discovery becomes generic
 
 ## M1 progress
+- m1-003-d: benchmarked hand decoder vs console flow on libc and the x86-64 corpus. Median speedup on libc: 28.3062×. hand decoder is 28.3× faster than console and set-metrics are equal within 0.01 against the oracle; keep disasm.rs.
+
 - m1-001: implemented native SLEIGH console request `flow(addr)` extracting
   {length, fallthrough, targets, kind} from p-code (BRANCH, CBRANCH, BRANCHIND,
   CALL, CALLIND, RETURN, FALLTHROUGH) across loaded architectures. Unit test
@@ -524,5 +526,5 @@ M1 — Discovery becomes generic
   keep/delete `disasm.rs`.
 
 ## Next task
-- m1-003-d
+- m1-004: to be scoped (M1 sub-tasks completed).
 
