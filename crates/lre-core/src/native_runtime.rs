@@ -12,7 +12,7 @@
 //! the CLI's env surface is preserved while everything below it is honest
 //! about its inputs.
 
-use crate::native::{pe_image_base, NativeImport};
+use crate::native::{elf_image_base, pe_image_base, NativeImport};
 use crate::session::RuntimeConfig;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -278,7 +278,9 @@ fn run_decompiler(
         None => {
             let data = std::fs::read(binary)
                 .map_err(|e| NativeRuntimeError(format!("{}: {e}", binary.display())))?;
-            pe_image_base(&data).unwrap_or(0x400000)
+            pe_image_base(&data)
+                .or_else(|| elf_image_base(&data))
+                .unwrap_or(0x400000)
         }
     };
     let mut command = Command::new(worker);

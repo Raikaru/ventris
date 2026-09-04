@@ -80,6 +80,8 @@ pub struct NativeImport {
     pub functions: Vec<NativeFunction>,
     pub xrefs: Vec<NativeXref>,
     pub externals: Vec<(u64, String)>,
+    /// Relocated pointer locations: (relocated_address, target_pointer).
+    pub relocated_pointers: Vec<(u64, u64)>,
     pub format: String,
     /// Ghidra-compatible language id selected from the file machine.
     pub language: String,
@@ -599,6 +601,18 @@ pub fn import_elf(data: &[u8]) -> Result<NativeImport> {
             }
         }
     }
+    // R_*_RELATIVE relocations: SHT_RELA (typ=4) and SHT_RELR (typ=19).
+    // x86-64 R_X86_64_RELATIVE = 8, AArch64 R_AARCH64_RELATIVE = 1027,
+    // RISC-V R_RISCV_RELATIVE = 3, PowerPC64 R_PPC64_RELATIVE = 22.
+    let machine = u16_at(data, 18).unwrap_or(0);
+    let rel_type = match machine {
+        0x03e => 8,    // x86-64
+        0x0b7 => 1027, // AArch64
+        0x0f3 => 3,    // RISC-V
+        0x015 => 22,   // PPC64
+        _ => 8,
+    };
+    let mut relocated_pointers = Vec::new();
     for r in sections.iter().filter(|s| s.typ == 4 && s.size > 0) {
         let entry_count = r.size as usize / 24;
         for i in 0..entry_count {
@@ -606,12 +620,14 @@ pub fn import_elf(data: &[u8]) -> Result<NativeImport> {
             if hdr + 24 > data.len() {
                 break;
             }
+            let got_off = u64_at(data, hdr)?;
             let r_info = u64_at(data, hdr + 8)?;
             let r_type = (r_info & 0xffffffff) as u32;
-            if r_type == 8 {
+            if r_type == rel_type {
                 let addend = u64_at(data, hdr + 16)? as i64;
                 if addend > 0 {
                     let target = addend as u64;
+                    relocated_pointers.push((got_off, target));
                     let in_code = mappings
                         .iter()
                         .any(|m| m.flags & 0x4 != 0 && target >= m.vaddr && target < m.vaddr + m.size);
@@ -626,6 +642,52 @@ pub fn import_elf(data: &[u8]) -> Result<NativeImport> {
             }
         }
     }
+    // SHT_RELR (type 19 = 0x13): packed relative relocations (RFC / generic ELF).
+    for r in sections.iter().filter(|s| s.typ == 19 && s.size > 0) {
+        let count = r.size as usize / 8;
+        let mut where_addr: u64 = 0;
+        let mut relr_locs = Vec::new();
+        for i in 0..count {
+            let hdr = r.off as usize + i * 8;
+            if hdr + 8 > data.len() {
+                break;
+            }
+            let entry = u64_at(data, hdr)?;
+            if (entry & 1) == 0 {
+                where_addr = entry;
+                relr_locs.push(where_addr);
+                where_addr = where_addr.wrapping_add(8);
+            } else {
+                for bit in 1..64 {
+                    if (entry & (1u64 << bit)) != 0 {
+                        relr_locs.push(where_addr.wrapping_add((bit - 1) * 8));
+                    }
+                }
+                where_addr = where_addr.wrapping_add(63 * 8);
+            }
+        }
+        for loc in relr_locs {
+            for m in &mappings {
+                if loc >= m.vaddr && loc + 8 <= m.vaddr + m.size {
+                    let file_off = m.file_off + (loc - m.vaddr);
+                    if let Ok(target) = u64_at(data, file_off as usize) {
+                        relocated_pointers.push((loc, target));
+                        let in_code = mappings.iter().any(|cm| {
+                            cm.flags & 0x4 != 0 && target >= cm.vaddr && target < cm.vaddr + cm.size
+                        });
+                        if in_code && !functions.iter().any(|f| f.entry == target) {
+                            functions.push(NativeFunction {
+                                entry: target,
+                                name: format!("FUN_{target:08x}"),
+                                size: 1,
+                            });
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
     if entry != 0 && !functions.iter().any(|f| f.entry == entry) {
         functions.push(NativeFunction {
             entry,
@@ -636,19 +698,17 @@ pub fn import_elf(data: &[u8]) -> Result<NativeImport> {
     functions.sort_by_key(|f| f.entry);
     functions.dedup_by_key(|f| f.entry);
     Ok(NativeImport {
-
         mappings,
         functions,
         xrefs: Vec::new(),
         externals,
+        relocated_pointers,
         format: "ELF".into(),
         language,
         ..Default::default()
     })
 }
 
-/// PE32+ parse: sections + entry point (import table externals kept out of
-/// scope; the differential covers the ELF function set).
 pub fn import_pe(data: &[u8]) -> Result<NativeImport> {
     if data.get(0..2) != Some(b"MZ") {
         return err("not a PE");
@@ -830,6 +890,67 @@ pub fn pe_image_base(data: &[u8]) -> Option<u64> {
     u64_at(data, pe_off + 48).ok()
 }
 
+/// Returns the preferred image base for an ELF image.
+/// For ET_EXEC (fixed base), returns 0.
+/// For ET_DYN (PIE / shared library), returns the minimum PT_LOAD vaddr
+/// or 0x100000 (64-bit) / 0x10000 (32-bit), matching Ghidra's default.
+pub fn elf_image_base(data: &[u8]) -> Option<u64> {
+    if data.get(0..4) != Some(b"\x7fELF") || data.len() < 18 {
+        return None;
+    }
+    let is_64 = data.get(4).copied() == Some(2);
+    let is_be = data.get(5).copied() == Some(2);
+    let e_type = if is_be {
+        u16_be_at(data, 16).ok()?
+    } else {
+        u16_at(data, 16).ok()?
+    };
+    if e_type != 3 {
+        // ET_EXEC or other non-DYN: base is already fixed in the headers.
+        return Some(0);
+    }
+    // ET_DYN: find minimum PT_LOAD vaddr from program headers if any non-zero.
+    let (phoff, phentsize, phnum) = if is_64 {
+        let off = u64_at(data, 32).ok()? as usize;
+        let esz = u16_at(data, 54).ok()? as usize;
+        let num = u16_at(data, 56).ok()? as usize;
+        (off, esz, num)
+    } else {
+        let off = if is_be { u32_be_at(data, 28).ok()? } else { u32_at(data, 28).ok()? } as usize;
+        let esz = if is_be { u16_be_at(data, 42).ok()? } else { u16_at(data, 42).ok()? } as usize;
+        let num = if is_be { u16_be_at(data, 44).ok()? } else { u16_at(data, 44).ok()? } as usize;
+        (off, esz, num)
+    };
+    let mut min_vaddr = u64::MAX;
+    for i in 0..phnum {
+        let hdr = phoff + i * phentsize;
+        if hdr + (if is_64 { 56 } else { 32 }) > data.len() {
+            break;
+        }
+        let p_type = if is_be { u32_be_at(data, hdr).ok()? } else { u32_at(data, hdr).ok()? };
+        if p_type == 1 {
+            // PT_LOAD
+            let p_vaddr = if is_64 {
+                u64_at(data, hdr + 16).ok()?
+            } else if is_be {
+                u32_be_at(data, hdr + 8).ok()? as u64
+            } else {
+                u32_at(data, hdr + 8).ok()? as u64
+            };
+            if p_vaddr < min_vaddr {
+                min_vaddr = p_vaddr;
+            }
+        }
+    }
+    if min_vaddr != u64::MAX && min_vaddr != 0 {
+        Some(min_vaddr)
+    } else if is_64 {
+        Some(0x100000)
+    } else {
+        Some(0x10000)
+    }
+}
+
 /// Loads `<binary>` mappings without running discovery or sweep passes.
 pub fn load_native_mappings(binary: &Path) -> Result<Vec<Mapping>> {
     let data = std::fs::read(binary)
@@ -967,6 +1088,19 @@ pub fn store_import(
             function: None,
         })
         .collect();
+    if !imp.relocated_pointers.is_empty() {
+        let sym_rows: Vec<lre_model::SymbolRow> = imp
+            .relocated_pointers
+            .iter()
+            .map(|(loc, target)| lre_model::SymbolRow {
+                name: format!("reloc_ptr_{target:08x}"),
+                address: lre_model::Address::ram(*loc),
+                external: false,
+                source: "native-import:relative-reloc".into(),
+            })
+            .collect();
+        let _ = db.replace_symbols(pid, &sym_rows);
+    }
     db.replace_xrefs(pid, &xrows)?;
     Ok(ProgramSummary {
         program: program.to_string(),
