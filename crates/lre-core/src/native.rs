@@ -5,7 +5,7 @@
 //!
 //! Design notes:
 //! - ELF64 import selects a Ghidra language from `e_machine` for the
-//!   architectures currently represented in the catalog; PE remains x86-64.
+//!   architectures currently represented in the catalog; PE supports PE32+ (x86-64) and PE32 (i386).
 //! - Structural ELF facts (mappings, symbols, entry point) are architecture
 //!   independent. The fallback flow walker is x86-64 only; other languages
 //!   retain those facts for the selected SLEIGH consumer.
@@ -2377,10 +2377,25 @@ mod tests {
     #[test]
     fn test_relocation_only_code_function_is_promoted() {
         use crate::native_runtime::{FlowKind, FlowResult};
-        // Setup: Function 0x1000 has flow-proven extent 0x1000..0x1020 (size 32).
-        // Candidate 0x1040 is a relocation-only code target in executable mapping.
-        // Candidate 0x1048 is an internal address inside 0x1040's body (0x1040..0x1060).
-        // Assert: 0x1040 is promoted to a function in imp.functions; 0x1048 is reconciled and dropped!
+        // Setup:
+        // func_root at 0x1000 has normal instruction-sized flow:
+        // 0x1000: push rbp (len 1, fall 0x1001)
+        // 0x1001: mov rbp, rsp (len 3, fall 0x1004)
+        // 0x1004: ret (len 1, Return) -> proven extent 0x1000..0x1005 (size 5).
+        //
+        // Relocation candidate 0x1040 is in the gap outside func_root's extent:
+        // 0x1040: push rbp (len 1, fall 0x1041)
+        // 0x1041: mov rbp, rsp (len 3, fall 0x1044) -> reaches 0x1044 via Fallthrough!
+        // 0x1044: call 0x1080 (len 5, Call target 0x1080, fall 0x1049)
+        // 0x1049: ret (len 1, Return)
+        //
+        // Candidate 0x1044 is reached through fallthrough from 0x1040 (internal target!).
+        // Candidate 0x1080 is reached through Call (call target!).
+        //
+        // Assert:
+        // 1. Relocation-only code function at 0x1040 IS PROMOTED to imp.functions.
+        // 2. Call target 0x1080 REMAINS a separate function in imp.functions.
+        // 3. Internal candidate 0x1044 reached through fallthrough is merged/dropped!
         let mut imp = NativeImport {
             mappings: vec![Mapping {
                 vaddr: 0x1000,
@@ -2392,9 +2407,9 @@ mod tests {
             functions: vec![NativeFunction {
                 entry: 0x1000,
                 name: "func_root".into(),
-                size: 32, // 0x1000..0x1020
+                size: 5, // 0x1000..0x1005
             }],
-            reloc_candidates: vec![0x1040, 0x1048],
+            reloc_candidates: vec![0x1040, 0x1044, 0x1080],
             format: "ELF".into(),
             language: "x86:LE:64:default".into(),
             ..Default::default()
@@ -2402,30 +2417,70 @@ mod tests {
 
         flow_discover_with_provider(&mut imp, |chunk| {
             chunk.iter().map(|&addr| {
-                if addr == 0x1000 {
-                    FlowResult {
+                match addr {
+                    0x1000 => FlowResult {
                         address: 0x1000,
-                        length: 32,
-                        fallthrough: None,
+                        length: 1,
+                        fallthrough: Some(0x1001),
                         targets: Vec::new(),
-                        kind: FlowKind::Return,
-                    }
-                } else if addr == 0x1040 {
-                    FlowResult {
-                        address: 0x1040,
-                        length: 32,
-                        fallthrough: None,
+                        kind: FlowKind::Fallthrough,
+                    },
+                    0x1001 => FlowResult {
+                        address: 0x1001,
+                        length: 3,
+                        fallthrough: Some(0x1004),
                         targets: Vec::new(),
-                        kind: FlowKind::Return,
-                    }
-                } else {
-                    FlowResult {
-                        address: addr,
+                        kind: FlowKind::Fallthrough,
+                    },
+                    0x1004 => FlowResult {
+                        address: 0x1004,
                         length: 1,
                         fallthrough: None,
                         targets: Vec::new(),
                         kind: FlowKind::Return,
-                    }
+                    },
+                    0x1040 => FlowResult {
+                        address: 0x1040,
+                        length: 1,
+                        fallthrough: Some(0x1041),
+                        targets: Vec::new(),
+                        kind: FlowKind::Fallthrough,
+                    },
+                    0x1041 => FlowResult {
+                        address: 0x1041,
+                        length: 3,
+                        fallthrough: Some(0x1044),
+                        targets: Vec::new(),
+                        kind: FlowKind::Fallthrough,
+                    },
+                    0x1044 => FlowResult {
+                        address: 0x1044,
+                        length: 5,
+                        fallthrough: Some(0x1049),
+                        targets: vec![0x1080],
+                        kind: FlowKind::Call,
+                    },
+                    0x1049 => FlowResult {
+                        address: 0x1049,
+                        length: 1,
+                        fallthrough: None,
+                        targets: Vec::new(),
+                        kind: FlowKind::Return,
+                    },
+                    0x1080 => FlowResult {
+                        address: 0x1080,
+                        length: 1,
+                        fallthrough: None,
+                        targets: Vec::new(),
+                        kind: FlowKind::Return,
+                    },
+                    other => FlowResult {
+                        address: other,
+                        length: 1,
+                        fallthrough: None,
+                        targets: Vec::new(),
+                        kind: FlowKind::Return,
+                    },
                 }
             }).collect()
         });
@@ -2433,8 +2488,11 @@ mod tests {
         // 1. Relocation-only code function at 0x1040 outside func_root's extent IS PROMOTED
         assert!(imp.functions.iter().any(|f| f.entry == 0x1040), "0x1040 must be promoted to a function");
 
-        // 2. Internal candidate 0x1048 inside 0x1040's body is reconciled and NOT a separate function
-        assert!(!imp.functions.iter().any(|f| f.entry == 0x1048), "internal relocation candidate 0x1048 must not be a function");
+        // 2. Call target 0x1080 remains a separate function
+        assert!(imp.functions.iter().any(|f| f.entry == 0x1080), "call target 0x1080 must remain a separate function");
+
+        // 3. Internal candidate 0x1044 reached through fallthrough from 0x1040 is merged/dropped
+        assert!(!imp.functions.iter().any(|f| f.entry == 0x1044), "internal candidate 0x1044 reached via fallthrough must be merged/dropped");
     }
     #[test]
     fn regression_load_native_pe32_data_to_data_relocation_never_becomes_function() {
@@ -2588,6 +2646,8 @@ mod tests {
         b[sec + 20..sec + 24].copy_from_slice(&0x100u32.to_le_bytes());
         b[sec + 36..sec + 40].copy_from_slice(&0x60000020u32.to_le_bytes());
 
+        // Put mapped executable pointer at relocation location raw 0x100 (RVA 0x1000):
+        b[0x100..0x108].copy_from_slice(&0x140001050u64.to_le_bytes());
         // Sec 1: .reloc with valid relocation block bytes, but Directory 5 is ABSENT
         let sec1 = sec + 40;
         b[sec1..sec1 + 6].copy_from_slice(b".reloc");
