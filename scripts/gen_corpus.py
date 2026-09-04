@@ -403,7 +403,7 @@ def validate_pe_twin(bin_path: Path, twin_path: Path, pdb_path: Path):
     found_cv = False
     for i in range(entry_count):
         eo = dbg_raw_off + i * 28
-        e_type = struct.unpack("<I", twin_data[eo+16:eo+20])[0]
+        e_type = struct.unpack("<I", twin_data[eo+12:eo+16])[0]
         e_raw_off = struct.unpack("<I", twin_data[eo+24:eo+28])[0]
         if e_type == 2:  # IMAGE_DEBUG_TYPE_CODEVIEW
             sig = twin_data[e_raw_off:e_raw_off+4]

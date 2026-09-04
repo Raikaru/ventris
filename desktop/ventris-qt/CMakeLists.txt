@@ -99,7 +99,7 @@ target_link_libraries(ventris-qt PRIVATE
     "${CMAKE_DL_LIBS}"
 )
 if(WIN32)
-    target_link_libraries(ventris-qt PRIVATE ws2_32 bcrypt userenv advapi32)
+    target_link_libraries(ventris-qt PRIVATE ws2_32 bcrypt userenv advapi32 ntdll)
 endif()
 if(APPLE)
     target_link_libraries(ventris-qt PRIVATE "-framework Security")

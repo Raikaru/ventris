@@ -317,7 +317,7 @@ for entry in run_manifest["entries"]:
         found_cv = False
         for i in range(t_info["dbg_size"] // 28):
             eo = dbg_raw_off + i * 28
-            e_type = struct.unpack("<I", t_data[eo+16:eo+20])[0]
+            e_type = struct.unpack("<I", t_data[eo+12:eo+16])[0]
             e_raw_off = struct.unpack("<I", t_data[eo+24:eo+28])[0]
             if e_type == 2:  # CODEVIEW
                 assert t_data[e_raw_off:e_raw_off+4] == b"RSDS", f"Missing RSDS signature in {twin_path.name}"
