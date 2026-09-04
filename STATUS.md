@@ -585,7 +585,7 @@ M1 — Discovery becomes generic
   or PE debug directory zeroing), ensuring bit-for-bit loadable code identity while stripped
   primaries lack .symtab and twins contain function symbols (plain_o0 stripped).
   Added machine 0x3 (EM_386) to elf_language in lre-core, enabling native ELF32 x86 import.
-  All 20 binaries import cleanly natively: x86-64 (8..408 functions), i386 (6..14 functions),
+  All 20 binaries import cleanly natively: x86-64 (8..408 functions), i386 (6..13 functions),
   aarch64 (3..5 functions), and powerpc (9..408 functions). Gate outputs and import
   databases are temporary; source digests, artifact hashes, recipes, unique matrix entries,
   independently counted symbols, twin identity and native imports are checked.
@@ -615,13 +615,17 @@ M1 — Discovery becomes generic
   C++ PIE fault, reproduced with Ubuntu 24.04 LLVM 18/QEMU 8.2. Explicit
   non-PIE C++ output passed both inputs; the `cpp_o2` ELF recipe now fixes
   that relocation model on every target. `plain_pie` is unchanged.
-- Execute these sub-tasks separately; each commit must stay below 800 changed lines.
-  m1-007 remains out of scope until these corrections and CI pass.
+- Closed m1-006 corrections at `2ea65bac64eb5921fd5c2939e2d9ecabb2941db1`:
+  [CI run 33915494027](https://github.com/Raikaru/ventris/actions/runs/33915494027)
+  passed 9/9 jobs, including Linux corpus 20 entries, MSVC corpus 5 entries,
+  Rust on 3 operating systems, and Qt packages on 3 operating systems.
+  Normal local gate: exit 0; `git diff --exit-code`: 0; porcelain output empty.
+  All corrective commits stayed below 800 changed lines. No m1-007 implementation
+  or acceptance test was started in this session.
 
 ## Next task
-- m1-006: multi-architecture corpus generation (x86-64, x86-32, AArch64, PPC32-BE)
-  with unstripped twin for each entry, sources + lock committed, MSVC via Windows CI
-  with local skipped, per §II.4 and docs/toolchains.md (running Linux and Windows CI corpus gates).
+- m1-007: Ghidra oracle corpus generation. Write and commit its failing
+  acceptance test before implementation; this task has not started.
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a
   clearly separated accelerator module with an equivalence test, never in the
