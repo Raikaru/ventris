@@ -608,7 +608,9 @@ M1 — Discovery becomes generic
   Verified locally: real LLVM PE/PDB pair exposes 2 function symbols; 7 PDB
   corruptions rejected (header-only, truncation, block reference, GUID, age,
   missing symbol stream, malformed record). MSVC uses a separate compiler PDB
-  and explicit linker `/PDB`; Windows CI remains required for final acceptance.
+  and explicit linker `/PDB`. CI run 33914542193 passed MSVC corpus and all
+  Rust/Qt jobs; Linux exposed host loader-cache leakage under qemu-i386.
+  Cross execution now sets the pinned target library path explicitly.
 - Execute these sub-tasks separately; each commit must stay below 800 changed lines.
   m1-007 remains out of scope until these corrections and CI pass.
 

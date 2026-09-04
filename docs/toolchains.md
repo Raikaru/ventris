@@ -40,7 +40,9 @@ not used.
 The Linux gate requires `qemu-i386`, `qemu-aarch64` and `qemu-ppc` (Debian:
 `qemu-user`). It executes positive TLS arithmetic and negative throw/catch
 inputs on all four ELF targets, using `-L SYSROOT/usr/TARGET` for the cross
-loaders and libraries. Windows executes the same checks natively for MSVC.
+loaders and `LD_LIBRARY_PATH=SYSROOT/usr/TARGET/lib` for the target libraries
+(preventing host loader-cache paths from selecting a host libc). Windows
+executes the same checks natively for MSVC.
 
 ## Target Architectures for Corpus (`m1-006`)
 

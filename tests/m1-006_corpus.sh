@@ -306,7 +306,8 @@ for entry in run_manifest["entries"]:
             emulator, target = runners[arch]
             assert shutil.which(emulator), f"Install qemu-user: missing {emulator}"
             prefix = committed_lock_path.parent.parent / "third_party/sysroots" / arch / "usr" / target
-            command = [emulator, "-L", str(prefix)]
+            # -L selects the interpreter, but the host cache can still resolve /lib32.
+            command = [emulator, "-L", str(prefix), "-E", f"LD_LIBRARY_PATH={prefix / 'lib'}"]
         for argument, expected_code, expected_output in (
             ("1", 0, "res: 52"), ("-1", 1, "caught: 1"),
         ):
