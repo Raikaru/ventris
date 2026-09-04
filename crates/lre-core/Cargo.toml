@@ -16,5 +16,5 @@ thiserror = { workspace = true }
 memmap2 = "0.9"
 
 [features]
-default = ["x86_decoder"]
+default = []
 x86_decoder = []

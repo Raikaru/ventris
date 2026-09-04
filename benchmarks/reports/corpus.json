@@ -11,28 +11,28 @@
       "fixture": "plain_o2",
       "rc": 0,
       "functions": 9,
-      "wall_s": 0.113,
+      "wall_s": 0.103,
       "output": "imported plain_o2 natively (9 functions, x86:LE:64:default)"
     },
     {
       "fixture": "plain_pie",
       "rc": 0,
       "functions": 10,
-      "wall_s": 0.112,
+      "wall_s": 0.13,
       "output": "imported plain_pie natively (10 functions, x86:LE:64:default)"
     },
     {
       "fixture": "cpp_o2",
       "rc": 0,
       "functions": 23,
-      "wall_s": 0.116,
+      "wall_s": 0.122,
       "output": "imported cpp_o2 natively (23 functions, x86:LE:64:default)"
     },
     {
       "fixture": "many_o2",
       "rc": 0,
       "functions": 409,
-      "wall_s": 0.138,
+      "wall_s": 0.161,
       "output": "imported many_o2 natively (409 functions, x86:LE:64:default)"
     }
   ],

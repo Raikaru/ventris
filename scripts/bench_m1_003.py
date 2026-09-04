@@ -36,14 +36,16 @@ def example_bin(profile: str, features: str) -> Path:
     return ROOT / "target" / target / "examples" / EXAMPLE
 
 
-def build_example(profile: str, default_features: bool) -> Path:
+def build_example(profile: str, hand: bool) -> Path:
     cargo = ["cargo", "build", "-p", "lre-core", "--example", EXAMPLE]
     if profile == "release":
         cargo.append("--release")
-    if not default_features:
+    if hand:
+        cargo.extend(["--features", "x86_decoder"])
+    else:
         cargo.append("--no-default-features")
     run(cargo, cwd=ROOT)
-    return example_bin(profile, "default" if default_features else "none")
+    return example_bin(profile, "hand" if hand else "console")
 
 
 def build_fixtures(tmp: Path) -> dict:
@@ -225,10 +227,10 @@ def main():
         # Build the two versions and copy them out so the second build
         # does not overwrite the first.
 
-        hand_src = build_example(profile, default_features=True)
+        hand_src = build_example(profile, hand=True)
         hand_exe = tmp / f"bench_load_native-hand-{profile}"
         shutil.copy(hand_src, hand_exe)
-        console_src = build_example(profile, default_features=False)
+        console_src = build_example(profile, hand=False)
         console_exe = tmp / f"bench_load_native-console-{profile}"
         shutil.copy(console_src, console_exe)
 

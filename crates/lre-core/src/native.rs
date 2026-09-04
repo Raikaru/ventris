@@ -747,16 +747,25 @@ pub fn import_pe(data: &[u8]) -> Result<NativeImport> {
     let num_sections = u16_at(data, pe_off + 6)? as usize;
     let opt_size = u16_at(data, pe_off + 20)? as usize;
     let opt = pe_off + 24;
+    if opt + opt_size > data.len() {
+        return err("PE optional header truncated");
+    }
     let magic = u16_at(data, opt)?;
 
     let (entry_rva, image_base, reloc_dir_offset) = match (machine, magic) {
         (0x8664, 0x20b) => {
+            if opt_size < 160 {
+                return err(format!("PE32+ optional header size {opt_size} too small (>= 160 expected)"));
+            }
             let entry_rva = u32_at(data, opt + 16)? as u64;
             let image_base = u64_at(data, opt + 24)?;
             let reloc_offset = opt + 152;
             (entry_rva, image_base, reloc_offset)
         }
         (0x014c, 0x10b) => {
+            if opt_size < 144 {
+                return err(format!("PE32 optional header size {opt_size} too small (>= 144 expected)"));
+            }
             let entry_rva = u32_at(data, opt + 16)? as u64;
             let image_base = u32_at(data, opt + 28)? as u64;
             let reloc_offset = opt + 136;
@@ -773,6 +782,9 @@ pub fn import_pe(data: &[u8]) -> Result<NativeImport> {
         }
     };
     let sec_table = opt + opt_size;
+    if sec_table + num_sections * 40 > data.len() {
+        return err("PE section table truncated");
+    }
     let mut mappings = Vec::new();
     struct PeSectionInfo {
         vaddr: u64,
@@ -1159,7 +1171,7 @@ pub fn flow_discover(imp: &mut NativeImport) {
     if imp.mappings.is_empty() {
         return;
     }
-    if !imp.language.is_empty() && !imp.language.starts_with("x86:LE:64") {
+    if !imp.language.is_empty() && !imp.language.starts_with("x86:") {
         close_call_targets(imp);
         let code = code_ranges(imp);
         let mut funcs = imp.functions.clone();
@@ -1186,10 +1198,13 @@ pub fn flow_discover(imp: &mut NativeImport) {
 /// (the direct-call closure; mirrors Ghidra's FUN_ naming).
 pub fn close_call_targets(imp: &mut NativeImport) {
     for x in &imp.xrefs {
+        if x.kind == "DATA" {
+            continue;
+        }
         let in_code = imp
             .mappings
             .iter()
-            .any(|m| x.to >= m.vaddr && x.to < m.vaddr + m.size);
+            .any(|m| m.flags & 0x4 != 0 && x.to >= m.vaddr && x.to < m.vaddr + m.size);
         if !in_code || imp.functions.iter().any(|f| f.entry == x.to) {
             continue;
         }
@@ -1454,6 +1469,10 @@ pub fn filter_candidate<F: FnMut(u64) -> crate::native_runtime::FlowResult>(
 
 #[cfg(feature = "x86_decoder")]
 fn flow_discover_x86(imp: &mut NativeImport) {
+    if imp.language.starts_with("x86:LE:32") {
+        flow_discover_console(imp);
+        return;
+    }
     let code = code_ranges(imp);
     let in_code = |a: u64| code.iter().any(|(v, e)| a >= *v && a < *e);
     let mut seeds: Vec<u64> = imp
@@ -1590,6 +1609,10 @@ fn flow_discover_x86(imp: &mut NativeImport) {
 
 #[cfg(not(feature = "x86_decoder"))]
 fn flow_discover_x86(imp: &mut NativeImport) {
+    flow_discover_console(imp);
+}
+
+pub fn flow_discover_console(imp: &mut NativeImport) {
     use crate::native_runtime::{ConsoleSession, FlowKind};
 
     let console_missing = imp
@@ -1738,6 +1761,46 @@ fn flow_discover_x86(imp: &mut NativeImport) {
         }
         active = next_active;
     }
+    // Explicit known-extents containment: combine initial function extents and discovered boundaries
+    let mut extents_map: std::collections::HashMap<u64, u64> = imp
+        .functions
+        .iter()
+        .filter(|f| f.size > 1)
+        .map(|f| (f.entry, f.size))
+        .collect();
+
+    let mut sorted_entries = entries.clone();
+    sorted_entries.sort_unstable();
+    sorted_entries.dedup();
+    for i in 0..sorted_entries.len() {
+        let cur = sorted_entries[i];
+        let next = sorted_entries.get(i + 1).copied();
+        let limit = code
+            .iter()
+            .find(|(start, end)| cur >= *start && cur < *end)
+            .map(|(_, end)| *end)
+            .unwrap_or(cur + 16);
+        let sz = next.unwrap_or(limit).min(limit).saturating_sub(cur);
+        if sz > 1 {
+            extents_map
+                .entry(cur)
+                .and_modify(|existing| {
+                    if *existing > 1 {
+                        *existing = (*existing).min(sz);
+                    } else {
+                        *existing = sz;
+                    }
+                })
+                .or_insert(sz);
+        }
+    }
+    let extents: Vec<(u64, u64)> = extents_map.into_iter().collect();
+    let filter_ctx = CandidateFilterContext {
+        mappings: &imp.mappings,
+        known_extents: &extents,
+        initial_seeds: &entries.iter().copied().collect(),
+    };
+
     // Relocation candidates: reject candidates already visited inside trusted bodies
     let unvisited_relocs: Vec<u64> = imp
         .reloc_candidates
@@ -1751,10 +1814,9 @@ fn flow_discover_x86(imp: &mut NativeImport) {
         let confirmed_relocs: Vec<u64> = unvisited_relocs
             .into_iter()
             .zip(flows)
-            .filter(|(_, info)| info.kind != FlowKind::Bad && info.kind != FlowKind::Unimpl && info.length > 0)
+            .filter(|&(c, ref info)| filter_candidate(c, &filter_ctx, |_| info.clone()))
             .map(|(c, _)| c)
             .collect();
-
         if !confirmed_relocs.is_empty() {
             for &r in &confirmed_relocs {
                 if !entries.contains(&r) {
@@ -1857,8 +1919,7 @@ fn flow_discover_x86(imp: &mut NativeImport) {
         }
     }
     imp.xrefs = xrefs;
-
-    let _ = session.quit();
+    close_call_targets(imp);
 }
 
 #[cfg(test)]
@@ -2279,5 +2340,122 @@ mod tests {
         assert!(imp.functions.iter().any(|f| f.entry == 0x401400));
         assert!(imp.xrefs.iter().any(|x| x.provenance == "native-import:pe-reloc"));
         assert!(imp.functions.len() >= 10);
+    }
+    #[test]
+    fn regression_load_native_pe32_data_to_data_relocation_never_becomes_function() {
+        let mut b = vec![0u8; 0x600];
+        b[0..2].copy_from_slice(b"MZ");
+        b[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        b[0x80..0x84].copy_from_slice(b"PE\0\0");
+        b[0x84..0x86].copy_from_slice(&0x014cu16.to_le_bytes()); // i386
+        b[0x86..0x88].copy_from_slice(&3u16.to_le_bytes()); // 3 sections
+        b[0x94..0x96].copy_from_slice(&0xe0u16.to_le_bytes()); // opt size 224
+        let opt = 0x98;
+        b[opt..opt + 2].copy_from_slice(&0x10bu16.to_le_bytes()); // PE32 magic
+        b[opt + 16..opt + 20].copy_from_slice(&0x1000u32.to_le_bytes()); // entry RVA
+        b[opt + 28..opt + 32].copy_from_slice(&0x400000u32.to_le_bytes()); // image base
+        // Relocation directory at opt + 136: RVA 0x3000, size 16
+        b[opt + 136..opt + 140].copy_from_slice(&0x3000u32.to_le_bytes());
+        b[opt + 140..opt + 144].copy_from_slice(&16u32.to_le_bytes());
+
+        let sec = opt + 0xe0; // 0x178
+        // Sec 0: .text (RVA 0x1000, size 0x1000, raw 0x200, raw_sz 0x100, exec)
+        b[sec..sec + 5].copy_from_slice(b".text");
+        b[sec + 8..sec + 12].copy_from_slice(&0x1000u32.to_le_bytes());
+        b[sec + 12..sec + 16].copy_from_slice(&0x1000u32.to_le_bytes());
+        b[sec + 16..sec + 20].copy_from_slice(&0x100u32.to_le_bytes());
+        b[sec + 20..sec + 24].copy_from_slice(&0x200u32.to_le_bytes());
+        b[sec + 36..sec + 40].copy_from_slice(&0x60000020u32.to_le_bytes());
+        b[0x200] = 0xc3; // ret at 0x401000
+
+        // Sec 1: .data (RVA 0x2000, size 0x1000, raw 0x300, raw_sz 0x100, data)
+        let sec1 = sec + 40;
+        b[sec1..sec1 + 5].copy_from_slice(b".data");
+        b[sec1 + 8..sec1 + 12].copy_from_slice(&0x1000u32.to_le_bytes());
+        b[sec1 + 12..sec1 + 16].copy_from_slice(&0x2000u32.to_le_bytes());
+        b[sec1 + 16..sec1 + 20].copy_from_slice(&0x100u32.to_le_bytes());
+        b[sec1 + 20..sec1 + 24].copy_from_slice(&0x300u32.to_le_bytes());
+        b[sec1 + 36..sec1 + 40].copy_from_slice(&0xc0000040u32.to_le_bytes());
+        // Put a 32-bit pointer at raw 0x300 (0x402000) pointing to 0x402080 (in .data)
+        b[0x300..0x304].copy_from_slice(&0x402080u32.to_le_bytes());
+
+        // Sec 2: .reloc (RVA 0x3000, size 0x1000, raw 0x400, raw_sz 0x100, reloc)
+        let sec2 = sec + 80;
+        b[sec2..sec2 + 6].copy_from_slice(b".reloc");
+        b[sec2 + 8..sec2 + 12].copy_from_slice(&0x1000u32.to_le_bytes());
+        b[sec2 + 12..sec2 + 16].copy_from_slice(&0x3000u32.to_le_bytes());
+        b[sec2 + 16..sec2 + 20].copy_from_slice(&16u32.to_le_bytes());
+        b[sec2 + 20..sec2 + 24].copy_from_slice(&0x400u32.to_le_bytes());
+        b[sec2 + 36..sec2 + 40].copy_from_slice(&0x42000040u32.to_le_bytes());
+        // Relocation block at 0x400: page RVA 0x2000, block size 12
+        b[0x400..0x404].copy_from_slice(&0x2000u32.to_le_bytes());
+        b[0x404..0x408].copy_from_slice(&12u32.to_le_bytes());
+        let entry0: u16 = (3 << 12) | 0; // HIGHLOW at offset 0
+        b[0x408..0x40a].copy_from_slice(&entry0.to_le_bytes());
+
+        let tmp_dir = std::env::temp_dir();
+        let tmp_path = tmp_dir.join("test_pe32_data_reloc_regression.exe");
+        std::fs::write(&tmp_path, &b).expect("write temp pe32");
+
+        let imp = load_native(&tmp_path).expect("load_native must succeed on valid PE32");
+        let _ = std::fs::remove_file(&tmp_path);
+
+        assert_eq!(imp.format, "PE");
+        assert_eq!(imp.language, "x86:LE:32:default");
+        assert!(imp.functions.iter().any(|f| f.entry == 0x401000));
+
+        // Proves data-to-data relocation remains an xref with pe-reloc provenance
+        let xref = imp.xrefs.iter().find(|x| x.from == 0x402000 && x.to == 0x402080);
+        assert!(xref.is_some(), "data-to-data relocation must be recorded in xrefs");
+        assert_eq!(xref.unwrap().kind, "DATA");
+        assert_eq!(xref.unwrap().provenance, "native-import:pe-reloc");
+
+        // Proves data-to-data relocation target and source NEVER become functions
+        assert!(
+            !imp.functions.iter().any(|f| f.entry == 0x402080),
+            "data-to-data relocation target must never become a function"
+        );
+        assert!(
+            !imp.functions.iter().any(|f| f.entry == 0x402000),
+            "data relocation source must never become a function"
+        );
+    }
+
+    #[test]
+    fn regression_pe_truncated_optional_header_returns_error() {
+        let mut b = vec![0u8; 0x100];
+        b[0..2].copy_from_slice(b"MZ");
+        b[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        b[0x80..0x84].copy_from_slice(b"PE\0\0");
+        b[0x84..0x86].copy_from_slice(&0x8664u16.to_le_bytes()); // AMD64
+        b[0x94..0x96].copy_from_slice(&0x200u16.to_le_bytes()); // opt_size claims 0x200 (past 0x100 len)
+        let res = import_pe(&b);
+        assert!(res.is_err(), "truncated optional header must return Err");
+
+        // Also test opt_size too small for PE32+ (e.g. 50 < 160)
+        let mut b2 = vec![0u8; 0x200];
+        b2[0..2].copy_from_slice(b"MZ");
+        b2[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        b2[0x80..0x84].copy_from_slice(b"PE\0\0");
+        b2[0x84..0x86].copy_from_slice(&0x8664u16.to_le_bytes());
+        b2[0x94..0x96].copy_from_slice(&50u16.to_le_bytes()); // opt_size 50
+        b2[0x98..0x9a].copy_from_slice(&0x20bu16.to_le_bytes()); // magic 0x20b
+        let res2 = import_pe(&b2);
+        assert!(res2.is_err(), "undersized PE32+ optional header must return Err");
+    }
+
+    #[test]
+    fn regression_pe_truncated_section_table_returns_error() {
+        let mut b = vec![0u8; 0x200];
+        b[0..2].copy_from_slice(b"MZ");
+        b[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        b[0x80..0x84].copy_from_slice(b"PE\0\0");
+        b[0x84..0x86].copy_from_slice(&0x014cu16.to_le_bytes()); // i386
+        b[0x86..0x88].copy_from_slice(&50u16.to_le_bytes()); // 50 sections * 40 = 2000 bytes (past 0x200 len)
+        b[0x94..0x96].copy_from_slice(&0xe0u16.to_le_bytes()); // opt_size 224
+        let opt = 0x98;
+        b[opt..opt + 2].copy_from_slice(&0x10bu16.to_le_bytes());
+        let res = import_pe(&b);
+        assert!(res.is_err(), "truncated section table must return Err");
     }
 }

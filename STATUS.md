@@ -502,6 +502,13 @@ green (82 tests across 20 suites); the CPack TGZ builds.
 M1 — Discovery becomes generic
 
 ## M1 progress
+- m1-003-d: benchmarked hand decoder vs console flow on libc and the x86-64 corpus.
+  All corpus rows scored against unstripped symbol references (zero null metrics).
+  On libc, hand achieves exact set equality against console flow (3,953/3,953),
+  and against the Ghidra oracle libc recall is 0.991472. Median speedup on libc: 1.1964×.
+  hand decoder is 1.2× faster than console (<2.0× threshold) even though set-metrics are equal against the oracle;
+  decision: keep_disasm_rs: false; deactivated default hand-decoder production path (default = []).
+
 - m1-005: implemented PE base relocations (.reloc directory 5, IMAGE_REL_BASED_DIR64/HIGHLOW),
   entry point calculation fix (opt + 16), strict PE machine/magic pair validation without mock fallbacks
   (PE32+ AMD64 0x8664/0x20b and PE32 i386 0x014c/0x10b; typed errors on truncated fields), and durable
@@ -517,13 +524,6 @@ M1 — Discovery becomes generic
   On `tiny_pe` unstripped twin (123 oracle symbols): 33 discovered, overlap 33, p=1.0000, r=0.2683;
   on `dispatch` unstripped twin (125 oracle symbols): 35 discovered, overlap 35, p=1.0000, r=0.2800.
   Acceptance tests `tests/m1-005_pe_relocs.sh` and `tests/m1-003_benchmark.sh` pass (PASS).
-
-- m1-003-d: benchmarked hand decoder vs console flow on libc and the x86-64 corpus.
-  All corpus rows scored against unstripped symbol references (zero null metrics).
-  Corpus hand/console metrics are not generally equal (plain_o2 hand r=0.8889 vs console r=0.7778;
-  cpp_o2 hand r=0.5625 vs console r=0.6250). On libc, hand achieves exact set equality against console flow (3,953/3,953),
-  and against the Ghidra oracle libc recall is 0.991472. Median speedup on libc: 1.7174×.
-  hand decoder is 1.7× faster than console (<2.0× threshold) even though set-metrics are equal against the oracle; do not keep disasm.rs.
 
 - m1-003-f: hand decoder candidate pre-pass confirmed by batched flow; achieves
   fn.precision=1.0000 and exact set equality (3,953/3,953) on libc describing hand-versus-console
