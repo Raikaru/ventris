@@ -779,12 +779,31 @@ M1 — Discovery becomes generic
   (<5 s). A run overlapping Ghidra verification took 5.454 s; no performance
   claim is made for concurrent verification workloads. Rustfmt is unavailable.
 
+## m1-010 sub-tasks
+- Acceptance: `benchmarks/discovery_gate.py` writes
+  `benchmarks/reports/discovery-gate.json`; exact function-entry precision and
+  recall must both reach 0.98 on each of the 20 locked ELF inputs covered by
+  m1-007 and scoring-v1. Missing inputs/oracles are skipped and non-passing.
+  Raw references and the approved scoring policy remain unchanged.
+- Existing libc performance and real-DOL recall checks remain regressions with
+  their existing thresholds; this task does not redefine their metrics.
+- m1-010-a: commit and run the failing all-input acceptance, retaining every
+  missed/extra entry and checking that legacy ISA-specific discovery has left
+  native.rs. The generic discovery module must contain no ISA-specific logic.
+- m1-010-b: move the shared flow worklist into the generic discovery module.
+- m1-010-c: remove legacy architecture-specific production discovery routes;
+  any retained accelerator must be separate and equivalence-tested.
+- m1-010-d: fix remaining M1 loader/seed/flow failures exposed by the gate.
+  If an M2 analyzer is necessary, record it under Blocked on and stop.
+- m1-010-e: required regressions, generated gate evidence and CI integration.
+  Keep each commit below 800 changed lines; no milestone pass until all rows
+  and the architecture check pass.
+
 ## Blocked on
 - None for the recorded m1-010 prerequisite.
 
 ## Next task
-- m1-010. The m1-008b prerequisite is complete; m1-010 was not started in this
-  session.
+- m1-010-a: write and commit the failing discovery gate before implementation.
 
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a
