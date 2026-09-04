@@ -1643,6 +1643,23 @@ pub fn flow_discover_console(imp: &mut NativeImport) {
     }
     flow_discover_with_provider(imp, |chunk| session.try_flow_batch(chunk));
 }
+fn merge_reached_candidate(
+    target: u64,
+    origin: u64,
+    reloc_set: &HashSet<u64>,
+    addr_origin: &mut std::collections::HashMap<u64, u64>,
+    proven_bodies: &mut std::collections::HashMap<u64, u64>,
+) {
+    if target != origin && reloc_set.contains(&target) {
+        addr_origin.insert(target, origin);
+        if let Some(t_span) = proven_bodies.remove(&target) {
+            proven_bodies
+                .entry(origin)
+                .and_modify(|e| *e = (*e).max(t_span))
+                .or_insert(t_span);
+        }
+    }
+}
 
 /// Core flow-based discovery over a provided control-flow resolver.
 pub fn flow_discover_with_provider<F: FnMut(&[u64]) -> Vec<crate::native_runtime::FlowResult>>(
@@ -1707,42 +1724,42 @@ pub fn flow_discover_with_provider<F: FnMut(&[u64]) -> Vec<crate::native_runtime
                         }
                         let fall = info.fallthrough.unwrap_or(addr + info.length as u64);
                         if in_code(fall) && !visited.contains(&fall) {
-                            addr_origin.entry(fall).or_insert(origin);
+                            addr_origin.insert(fall, origin);
                             next_active.push(fall);
                         }
                     }
                     FlowKind::Branch => {
-                        if let Some(t) = info.targets.first() {
-                            if in_code(*t) && !visited.contains(t) {
-                                addr_origin.entry(*t).or_insert(origin);
-                                next_active.push(*t);
+                        if let Some(&t) = info.targets.first() {
+                            if in_code(t) && !visited.contains(&t) {
+                                addr_origin.insert(t, origin);
+                                next_active.push(t);
                             }
                         }
                     }
                     FlowKind::CBranch => {
-                        if let Some(t) = info.targets.first() {
-                            if in_code(*t) && !visited.contains(t) {
-                                addr_origin.entry(*t).or_insert(origin);
-                                next_active.push(*t);
+                        if let Some(&t) = info.targets.first() {
+                            if in_code(t) && !visited.contains(&t) {
+                                addr_origin.insert(t, origin);
+                                next_active.push(t);
                             }
                         }
                         let fall = info.fallthrough.unwrap_or(addr + info.length as u64);
                         if in_code(fall) && !visited.contains(&fall) {
-                            addr_origin.entry(fall).or_insert(origin);
+                            addr_origin.insert(fall, origin);
                             next_active.push(fall);
                         }
                     }
                     FlowKind::CallInd => {
                         let fall = info.fallthrough.unwrap_or(addr + info.length as u64);
                         if in_code(fall) && !visited.contains(&fall) {
-                            addr_origin.entry(fall).or_insert(origin);
+                            addr_origin.insert(fall, origin);
                             next_active.push(fall);
                         }
                     }
                     FlowKind::Fallthrough => {
                         let fall = info.fallthrough.unwrap_or(addr + info.length as u64);
                         if in_code(fall) && !visited.contains(&fall) {
-                            addr_origin.entry(fall).or_insert(origin);
+                            addr_origin.insert(fall, origin);
                             next_active.push(fall);
                         }
                     }
@@ -1801,6 +1818,7 @@ pub fn flow_discover_with_provider<F: FnMut(&[u64]) -> Vec<crate::native_runtime
                     addr_origin.insert(r, r);
                 }
             }
+            let reloc_set: HashSet<u64> = confirmed_relocs.iter().copied().collect();
             let mut reloc_active = confirmed_relocs;
             while !reloc_active.is_empty() {
                 reloc_active.sort_unstable();
@@ -1836,36 +1854,41 @@ pub fn flow_discover_with_provider<F: FnMut(&[u64]) -> Vec<crate::native_runtime
                                     }
                                 }
                                 let fall = info.fallthrough.unwrap_or(addr + info.length as u64);
+                                merge_reached_candidate(fall, origin, &reloc_set, &mut addr_origin, &mut proven_bodies);
                                 if in_code(fall) && !visited.contains(&fall) {
-                                    addr_origin.entry(fall).or_insert(origin);
+                                    addr_origin.insert(fall, origin);
                                     next_active.push(fall);
                                 }
                             }
                             FlowKind::Branch => {
-                                if let Some(t) = info.targets.first() {
-                                    if in_code(*t) && !visited.contains(t) {
-                                        addr_origin.entry(*t).or_insert(origin);
-                                        next_active.push(*t);
+                                if let Some(&t) = info.targets.first() {
+                                    merge_reached_candidate(t, origin, &reloc_set, &mut addr_origin, &mut proven_bodies);
+                                    if in_code(t) && !visited.contains(&t) {
+                                        addr_origin.insert(t, origin);
+                                        next_active.push(t);
                                     }
                                 }
                             }
                             FlowKind::CBranch => {
-                                if let Some(t) = info.targets.first() {
-                                    if in_code(*t) && !visited.contains(t) {
-                                        addr_origin.entry(*t).or_insert(origin);
-                                        next_active.push(*t);
+                                if let Some(&t) = info.targets.first() {
+                                    merge_reached_candidate(t, origin, &reloc_set, &mut addr_origin, &mut proven_bodies);
+                                    if in_code(t) && !visited.contains(&t) {
+                                        addr_origin.insert(t, origin);
+                                        next_active.push(t);
                                     }
                                 }
                                 let fall = info.fallthrough.unwrap_or(addr + info.length as u64);
+                                merge_reached_candidate(fall, origin, &reloc_set, &mut addr_origin, &mut proven_bodies);
                                 if in_code(fall) && !visited.contains(&fall) {
-                                    addr_origin.entry(fall).or_insert(origin);
+                                    addr_origin.insert(fall, origin);
                                     next_active.push(fall);
                                 }
                             }
                             FlowKind::Fallthrough => {
                                 let fall = info.fallthrough.unwrap_or(addr + info.length as u64);
+                                merge_reached_candidate(fall, origin, &reloc_set, &mut addr_origin, &mut proven_bodies);
                                 if in_code(fall) && !visited.contains(&fall) {
-                                    addr_origin.entry(fall).or_insert(origin);
+                                    addr_origin.insert(fall, origin);
                                     next_active.push(fall);
                                 }
                             }
@@ -1881,6 +1904,11 @@ pub fn flow_discover_with_provider<F: FnMut(&[u64]) -> Vec<crate::native_runtime
     // Reconcile batched relocation candidates after discovering their bodies:
     // an entry plus an internal relocation target cannot both become functions.
     entries.retain(|&e| {
+        if let Some(&origin) = addr_origin.get(&e) {
+            if origin != e {
+                return false;
+            }
+        }
         let is_internal_to_another = proven_bodies.iter().any(|(&root, &span_end)| {
             root != e && e > root && e < span_end
         });

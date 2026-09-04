@@ -127,7 +127,7 @@ RUNS=3 VENTRIS_SLA=... ./benchmarks/gate.sh # memory/perf gates
 
 ## Honest status
 
-- **Supported (gated, tested)**: x86-64/x86-32 ELF + PE (PE32/PE32+) native import (section
+- **Supported (gated, tested)**: x86-64 ELF + PE (PE32/PE32+) native import (section
   maps, symtab/dynsym, PLT/GOT naming, flow-based function discovery with
   the `_start` → `main` RDI convention and init/fini-array seeds); store
   browsing/reopen/rename; SLEIGH disassembly via the pinned console;

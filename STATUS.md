@@ -315,7 +315,7 @@ workflow baseline (39.6 MB peak vs 375 MiB stock; see gate numbers below and
 
 
 ## Native import (no-JVM) landed
-- `lre-core::native`: ELF (32/64) + PE (PE32/PE32+) parsers (sections -> memory map,
+- `lre-core::native`: ELF64 + PE (PE32/PE32+) parsers (sections -> memory map,
   SHT_SYMTAB function symbols, SHT_DYNSYM externals, SHT_RELA GOT relocs
   naming the `ff 25` PLT stubs), direct-call sweep (call/jcc/jmp rel32),
   and the call-target closure (FUN_<hex> naming). Facts land in the same
