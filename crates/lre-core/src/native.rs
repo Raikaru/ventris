@@ -1,4 +1,4 @@
-//! Native (no-JVM) ELF/PE import: parse headers, derive the memory map,
+//! Native (no-JVM) ELF/PE/DOL import: parse headers, derive the memory map,
 //! discover functions from symbols and entry-point call walking, and extract
 //! direct xrefs. Facts land in the same project.sqlite tables the bridge
 //! import fills, with provenance `native-import`.
@@ -18,6 +18,8 @@
 use lre_db::ProjectDb;
 use std::collections::HashSet;
 use std::path::Path;
+pub(crate) mod dol;
+mod discovery;
 use lre_model::{
     FunctionRow, MemoryRegion, Provenance, ProgramSummary, StringRow, XrefRow,
 };
@@ -1135,17 +1137,21 @@ pub fn elf_image_base(data: &[u8]) -> Option<u64> {
     }
 }
 
+fn parse_native(data: &[u8]) -> Result<NativeImport> {
+    if data.starts_with(b"\x7fELF") {
+        import_elf(data)
+    } else if data.starts_with(b"MZ") {
+        import_pe(data)
+    } else {
+        dol::import(data)
+    }
+}
+
 /// Loads `<binary>` mappings without running discovery or sweep passes.
 pub fn load_native_mappings(binary: &Path) -> Result<Vec<Mapping>> {
     let data = std::fs::read(binary)
         .map_err(|e| ImportError::Bad(format!("{}: {e}", binary.display())))?;
-    let imp = if data.get(0..4) == Some(b"\x7fELF") {
-        import_elf(&data)?
-    } else if data.get(0..2) == Some(b"MZ") {
-        import_pe(&data)?
-    } else {
-        return err("unsupported format (ELF/PE expected)");
-    };
+    let imp = parse_native(&data)?;
     Ok(imp.mappings)
 }
 
@@ -1153,18 +1159,16 @@ pub fn load_native_mappings(binary: &Path) -> Result<Vec<Mapping>> {
 pub fn load_native(binary: &Path) -> Result<NativeImport> {
     let data = std::fs::read(binary)
         .map_err(|e| ImportError::Bad(format!("{}: {e}", binary.display())))?;
-    let mut imp = if data.get(0..4) == Some(b"\x7fELF") {
-        import_elf(&data)?
-    } else if data.get(0..2) == Some(b"MZ") {
-        import_pe(&data)?
-    } else {
-        return err("unsupported format (ELF/PE expected)");
-    };
+    let mut imp = parse_native(&data)?;
     imp.binary = binary.canonicalize().unwrap_or_else(|_| binary.to_path_buf());
     imp.cfg = crate::session::RuntimeConfig::from_env();
     imp.cfg.language_id = imp.language.clone();
-    sweep_calls(&mut imp);
-    flow_discover(&mut imp);
+    if imp.format == "dol" {
+        discovery::discover_mapped(&mut imp)?;
+    } else {
+        sweep_calls(&mut imp);
+        flow_discover(&mut imp);
+    }
     Ok(imp)
 }
 
@@ -1692,6 +1696,14 @@ fn merge_reached_candidate(
 /// Core flow-based discovery over a provided control-flow resolver.
 pub fn flow_discover_with_provider<F: FnMut(&[u64]) -> Vec<crate::native_runtime::FlowResult>>(
     imp: &mut NativeImport,
+    flow_provider: F,
+) {
+    flow_discover_with_candidates(imp, &[], flow_provider);
+}
+
+fn flow_discover_with_candidates<F: FnMut(&[u64]) -> Vec<crate::native_runtime::FlowResult>>(
+    imp: &mut NativeImport,
+    candidates: &[u64],
     mut flow_provider: F,
 ) {
     use crate::native_runtime::FlowKind;
@@ -1709,6 +1721,7 @@ pub fn flow_discover_with_provider<F: FnMut(&[u64]) -> Vec<crate::native_runtime
     entries.dedup();
 
     let mut calls: Vec<(u64, u64)> = Vec::new();
+    let mut instruction_extents = Vec::new();
     let mut proven_bodies: std::collections::HashMap<u64, u64> = std::collections::HashMap::with_capacity(4096);
     let mut addr_origin: std::collections::HashMap<u64, u64> = std::collections::HashMap::with_capacity(32768);
     for &s in &entries {
@@ -1733,6 +1746,9 @@ pub fn flow_discover_with_provider<F: FnMut(&[u64]) -> Vec<crate::native_runtime
             for (addr, info) in chunk.iter().copied().zip(flows) {
                 let origin = get_canonical_origin(addr, &addr_origin);
                 let span = addr + info.length as u64;
+                if !matches!(info.kind, FlowKind::Bad | FlowKind::Unimpl) {
+                    instruction_extents.push((addr, info.length as u64));
+                }
                 proven_bodies
                     .entry(origin)
                     .and_modify(|e| *e = (*e).max(span))
@@ -1798,23 +1814,14 @@ pub fn flow_discover_with_provider<F: FnMut(&[u64]) -> Vec<crate::native_runtime
         active = next_active;
     }
 
-    // Explicit known-extents containment: combine initial function extents and discovered boundaries
+    // Only decoded bytes prove containment. A branch over a gap does not.
     let mut extents: Vec<(u64, u64)> = imp
         .functions
         .iter()
         .filter(|f| f.size > 1)
         .map(|f| (f.entry, f.size))
         .collect();
-    for (&origin, &span_end) in &proven_bodies {
-        let proven_sz = span_end.saturating_sub(origin);
-        if proven_sz > 1 {
-            if let Some(existing) = extents.iter_mut().find(|(e, _)| *e == origin) {
-                existing.1 = if existing.1 > 1 { existing.1.min(proven_sz) } else { proven_sz };
-            } else {
-                extents.push((origin, proven_sz));
-            }
-        }
-    }
+    extents.extend(instruction_extents);
 
     let filter_ctx = CandidateFilterContext {
         mappings: &imp.mappings,
@@ -1826,6 +1833,7 @@ pub fn flow_discover_with_provider<F: FnMut(&[u64]) -> Vec<crate::native_runtime
     let unvisited_relocs: Vec<u64> = imp
         .reloc_candidates
         .iter()
+        .chain(candidates.iter())
         .copied()
         .filter(|&cand| in_code(cand) && !visited.contains(&cand) && !entries.contains(&cand))
         .collect();
@@ -1941,16 +1949,7 @@ pub fn flow_discover_with_provider<F: FnMut(&[u64]) -> Vec<crate::native_runtime
 
     // Reconcile batched relocation candidates after discovering their bodies:
     // an entry plus an internal relocation target cannot both become functions.
-    entries.retain(|&e| {
-        let canon = get_canonical_origin(e, &addr_origin);
-        if canon != e {
-            return false;
-        }
-        let is_internal_to_another = proven_bodies.iter().any(|(&root, &span_end)| {
-            root != e && e > root && e < span_end
-        });
-        !is_internal_to_another
-    });
+    entries.retain(|&e| get_canonical_origin(e, &addr_origin) == e);
 
     entries.sort_unstable();
     entries.dedup();
@@ -1990,6 +1989,31 @@ pub fn flow_discover_with_provider<F: FnMut(&[u64]) -> Vec<crate::native_runtime
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn distant_branch_does_not_claim_unvisited_gap() {
+        use crate::native_runtime::{FlowKind, FlowResult};
+        let mut imp = NativeImport {
+            mappings: vec![Mapping {
+                vaddr: 0x1000, size: 0x2010, file_off: 0, flags: 6,
+                bytes: vec![0x90; 0x2010],
+            }],
+            functions: vec![NativeFunction { entry: 0x1000, name: "entry".into(), size: 1 }],
+            reloc_candidates: vec![0x2000, 0x3001],
+            ..Default::default()
+        };
+        flow_discover_with_provider(&mut imp, |addresses| addresses.iter().map(|&address| {
+            FlowResult {
+                address, length: 4, fallthrough: None,
+                targets: if address == 0x1000 { vec![0x3000] } else { vec![] },
+                kind: if address == 0x1000 { FlowKind::Branch } else { FlowKind::Return },
+            }
+        }).collect());
+        assert!(imp.functions.iter().any(|f| f.entry == 0x2000),
+                "a distant branch must not suppress a function in the unvisited gap");
+        assert!(!imp.functions.iter().any(|f| f.entry == 0x3001),
+                "an instruction-interior pointer must still be rejected");
+    }
+
 
     #[cfg(feature = "x86_decoder")]
     #[test]

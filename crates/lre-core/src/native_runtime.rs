@@ -16,6 +16,8 @@ use crate::native::{elf_image_base, pe_image_base, NativeImport};
 use crate::session::RuntimeConfig;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+mod image;
+use image::MappedImage;
 
 /// Facade error for the native runtime (string-typed: these are setup and
 /// child-process failures, reported verbatim to the caller).
@@ -81,8 +83,11 @@ fn console_output(cfg: &RuntimeConfig, binary: &Path, address: &str) -> Result<S
     } else {
         format!("0x{address}")
     };
+    let mapped = MappedImage::for_dol(binary)?;
     let bfd_target = bfd_target_for(&cfg.language_id, binary)?;
-    let load_script = if cfg.language_id.starts_with("x86:") {
+    let load_script = if let Some(image) = &mapped {
+        image.command()
+    } else if cfg.language_id.starts_with("x86:") {
         format!(
             "load file {} {}\nadjust vma 0x400000\n",
             bfd_target,
@@ -372,6 +377,7 @@ pub fn console_discover(
             console.display()
         ));
     }
+    let mapped = MappedImage::for_dol(binary)?;
     let mut child = Command::new(&console)
         .arg("-s")
         .arg(&langs)
@@ -385,7 +391,9 @@ pub fn console_discover(
     let mut reader = BufReader::new(stdout);
 
     let bfd_target = bfd_target_for(&cfg.language_id, binary)?;
-    let init_script = if cfg.language_id.starts_with("x86:") {
+    let init_script = if let Some(image) = &mapped {
+        image.command()
+    } else if cfg.language_id.starts_with("x86:") {
         format!(
             "load file {} {}\nadjust vma 0x400000\n",
             bfd_target,
@@ -605,6 +613,7 @@ pub fn console_flow(cfg: &RuntimeConfig, binary: &Path, address: u64) -> Result<
     let ghroot = cfg.ghidra_install.to_string_lossy().into_owned();
     let langs = cfg.language_dir.to_string_lossy().into_owned();
 
+    let mapped = MappedImage::for_dol(binary)?;
     let target = bfd_target_for(&cfg.language_id, binary)?;
     let mappings = crate::native::load_native_mappings(binary).unwrap_or_default();
     let adjust_vma = mappings
@@ -614,7 +623,9 @@ pub fn console_flow(cfg: &RuntimeConfig, binary: &Path, address: u64) -> Result<
         .map(|m| m.vaddr.wrapping_sub(m.file_off))
         .unwrap_or(0);
 
-    let script = if cfg.language_id.starts_with("x86:") {
+    let script = if let Some(image) = &mapped {
+        format!("{}flow 0x{address:x}\nquit\n", image.command())
+    } else if cfg.language_id.starts_with("x86:") {
         format!(
             "load file {} {}\nflow 0x{:x}\nquit\n",
             target,
@@ -758,6 +769,9 @@ impl ConsoleSession {
     /// Load a binary and, for non-x86 targets, set the image base so virtual
     /// addresses line up with the BFD load (vaddr - file_off of the first mapping).
     pub fn load(&mut self, binary: &Path, base: u64) -> Result<()> {
+        if let Some(image) = MappedImage::for_dol(binary)? {
+            return self.load_xml(&image);
+        }
         let target = bfd_target_for(&self.language_id, binary)?;
         let script = if self.language_id.starts_with("x86:") {
             format!("load file {} {}\n", target, binary.display())
@@ -775,6 +789,21 @@ impl ConsoleSession {
         let prompts = if self.language_id.starts_with("x86:") { 1 } else { 2 };
         for _ in 0..prompts {
             let _ = read_until_prompt(&mut self.reader)?;
+        }
+        Ok(())
+    }
+
+    /// Load existing native mappings without flattening sparse virtual addresses.
+    pub fn load_mapped(&mut self, import: &NativeImport) -> Result<()> {
+        let image = MappedImage::new(import)?;
+        self.load_xml(&image)
+    }
+
+    fn load_xml(&mut self, image: &MappedImage) -> Result<()> {
+        self.send(&image.command())?;
+        let response = read_until_prompt(&mut self.reader)?;
+        if !response.contains("successfully loaded:") {
+            return err(format!("mapped image load failed: {response}"));
         }
         Ok(())
     }

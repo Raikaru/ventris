@@ -81,9 +81,11 @@ def main():
             matched = native & oracle
             row["native_functions"] = len(native)
             row["matched_functions"] = len(matched)
+            row["false_positive_functions"] = len(native-oracle)
             row["metrics"] = {"fn.recall": len(matched)/len(oracle),
                               "fn.precision": len(matched)/len(native) if native else 0.0}
             row["missing_entries"] = [f"{a:08x}" for a in sorted(oracle-native)]
+            row["extra_entries"] = [f"{a:08x}" for a in sorted(native-oracle)]
             # Verify sparse file offsets and BSS zero fill through the consumer memory API.
             def memory(binary, address, size):
                 result = subprocess.run([str(CLI), "mem", str(binary), f"{address:x}", str(size),

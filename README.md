@@ -117,6 +117,21 @@ export VENTRIS_GHIDRA=$HOME/ghidra_12.1.3_PUBLIC          # console defaults
 Bridge (compatibility) equivalents remain: `import`, `decompile`, `disasm`,
 `dump-specs` with `--ghidra DIR` / the service jar.
 
+GameCube DOL import maps the section table and preserves initialized data
+inside BSS bounds. Discovery requires the native console and installed
+`PowerPC:BE:32:default` language; the console loads a temporary sparse XML
+image and supplies instruction flow to the generic worklist. No symbol ELF
+is supplied to the importer. `.rel` loading is not implemented.
+
+```sh
+./target/debug/lre-cli import-native /path/to/sys/main.dol --name dol --project ./proj
+python3 tests/m1-009_dol.py --dol /path/to/sys/main.dol --oracle /path/to/files/boot.elf
+```
+
+The real-input gate requires the hash-pinned GQFE78 pair; missing private
+inputs produce a skipped, non-passing report. It is a local gate, not a claim
+that CI possesses or tests the game binary.
+
 ## Verification
 
 ```sh
