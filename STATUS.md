@@ -717,10 +717,41 @@ M1 — Discovery becomes generic
   locally, not in CI. Missing inputs remain skipped/non-passing.
   `.rel` support is not implemented. No corpus or metric definition changed.
 
+## m1-008b prerequisite investigation
+- CI run `33923983804` for `6e1bae6` passed all 10 jobs.
+- The recorded m1-003 gap concerns the x86-64 `plain_o0` and `cpp_o2`
+  corpus variants. Acceptance `tests/m1-008b_pointer_seeds.py` scores the
+  corresponding locked m1-006 inputs against unchanged m1-007 references.
+  No cross-architecture gate claim or address normalization is introduced.
+- Failing acceptance: plain_o0 10/15 (0.666667), cpp_o2 14/29 (0.482759);
+  precision 1.0 for both, 0 native-only entries. Every missing entry is
+  retained in the generated report.
+- Fresh bridge imports identify 3 plain_o0 and 9 cpp_o2 oracle functions at
+  `00204000` and above as external symbols outside the binary's allocated
+  sections (including `__libc_start_main`, `__gmon_start__`, and `printf`).
+  Code-entry recovery alone is capped at 12/15 and 20/29, below 0.98.
+  The other misses include unreferenced code and PLT resolver paths, not just
+  data-pointer seeds. No implementation or oracle changes have been made.
+
+## Blocked on
+- m1-008b: human decision about synthetic external entries in the function
+  recall denominator. Per II.0/II.1, stop before any metric change.
+- m1-010: the explicitly recorded m1-008b prerequisite is not passed.
+
+## Proposed changes
+- Recommended: define code-function discovery scoring to exclude Ghidra's
+  synthetic external entries outside the loaded input image. Keep executable
+  PLT functions and unreferenced code in the denominator. Preserve existing
+  raw references; produce separately versioned scoring evidence after approval.
+  This is a proposed metric change, not an applied filter or a passed gate.
+- Alternative: retain the existing denominator and explicitly expand native
+  import's contract to model loader-generated external function placeholders;
+  do not disguise those placeholders as flow-confirmed code.
+
 ## Next task
-- m1-010. Preserve the architecture-specific accelerator restriction below.
-  Its acceptance test has not been written in this session; implementation
-  has not started.
+- m1-008b: blocked on the reserved decision above. Failing acceptance exists:
+  `tests/m1-008b_pointer_seeds.py`. Resolve the metric contract before
+  implementation, then return to m1-010. Neither implementation has started.
 
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a
