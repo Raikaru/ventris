@@ -1,0 +1,71 @@
+{
+  "gate": "m1-008b",
+  "milestone": "M1",
+  "scoring_policy": "code-functions-v1",
+  "commit": "9189859bcb367b321abe7c5d279031afd09b17f7",
+  "date": "2026-09-04",
+  "machine": {
+    "os": "Linux-7.1.12-200.fc44.x86_64-x86_64-with-glibc2.43",
+    "cpu": "x86_64"
+  },
+  "corpus": [
+    {
+      "id": "x86_64_plain_o0",
+      "status": "pass",
+      "metrics": {
+        "fn.recall": 1.0,
+        "fn.precision": 1.0
+      },
+      "thresholds": {
+        "fn.recall": 0.98
+      },
+      "runs": 1,
+      "sha256": "ec6f8b8aa9e8579fbc0dd2235b939b1e30f943a398a46bb63b5cd65cb05ff4cd",
+      "oracle": "oracle/ec6f8b8aa9e8579fbc0dd2235b939b1e30f943a398a46bb63b5cd65cb05ff4cd.json",
+      "oracle_sha256": "9efb9ecd53db25aeafd6f031326859c3e38c957e99d85687075d35128a7b7123",
+      "scoring_policy": "code-functions-v1",
+      "scoring_view": "oracle/scoring-v1/ec6f8b8aa9e8579fbc0dd2235b939b1e30f943a398a46bb63b5cd65cb05ff4cd.json",
+      "scoring_view_sha256": "a94b3a47bed688dc8ea888bf4708f7a20cfe1aa7d1cdb2ecd25b33f90ad6d49b",
+      "raw_oracle_functions": 15,
+      "excluded_functions": 3,
+      "oracle_entries_outside_executable_sections": [],
+      "native_functions": 12,
+      "oracle_functions": 12,
+      "matched_functions": 12,
+      "missing_entries": [],
+      "extra_entries": []
+    },
+    {
+      "id": "x86_64_cpp_o2",
+      "status": "pass",
+      "metrics": {
+        "fn.recall": 1.0,
+        "fn.precision": 1.0
+      },
+      "thresholds": {
+        "fn.recall": 0.98
+      },
+      "runs": 1,
+      "sha256": "1fb36ba4a74eef85054eba808fbc12b975a614ee431a9e79a9339cae8c11367d",
+      "oracle": "oracle/1fb36ba4a74eef85054eba808fbc12b975a614ee431a9e79a9339cae8c11367d.json",
+      "oracle_sha256": "b8a28a14abd73bf6d00b71c3006ff5daa1863c0d96f4faef1970c88d711cd6e5",
+      "scoring_policy": "code-functions-v1",
+      "scoring_view": "oracle/scoring-v1/1fb36ba4a74eef85054eba808fbc12b975a614ee431a9e79a9339cae8c11367d.json",
+      "scoring_view_sha256": "fbf90f22bd97325d8324d2d7cbae04866cc3b61a46f8aa64ff38598021648b1f",
+      "raw_oracle_functions": 29,
+      "excluded_functions": 9,
+      "oracle_entries_outside_executable_sections": [],
+      "native_functions": 20,
+      "oracle_functions": 20,
+      "matched_functions": 20,
+      "missing_entries": [],
+      "extra_entries": []
+    }
+  ],
+  "summary": {
+    "pass": 2,
+    "fail": 0,
+    "skipped": 0
+  },
+  "passed": true
+}
