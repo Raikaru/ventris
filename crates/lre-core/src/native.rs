@@ -718,13 +718,19 @@ pub fn import_pe(data: &[u8]) -> Result<NativeImport> {
     if machine != 0x8664 {
         return err("PE x86-64 expected");
     }
-    let entry_rva = u32_at(data, pe_off + 24)?;
     let num_sections = u16_at(data, pe_off + 6)? as usize;
     let opt_size = u16_at(data, pe_off + 20)? as usize;
     let opt = pe_off + 24;
-    let image_base = u64_at(data, opt + 24)?; // PE32+: no BaseOfData; ImageBase at +24
+    let entry_rva = u32_at(data, opt + 16)? as u64;
+    let image_base = u64_at(data, opt + 24)?; // PE32+: ImageBase at +24
     let sec_table = opt + opt_size;
     let mut mappings = Vec::new();
+    struct PeSectionInfo {
+        vaddr: u64,
+        vsize: usize,
+        raw_off: usize,
+    }
+    let mut raw_sections = Vec::new();
     for i in 0..num_sections {
         let o = sec_table + i * 40;
         let vaddr = u32_at(data, o + 12)? as u64;
@@ -734,12 +740,14 @@ pub fn import_pe(data: &[u8]) -> Result<NativeImport> {
         if size == 0 {
             continue;
         }
+        raw_sections.push(PeSectionInfo {
+            vaddr,
+            vsize: size,
+            raw_off: raw,
+        });
         let mut bytes = data.get(raw..raw + raw_size).unwrap_or(&[]).to_vec();
         bytes.resize(size, 0);
         let sflags = u32_at(data, o + 36)? as u64; // section characteristics
-        // IMAGE_SCN_MEM_EXECUTE = 0x20000000; the old mask (0x60000000)
-        // OR'd in IMAGE_SCN_MEM_READ (0x40000000), classifying readable
-        // data sections as executable code.
         let exec = sflags & 0x20000000 != 0;
         mappings.push(Mapping {
             vaddr: image_base + vaddr,
@@ -753,22 +761,142 @@ pub fn import_pe(data: &[u8]) -> Result<NativeImport> {
         return err("PE has no sections");
     }
     let mut functions = vec![NativeFunction {
-        entry: image_base + entry_rva as u64,
+        entry: image_base + entry_rva,
         name: "_entry".into(),
         size: 1,
     }];
+
+    // Parse base relocations from Data Directory 5 (.reloc)
+    let reloc_dir_rva = u32_at(data, opt + 152).unwrap_or(0) as u64;
+    let reloc_dir_size = u32_at(data, opt + 156).unwrap_or(0) as usize;
+
+    let reloc_raw_data: Option<&[u8]> = if reloc_dir_rva > 0 && reloc_dir_size > 0 {
+        raw_sections.iter().find_map(|s| {
+            if reloc_dir_rva >= s.vaddr && reloc_dir_rva < s.vaddr + s.vsize as u64 {
+                let off = s.raw_off + (reloc_dir_rva - s.vaddr) as usize;
+                data.get(off..off + reloc_dir_size)
+            } else {
+                None
+            }
+        })
+    } else {
+        (0..num_sections).find_map(|i| {
+            let o = sec_table + i * 40;
+            let name = data.get(o..o + 8)?;
+            if name.starts_with(b".reloc") {
+                let raw = u32_at(data, o + 20).ok()? as usize;
+                let raw_size = u32_at(data, o + 16).ok()? as usize;
+                data.get(raw..raw + raw_size)
+            } else {
+                None
+            }
+        })
+    };
+
+    let mut relocated_pointers: Vec<(u64, u64)> = Vec::new();
+    if let Some(reloc_bytes) = reloc_raw_data {
+        let mut pos = 0usize;
+        while pos + 8 <= reloc_bytes.len() {
+            let page_rva = match u32_at(reloc_bytes, pos) {
+                Ok(v) => v as u64,
+                Err(_) => break,
+            };
+            let block_size = match u32_at(reloc_bytes, pos + 4) {
+                Ok(v) => v as usize,
+                Err(_) => break,
+            };
+            if block_size < 8 || pos + block_size > reloc_bytes.len() {
+                break;
+            }
+            let entry_count = (block_size - 8) / 2;
+            for i in 0..entry_count {
+                let entry = match u16_at(reloc_bytes, pos + 8 + i * 2) {
+                    Ok(v) => v,
+                    Err(_) => break,
+                };
+                let r_type = entry >> 12;
+                let r_offset = (entry & 0x0fff) as u64;
+                let target_rva = page_rva + r_offset;
+                let loc = image_base + target_rva;
+
+                if let Some(m) = mappings.iter().find(|m| loc >= m.vaddr && loc < m.vaddr + m.size) {
+                    let off = (loc - m.vaddr) as usize;
+                    match r_type {
+                        10 => { // IMAGE_REL_BASED_DIR64
+                            if off + 8 <= m.bytes.len() {
+                                let ptr = u64::from_le_bytes(m.bytes[off..off + 8].try_into().unwrap());
+                                let in_code = mappings.iter().any(|cm| {
+                                    cm.flags & 0x4 != 0 && ptr >= cm.vaddr && ptr < cm.vaddr + cm.size
+                                });
+                                let code_target = if in_code {
+                                    Some(ptr)
+                                } else if mappings.iter().any(|cm| {
+                                    cm.flags & 0x4 != 0 && image_base + ptr >= cm.vaddr && image_base + ptr < cm.vaddr + cm.size
+                                }) {
+                                    Some(image_base + ptr)
+                                } else {
+                                    None
+                                };
+                                if let Some(target) = code_target {
+                                    relocated_pointers.push((loc, target));
+                                    if !functions.iter().any(|f| f.entry == target) {
+                                        functions.push(NativeFunction {
+                                            entry: target,
+                                            name: format!("FUN_{target:08x}"),
+                                            size: 1,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        3 => { // IMAGE_REL_BASED_HIGHLOW
+                            if off + 4 <= m.bytes.len() {
+                                let ptr = u32::from_le_bytes(m.bytes[off..off + 4].try_into().unwrap()) as u64;
+                                let in_code = mappings.iter().any(|cm| {
+                                    cm.flags & 0x4 != 0 && ptr >= cm.vaddr && ptr < cm.vaddr + cm.size
+                                });
+                                let code_target = if in_code {
+                                    Some(ptr)
+                                } else if mappings.iter().any(|cm| {
+                                    cm.flags & 0x4 != 0 && image_base + ptr >= cm.vaddr && image_base + ptr < cm.vaddr + cm.size
+                                }) {
+                                    Some(image_base + ptr)
+                                } else {
+                                    None
+                                };
+                                if let Some(target) = code_target {
+                                    relocated_pointers.push((loc, target));
+                                    if !functions.iter().any(|f| f.entry == target) {
+                                        functions.push(NativeFunction {
+                                            entry: target,
+                                            name: format!("FUN_{target:08x}"),
+                                            size: 1,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            pos += block_size;
+        }
+    }
+
     functions.sort_by_key(|f| f.entry);
+    functions.dedup_by_key(|f| f.entry);
     Ok(NativeImport {
         mappings,
         functions,
         xrefs: Vec::new(),
         externals: Vec::new(),
+        relocated_pointers,
         format: "PE".into(),
         language: "x86:LE:64:default".into(),
         ..Default::default()
     })
 }
-
 /// Returns the executable (code) ranges of the import, for seed filtering.
 pub fn code_ranges(imp: &NativeImport) -> Vec<(u64, u64)> {
     imp.mappings
@@ -884,7 +1012,13 @@ pub fn pe_image_base(data: &[u8]) -> Option<u64> {
     if data.get(pe_off..pe_off + 4) != Some(b"PE\0\0") {
         return None;
     }
-    u64_at(data, pe_off + 48).ok()
+    let opt = pe_off + 24;
+    let magic = u16_at(data, opt).unwrap_or(0);
+    if magic == 0x10b {
+        u32_at(data, opt + 28).ok().map(|b| b as u64)
+    } else {
+        u64_at(data, opt + 24).ok()
+    }
 }
 
 /// Returns the preferred image base for an ELF image.
@@ -1094,7 +1228,11 @@ pub fn store_import(
                 name: format!("reloc_ptr_{target:08x}"),
                 address: lre_model::Address::ram(*loc),
                 external: false,
-                source: "native-import:relative-reloc".into(),
+                source: if imp.format == "PE" {
+                    "native-import:pe-reloc".into()
+                } else {
+                    "native-import:relative-reloc".into()
+                },
             })
             .collect();
         let _ = db.replace_symbols(pid, &sym_rows);
