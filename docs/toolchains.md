@@ -133,3 +133,36 @@ Validation checks MSF block/stream bounds, PDB Info and DBI ages, exact RSDS
 GUID/age and filename association, and complete public function symbol records.
 The primary has no debug-directory reference; every executable section retains
 the twin's name, RVA, virtual/raw sizes and bytes.
+
+## Ghidra corpus references (`m1-007`)
+
+On Linux, install JDK 25 and the pinned Ghidra 12.1.3 release, then run:
+
+```bash
+python3 scripts/gen_corpus.py --architectures x86_64,i386,aarch64,powerpc --out-dir /tmp/ventris-corpus
+python3 scripts/gen_oracle.py --corpus-dir /tmp/ventris-corpus --report /tmp/ventris-oracle-report.json
+python3 tests/m1-007_oracle_test.py
+```
+
+`VENTRIS_GHIDRA` or `--ghidra` selects the installation; the default is
+`~/ghidra_12.1.3_PUBLIC`. CI verifies the official release archive's SHA-256.
+The generator rebuilds the existing Java bridge once when analysis is needed,
+imports each stripped primary into an isolated temporary project, runs default
+Ghidra analysis, and exports all non-external function entries. It never uses
+the unstripped twins as analysis inputs.
+
+References are `oracle/<binary-sha256>.json`; `--output-dir` selects another cache.
+Each records the upstream version/revision, bridge source digest, selected
+language, image base and sorted unique entries. Addresses remain **Ghidra
+virtual addresses**, not RVAs or native-loader addresses. Automatic language
+selection is preserved: Ghidra selects `PowerPC:BE:32:e500` for the local PPC
+fixtures; the native corpus lock's `default` language is not an oracle override.
+This task does not change discovery scoring or the existing libc reference.
+
+Valid cache hits do not launch Java or rewrite references. `--check` validates
+without generating; missing primaries and missing/invalid references are
+reported as skipped with reasons and make the gate fail. Validation still
+requires the pinned installation metadata and current bridge sources.
+The m1-007 gate requires all **20 ELF entries**, with zero allowed skips; the
+separate five MSVC entries are outside the original m1-007 acceptance scope.
+The committed generation report is `benchmarks/reports/m1-007.json`.

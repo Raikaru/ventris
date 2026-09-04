@@ -65,6 +65,29 @@ jobs:
       - name: Reject corrupt PE symbol databases
         run: python3 tests/m1-006_pdb_test.py
 
+  corpus-oracle:
+    name: Ghidra Corpus Oracle (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Install LLVM tools
+        run: sudo apt-get update && sudo apt-get install -y llvm lld clang
+      - name: Install pinned Ghidra release
+        run: |
+          curl --fail --location --retry 3 https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.3_build/ghidra_12.1.3_PUBLIC_20260817.zip --output "$RUNNER_TEMP/ghidra.zip"
+          echo "93a5d11a9ad510622acaaf908c556a7b9b764d338e78a7567f3689bf5081fd54  $RUNNER_TEMP/ghidra.zip" | sha256sum --check
+          unzip -q "$RUNNER_TEMP/ghidra.zip" -d "$RUNNER_TEMP"
+          echo "VENTRIS_GHIDRA=$RUNNER_TEMP/ghidra_12.1.3_PUBLIC" >> "$GITHUB_ENV"
+      - name: Generate and validate all 20 ELF oracles
+        run: |
+          python3 tests/m1-007_oracle_test.py
+          git diff --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+
   corpus-windows:
     name: MSVC Corpus (windows-latest)
     runs-on: windows-latest

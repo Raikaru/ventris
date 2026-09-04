@@ -111,6 +111,8 @@ final class Dispatcher {
             JsonObject out = new JsonObject();
             out.addProperty("program", session.programName());
             out.addProperty("language", session.program().getLanguageID().getIdAsString());
+            // Program.getImageBase(): .ghidra-java/ghidra/program/model/listing/Program.java:473-477.
+            out.addProperty("image_base", session.program().getImageBase().toString());
             out.addProperty("functions", session.functionEntries().size());
             return out;
         } catch (IOException | ghidra.util.exception.CancelledException

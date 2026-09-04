@@ -2,7 +2,6 @@
 """m1-007 acceptance: real bridge oracles for all 20 ELF corpus entries."""
 import hashlib
 import json
-import os
 from pathlib import Path
 import subprocess
 import sys
@@ -31,6 +30,7 @@ class OracleAcceptance(unittest.TestCase):
         result = subprocess.run(cls.command, capture_output=True, text=True, timeout=900)
         if result.returncode:
             raise AssertionError(result.stdout + result.stderr)
+        print(result.stdout, end="", flush=True)
         cls.initial_report = json.loads(cls.report.read_text())
         cls.manifest = json.loads((cls.corpus / "manifest.json").read_text())
 
@@ -70,10 +70,9 @@ class OracleAcceptance(unittest.TestCase):
         path = self.cache / f"{entry['binary_sha256']}.json"
         original = path.read_bytes()
         for field, value in (("sha256", "0" * 64), ("entries", []),
-                             ("bridge_sources_sha256", "0" * 64)):
+                             ("bridge_sources_sha256", "0" * 64), (None, [])):
             with self.subTest(field=field):
-                broken = json.loads(original)
-                broken[field] = value
+                broken = {**json.loads(original), field: value} if field else value
                 path.write_text(json.dumps(broken))
                 try:
                     result = self.run_generator("--check")
