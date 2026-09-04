@@ -44,6 +44,11 @@ loaders and `LD_LIBRARY_PATH=SYSROOT/usr/TARGET/lib` for the target libraries
 (preventing host loader-cache paths from selecting a host libc). Windows
 executes the same checks natively for MSVC.
 
+`cpp_o2` explicitly uses `-fno-pie -no-pie` on ELF targets. This avoids
+host-dependent default PIE selection: Ubuntu 24.04 LLVM 18 PPC C++ PIE output
+faulted on both runtime inputs, while its non-PIE output passed both.
+The independent `plain_pie` variant remains `-fPIE -pie`.
+
 ## Target Architectures for Corpus (`m1-006`)
 
 Each architecture builds the 5 corpus variants:

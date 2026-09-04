@@ -611,6 +611,10 @@ M1 — Discovery becomes generic
   and explicit linker `/PDB`. CI run 33914542193 passed MSVC corpus and all
   Rust/Qt jobs; Linux exposed host loader-cache leakage under qemu-i386.
   Cross execution now sets the pinned target library path explicitly.
+  Run 33914879326 then passed i386/AArch64 runtime checks but exposed a PPC
+  C++ PIE fault, reproduced with Ubuntu 24.04 LLVM 18/QEMU 8.2. Explicit
+  non-PIE C++ output passed both inputs; the `cpp_o2` ELF recipe now fixes
+  that relocation model on every target. `plain_pie` is unchanged.
 - Execute these sub-tasks separately; each commit must stay below 800 changed lines.
   m1-007 remains out of scope until these corrections and CI pass.
 

@@ -100,7 +100,7 @@ VARIANTS = {
     "cpp_o2": {
         "source": "src.cpp",
         "is_cpp": True,
-        "flags": ["-O2", "-g"],
+        "flags": ["-O2", "-g", "-fno-pie", "-no-pie"],
         "ext": ".bin",
     },
     "many_o2": {
