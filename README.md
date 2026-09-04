@@ -127,7 +127,7 @@ RUNS=3 VENTRIS_SLA=... ./benchmarks/gate.sh # memory/perf gates
 
 ## Honest status
 
-- **Supported (gated, tested)**: x86-64 ELF + PE32+ native import (section
+- **Supported (gated, tested)**: x86-64/x86-32 ELF + PE (PE32/PE32+) native import (section
   maps, symtab/dynsym, PLT/GOT naming, flow-based function discovery with
   the `_start` → `main` RDI convention and init/fini-array seeds); store
   browsing/reopen/rename; SLEIGH disassembly via the pinned console;
@@ -175,7 +175,7 @@ RUNS=3 VENTRIS_SLA=... ./benchmarks/gate.sh # memory/perf gates
 | ELF RISC-V LE64 | supported | selected SLEIGH bundle required; not parity-gated |
 | ELF PowerPC LE32/LE64 | supported | e500 BE32 parity verified on Agent Under Fire; broader targets not gated |
 
-The fallback flow walker and PE parser are x86-64-specific. Non-x86 ELF
+The PE parser supports PE32+ (x86-64) and PE32 (i386). Non-x86 ELF
 imports preserve mappings, symbols, and the entry point for a matching
 `VENTRIS_LANGUAGE`, `VENTRIS_LANGUAGE_DIR`, and `VENTRIS_SLA` worker bundle;
 the Agent Under Fire e500 bundle is the currently verified non-x86 target.

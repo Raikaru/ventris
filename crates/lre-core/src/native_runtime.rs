@@ -742,7 +742,7 @@ impl ConsoleSession {
 
         let stdin = child.stdin.take().expect("console stdin");
         let stdout = child.stdout.take().expect("console stdout");
-        let mut reader = std::io::BufReader::new(stdout);
+        let mut reader = std::io::BufReader::with_capacity(128 * 1024, stdout);
 
         // The console prints an initial "[decomp]> " prompt.
         let _ = read_until_prompt(&mut reader)?;

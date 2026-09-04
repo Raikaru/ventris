@@ -315,7 +315,7 @@ workflow baseline (39.6 MB peak vs 375 MiB stock; see gate numbers below and
 
 
 ## Native import (no-JVM) landed
-- `lre-core::native`: ELF64 + PE32+ parsers (sections -> memory map,
+- `lre-core::native`: ELF (32/64) + PE (PE32/PE32+) parsers (sections -> memory map,
   SHT_SYMTAB function symbols, SHT_DYNSYM externals, SHT_RELA GOT relocs
   naming the `ff 25` PLT stubs), direct-call sweep (call/jcc/jmp rel32),
   and the call-target closure (FUN_<hex> naming). Facts land in the same
@@ -538,7 +538,7 @@ M1 — Discovery becomes generic
 - m1-004: implemented ELF PIE relative relocation discovery (SHT_RELA / R_*_RELATIVE
   and SHT_RELR packed relocations across architectures), image base selection
   via `elf_image_base` (minimum PT_LOAD vaddr or 0x100000/0x10000 default for ET_DYN),
-  and durable store writes of relocated pointer symbols (`reloc_ptr_<target>`).
+  and durable store writes of relocated pointers as data xrefs with provenance (`native-import:elf-reloc`).
   Acceptance test `tests/m1-004_pie.sh` passes with fn.recall=1.0000 on both
   plain_pie (8/8 oracle functions) and relr_pie (12/12 oracle functions).
 - m1-001: implemented native SLEIGH console request `flow(addr)` extracting
@@ -552,7 +552,7 @@ M1 — Discovery becomes generic
   console session; the acceptance `tests/m1-003_x86_flow.sh` asserts
   fn.precision=1.0000 and fn.recall>=0.9965 against the hand-decoder
   baseline on /usr/lib64/libc.so.6. Result: precision=1.000000,
-  recall=0.996723 (3953/3966), PASS.
+  recall=1.000000 (exact set equality 3,953/3,953), PASS.
 
 ## Sub-tasks (m1-003)
 - m1-003-a: split `x86_decoder` feature and add failing acceptance test.
