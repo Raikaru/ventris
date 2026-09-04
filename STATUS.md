@@ -623,9 +623,21 @@ M1 — Discovery becomes generic
   All corrective commits stayed below 800 changed lines. No m1-007 implementation
   or acceptance test was started in this session.
 
+## m1-007 sub-tasks
+- m1-007-a: failing acceptance, bridge image-base metadata and SHA-keyed oracle
+  generator. Acceptance: `tests/m1-007_oracle_test.py`; all 20 ELF entries,
+  cache reuse without Java, invalid-cache and missing-input rejection.
+- m1-007-b: publish the five x86-64 oracle references.
+- m1-007-c: publish the five i386 oracle references.
+- m1-007-d: publish the five AArch64 oracle references.
+- m1-007-e: publish the five PPC32-BE oracle references.
+- m1-007-f: commit the generated report and verification evidence.
+  Generated reference arrays are split by architecture to keep each commit
+  below 800 changed lines. The existing libc reference is unchanged.
+
 ## Next task
-- m1-007: Ghidra oracle corpus generation. Write and commit its failing
-  acceptance test before implementation; this task has not started.
+- m1-007: Ghidra oracle corpus generation; execute the sub-tasks above.
+  Scope: the 20 ELF entries required by II.4; no discovery/scoring changes.
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a
   clearly separated accelerator module with an equivalence test, never in the
