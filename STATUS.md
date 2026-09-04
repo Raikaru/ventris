@@ -518,7 +518,7 @@ M1 — Discovery becomes generic
   `CandidateFilterContext` / `filter_candidate` with unit tests verifying rejection of internal and out-of-code
   candidates under `--no-default-features`. Containment uses actual flow-proven extents (`proven_bodies`
   tracked from instruction spans during BFS walk; size-1 stripped entries cannot disable containment;
-  positive regression test confirms relocation-only code functions in gaps are promoted, and internal candidates reached via fallthrough/branches are reconciled/dropped while call targets remain separate). Console-only path explores
+  positive regression test confirms relocation-only code functions in gaps are promoted, descendant origins are canonicalized/reparented to merge full spans, and internal candidates reached via fallthrough/branches are reconciled/dropped while call targets remain separate). Console-only path explores
   trusted seeds first and rejects relocation candidates already visited inside those bodies. Guarded x86-64
   hand decoder against x86-32, propagating detected language into `ConsoleSession` and BFD selection (`pei-i386`),
   routing PE32 through console-backed flow confirmation. Restored deterministic console child process cleanup

@@ -1643,6 +1643,18 @@ pub fn flow_discover_console(imp: &mut NativeImport) {
     }
     flow_discover_with_provider(imp, |chunk| session.try_flow_batch(chunk));
 }
+fn get_canonical_origin(mut addr: u64, addr_origin: &std::collections::HashMap<u64, u64>) -> u64 {
+    let mut hops = 0;
+    while let Some(&parent) = addr_origin.get(&addr) {
+        if parent == addr || hops >= 64 {
+            break;
+        }
+        addr = parent;
+        hops += 1;
+    }
+    addr
+}
+
 fn merge_reached_candidate(
     target: u64,
     origin: u64,
@@ -1650,11 +1662,28 @@ fn merge_reached_candidate(
     addr_origin: &mut std::collections::HashMap<u64, u64>,
     proven_bodies: &mut std::collections::HashMap<u64, u64>,
 ) {
-    if target != origin && reloc_set.contains(&target) {
-        addr_origin.insert(target, origin);
+    if !reloc_set.contains(&target) {
+        return;
+    }
+    let canon_origin = get_canonical_origin(origin, addr_origin);
+    let canon_target = get_canonical_origin(target, addr_origin);
+    if canon_target != canon_origin {
+        addr_origin.insert(target, canon_origin);
+        addr_origin.insert(canon_target, canon_origin);
+        for v in addr_origin.values_mut() {
+            if *v == target || *v == canon_target {
+                *v = canon_origin;
+            }
+        }
         if let Some(t_span) = proven_bodies.remove(&target) {
             proven_bodies
-                .entry(origin)
+                .entry(canon_origin)
+                .and_modify(|e| *e = (*e).max(t_span))
+                .or_insert(t_span);
+        }
+        if let Some(t_span) = proven_bodies.remove(&canon_target) {
+            proven_bodies
+                .entry(canon_origin)
                 .and_modify(|e| *e = (*e).max(t_span))
                 .or_insert(t_span);
         }
@@ -1703,7 +1732,7 @@ pub fn flow_discover_with_provider<F: FnMut(&[u64]) -> Vec<crate::native_runtime
         for chunk in to_query.chunks(1024) {
             let flows = flow_provider(chunk);
             for (addr, info) in chunk.iter().copied().zip(flows) {
-                let origin = addr_origin.get(&addr).copied().unwrap_or(addr);
+                let origin = get_canonical_origin(addr, &addr_origin);
                 let span = addr + info.length as u64;
                 proven_bodies
                     .entry(origin)
@@ -1834,7 +1863,7 @@ pub fn flow_discover_with_provider<F: FnMut(&[u64]) -> Vec<crate::native_runtime
                 for chunk in to_query.chunks(1024) {
                     let flows = flow_provider(chunk);
                     for (addr, info) in chunk.iter().copied().zip(flows) {
-                        let origin = addr_origin.get(&addr).copied().unwrap_or(addr);
+                        let origin = get_canonical_origin(addr, &addr_origin);
                         let span = addr + info.length as u64;
                         proven_bodies
                             .entry(origin)
@@ -1900,14 +1929,23 @@ pub fn flow_discover_with_provider<F: FnMut(&[u64]) -> Vec<crate::native_runtime
             }
         }
     }
+    // Canonicalize proven_bodies so descendant spans are merged into their root origins:
+    let mut canon_bodies: std::collections::HashMap<u64, u64> = std::collections::HashMap::with_capacity(proven_bodies.len());
+    for (root, span_end) in proven_bodies.drain() {
+        let canon = get_canonical_origin(root, &addr_origin);
+        canon_bodies
+            .entry(canon)
+            .and_modify(|e| *e = (*e).max(span_end))
+            .or_insert(span_end);
+    }
+    proven_bodies = canon_bodies;
 
     // Reconcile batched relocation candidates after discovering their bodies:
     // an entry plus an internal relocation target cannot both become functions.
     entries.retain(|&e| {
-        if let Some(&origin) = addr_origin.get(&e) {
-            if origin != e {
-                return false;
-            }
+        let canon = get_canonical_origin(e, &addr_origin);
+        if canon != e {
+            return false;
         }
         let is_internal_to_another = proven_bodies.iter().any(|(&root, &span_end)| {
             root != e && e > root && e < span_end
@@ -2493,6 +2531,10 @@ mod tests {
 
         // 3. Internal candidate 0x1044 reached through fallthrough from 0x1040 is merged/dropped
         assert!(!imp.functions.iter().any(|f| f.entry == 0x1044), "internal candidate 0x1044 reached via fallthrough must be merged/dropped");
+
+        // 4. Function size of 0x1040 covers the full span 0x1040..0x104a (size 0xa)
+        let f_1040 = imp.functions.iter().find(|f| f.entry == 0x1040).expect("0x1040 must be present");
+        assert_eq!(f_1040.size, 0xa, "0x1040 function size must be 0xa (0x1040..0x104a)");
     }
     #[test]
     fn regression_load_native_pe32_data_to_data_relocation_never_becomes_function() {
@@ -2625,42 +2667,50 @@ mod tests {
     }
     #[test]
     fn negative_test_reloc_section_ignored_when_directory_5_absent() {
-        let mut b = vec![0u8; 0x400];
+        let mut b = vec![0u8; 0x600];
         b[0..2].copy_from_slice(b"MZ");
         b[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
-        b[0x80..0x84].copy_from_slice(b"PE\0\0");
-        b[0x84..0x86].copy_from_slice(&0x8664u16.to_le_bytes()); // AMD64
-        b[0x86..0x88].copy_from_slice(&2u16.to_le_bytes()); // 2 sections (.text, .reloc)
-        b[0x94..0x96].copy_from_slice(&0xf0u16.to_le_bytes()); // opt size 240
-        let opt = 0x98;
+        let pe_off = 0x80;
+        b[pe_off..pe_off + 4].copy_from_slice(b"PE\0\0");
+        b[pe_off + 4..pe_off + 6].copy_from_slice(&0x8664u16.to_le_bytes()); // AMD64
+        b[pe_off + 6..pe_off + 8].copy_from_slice(&2u16.to_le_bytes()); // 2 sections (.text, .reloc)
+        b[pe_off + 20..pe_off + 22].copy_from_slice(&0xf0u16.to_le_bytes()); // opt size 240
+        let opt = pe_off + 24; // 0x98
         b[opt..opt + 2].copy_from_slice(&0x20bu16.to_le_bytes()); // PE32+
+        b[opt + 16..opt + 20].copy_from_slice(&0x1000u32.to_le_bytes()); // entry RVA
+        // Explicit ImageBase (0x140000000) at opt + 24:
+        b[opt + 24..opt + 32].copy_from_slice(&0x140000000u64.to_le_bytes());
         // NumberOfRvaAndSizes at opt + 108 = 0 (Directory 5 ABSENT!)
         b[opt + 108..opt + 112].copy_from_slice(&0u32.to_le_bytes());
 
-        let sec = opt + 0xf0;
+        let sec = opt + 0xf0; // 0x98 + 0xf0 = 0x188
+        // Section table: 2 sections * 40 bytes = 80 bytes (0x188..0x1d8)
         // Sec 0: .text
         b[sec..sec + 5].copy_from_slice(b".text");
-        b[sec + 8..sec + 12].copy_from_slice(&0x1000u32.to_le_bytes());
-        b[sec + 12..sec + 16].copy_from_slice(&0x1000u32.to_le_bytes());
-        b[sec + 16..sec + 20].copy_from_slice(&0x100u32.to_le_bytes());
-        b[sec + 20..sec + 24].copy_from_slice(&0x100u32.to_le_bytes());
-        b[sec + 36..sec + 40].copy_from_slice(&0x60000020u32.to_le_bytes());
+        b[sec + 8..sec + 12].copy_from_slice(&0x1000u32.to_le_bytes()); // VirtualSize
+        b[sec + 12..sec + 16].copy_from_slice(&0x1000u32.to_le_bytes()); // VirtualAddress
+        b[sec + 16..sec + 20].copy_from_slice(&0x100u32.to_le_bytes()); // SizeOfRawData
+        b[sec + 20..sec + 24].copy_from_slice(&0x200u32.to_le_bytes()); // PointerToRawData (after section table ends at 0x1d8)
+        b[sec + 36..sec + 40].copy_from_slice(&0x60000020u32.to_le_bytes()); // CODE | EXECUTE | READ
 
-        // Put mapped executable pointer at relocation location raw 0x100 (RVA 0x1000):
-        b[0x100..0x108].copy_from_slice(&0x140001050u64.to_le_bytes());
         // Sec 1: .reloc with valid relocation block bytes, but Directory 5 is ABSENT
-        let sec1 = sec + 40;
+        let sec1 = sec + 40; // 0x1b0
         b[sec1..sec1 + 6].copy_from_slice(b".reloc");
-        b[sec1 + 8..sec1 + 12].copy_from_slice(&0x1000u32.to_le_bytes());
-        b[sec1 + 12..sec1 + 16].copy_from_slice(&0x2000u32.to_le_bytes());
-        b[sec1 + 16..sec1 + 20].copy_from_slice(&16u32.to_le_bytes());
-        b[sec1 + 20..sec1 + 24].copy_from_slice(&0x200u32.to_le_bytes());
-        b[sec1 + 36..sec1 + 40].copy_from_slice(&0x42000040u32.to_le_bytes());
-        // Put valid relocation block at raw 0x200:
-        b[0x200..0x204].copy_from_slice(&0x1000u32.to_le_bytes());
-        b[0x204..0x208].copy_from_slice(&12u32.to_le_bytes());
-        let entry0: u16 = (10 << 12) | 0;
-        b[0x208..0x20a].copy_from_slice(&entry0.to_le_bytes());
+        b[sec1 + 8..sec1 + 12].copy_from_slice(&0x1000u32.to_le_bytes()); // VirtualSize
+        b[sec1 + 12..sec1 + 16].copy_from_slice(&0x2000u32.to_le_bytes()); // VirtualAddress
+        b[sec1 + 16..sec1 + 20].copy_from_slice(&0x100u32.to_le_bytes()); // SizeOfRawData
+        b[sec1 + 20..sec1 + 24].copy_from_slice(&0x300u32.to_le_bytes()); // PointerToRawData (after .text raw data)
+        b[sec1 + 36..sec1 + 40].copy_from_slice(&0x42000040u32.to_le_bytes()); // INITIALIZED_DATA | DISCARDABLE | READ
+
+        // Put mapped executable pointer at relocation location in .text raw data (raw 0x200, RVA 0x1000):
+        // Relocated pointer 0x140001050 lands inside executable mapping (ImageBase 0x140000000 + RVA 0x1000..0x2000)
+        b[0x200..0x208].copy_from_slice(&0x140001050u64.to_le_bytes());
+
+        // Put valid relocation block in .reloc raw data (raw 0x300):
+        b[0x300..0x304].copy_from_slice(&0x1000u32.to_le_bytes()); // Page RVA
+        b[0x304..0x308].copy_from_slice(&12u32.to_le_bytes()); // Block Size
+        let entry0: u16 = (10 << 12) | 0; // DIR64 at offset 0
+        b[0x308..0x30a].copy_from_slice(&entry0.to_le_bytes());
 
         let imp = import_pe(&b).expect("PE must parse cleanly");
         // Directory 5 is absent, so .reloc section MUST BE IGNORED
