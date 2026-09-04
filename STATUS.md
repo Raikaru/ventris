@@ -662,10 +662,26 @@ M1 — Discovery becomes generic
   0 files remain tracked under `.ghidra-java/`. The root ignore rule prevents
   re-adding the extraction during ordinary staging.
 
+## m1-008 verified
+- Test-first commit `5af21d9`: 5 language cases passed and the ARM BE8 case
+  failed (selected `ARM:BE:32:v7` instead of `ARM:LEBE:32:v7LEInstruction`).
+- ELF language selection now reads `e_flags`; ARM `EF_ARM_BE8` selects the
+  pinned mixed-endian language. ELF32 i386, ARM LE/BE32 and PE32 selection
+  remain unchanged. No corpus matrix or discovery metric was changed.
+- `tests/m1-008_languages.py`: 6/6 passed, 0 failed, 0 skipped. It checks real
+  compiler-produced ELF32 inputs, the existing PE32 fixture, an ELF64 control,
+  installed `.ldefs`/SLA metadata and the native architecture catalog.
+  Generated report committed in `ad14d0e`: `benchmarks/reports/m1-008.json`.
+- `cargo test --workspace`: 97 passed; legacy corpus: 5/5; m1-006 Linux corpus:
+  20/20 (5 MSVC skips permitted on Linux). README matrix check passed.
+  The existing Ghidra CI job also runs the language gate.
+
 ## Next task
-- m1-008: language-id selection for ELF32 (x86-32, ARM32) and PE32.
-  Acceptance: corpus imports pick the correct `.ldefs` entry.
-  No m1-008 implementation or acceptance test was started in this session.
+- m1-009: stripped GameCube `.dol` loader (section table to image), with
+  discovery through the generic worklist. `.rel` support is optional.
+  Acceptance: function recall against the `base.elf` symbol oracle is at
+  least 0.95 on the stripped `.dol`.
+  No m1-009 implementation or acceptance test was started in this session.
 
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a
