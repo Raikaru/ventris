@@ -803,7 +803,7 @@ M1 — Discovery becomes generic
 - None for the recorded m1-010 prerequisite.
 
 ## Next task
-- m1-010-a: write and commit the failing discovery gate before implementation.
+- m1-010-b: extract the shared worklist; acceptance is committed in `bc0e10f`.
 
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a
