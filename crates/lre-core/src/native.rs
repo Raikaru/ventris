@@ -742,23 +742,35 @@ pub fn import_pe(data: &[u8]) -> Result<NativeImport> {
     let (is_64, language) = match machine {
         0x8664 => (true, "x86:LE:64:default"),
         0x014c => (false, "x86:LE:32:default"),
-        other => return err(format!("unsupported PE machine {other:#x} (x86-64 or i386 expected)")),
+        other => return err(format!("unsupported PE machine {other:#x} (AMD64 0x8664 or i386 0x14c expected)")),
     };
     let num_sections = u16_at(data, pe_off + 6)? as usize;
     let opt_size = u16_at(data, pe_off + 20)? as usize;
     let opt = pe_off + 24;
-    let magic = u16_at(data, opt).unwrap_or(0);
-    let (entry_rva, image_base, reloc_dir_offset) = if is_64 || magic == 0x20b {
-        let entry_rva = u32_at(data, opt + 16).unwrap_or(0) as u64;
-        // In real PE32+, ImageBase is at opt + 24; mock slices may put it at opt + 0
-        let image_base = u64_at(data, opt + 24).or_else(|_| u64_at(data, opt)).unwrap_or(0);
-        let reloc_offset = opt + 152;
-        (entry_rva, image_base, reloc_offset)
-    } else {
-        let entry_rva = u32_at(data, opt + 16).unwrap_or(0) as u64;
-        let image_base = u32_at(data, opt + 28).unwrap_or(0) as u64;
-        let reloc_offset = opt + 136;
-        (entry_rva, image_base, reloc_offset)
+    let magic = u16_at(data, opt)?;
+
+    let (entry_rva, image_base, reloc_dir_offset) = match (machine, magic) {
+        (0x8664, 0x20b) => {
+            let entry_rva = u32_at(data, opt + 16)? as u64;
+            let image_base = u64_at(data, opt + 24)?;
+            let reloc_offset = opt + 152;
+            (entry_rva, image_base, reloc_offset)
+        }
+        (0x014c, 0x10b) => {
+            let entry_rva = u32_at(data, opt + 16)? as u64;
+            let image_base = u32_at(data, opt + 28)? as u64;
+            let reloc_offset = opt + 136;
+            (entry_rva, image_base, reloc_offset)
+        }
+        (0x8664, other) => {
+            return err(format!("PE AMD64 requires PE32+ optional header magic 0x20b, got {other:#x}"));
+        }
+        (0x014c, other) => {
+            return err(format!("PE i386 requires PE32 optional header magic 0x10b, got {other:#x}"));
+        }
+        (other, _) => {
+            return err(format!("unsupported PE machine {other:#x} (AMD64 0x8664 or i386 0x14c expected)"));
+        }
     };
     let sec_table = opt + opt_size;
     let mut mappings = Vec::new();
@@ -863,52 +875,40 @@ pub fn import_pe(data: &[u8]) -> Result<NativeImport> {
                         10 => { // IMAGE_REL_BASED_DIR64
                             if off + 8 <= m.bytes.len() {
                                 let ptr = u64::from_le_bytes(m.bytes[off..off + 8].try_into().unwrap());
-                                let in_code = mappings.iter().any(|cm| {
-                                    cm.flags & 0x4 != 0 && ptr >= cm.vaddr && ptr < cm.vaddr + cm.size
-                                });
-                                let code_target = if in_code {
-                                    Some(ptr)
-                                } else if mappings.iter().any(|cm| {
-                                    cm.flags & 0x4 != 0 && image_base + ptr >= cm.vaddr && image_base + ptr < cm.vaddr + cm.size
-                                }) {
-                                    Some(image_base + ptr)
-                                } else {
-                                    None
-                                };
-                                if let Some(target) = code_target {
-                                    reloc_candidates.push(target);
+                                let in_mem = mappings.iter().any(|cm| ptr >= cm.vaddr && ptr < cm.vaddr + cm.size);
+                                if in_mem {
                                     xrefs.push(NativeXref::with_provenance(
                                         loc,
-                                        target,
+                                        ptr,
                                         "DATA",
                                         "native-import:pe-reloc",
                                     ));
+                                }
+                                let in_code = mappings.iter().any(|cm| {
+                                    cm.flags & 0x4 != 0 && ptr >= cm.vaddr && ptr < cm.vaddr + cm.size
+                                });
+                                if in_code {
+                                    reloc_candidates.push(ptr);
                                 }
                             }
                         }
                         3 => { // IMAGE_REL_BASED_HIGHLOW
                             if off + 4 <= m.bytes.len() {
                                 let ptr = u32::from_le_bytes(m.bytes[off..off + 4].try_into().unwrap()) as u64;
-                                let in_code = mappings.iter().any(|cm| {
-                                    cm.flags & 0x4 != 0 && ptr >= cm.vaddr && ptr < cm.vaddr + cm.size
-                                });
-                                let code_target = if in_code {
-                                    Some(ptr)
-                                } else if mappings.iter().any(|cm| {
-                                    cm.flags & 0x4 != 0 && image_base + ptr >= cm.vaddr && image_base + ptr < cm.vaddr + cm.size
-                                }) {
-                                    Some(image_base + ptr)
-                                } else {
-                                    None
-                                };
-                                if let Some(target) = code_target {
-                                    reloc_candidates.push(target);
+                                let in_mem = mappings.iter().any(|cm| ptr >= cm.vaddr && ptr < cm.vaddr + cm.size);
+                                if in_mem {
                                     xrefs.push(NativeXref::with_provenance(
                                         loc,
-                                        target,
+                                        ptr,
                                         "DATA",
                                         "native-import:pe-reloc",
                                     ));
+                                }
+                                let in_code = mappings.iter().any(|cm| {
+                                    cm.flags & 0x4 != 0 && ptr >= cm.vaddr && ptr < cm.vaddr + cm.size
+                                });
+                                if in_code {
+                                    reloc_candidates.push(ptr);
                                 }
                             }
                         }
@@ -1017,7 +1017,7 @@ pub fn sweep_ppc_calls(imp: &mut NativeImport) {
 
 /// Sweeps mappings for direct call rel32 / jcc rel32 targets (x86-64).
 pub fn sweep_calls(imp: &mut NativeImport) {
-    if !imp.language.is_empty() && !imp.language.starts_with("x86:") {
+    if !imp.language.is_empty() && !imp.language.starts_with("x86:LE:64") {
         if imp.language.starts_with("PowerPC:") {
             sweep_ppc_calls(imp);
         }
@@ -1025,7 +1025,6 @@ pub fn sweep_calls(imp: &mut NativeImport) {
     }
     sweep_calls_x86(imp);
 }
-
 /// Finds a known external name for a function entry, if any (PLT/GOT named
 /// stubs; FUN_<hex> otherwise).
 pub fn extern_name(imp: &NativeImport, entry: u64) -> Option<String> {
@@ -1049,11 +1048,13 @@ pub fn pe_image_base(data: &[u8]) -> Option<u64> {
         return None;
     }
     let opt = pe_off + 24;
-    let magic = u16_at(data, opt).unwrap_or(0);
+    let magic = u16_at(data, opt).ok()?;
     if magic == 0x10b {
         u32_at(data, opt + 28).ok().map(|b| b as u64)
-    } else {
+    } else if magic == 0x20b {
         u64_at(data, opt + 24).ok()
+    } else {
+        None
     }
 }
 
@@ -1145,6 +1146,7 @@ pub fn load_native(binary: &Path) -> Result<NativeImport> {
     };
     imp.binary = binary.to_path_buf();
     imp.cfg = crate::session::RuntimeConfig::from_env();
+    imp.cfg.language_id = imp.language.clone();
     sweep_calls(&mut imp);
     flow_discover(&mut imp);
     Ok(imp)
@@ -1157,7 +1159,7 @@ pub fn flow_discover(imp: &mut NativeImport) {
     if imp.mappings.is_empty() {
         return;
     }
-    if !imp.language.is_empty() && !imp.language.starts_with("x86:") {
+    if !imp.language.is_empty() && !imp.language.starts_with("x86:LE:64") {
         close_call_targets(imp);
         let code = code_ranges(imp);
         let mut funcs = imp.functions.clone();
@@ -1382,6 +1384,73 @@ fn sweep_calls_x86(imp: &mut NativeImport) {
         imp.xrefs = Vec::new();
     }
 }
+/// Context for candidate pre-pass confirmation.
+pub struct CandidateFilterContext<'a> {
+    pub mappings: &'a [Mapping],
+    pub known_extents: &'a [(u64, u64)],
+    pub initial_seeds: &'a HashSet<u64>,
+}
+
+/// Evaluates whether an unseeded candidate represents a genuine function entry point.
+pub fn filter_candidate<F: FnMut(u64) -> crate::native_runtime::FlowResult>(
+    cand: u64,
+    ctx: &CandidateFilterContext,
+    mut flow_fn: F,
+) -> bool {
+    use crate::native_runtime::FlowKind;
+
+    // 1. Must fall inside executable memory
+    let in_code = ctx
+        .mappings
+        .iter()
+        .any(|m| m.flags & 0x4 != 0 && cand >= m.vaddr && cand < m.vaddr + m.size);
+    if !in_code {
+        return false;
+    }
+
+    // 2. Reject if strictly inside the body of an already known function:
+    // [f.entry + 1, f.entry + f.size)
+    let inside_known = ctx.known_extents.iter().any(|&(entry, size)| {
+        size > 1 && cand > entry && cand < entry + size
+    });
+    if inside_known {
+        return false;
+    }
+
+    // 3. Flow validity
+    let info = flow_fn(cand);
+    if info.kind == FlowKind::Bad || info.kind == FlowKind::Unimpl || info.length == 0 {
+        return false;
+    }
+
+    // 4. Structural pad check: if candidate bytes begin with padding (0x00 or 0x90),
+    // verify it does not fall through to or sit within 4 bytes of a known entry.
+    let is_pad = ctx
+        .mappings
+        .iter()
+        .find_map(|m| {
+            if cand >= m.vaddr && cand < m.vaddr + m.size {
+                let off = (cand - m.vaddr) as usize;
+                let b0 = m.bytes.get(off).copied()?;
+                if b0 == 0x00 || b0 == 0x90 {
+                    if let Some(fall) = info.fallthrough {
+                        if ctx.initial_seeds.contains(&fall) {
+                            return Some(true);
+                        }
+                    }
+                    if (1..=4).any(|step| ctx.initial_seeds.contains(&(cand + step))) {
+                        return Some(true);
+                    }
+                }
+                Some(false)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(false);
+
+    !is_pad
+}
 
 #[cfg(feature = "x86_decoder")]
 fn flow_discover_x86(imp: &mut NativeImport) {
@@ -1413,15 +1482,32 @@ fn flow_discover_x86(imp: &mut NativeImport) {
     let mut confirmed_entries: Vec<u64> = Vec::new();
     let initial_seeds: HashSet<u64> = seeds.iter().copied().collect();
 
+    // Containment extents: combine initial function extents and discovered d.entries/d.sizes.
+    // A size-1 stripped entry from imp.functions does not disable containment because d.sizes provides the extent.
+    let mut extents: Vec<(u64, u64)> = imp
+        .functions
+        .iter()
+        .filter(|f| f.size > 1)
+        .map(|f| (f.entry, f.size))
+        .collect();
+    for (&e, &sz) in d.entries.iter().zip(&d.sizes) {
+        if sz > 1 {
+            if let Some(existing) = extents.iter_mut().find(|(ent, _)| *ent == e) {
+                existing.1 = if existing.1 > 1 { existing.1.min(sz) } else { sz };
+            } else {
+                extents.push((e, sz));
+            }
+        }
+    }
+
     // Relocation targets become flow-confirmed candidates, rejected if inside a known function:
-    let known_funcs = imp.functions.clone();
     let valid_reloc_candidates: Vec<u64> = imp
         .reloc_candidates
         .iter()
         .copied()
         .filter(|&cand| {
-            !known_funcs.iter().any(|f| {
-                f.size > 1 && cand > f.entry && cand < f.entry + f.size
+            !extents.iter().any(|&(entry, size)| {
+                size > 1 && cand > entry && cand < entry + size
             })
         })
         .collect();
@@ -1436,8 +1522,14 @@ fn flow_discover_x86(imp: &mut NativeImport) {
     unseeded_candidates.sort_unstable();
     unseeded_candidates.dedup();
 
+    let filter_ctx = CandidateFilterContext {
+        mappings: &imp.mappings,
+        known_extents: &extents,
+        initial_seeds: &initial_seeds,
+    };
+
     if !unseeded_candidates.is_empty() && imp.cfg.console_path.as_ref().map_or(false, |p| p.is_file()) {
-        use crate::native_runtime::{ConsoleSession, FlowKind};
+        use crate::native_runtime::ConsoleSession;
         if let Ok(mut session) = ConsoleSession::new(&imp.cfg) {
             let base = imp
                 .mappings
@@ -1447,33 +1539,7 @@ fn flow_discover_x86(imp: &mut NativeImport) {
             if session.load(&imp.binary, base).is_ok() {
                 let flows = session.try_flow_batch(&unseeded_candidates);
                 for (&cand, info) in unseeded_candidates.iter().zip(flows) {
-                    // Decoded flow validity: must not be Bad or Unimpl, and length must be > 0
-                    if info.kind == FlowKind::Bad || info.kind == FlowKind::Unimpl || info.length == 0 {
-                        continue;
-                    }
-                    // Structural pad check: if candidate bytes begin with padding (0x00 or 0x90),
-                    // verify it does not fall through to or sit within 4 bytes of a known entry.
-                    let is_pad = imp.mappings.iter().find_map(|m| {
-                        if cand >= m.vaddr && cand < m.vaddr + m.size {
-                            let off = (cand - m.vaddr) as usize;
-                            let b0 = m.bytes.get(off).copied()?;
-                            if b0 == 0x00 || b0 == 0x90 {
-                                if let Some(fall) = info.fallthrough {
-                                    if initial_seeds.contains(&fall) {
-                                        return Some(true);
-                                    }
-                                }
-                                if (1..=4).any(|step| initial_seeds.contains(&(cand + step))) {
-                                    return Some(true);
-                                }
-                            }
-                            Some(false)
-                        } else {
-                            None
-                        }
-                    }).unwrap_or(false);
-
-                    if !is_pad {
+                    if filter_candidate(cand, &filter_ctx, |_| info.clone()) {
                         confirmed_entries.push(cand);
                     }
                 }
@@ -1550,40 +1616,16 @@ fn flow_discover_x86(imp: &mut NativeImport) {
 
     let code = code_ranges(imp);
     let in_code = |a: u64| code.iter().any(|(v, e)| a >= *v && a < *e);
-    let known_funcs = imp.functions.clone();
-    let valid_relocs: Vec<u64> = imp
-        .reloc_candidates
-        .iter()
-        .copied()
-        .filter(|&cand| {
-            in_code(cand)
-                && !known_funcs
-                    .iter()
-                    .any(|f| f.size > 1 && cand > f.entry && cand < f.entry + f.size)
-        })
-        .collect();
-    let confirmed_relocs: Vec<u64> = if !valid_relocs.is_empty() {
-        let flows = session.try_flow_batch(&valid_relocs);
-        valid_relocs
-            .into_iter()
-            .zip(flows)
-            .filter(|(_, info)| info.kind != FlowKind::Bad && info.kind != FlowKind::Unimpl && info.length > 0)
-            .map(|(c, _)| c)
-            .collect()
-    } else {
-        Vec::new()
-    };
+    // Initial discovery from trusted seeds first:
     let mut entries: Vec<u64> = imp
         .functions
         .iter()
         .map(|f| f.entry)
         .chain(imp.externals.iter().map(|(a, _)| *a))
-        .chain(confirmed_relocs)
         .filter(|a| *a != 0 && in_code(*a))
         .collect();
     entries.sort_unstable();
     entries.dedup();
-
 
     // Helper to read a little-endian u64 from a mapped address.
     let read_u64_at = |addr: u64| -> Option<u64> {
@@ -1695,6 +1737,93 @@ fn flow_discover_x86(imp: &mut NativeImport) {
             }
         }
         active = next_active;
+    }
+    // Relocation candidates: reject candidates already visited inside trusted bodies
+    let unvisited_relocs: Vec<u64> = imp
+        .reloc_candidates
+        .iter()
+        .copied()
+        .filter(|&cand| in_code(cand) && !visited.contains(&cand) && !entries.contains(&cand))
+        .collect();
+
+    if !unvisited_relocs.is_empty() {
+        let flows = session.try_flow_batch(&unvisited_relocs);
+        let confirmed_relocs: Vec<u64> = unvisited_relocs
+            .into_iter()
+            .zip(flows)
+            .filter(|(_, info)| info.kind != FlowKind::Bad && info.kind != FlowKind::Unimpl && info.length > 0)
+            .map(|(c, _)| c)
+            .collect();
+
+        if !confirmed_relocs.is_empty() {
+            for &r in &confirmed_relocs {
+                if !entries.contains(&r) {
+                    entries.push(r);
+                }
+            }
+            active = confirmed_relocs;
+            while !active.is_empty() {
+                active.sort_unstable();
+                active.dedup();
+                let to_query: Vec<u64> = active
+                    .into_iter()
+                    .filter(|a| *a != 0 && in_code(*a) && visited.insert(*a))
+                    .collect();
+                if to_query.is_empty() {
+                    break;
+                }
+                let mut next_active: Vec<u64> = Vec::new();
+                for chunk in to_query.chunks(1024) {
+                    let flows = session.try_flow_batch(chunk);
+                    for (addr, info) in chunk.iter().copied().zip(flows) {
+                        match info.kind {
+                            FlowKind::Call => {
+                                for t in &info.targets {
+                                    if in_code(*t) && !entries.contains(t) {
+                                        entries.push(*t);
+                                        next_active.push(*t);
+                                    }
+                                    if *t != 0 {
+                                        calls.push((addr, *t));
+                                    }
+                                }
+                                if let Some(f) = info.fallthrough {
+                                    next_active.push(f);
+                                } else {
+                                    next_active.push(addr + info.length as u64);
+                                }
+                            }
+                            FlowKind::Branch => {
+                                if let Some(t) = info.targets.first() {
+                                    if in_code(*t) && !visited.contains(t) {
+                                        next_active.push(*t);
+                                    }
+                                }
+                            }
+                            FlowKind::CBranch => {
+                                if let Some(t) = info.targets.first() {
+                                    if in_code(*t) && !visited.contains(t) {
+                                        next_active.push(*t);
+                                    }
+                                }
+                                let fall = info.fallthrough.unwrap_or(addr + info.length as u64);
+                                if in_code(fall) && !visited.contains(&fall) {
+                                    next_active.push(fall);
+                                }
+                            }
+                            FlowKind::Fallthrough => {
+                                let fall = info.fallthrough.unwrap_or(addr + info.length as u64);
+                                if in_code(fall) && !visited.contains(&fall) {
+                                    next_active.push(fall);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                active = next_active;
+            }
+        }
     }
 
     entries.sort_unstable();
@@ -1924,6 +2053,7 @@ mod tests {
         b[0..2].copy_from_slice(b"MZ");
         b[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
         b[0x80..0x84].copy_from_slice(b"PE\0\0");
+        b[0x98..0x9a].copy_from_slice(&0x20bu16.to_le_bytes()); // PE32+ magic
         b[0xb0..0xb8].copy_from_slice(&0x140000000u64.to_le_bytes());
         assert_eq!(pe_image_base(&b), Some(0x140000000));
         assert_eq!(pe_image_base(b"\x7fELF"), None);
@@ -2004,5 +2134,150 @@ mod tests {
         };
         flow_discover_x86(&mut imp);
         assert!(!imp.functions.iter().any(|f| f.entry == 0x99999));
+    }
+    #[test]
+    fn test_filter_candidate_rejects_internal_even_with_valid_flow() {
+        use crate::native_runtime::FlowResult;
+        let mappings = vec![Mapping {
+            vaddr: 0x1000,
+            size: 0x100,
+            file_off: 0,
+            flags: 0x4,
+            bytes: vec![0x90; 0x100],
+        }];
+        let extents = vec![(0x1000, 0x50)]; // 0x1000..0x1050
+        let initial_seeds = HashSet::from([0x1000]);
+        let ctx = CandidateFilterContext {
+            mappings: &mappings,
+            known_extents: &extents,
+            initial_seeds: &initial_seeds,
+        };
+
+        // Candidate 0x1020 is internal to 0x1000..0x1050.
+        // Mock flow returns a valid instruction with length 4.
+        let result = filter_candidate(0x1020, &ctx, |addr| FlowResult {
+            address: addr,
+            length: 4,
+            fallthrough: Some(addr + 4),
+            targets: Vec::new(),
+            kind: crate::native_runtime::FlowKind::Fallthrough,
+        });
+        assert!(!result, "candidate inside known function must be rejected even with valid flow");
+    }
+
+    #[test]
+    fn test_filter_candidate_rejects_out_of_code_even_with_valid_flow() {
+        use crate::native_runtime::FlowResult;
+        let mappings = vec![
+            Mapping {
+                vaddr: 0x1000,
+                size: 0x100,
+                file_off: 0,
+                flags: 0x4, // executable
+                bytes: vec![0x90; 0x100],
+            },
+            Mapping {
+                vaddr: 0x2000,
+                size: 0x100,
+                file_off: 0x100,
+                flags: 0x2, // non-executable data
+                bytes: vec![0x00; 0x100],
+            },
+        ];
+        let extents = vec![(0x1000, 0x20)];
+        let initial_seeds = HashSet::from([0x1000]);
+        let ctx = CandidateFilterContext {
+            mappings: &mappings,
+            known_extents: &extents,
+            initial_seeds: &initial_seeds,
+        };
+
+        // Candidate 0x2050 is in data mapping. Flow returns valid instruction.
+        let result = filter_candidate(0x2050, &ctx, |addr| FlowResult {
+            address: addr,
+            length: 4,
+            fallthrough: Some(addr + 4),
+            targets: Vec::new(),
+            kind: crate::native_runtime::FlowKind::Fallthrough,
+        });
+        assert!(!result, "candidate outside executable mapping must be rejected even with valid flow");
+    }
+
+    #[test]
+    fn test_pe_data_to_data_relocation_recorded_in_xrefs() {
+        // Build mock PE with .text (code) and .data (data) sections.
+        // Relocation in .data points to .data (data-to-data).
+        let mut b = vec![0u8; 0x400];
+        b[0..2].copy_from_slice(b"MZ");
+        b[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        b[0x80..0x84].copy_from_slice(b"PE\0\0");
+        b[0x84..0x86].copy_from_slice(&0x8664u16.to_le_bytes()); // AMD64
+        b[0x86..0x88].copy_from_slice(&3u16.to_le_bytes()); // 3 sections (.text, .data, .reloc)
+        b[0x94..0x96].copy_from_slice(&0xf0u16.to_le_bytes()); // opt size
+        b[0x98..0x9a].copy_from_slice(&0x20bu16.to_le_bytes()); // PE32+
+        b[0xb0..0xb8].copy_from_slice(&0x140000000u64.to_le_bytes()); // ImageBase at opt + 24
+        // Directory 5 (.reloc) at opt + 152:
+        b[0x98 + 152..0x98 + 156].copy_from_slice(&0x3000u32.to_le_bytes()); // RVA
+        b[0x98 + 156..0x98 + 160].copy_from_slice(&16u32.to_le_bytes()); // Size 16
+
+        let sec = 0x80 + 24 + 0xf0;
+        // Sec 0: .text (RVA 0x1000, size 0x1000, raw 0x100, raw_sz 0x100, flags 0x60000020 code)
+        b[sec..sec + 5].copy_from_slice(b".text");
+        b[sec + 8..sec + 12].copy_from_slice(&0x1000u32.to_le_bytes());
+        b[sec + 12..sec + 16].copy_from_slice(&0x1000u32.to_le_bytes());
+        b[sec + 16..sec + 20].copy_from_slice(&0x100u32.to_le_bytes());
+        b[sec + 20..sec + 24].copy_from_slice(&0x100u32.to_le_bytes());
+        b[sec + 36..sec + 40].copy_from_slice(&0x60000020u32.to_le_bytes());
+
+        // Sec 1: .data (RVA 0x2000, size 0x1000, raw 0x200, raw_sz 0x100, flags 0xc0000040 data)
+        let sec1 = sec + 40;
+        b[sec1..sec1 + 5].copy_from_slice(b".data");
+        b[sec1 + 8..sec1 + 12].copy_from_slice(&0x1000u32.to_le_bytes());
+        b[sec1 + 12..sec1 + 16].copy_from_slice(&0x2000u32.to_le_bytes());
+        b[sec1 + 16..sec1 + 20].copy_from_slice(&0x100u32.to_le_bytes());
+        b[sec1 + 20..sec1 + 24].copy_from_slice(&0x200u32.to_le_bytes());
+        b[sec1 + 36..sec1 + 40].copy_from_slice(&0xc0000040u32.to_le_bytes());
+        // Put a pointer at raw 0x200 (RVA 0x2000) pointing to .data at 0x140002080 (data-to-data)
+        b[0x200..0x208].copy_from_slice(&0x140002080u64.to_le_bytes());
+
+        // Sec 2: .reloc (RVA 0x3000, size 0x1000, raw 0x300, raw_sz 0x100, flags 0x42000040)
+        let sec2 = sec + 80;
+        b[sec2..sec2 + 6].copy_from_slice(b".reloc");
+        b[sec2 + 8..sec2 + 12].copy_from_slice(&0x1000u32.to_le_bytes());
+        b[sec2 + 12..sec2 + 16].copy_from_slice(&0x3000u32.to_le_bytes());
+        b[sec2 + 16..sec2 + 20].copy_from_slice(&16u32.to_le_bytes());
+        b[sec2 + 20..sec2 + 24].copy_from_slice(&0x300u32.to_le_bytes());
+        b[sec2 + 36..sec2 + 40].copy_from_slice(&0x42000040u32.to_le_bytes());
+        // Relocation block at 0x300:
+        b[0x300..0x304].copy_from_slice(&0x2000u32.to_le_bytes()); // page RVA 0x2000
+        b[0x304..0x308].copy_from_slice(&12u32.to_le_bytes()); // block size 12 (8 header + 2*2 entries)
+        let entry0: u16 = (10 << 12) | 0; // DIR64 at off 0
+        b[0x308..0x30a].copy_from_slice(&entry0.to_le_bytes());
+        b[0x30a..0x30c].copy_from_slice(&0u16.to_le_bytes()); // padding
+
+        let imp = import_pe(&b).unwrap();
+        // 1. Data-to-data relocation must be emitted as DATA xref with pe-reloc provenance
+        let xref = imp.xrefs.iter().find(|x| x.from == 0x140002000 && x.to == 0x140002080);
+        assert!(xref.is_some(), "data-to-data relocation must be present in xrefs");
+        assert_eq!(xref.unwrap().kind, "DATA");
+        assert_eq!(xref.unwrap().provenance, "native-import:pe-reloc");
+
+        // 2. Data-to-data relocation must NOT be promoted as a function candidate
+        assert!(!imp.reloc_candidates.contains(&0x140002080), "data-to-data relocation must not be a function candidate");
+    }
+
+    #[test]
+    fn test_pe32_fixture_import_and_discovery() {
+        let path = std::path::Path::new("tests/fixtures-src/tiny_pe32.exe");
+        if !path.is_file() {
+            return;
+        }
+        let imp = load_native(path).expect("tiny_pe32 must load cleanly");
+        assert_eq!(imp.format, "PE");
+        assert_eq!(imp.language, "x86:LE:32:default");
+        assert_eq!(pe_image_base(&std::fs::read(path).unwrap()), Some(0x400000));
+        assert!(imp.functions.iter().any(|f| f.entry == 0x401400));
+        assert!(imp.xrefs.iter().any(|x| x.provenance == "native-import:pe-reloc"));
+        assert!(imp.functions.len() >= 10);
     }
 }

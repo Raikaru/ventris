@@ -196,11 +196,16 @@ def apply_rule(speedup: float, hand_metrics: tuple, console_metrics: tuple) -> d
             f"hand decoder is {speedup:.1f}\u00d7 faster than console and "
             "set-metrics are equal against the oracle; keep disasm.rs."
         )
-    else:
+    elif not metrics_equal:
         reason = (
             f"hand decoder is {speedup:.1f}\u00d7 faster than console but "
             f"set-metrics differ (hand p={hp:.4f} r={hr:.4f}, console p={cp:.4f} r={cr:.4f}); "
             "do not keep disasm.rs."
+        )
+    else:
+        reason = (
+            f"hand decoder is {speedup:.1f}\u00d7 faster than console (<2.0\u00d7 threshold) "
+            f"even though set-metrics are equal against the oracle; do not keep disasm.rs."
         )
     return {"keep_disasm_rs": keep, "speedup": round(speedup, 4), "reason": reason}
 

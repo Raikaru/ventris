@@ -10,103 +10,103 @@
   "targets": [
     {
       "id": "plain_o0",
-      "sha256": "2cd03b4ff404065af7ad63a47371148e00c751f9a8a32ecc03ac03f05043a5e9",
-      "path": "/tmp/ventris-m1-003-ru_ofcod/plain_o0.bin",
+      "sha256": "306b1a30d76afe56eb641110135b9953fd778f7f704cec2830d5c7ec670c4003",
+      "path": "/tmp/ventris-m1-003-0t6oellg/plain_o0.bin",
       "oracle_sha256": null,
       "runs": 3,
       "hand": {
-        "median_wall_s": 0.080282,
+        "median_wall_s": 0.07197,
         "count": 10,
         "precision": 0.8,
         "recall": 0.8
       },
       "console": {
-        "median_wall_s": 0.103722,
+        "median_wall_s": 0.094891,
         "count": 10,
         "precision": 0.8,
         "recall": 0.8
       },
-      "speedup": 1.292
+      "speedup": 1.3185
     },
     {
       "id": "plain_o2",
       "sha256": "8584fd222fdede0050074310db35458b5d5fa77987244ff24f6a262224ea16bf",
-      "path": "/tmp/ventris-m1-003-ru_ofcod/plain_o2.bin",
+      "path": "/tmp/ventris-m1-003-0t6oellg/plain_o2.bin",
       "oracle_sha256": null,
       "runs": 3,
       "hand": {
-        "median_wall_s": 0.081421,
+        "median_wall_s": 0.076026,
         "count": 9,
         "precision": 0.888889,
         "recall": 0.888889
       },
       "console": {
-        "median_wall_s": 0.109499,
+        "median_wall_s": 0.100482,
         "count": 8,
         "precision": 0.875,
         "recall": 0.777778
       },
-      "speedup": 1.3448
+      "speedup": 1.3217
     },
     {
       "id": "plain_pie",
       "sha256": "7ca4a3a895657ee93f42268c68e96aab867499a682c45ac4776922d1bb2a0479",
-      "path": "/tmp/ventris-m1-003-ru_ofcod/plain_pie.bin",
+      "path": "/tmp/ventris-m1-003-0t6oellg/plain_pie.bin",
       "oracle_sha256": null,
       "runs": 3,
       "hand": {
-        "median_wall_s": 0.084533,
+        "median_wall_s": 0.075931,
         "count": 10,
         "precision": 0.8,
         "recall": 1.0
       },
       "console": {
-        "median_wall_s": 0.104086,
+        "median_wall_s": 0.093,
         "count": 9,
         "precision": 0.777778,
         "recall": 0.875
       },
-      "speedup": 1.2313
+      "speedup": 1.2248
     },
     {
       "id": "cpp_o2",
       "sha256": "1f791ea358476a56372332edcaf807007f9c3d65fb24f9145d40950240fda7be",
-      "path": "/tmp/ventris-m1-003-ru_ofcod/cpp_o2.bin",
+      "path": "/tmp/ventris-m1-003-0t6oellg/cpp_o2.bin",
       "oracle_sha256": null,
       "runs": 3,
       "hand": {
-        "median_wall_s": 0.080414,
-        "count": 21,
-        "precision": 0.428571,
-        "recall": 0.5625
+        "median_wall_s": 0.079558,
+        "count": 23,
+        "precision": 0.478261,
+        "recall": 0.6875
       },
       "console": {
-        "median_wall_s": 0.110921,
+        "median_wall_s": 0.105963,
         "count": 22,
         "precision": 0.454545,
         "recall": 0.625
       },
-      "speedup": 1.3794
+      "speedup": 1.3319
     },
     {
       "id": "many_o2",
       "sha256": "97b18b95d3b7e5e0dd1a2ab11c262ca8b8a5ad80f25b60a50a6cc8cac7018ef0",
-      "path": "/tmp/ventris-m1-003-ru_ofcod/many_o2.bin",
+      "path": "/tmp/ventris-m1-003-0t6oellg/many_o2.bin",
       "oracle_sha256": null,
       "runs": 3,
       "hand": {
-        "median_wall_s": 0.089481,
+        "median_wall_s": 0.089159,
         "count": 409,
         "precision": 0.997555,
         "recall": 0.997555
       },
       "console": {
-        "median_wall_s": 0.143983,
+        "median_wall_s": 0.13892,
         "count": 408,
         "precision": 0.997549,
         "recall": 0.99511
       },
-      "speedup": 1.6091
+      "speedup": 1.5581
     },
     {
       "id": "libc",
@@ -115,24 +115,24 @@
       "oracle_sha256": "01cccbe278d898add05282986a9346d4dda4b3d2b84bc496f9c04c66016528db",
       "runs": 3,
       "hand": {
-        "median_wall_s": 1.705388,
+        "median_wall_s": 2.029339,
         "count": 3953,
         "precision": 1.0,
         "recall": 0.991472
       },
       "console": {
-        "median_wall_s": 3.835925,
+        "median_wall_s": 3.485152,
         "count": 3953,
         "precision": 1.0,
         "recall": 0.991472
       },
-      "speedup": 2.2493
+      "speedup": 1.7174
     }
   ],
   "decision": {
-    "keep_disasm_rs": true,
-    "speedup": 2.2493,
-    "reason": "hand decoder is 2.2\u00d7 faster than console and set-metrics are equal against the oracle; keep disasm.rs."
+    "keep_disasm_rs": false,
+    "speedup": 1.7174,
+    "reason": "hand decoder is 1.7\u00d7 faster than console (<2.0\u00d7 threshold) even though set-metrics are equal against the oracle; do not keep disasm.rs."
   },
   "passed": true
 }

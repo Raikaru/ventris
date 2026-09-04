@@ -862,8 +862,9 @@ impl ConsoleSession {
         }
 
         let mut results = Vec::with_capacity(addresses.len());
+        let mut line = String::with_capacity(256);
         for &addr in addresses {
-            let mut line = String::new();
+            line.clear();
             let n = self
                 .reader
                 .read_line(&mut line)
@@ -871,7 +872,6 @@ impl ConsoleSession {
             if n == 0 {
                 return err("console closed during flow_batch output");
             }
-
             if line.contains("Low-level ERROR") {
                 results.push(FlowResult {
                     address: addr,

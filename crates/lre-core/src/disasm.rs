@@ -145,8 +145,20 @@ fn mem_modlen(b: &[u8], m: usize, force_memory: bool) -> u8 {
                 0
             }
         }
-        1 => 1,
-        2 => 4,
+        1 => {
+            if rm == 4 {
+                2
+            } else {
+                1
+            }
+        }
+        2 => {
+            if rm == 4 {
+                5
+            } else {
+                4
+            }
+        }
         _ => 0, // register form (impossible here)
     }
 }
@@ -657,6 +669,30 @@ mod tests {
         let d = discover(&maps, &[0x400000]);
         assert!(d.entries.contains(&0x400020), "fall-through call target discovered");
         assert!(d.calls.iter().any(|(f, t)| *f == 0x400002 && *t == 0x400020));
+    }
+
+    #[test]
+    fn test_push_start_context_discovers_call_target() {
+        let code: Vec<u8> = vec![
+            0xf3, 0x0f, 0x1e, 0xfa, // 358a0: endbr64
+            0xf3, 0x48, 0x0f, 0x1e, 0xc9, // 358a4: rdsspq %rcx
+            0x48, 0x89, 0xe2, // 358a9: mov %rsp,%rdx
+            0x48, 0x8b, 0xb7, 0xa0, 0x00, 0x00, 0x00, // 358ac: mov 0xa0(%rdi),%rsi
+            0x48, 0x8d, 0x66, 0x08, // 358b3: lea 0x8(%rsi),%rsp
+            0x48, 0x8b, 0xb7, 0xb8, 0x03, 0x00, 0x00, // 358b7: mov 0x3b8(%rdi),%rsi
+            0x48, 0x8b, 0x87, 0xb0, 0x03, 0x00, 0x00, // 358be: mov 0x3b0(%rdi),%rax
+            0xf3, 0x0f, 0x01, 0x6c, 0x30, 0xf8, // 358c5: rstorssp -0x8(%rax,%rsi,1)
+            0xf3, 0x0f, 0x01, 0xea, // 358cb: saveprevssp
+            0xe8, 0x02, 0x00, 0x00, 0x00, // 358cf: call 358d6
+            0xeb, 0x1a, // 358d4: jmp 358f0
+            0xf3, 0x0f, 0x01, 0x69, 0xf8, // 358d6: rstorssp -0x8(%rcx)
+            0xf3, 0x0f, 0x01, 0xea, // 358db: saveprevssp
+            0x48, 0x89, 0xd4, // 358df: mov %rdx,%rsp
+            0xc3, // 358e2: ret
+        ];
+        let maps = [(0x358a0, code.len() as u64, 0x358a0, code.as_slice())];
+        let d = discover(&maps, &[0x358a0]);
+        assert!(d.entries.contains(&0x358d6), "entries: {:x?}", d.entries);
     }
 
     #[test]
