@@ -143,8 +143,8 @@ def median(values: list) -> float:
 
 
 def score(entries: list, oracle: set) -> tuple:
-    if not oracle:
-        return (1.0, 1.0)
+    if oracle is None:
+        return (None, None)
     e = set(entries)
     matched = e & oracle
     precision = len(matched) / len(e) if e else 0.0
@@ -262,14 +262,14 @@ def main():
                 "hand": {
                     "median_wall_s": round(median(hand_walls), 6),
                     "count": hand_count,
-                    "precision": round(hand_p, 6),
-                    "recall": round(hand_r, 6),
+                    "precision": round(hand_p, 6) if hand_p is not None else None,
+                    "recall": round(hand_r, 6) if hand_r is not None else None,
                 },
                 "console": {
                     "median_wall_s": round(median(console_walls), 6),
                     "count": console_count,
-                    "precision": round(console_p, 6),
-                    "recall": round(console_r, 6),
+                    "precision": round(console_p, 6) if console_p is not None else None,
+                    "recall": round(console_r, 6) if console_r is not None else None,
                 },
                 "speedup": round(speedup, 4),
             })

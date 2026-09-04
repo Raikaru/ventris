@@ -10,103 +10,103 @@
   "targets": [
     {
       "id": "plain_o0",
-      "sha256": "d94af3c12eee3c309cb1d71cc8e4c651e3229a1372d133850043f144e17fb9c0",
-      "path": "/tmp/ventris-m1-003-yd0sul6q/plain_o0.bin",
+      "sha256": "f74720900a5a67563d6621203ab80f993180cf3b47ed32f05fee0e6112061016",
+      "path": "/tmp/ventris-m1-003-dylm7zwt/plain_o0.bin",
       "oracle_sha256": null,
       "runs": 3,
       "hand": {
-        "median_wall_s": 0.005998,
+        "median_wall_s": 0.002664,
         "count": 12,
-        "precision": 1.0,
-        "recall": 1.0
+        "precision": null,
+        "recall": null
       },
       "console": {
-        "median_wall_s": 0.098802,
+        "median_wall_s": 0.096756,
         "count": 12,
-        "precision": 1.0,
-        "recall": 1.0
+        "precision": null,
+        "recall": null
       },
-      "speedup": 16.4727
+      "speedup": 36.3203
     },
     {
       "id": "plain_o2",
       "sha256": "dbeb47ff849b854bd1fda63d9079e332ace0796cc383d088db29813f079260ce",
-      "path": "/tmp/ventris-m1-003-yd0sul6q/plain_o2.bin",
+      "path": "/tmp/ventris-m1-003-dylm7zwt/plain_o2.bin",
       "oracle_sha256": null,
       "runs": 3,
       "hand": {
-        "median_wall_s": 0.005503,
+        "median_wall_s": 0.002311,
         "count": 8,
-        "precision": 1.0,
-        "recall": 1.0
+        "precision": null,
+        "recall": null
       },
       "console": {
-        "median_wall_s": 0.096361,
+        "median_wall_s": 0.089633,
         "count": 8,
-        "precision": 1.0,
-        "recall": 1.0
+        "precision": null,
+        "recall": null
       },
-      "speedup": 17.5102
+      "speedup": 38.7822
     },
     {
       "id": "plain_pie",
       "sha256": "d7d916dfbe9677625e5276ae91a3851ebae6cecb5d521a673bf4b7b8b595bb44",
-      "path": "/tmp/ventris-m1-003-yd0sul6q/plain_pie.bin",
+      "path": "/tmp/ventris-m1-003-dylm7zwt/plain_pie.bin",
       "oracle_sha256": null,
       "runs": 3,
       "hand": {
-        "median_wall_s": 0.005237,
+        "median_wall_s": 0.004813,
         "count": 9,
-        "precision": 1.0,
-        "recall": 1.0
+        "precision": null,
+        "recall": null
       },
       "console": {
-        "median_wall_s": 0.09269,
+        "median_wall_s": 0.096241,
         "count": 9,
-        "precision": 1.0,
-        "recall": 1.0
+        "precision": null,
+        "recall": null
       },
-      "speedup": 17.6977
+      "speedup": 19.9956
     },
     {
       "id": "cpp_o2",
       "sha256": "d7b5f2dae8e8baf31eec44648bae084066df50d1eef2eeb252aac09b7cf02e9c",
-      "path": "/tmp/ventris-m1-003-yd0sul6q/cpp_o2.bin",
+      "path": "/tmp/ventris-m1-003-dylm7zwt/cpp_o2.bin",
       "oracle_sha256": null,
       "runs": 3,
       "hand": {
-        "median_wall_s": 0.006507,
+        "median_wall_s": 0.003241,
         "count": 20,
-        "precision": 1.0,
-        "recall": 1.0
+        "precision": null,
+        "recall": null
       },
       "console": {
-        "median_wall_s": 0.106661,
+        "median_wall_s": 0.106898,
         "count": 22,
-        "precision": 1.0,
-        "recall": 1.0
+        "precision": null,
+        "recall": null
       },
-      "speedup": 16.3916
+      "speedup": 32.9852
     },
     {
       "id": "many_o2",
       "sha256": "5fe7107a931cdf25e011061d4ab6e6f14ef0699d673b689d46a28d0e2cc5ccac",
-      "path": "/tmp/ventris-m1-003-yd0sul6q/many_o2.bin",
+      "path": "/tmp/ventris-m1-003-dylm7zwt/many_o2.bin",
       "oracle_sha256": null,
       "runs": 3,
       "hand": {
-        "median_wall_s": 0.006021,
+        "median_wall_s": 0.002802,
         "count": 408,
-        "precision": 1.0,
-        "recall": 1.0
+        "precision": null,
+        "recall": null
       },
       "console": {
-        "median_wall_s": 0.143365,
+        "median_wall_s": 0.162983,
         "count": 408,
-        "precision": 1.0,
-        "recall": 1.0
+        "precision": null,
+        "recall": null
       },
-      "speedup": 23.8089
+      "speedup": 58.1581
     },
     {
       "id": "libc",
@@ -115,24 +115,24 @@
       "oracle_sha256": "01cccbe278d898add05282986a9346d4dda4b3d2b84bc496f9c04c66016528db",
       "runs": 3,
       "hand": {
-        "median_wall_s": 1.788861,
+        "median_wall_s": 1.786256,
         "count": 3966,
         "precision": 0.996722,
         "recall": 0.991472
       },
       "console": {
-        "median_wall_s": 50.635828,
+        "median_wall_s": 52.595755,
         "count": 3953,
         "precision": 1.0,
         "recall": 0.991472
       },
-      "speedup": 28.3062
+      "speedup": 29.4447
     }
   ],
   "decision": {
     "keep_disasm_rs": true,
-    "speedup": 28.3062,
-    "reason": "hand decoder is 28.3\u00d7 faster than console and set-metrics are equal within 0.01 against the oracle; keep disasm.rs."
+    "speedup": 29.4447,
+    "reason": "hand decoder is 29.4\u00d7 faster than console and set-metrics are equal within 0.01 against the oracle; keep disasm.rs."
   },
   "passed": true
 }
