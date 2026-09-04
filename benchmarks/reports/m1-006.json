@@ -10,7 +10,8 @@
       "variant": "plain_o0",
       "status": "ok",
       "endian": "little",
-      "functions_discovered": 10,
+      "format": "elf",
+      "functions_discovered": 6,
       "symbols_in_twin": 12,
       "expected_language": "x86:LE:64:default"
     },
@@ -19,7 +20,8 @@
       "variant": "plain_o2",
       "status": "ok",
       "endian": "little",
-      "functions_discovered": 9,
+      "format": "elf",
+      "functions_discovered": 6,
       "symbols_in_twin": 12,
       "expected_language": "x86:LE:64:default"
     },
@@ -28,7 +30,8 @@
       "variant": "plain_pie",
       "status": "ok",
       "endian": "little",
-      "functions_discovered": 8,
+      "format": "elf",
+      "functions_discovered": 7,
       "symbols_in_twin": 12,
       "expected_language": "x86:LE:64:default"
     },
@@ -37,7 +40,8 @@
       "variant": "cpp_o2",
       "status": "ok",
       "endian": "little",
-      "functions_discovered": 9,
+      "format": "elf",
+      "functions_discovered": 6,
       "symbols_in_twin": 19,
       "expected_language": "x86:LE:64:default"
     },
@@ -46,7 +50,8 @@
       "variant": "many_o2",
       "status": "ok",
       "endian": "little",
-      "functions_discovered": 408,
+      "format": "elf",
+      "functions_discovered": 6,
       "symbols_in_twin": 410,
       "expected_language": "x86:LE:64:default"
     },
@@ -55,6 +60,7 @@
       "variant": "plain_o0",
       "status": "ok",
       "endian": "little",
+      "format": "elf",
       "functions_discovered": 7,
       "symbols_in_twin": 13,
       "expected_language": "x86:LE:32:default"
@@ -64,6 +70,7 @@
       "variant": "plain_o2",
       "status": "ok",
       "endian": "little",
+      "format": "elf",
       "functions_discovered": 7,
       "symbols_in_twin": 13,
       "expected_language": "x86:LE:32:default"
@@ -73,6 +80,7 @@
       "variant": "plain_pie",
       "status": "ok",
       "endian": "little",
+      "format": "elf",
       "functions_discovered": 9,
       "symbols_in_twin": 14,
       "expected_language": "x86:LE:32:default"
@@ -82,6 +90,7 @@
       "variant": "cpp_o2",
       "status": "ok",
       "endian": "little",
+      "format": "elf",
       "functions_discovered": 7,
       "symbols_in_twin": 20,
       "expected_language": "x86:LE:32:default"
@@ -91,6 +100,7 @@
       "variant": "many_o2",
       "status": "ok",
       "endian": "little",
+      "format": "elf",
       "functions_discovered": 6,
       "symbols_in_twin": 411,
       "expected_language": "x86:LE:32:default"
@@ -100,6 +110,7 @@
       "variant": "plain_o0",
       "status": "ok",
       "endian": "little",
+      "format": "elf",
       "functions_discovered": 5,
       "symbols_in_twin": 14,
       "expected_language": "AARCH64:LE:64:v8A"
@@ -109,6 +120,7 @@
       "variant": "plain_o2",
       "status": "ok",
       "endian": "little",
+      "format": "elf",
       "functions_discovered": 5,
       "symbols_in_twin": 14,
       "expected_language": "AARCH64:LE:64:v8A"
@@ -118,6 +130,7 @@
       "variant": "plain_pie",
       "status": "ok",
       "endian": "little",
+      "format": "elf",
       "functions_discovered": 3,
       "symbols_in_twin": 14,
       "expected_language": "AARCH64:LE:64:v8A"
@@ -127,6 +140,7 @@
       "variant": "cpp_o2",
       "status": "ok",
       "endian": "little",
+      "format": "elf",
       "functions_discovered": 5,
       "symbols_in_twin": 21,
       "expected_language": "AARCH64:LE:64:v8A"
@@ -136,6 +150,7 @@
       "variant": "many_o2",
       "status": "ok",
       "endian": "little",
+      "format": "elf",
       "functions_discovered": 5,
       "symbols_in_twin": 412,
       "expected_language": "AARCH64:LE:64:v8A"
@@ -145,6 +160,7 @@
       "variant": "plain_o0",
       "status": "ok",
       "endian": "big",
+      "format": "elf",
       "functions_discovered": 10,
       "symbols_in_twin": 14,
       "expected_language": "PowerPC:BE:32:default"
@@ -154,6 +170,7 @@
       "variant": "plain_o2",
       "status": "ok",
       "endian": "big",
+      "format": "elf",
       "functions_discovered": 9,
       "symbols_in_twin": 14,
       "expected_language": "PowerPC:BE:32:default"
@@ -163,6 +180,7 @@
       "variant": "plain_pie",
       "status": "ok",
       "endian": "big",
+      "format": "elf",
       "functions_discovered": 13,
       "symbols_in_twin": 16,
       "expected_language": "PowerPC:BE:32:default"
@@ -172,6 +190,7 @@
       "variant": "cpp_o2",
       "status": "ok",
       "endian": "big",
+      "format": "elf",
       "functions_discovered": 9,
       "symbols_in_twin": 21,
       "expected_language": "PowerPC:BE:32:default"
@@ -181,6 +200,7 @@
       "variant": "many_o2",
       "status": "ok",
       "endian": "big",
+      "format": "elf",
       "functions_discovered": 408,
       "symbols_in_twin": 411,
       "expected_language": "PowerPC:BE:32:default"

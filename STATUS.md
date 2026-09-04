@@ -572,10 +572,9 @@ M1 — Discovery becomes generic
   values in .data/.rodata/.data.rel.ro that land in executable sections and confirm
   via batched flow. Acceptance: cpp_o2 and plain_o0 recall >= 0.98 against the
   m1-007 Ghidra oracle.
-- Commit rule note: commit `e0db463` exceeded the 800 changed line limit
-  (1,386 insertions across committed corpus sources including many.c (806 lines),
-  lockfile, and generator script); per II.0, recorded as an acknowledged violation
-  without history rewriting.
+- Commit rule note: commits `e0db463` (1,386 insertions) and `0dca6cd` (1,148 changed lines:
+  919 additions + 229 deletions across generator, lockfile, gate, and report) exceeded the 800
+  changed line limit; per II.0, recorded as acknowledged violations without history rewriting.
 
 - m1-006: generated multi-architecture corpus across 4 target architectures (x86-64,
   x86-32, aarch64, powerpc) × 5 variants (plain_o0, plain_o2, plain_pie, cpp_o2, many_o2)
