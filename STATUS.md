@@ -573,10 +573,19 @@ M1 — Discovery becomes generic
   via batched flow. Acceptance: cpp_o2 and plain_o0 recall >= 0.98 against the
   m1-007 Ghidra oracle.
 
+- m1-006: generated multi-architecture corpus across 4 target architectures (x86-64,
+  x86-32, aarch64, powerpc) × 5 variants (plain_o0, plain_o2, plain_pie, cpp_o2, many_o2)
+  = 20 binaries + 20 unstripped twins containing .symtab function symbols. Committed sources
+  in tests/corpus-src/ (plain.c, src.cpp, many.c) and lockfile tests/corpus.lock.json.
+  Added scripts/gen_corpus.py; MSVC entries skipped on non-Windows host (verified via Windows CI).
+  Added machine 0x3 (EM_386) to elf_language in lre-core, enabling native ELF32 x86 import.
+  All 20 binaries import cleanly natively: x86-64 (8..408 functions), i386 (6..14 functions),
+  aarch64 (3..11 functions), and powerpc (9..408 functions). Acceptance test tests/m1-006_corpus.sh passes (PASS).
+
 ## Next task
-- m1-006: multi-architecture corpus generation (x86-64, x86-32, AArch64, PPC32-BE)
-  with unstripped twin for each entry, sources + lock committed, MSVC via Windows CI
-  with local skipped, per §II.4 and docs/toolchains.md.
+- m1-007: multi-architecture Ghidra oracle generation and scoring baseline across the corpus
+  (bridge import + export_facts for oracle function entries, scoring discovery against oracle
+  and unstripped twin symbols, per §II.4 and M1 gate criteria).
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a
   clearly separated accelerator module with an equivalence test, never in the

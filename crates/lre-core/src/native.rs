@@ -391,6 +391,7 @@ fn elf_language(machine: u16, big_endian: bool) -> Result<String> {
     let _ = be;
     match (machine, big_endian) {
         (0x03e, false) => Ok("x86:LE:64:default".into()),
+        (0x003, false) => Ok("x86:LE:32:default".into()),
         (0x0b7, false) => Ok("AARCH64:LE:64:v8A".into()),
         (0x028, false) => Ok("ARM:LE:32:v7".into()),
         (0x028, true) => Ok("ARM:BE:32:v7".into()),
