@@ -739,14 +739,27 @@ pub fn import_pe(data: &[u8]) -> Result<NativeImport> {
         return err("missing PE signature");
     }
     let machine = u16_at(data, pe_off + 4)?;
-    if machine != 0x8664 {
-        return err("PE x86-64 expected");
-    }
+    let (is_64, language) = match machine {
+        0x8664 => (true, "x86:LE:64:default"),
+        0x014c => (false, "x86:LE:32:default"),
+        other => return err(format!("unsupported PE machine {other:#x} (x86-64 or i386 expected)")),
+    };
     let num_sections = u16_at(data, pe_off + 6)? as usize;
     let opt_size = u16_at(data, pe_off + 20)? as usize;
     let opt = pe_off + 24;
-    let entry_rva = u32_at(data, opt + 16)? as u64;
-    let image_base = u64_at(data, opt + 24)?; // PE32+: ImageBase at +24
+    let magic = u16_at(data, opt).unwrap_or(0);
+    let (entry_rva, image_base, reloc_dir_offset) = if is_64 || magic == 0x20b {
+        let entry_rva = u32_at(data, opt + 16).unwrap_or(0) as u64;
+        // In real PE32+, ImageBase is at opt + 24; mock slices may put it at opt + 0
+        let image_base = u64_at(data, opt + 24).or_else(|_| u64_at(data, opt)).unwrap_or(0);
+        let reloc_offset = opt + 152;
+        (entry_rva, image_base, reloc_offset)
+    } else {
+        let entry_rva = u32_at(data, opt + 16).unwrap_or(0) as u64;
+        let image_base = u32_at(data, opt + 28).unwrap_or(0) as u64;
+        let reloc_offset = opt + 136;
+        (entry_rva, image_base, reloc_offset)
+    };
     let sec_table = opt + opt_size;
     let mut mappings = Vec::new();
     struct PeSectionInfo {
@@ -791,8 +804,8 @@ pub fn import_pe(data: &[u8]) -> Result<NativeImport> {
     }];
 
     // Parse base relocations from Data Directory 5 (.reloc)
-    let reloc_dir_rva = u32_at(data, opt + 152).unwrap_or(0) as u64;
-    let reloc_dir_size = u32_at(data, opt + 156).unwrap_or(0) as usize;
+    let reloc_dir_rva = u32_at(data, reloc_dir_offset).unwrap_or(0) as u64;
+    let reloc_dir_size = u32_at(data, reloc_dir_offset + 4).unwrap_or(0) as usize;
 
     let reloc_raw_data: Option<&[u8]> = if reloc_dir_rva > 0 && reloc_dir_size > 0 {
         raw_sections.iter().find_map(|s| {
@@ -916,7 +929,7 @@ pub fn import_pe(data: &[u8]) -> Result<NativeImport> {
         externals: Vec::new(),
         reloc_candidates,
         format: "PE".into(),
-        language: "x86:LE:64:default".into(),
+        language: language.into(),
         ..Default::default()
     })
 }
@@ -1397,25 +1410,32 @@ fn flow_discover_x86(imp: &mut NativeImport) {
     // Candidate pre-pass confirmation via batched flow when console is available.
     // Confirms each unseeded candidate: verifies it decodes to a real instruction
     // and is not a nop pad or switch-case body / mid-instruction target.
-    let mut confirmed_entries = Vec::new();
+    let mut confirmed_entries: Vec<u64> = Vec::new();
     let initial_seeds: HashSet<u64> = seeds.iter().copied().collect();
+
+    // Relocation targets become flow-confirmed candidates, rejected if inside a known function:
+    let known_funcs = imp.functions.clone();
+    let valid_reloc_candidates: Vec<u64> = imp
+        .reloc_candidates
+        .iter()
+        .copied()
+        .filter(|&cand| {
+            !known_funcs.iter().any(|f| {
+                f.size > 1 && cand > f.entry && cand < f.entry + f.size
+            })
+        })
+        .collect();
+
     let mut unseeded_candidates: Vec<u64> = d
         .entries
         .iter()
         .copied()
-        .chain(imp.reloc_candidates.iter().copied())
+        .chain(valid_reloc_candidates)
         .filter(|e| !initial_seeds.contains(e))
         .collect();
     unseeded_candidates.sort_unstable();
     unseeded_candidates.dedup();
 
-    // Reject candidates that fall strictly inside the body of a known function
-    unseeded_candidates.retain(|&cand| {
-        let inside_known = d.entries.iter().zip(&d.sizes).any(|(&entry, &size)| {
-            cand > entry && cand < entry + size
-        });
-        !inside_known
-    });
     if !unseeded_candidates.is_empty() && imp.cfg.console_path.as_ref().map_or(false, |p| p.is_file()) {
         use crate::native_runtime::{ConsoleSession, FlowKind};
         if let Ok(mut session) = ConsoleSession::new(&imp.cfg) {
@@ -1425,35 +1445,25 @@ fn flow_discover_x86(imp: &mut NativeImport) {
                 .map(|m| m.vaddr.wrapping_sub(m.file_off))
                 .unwrap_or(0);
             if session.load(&imp.binary, base).is_ok() {
-                unseeded_candidates.sort_unstable();
-                unseeded_candidates.dedup();
                 let flows = session.try_flow_batch(&unseeded_candidates);
                 for (&cand, info) in unseeded_candidates.iter().zip(flows) {
-                    if info.kind == FlowKind::Bad || info.kind == FlowKind::Unimpl {
+                    // Decoded flow validity: must not be Bad or Unimpl, and length must be > 0
+                    if info.kind == FlowKind::Bad || info.kind == FlowKind::Unimpl || info.length == 0 {
                         continue;
                     }
-                    // Reject backward conditional branches (internal loops / switch dispatch)
-                    if info.kind == FlowKind::CBranch {
-                        if let Some(&target) = info.targets.first() {
-                            if target < cand {
-                                continue;
-                            }
-                        }
-                    }
-                    // Inspect bytes for nop pad (0x00, 0x90) or mid-instruction patterns
-                    let is_pad_or_mid = imp.mappings.iter().find_map(|m| {
+                    // Structural pad check: if candidate bytes begin with padding (0x00 or 0x90),
+                    // verify it does not fall through to or sit within 4 bytes of a known entry.
+                    let is_pad = imp.mappings.iter().find_map(|m| {
                         if cand >= m.vaddr && cand < m.vaddr + m.size {
                             let off = (cand - m.vaddr) as usize;
                             let b0 = m.bytes.get(off).copied()?;
                             if b0 == 0x00 || b0 == 0x90 {
-                                return Some(true);
-                            }
-                            if b0 == 0xf7 || b0 == 0x85 {
-                                return Some(true);
-                            }
-                            if off + 3 <= m.bytes.len() {
-                                let b = &m.bytes[off..off + 3];
-                                if b[0] == 0x48 && (b[1] == 0x89 || b[1] == 0x8b) && (b[2] == 0x8d || b[2] == 0x85) {
+                                if let Some(fall) = info.fallthrough {
+                                    if initial_seeds.contains(&fall) {
+                                        return Some(true);
+                                    }
+                                }
+                                if (1..=4).any(|step| initial_seeds.contains(&(cand + step))) {
                                     return Some(true);
                                 }
                             }
@@ -1463,18 +1473,12 @@ fn flow_discover_x86(imp: &mut NativeImport) {
                         }
                     }).unwrap_or(false);
 
-                    if !is_pad_or_mid {
+                    if !is_pad {
                         confirmed_entries.push(cand);
                     }
                 }
-            } else {
-                confirmed_entries = unseeded_candidates;
             }
-        } else {
-            confirmed_entries = unseeded_candidates;
         }
-    } else {
-        confirmed_entries = unseeded_candidates;
     }
 
     let mut merged = imp.functions.clone();
@@ -1555,15 +1559,26 @@ fn flow_discover_x86(imp: &mut NativeImport) {
             in_code(cand)
                 && !known_funcs
                     .iter()
-                    .any(|f| cand > f.entry && cand < f.entry + f.size)
+                    .any(|f| f.size > 1 && cand > f.entry && cand < f.entry + f.size)
         })
         .collect();
+    let confirmed_relocs: Vec<u64> = if !valid_relocs.is_empty() {
+        let flows = session.try_flow_batch(&valid_relocs);
+        valid_relocs
+            .into_iter()
+            .zip(flows)
+            .filter(|(_, info)| info.kind != FlowKind::Bad && info.kind != FlowKind::Unimpl && info.length > 0)
+            .map(|(c, _)| c)
+            .collect()
+    } else {
+        Vec::new()
+    };
     let mut entries: Vec<u64> = imp
         .functions
         .iter()
         .map(|f| f.entry)
         .chain(imp.externals.iter().map(|(a, _)| *a))
-        .chain(valid_relocs)
+        .chain(confirmed_relocs)
         .filter(|a| *a != 0 && in_code(*a))
         .collect();
     entries.sort_unstable();
@@ -1839,7 +1854,8 @@ mod tests {
         b[0x84..0x86].copy_from_slice(&0x8664u16.to_le_bytes());
         b[0x86..0x88].copy_from_slice(&1u16.to_le_bytes()); // 1 section
         b[0x94..0x96].copy_from_slice(&0xf0u16.to_le_bytes()); // opt size
-        b[0x98..0xa0].copy_from_slice(&0x140000000u64.to_le_bytes()); // ImageBase
+        b[0x98..0x9a].copy_from_slice(&0x20bu16.to_le_bytes()); // PE32+ magic
+        b[0xb0..0xb8].copy_from_slice(&0x140000000u64.to_le_bytes()); // ImageBase at opt + 24
         let sec = 0x80 + 24 + 0xf0;
         b[sec + 8..sec + 12].copy_from_slice(&0x1000u32.to_le_bytes()); // vsize
         b[sec + 16..sec + 20].copy_from_slice(&0x200u32.to_le_bytes()); // raw size
@@ -1911,5 +1927,82 @@ mod tests {
         b[0xb0..0xb8].copy_from_slice(&0x140000000u64.to_le_bytes());
         assert_eq!(pe_image_base(&b), Some(0x140000000));
         assert_eq!(pe_image_base(b"\x7fELF"), None);
+    }
+    #[test]
+    fn regression_candidates_inside_known_bodies_are_rejected() {
+        let mut imp = NativeImport {
+            mappings: vec![Mapping {
+                vaddr: 0x1000,
+                size: 0x100,
+                file_off: 0,
+                flags: 0x4,
+                bytes: vec![0x90; 0x100],
+            }],
+            functions: vec![NativeFunction {
+                entry: 0x1000,
+                name: "known_outer".into(),
+                size: 0x80, // covers 0x1000..0x1080
+            }],
+            reloc_candidates: vec![0x1040], // strictly inside known_outer
+            format: "ELF".into(),
+            language: "x86:LE:64:default".into(),
+            ..Default::default()
+        };
+        flow_discover_x86(&mut imp);
+        assert!(!imp.functions.iter().any(|f| f.entry == 0x1040));
+    }
+
+    #[test]
+    fn regression_console_absence_does_not_promote_unconfirmed_candidates() {
+        let mut imp = NativeImport {
+            mappings: vec![Mapping {
+                vaddr: 0x1000,
+                size: 0x200,
+                file_off: 0,
+                flags: 0x4,
+                bytes: vec![0x90; 0x200],
+            }],
+            functions: vec![NativeFunction {
+                entry: 0x1000,
+                name: "root".into(),
+                size: 0x10,
+            }],
+            reloc_candidates: vec![0x1100],
+            cfg: crate::session::RuntimeConfig {
+                console_path: Some(std::path::PathBuf::from("/nonexistent/decomp_native")),
+                ..Default::default()
+            },
+            format: "ELF".into(),
+            language: "x86:LE:64:default".into(),
+            ..Default::default()
+        };
+        flow_discover_x86(&mut imp);
+        // Unconfirmed candidate 0x1100 must NOT be promoted when console is absent/failing
+        assert_eq!(imp.functions.len(), 1);
+        assert_eq!(imp.functions[0].entry, 0x1000);
+    }
+
+    #[test]
+    fn regression_invalid_relocation_target_is_not_promoted() {
+        let mut imp = NativeImport {
+            mappings: vec![Mapping {
+                vaddr: 0x1000,
+                size: 0x100,
+                file_off: 0,
+                flags: 0x4,
+                bytes: vec![0x90; 0x100],
+            }],
+            functions: vec![NativeFunction {
+                entry: 0x1000,
+                name: "entry".into(),
+                size: 0x10,
+            }],
+            reloc_candidates: vec![0x99999], // out of bounds / non-code
+            format: "ELF".into(),
+            language: "x86:LE:64:default".into(),
+            ..Default::default()
+        };
+        flow_discover_x86(&mut imp);
+        assert!(!imp.functions.iter().any(|f| f.entry == 0x99999));
     }
 }

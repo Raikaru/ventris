@@ -232,8 +232,6 @@ pub fn decode(b: &[u8], addr: u64) -> InstrInfo {
             match reg {
                 2 => Flow::IndirectCall,
                 4 => Flow::Indirect,
-                6 => Flow::Stop,
-                3 | 5 | 0 | 1 | 7 => Flow::Next,
                 _ => Flow::Next,
             }
         } else {
