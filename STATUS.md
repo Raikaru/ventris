@@ -681,12 +681,25 @@ M1 — Discovery becomes generic
   targets with `-fno-pie -no-pie` passed both compiler checks. The corrected
   full local gate again passed 6/6; compiler stderr is retained on failures.
 
+## m1-009 sub-tasks and oracle decision
+- Human approved the real `sys/main.dol` with `files/boot.elf` as its oracle.
+  All 644 function bodies and all 10 file-backed allocated sections match
+  byte-for-byte at their original addresses. `base.elf` is a different build:
+  only 44/644 function entry addresses overlap. Exact-address recall >=0.95
+  is unchanged; no address normalization or oracle seeds enter discovery.
+- m1-009-a: commit the failing real-DOL acceptance and this oracle decision.
+- m1-009-b: parse DOL section mappings, preserve initialized data inside BSS,
+  reject malformed ranges, and integrate the shared native mapping loader.
+- m1-009-c: use the existing SLEIGH XML image loader and generic flow worklist
+  for sparse DOL discovery; do not modify the pinned upstream tree.
+- m1-009-d: commit the generated recall report, regression evidence and docs.
+
 ## Next task
 - m1-009: stripped GameCube `.dol` loader (section table to image), with
   discovery through the generic worklist. `.rel` support is optional.
-  Acceptance: function recall against the `base.elf` symbol oracle is at
-  least 0.95 on the stripped `.dol`.
-  No m1-009 implementation or acceptance test was started in this session.
+  Acceptance: function recall against the matching `boot.elf` symbol oracle
+  is at least 0.95 on the real stripped `sys/main.dol`.
+  Execute the sub-tasks above; `.rel` support is optional.
 
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a
