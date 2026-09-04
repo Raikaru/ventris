@@ -177,18 +177,17 @@ def strip_pe_debug(bin_path: Path):
 
 
 def strip_binary(bin_path: Path):
+    if str(bin_path).endswith(".exe"):
+        strip_pe_debug(bin_path)
     strip_tool = find_strip_tool()
     if strip_tool:
         subprocess.run([strip_tool, "--strip-all", str(bin_path)], check=True)
-    elif str(bin_path).endswith(".exe"):
-        strip_pe_debug(bin_path)
-    else:
+    elif not str(bin_path).endswith(".exe"):
         strip_tool_fallback = shutil.which("strip")
         if strip_tool_fallback:
             subprocess.run([strip_tool_fallback, "--strip-all", str(bin_path)], check=True)
         else:
             sys.stderr.write(f"Warning: neither llvm-strip nor strip found to strip {bin_path}\n")
-
 
 def parse_elf_sections(data: bytes):
     is_64 = data[4] == 2
