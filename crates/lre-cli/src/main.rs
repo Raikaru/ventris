@@ -541,19 +541,25 @@ fn run_inner(args: &[String]) -> Result<(), String> {
         "xrefs" => {
             let program = args.get(2).ok_or("xrefs needs a program name")?.clone();
 
-            let addr_arg = flag(args, "--to")
-                .or_else(|| flag(args, "--from"))
-                .ok_or("xrefs needs --to or --from ADDRESS")?;
-            let address = lre_model::Address::parse_ram_hex(&addr_arg)
-                .ok_or_else(|| format!("bad address: {addr_arg}"))?;
-            let rows = if args.iter().any(|a| a == "--to") {
-                core.xrefs_to(&program, &address)
+            let addr_arg = flag(args, "--to").or_else(|| flag(args, "--from"));
+            let rows = if let Some(addr_str) = addr_arg {
+                let address = lre_model::Address::parse_ram_hex(&addr_str)
+                    .ok_or_else(|| format!("bad address: {addr_str}"))?;
+                if args.iter().any(|a| a == "--to") {
+                    core.xrefs_to(&program, &address)
+                } else {
+                    core.xrefs_from(&program, &address)
+                }
             } else {
-                core.xrefs_from(&program, &address)
+                core.xrefs(&program)
             }
             .map_err(|e| e.to_string())?;
             for r in &rows {
-                println!("{} --{}--> {}", r.from, r.kind, r.to);
+                if !r.provenance.is_empty() {
+                    println!("{} --{}--> {} [{}]", r.from, r.kind, r.to, r.provenance);
+                } else {
+                    println!("{} --{}--> {}", r.from, r.kind, r.to);
+                }
             }
             println!("-- {} xrefs", rows.len());
         }

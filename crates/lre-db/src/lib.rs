@@ -184,6 +184,7 @@ impl ProjectDb {
                  src TEXT NOT NULL,
                  dst TEXT NOT NULL,
                  kind TEXT NOT NULL,
+                 provenance TEXT NOT NULL DEFAULT '',
                  PRIMARY KEY (program_id, src, dst, kind)
              );
              CREATE INDEX IF NOT EXISTS idx_xrefs_dst ON xrefs(program_id, dst);
@@ -343,6 +344,7 @@ impl ProjectDb {
                  ON collaboration_ops(program_id, lamport, actor, op_id);
              COMMIT;",
         )?;
+        let _ = self.conn.execute("ALTER TABLE xrefs ADD COLUMN provenance TEXT NOT NULL DEFAULT ''", []);
         let v_text: String = self
             .conn
             .query_row("SELECT value FROM meta WHERE key='schema_version'", [], |r| {
@@ -452,13 +454,13 @@ impl ProjectDb {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute("DELETE FROM xrefs WHERE program_id = ?1", params![program.0])?;
         let mut stmt = tx
-            .prepare("INSERT INTO xrefs(program_id, src, dst, kind) VALUES (?1, ?2, ?3, ?4)")?;
+            .prepare("INSERT INTO xrefs(program_id, src, dst, kind, provenance) VALUES (?1, ?2, ?3, ?4, ?5)")?;
         let mut seen = std::collections::HashSet::new();
         for r in rows {
             if !seen.insert((r.from.clone(), r.to.clone(), r.kind.clone())) {
                 continue;
             }
-            stmt.execute(params![program.0, addr_cell(&r.from), addr_cell(&r.to), r.kind])?;
+            stmt.execute(params![program.0, addr_cell(&r.from), addr_cell(&r.to), r.kind, r.provenance])?;
         }
         drop(stmt);
                 self.bump_and_record(&tx, program, "replace-xrefs", &format!("{}", rows.len()))?;
@@ -686,13 +688,15 @@ impl ProjectDb {
         let (sql_win, key) = if incoming {
             ("SELECT x.src, x.dst, x.kind, \
               (SELECT f.name FROM functions f WHERE f.program_id = x.program_id \
-               AND f.entry <= x.src AND x.src < f.entry + f.size LIMIT 1) \
+               AND f.entry <= x.src AND x.src < f.entry + f.size LIMIT 1), \
+              x.provenance \
               FROM xrefs x WHERE x.program_id = ?1 AND x.dst = ?2
               ORDER BY x.src LIMIT ?3 OFFSET ?4", dst)
         } else {
             ("SELECT x.src, x.dst, x.kind, \
               (SELECT f.name FROM functions f WHERE f.program_id = x.program_id \
-               AND f.entry <= x.src AND x.src < f.entry + f.size LIMIT 1) \
+               AND f.entry <= x.src AND x.src < f.entry + f.size LIMIT 1), \
+              x.provenance \
               FROM xrefs x WHERE x.program_id = ?1 AND x.src = ?2
               ORDER BY x.dst LIMIT ?3 OFFSET ?4", src)
         };
@@ -708,7 +712,8 @@ impl ProjectDb {
         let mut stmt = self.conn.prepare(
             "SELECT x.src, x.dst, x.kind, \
               (SELECT f.name FROM functions f WHERE f.program_id = x.program_id \
-               AND f.entry <= x.src AND x.src < f.entry + f.size LIMIT 1) \
+               AND f.entry <= x.src AND x.src < f.entry + f.size LIMIT 1), \
+              x.provenance \
               FROM xrefs x WHERE x.program_id = ?1 AND x.dst = ?2 ORDER BY x.src",
         )?;
         let rows = stmt
@@ -722,7 +727,8 @@ impl ProjectDb {
         let mut stmt = self.conn.prepare(
             "SELECT x.src, x.dst, x.kind, \
               (SELECT f.name FROM functions f WHERE f.program_id = x.program_id \
-               AND f.entry <= x.src AND x.src < f.entry + f.size LIMIT 1) \
+               AND f.entry <= x.src AND x.src < f.entry + f.size LIMIT 1), \
+              x.provenance \
               FROM xrefs x WHERE x.program_id = ?1 AND x.src = ?2 ORDER BY x.dst",
         )?;
         let rows = stmt
@@ -730,6 +736,21 @@ impl ProjectDb {
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
+    /// Lists all xrefs of a program ordered by source and destination.
+    pub fn xrefs(&self, program: ProgramId) -> Result<Vec<XrefRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT x.src, x.dst, x.kind, \
+              (SELECT f.name FROM functions f WHERE f.program_id = x.program_id \
+               AND f.entry <= x.src AND x.src < f.entry + f.size LIMIT 1), \
+              x.provenance \
+              FROM xrefs x WHERE x.program_id = ?1 ORDER BY x.src, x.dst",
+        )?;
+        let rows = stmt
+            .query_map(params![program.0], map_xref)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
 
     /// Lists symbols of a program ordered by address.
     pub fn symbols(&self, program: ProgramId) -> Result<Vec<SymbolRow>> {
@@ -1996,6 +2017,7 @@ fn map_xref(r: &Row<'_>) -> rusqlite::Result<XrefRow> {
         to: addr_from_cell(r.get(1)?),
         kind: r.get(2)?,
         function: r.get(3)?,
+        provenance: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
     })
 }
 
@@ -2311,6 +2333,7 @@ mod tests {
             from: lre_model::Address::ram(0x400488),
             to: lre_model::Address::ram(0x400466),
             kind: "UNCONDITIONAL_CALL".into(),
+            provenance: String::new(),
         }];
         db.replace_xrefs(id, &rows).unwrap();
         assert_eq!(db.xrefs_to(id, &lre_model::Address::ram(0x400466)).unwrap().len(), 1);
@@ -2360,6 +2383,7 @@ mod tests {
                 from: entry.clone(),
                 to: lre_model::Address::ram(0x401000),
                 kind: "DATA".into(),
+                provenance: String::new(),
             }],
         )
         .unwrap();

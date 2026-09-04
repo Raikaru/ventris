@@ -698,6 +698,12 @@ impl Core {
     }
 
 
+    /// Lists all xrefs from the project store (no JVM).
+    pub fn xrefs(&self, program: &str) -> Result<Vec<XrefRow>> {
+        let id = self.db.program_id(program)?;
+        Ok(self.db.xrefs(id)?)
+    }
+
     /// Incoming xrefs from the project store (no JVM).
     pub fn xrefs_to(&self, program: &str, address: &lre_model::Address) -> Result<Vec<XrefRow>> {
         let id = self.db.program_id(program)?;
@@ -863,46 +869,7 @@ impl Core {
     /// (in-Rust walk + SLEIGH console closure when the binary looks
     /// stripped), and store writes with native provenance.
     pub fn import_native(&self, binary: &Path, name: &str) -> Result<ProgramSummary> {
-        let mut imp = native::load_native(binary)?;
-        imp.cfg = self.config.clone();
-        // SLEIGH-first (review CORE-008): when the pinned console is
-        // available its disassembly is the primary flow source; the in-Rust
-        // two-path walk (already run by load_native) is the fallback /
-        // cross-check. Both sets are unioned so nothing available is lost.
-        let console_available = self
-            .config
-            .console_path
-            .as_ref()
-            .map(|p| p.is_file())
-            .unwrap_or(false);
-        if console_available {
-            let seeds = native_runtime::console_seeds(&imp);
-            match native_runtime::console_discover(&self.config, binary, &seeds) {
-                Ok((funcs, calls)) => {
-                    for (entry, size) in funcs {
-                        if !imp.functions.iter().any(|f| f.entry == entry) {
-                            let fname = native::extern_name(&imp, entry)
-                                .unwrap_or_else(|| format!("FUN_{entry:08x}"));
-                            imp.functions.push(native::NativeFunction {
-                                entry,
-                                name: fname,
-                                size: size.max(1),
-                            });
-                        }
-                    }
-                    for (from, to) in calls {
-                        if !imp.xrefs.iter().any(|x| x.from == from && x.to == to) {
-                            imp.xrefs.push(native::NativeXref {
-                                from,
-                                to,
-                                kind: "UNCONDITIONAL_CALL".into(),
-                            });
-                        }
-                    }
-                }
-                Err(e) => eprintln!("console discovery skipped: {e}"),
-            }
-        }
+        let imp = native::load_native(binary)?;
         Ok(native::store_import(&self.db, name, &imp)?)
     }
 

@@ -503,19 +503,24 @@ M1 — Discovery becomes generic
 
 ## M1 progress
 - m1-005: implemented PE base relocations (.reloc directory 5, IMAGE_REL_BASED_DIR64/HIGHLOW),
-  entry point calculation fix (opt + 16), image base selection supporting PE32/PE32+,
-  and durable store writes of relocated pointer symbols (`reloc_ptr_<target>` with
-  source `native-import:pe-reloc`). On `tiny_pe.exe`, discovered functions grew from 1 to 38,
-  with 16 relocated pointer symbols recorded in the store. Acceptance test
-  `tests/m1-005_pe_relocs.sh` passes (PASS).
-- m1-003-f: hand decoder candidate pre-pass confirmed by batched flow; achieves
-  fn.precision=1.0000 and exact set equality (3,955/3,955) on libc. Re-benchmarked
-  with all corpus rows scored against unstripped references. Median speedup on libc:
-  4.2885×. hand decoder is 4.3× faster than console and set-metrics are equal against
-  the oracle; keep disasm.rs.
-- m1-003-e: implemented batched flow in the console (`flow <addr1> <addr2> ...`);
-  console-path libc import runs in 4.31s (acceptance threshold < 5.0s, PASS).
+  entry point calculation fix (opt + 16), image base selection (default base verified,
+  non-default not yet), and durable store writes of relocated pointers as data xrefs with
+  provenance (`native-import:pe-reloc`, `native-import:elf-reloc` for m1-004 ELF relocs,
+  0 symbol rows). Relocation targets become flow-confirmed candidates, rejected if inside
+  known functions. On `tiny_pe` unstripped twin (123 oracle symbols): 31 discovered,
+  overlap 31, p=1.0000, r=0.2520; on `dispatch` unstripped twin (125 oracle symbols):
+  33 discovered, overlap 33, p=1.0000, r=0.2640. Acceptance test `tests/m1-005_pe_relocs.sh` passes (PASS).
 
+- m1-003-d: benchmarked hand decoder vs console flow on libc and the x86-64 corpus.
+  All corpus rows scored against unstripped symbol references (zero null metrics).
+  Median speedup on libc: 2.2493×. hand decoder is 2.2× faster than console and set-metrics
+  are equal against the oracle; keep disasm.rs.
+
+- m1-003-f: hand decoder candidate pre-pass confirmed by batched flow; achieves
+  fn.precision=1.0000 and exact set equality (3,953/3,953) on libc against console flow.
+
+- m1-003-e: implemented batched flow in the console (`flow <addr1> <addr2> ...`);
+  console-path libc import runs in 4.02s (acceptance threshold < 5.0s, PASS).
 - m1-004: implemented ELF PIE relative relocation discovery (SHT_RELA / R_*_RELATIVE
   and SHT_RELR packed relocations across architectures), image base selection
   via `elf_image_base` (minimum PT_LOAD vaddr or 0x100000/0x10000 default for ET_DYN),
@@ -556,9 +561,8 @@ M1 — Discovery becomes generic
 
 ## Next task
 - m1-006: multi-architecture corpus generation (x86-64, x86-32, AArch64, PPC32-BE)
-  across the 5 corpus variants ({C -O0, C -O2, C++ exceptions+TLS, stripped, PIE})
-  per docs/toolchains.md.
-
+  with unstripped twin for each entry, sources + lock committed, MSVC via Windows CI
+  with local skipped, per §II.4 and docs/toolchains.md.
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a
   clearly separated accelerator module with an equivalence test, never in the

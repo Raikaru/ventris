@@ -143,7 +143,7 @@ pub struct FunctionRow {
 }
 
 /// One cross-reference record.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct XrefRow {
     /// Source (incoming) address (typed).
     pub from: Address,
@@ -154,6 +154,9 @@ pub struct XrefRow {
     /// Name of the function containing the source address, resolved at
     /// query time; None for data xrefs or unmapped sources.
     pub function: Option<String>,
+    /// Producer/provenance label.
+    #[serde(default)]
+    pub provenance: String,
 }
 
 /// One symbol row.

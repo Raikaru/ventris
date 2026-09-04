@@ -68,6 +68,27 @@ pub struct NativeXref {
     pub from: u64,
     pub to: u64,
     pub kind: String,
+    pub provenance: String,
+}
+
+impl NativeXref {
+    pub fn new(from: u64, to: u64, kind: impl Into<String>) -> Self {
+        Self {
+            from,
+            to,
+            kind: kind.into(),
+            provenance: "native-import".into(),
+        }
+    }
+
+    pub fn with_provenance(from: u64, to: u64, kind: impl Into<String>, provenance: impl Into<String>) -> Self {
+        Self {
+            from,
+            to,
+            kind: kind.into(),
+            provenance: provenance.into(),
+        }
+    }
 }
 
 /// Parsed import result: everything the importer writes to the store.
@@ -77,8 +98,8 @@ pub struct NativeImport {
     pub functions: Vec<NativeFunction>,
     pub xrefs: Vec<NativeXref>,
     pub externals: Vec<(u64, String)>,
-    /// Relocated pointer locations: (relocated_address, target_pointer).
-    pub relocated_pointers: Vec<(u64, u64)>,
+    /// Relocation code targets to be verified as candidate function entries.
+    pub reloc_candidates: Vec<u64>,
     pub format: String,
     /// Ghidra-compatible language id selected from the file machine.
     pub language: String,
@@ -609,7 +630,8 @@ pub fn import_elf(data: &[u8]) -> Result<NativeImport> {
         0x015 => 22,   // PPC64
         _ => 8,
     };
-    let mut relocated_pointers = Vec::new();
+    let mut reloc_candidates = Vec::new();
+    let mut xrefs = Vec::new();
     for r in sections.iter().filter(|s| s.typ == 4 && s.size > 0) {
         let entry_count = r.size as usize / 24;
         for i in 0..entry_count {
@@ -624,16 +646,17 @@ pub fn import_elf(data: &[u8]) -> Result<NativeImport> {
                 let addend = u64_at(data, hdr + 16)? as i64;
                 if addend > 0 {
                     let target = addend as u64;
-                    relocated_pointers.push((got_off, target));
+                    xrefs.push(NativeXref::with_provenance(
+                        got_off,
+                        target,
+                        "DATA",
+                        "native-import:elf-reloc",
+                    ));
                     let in_code = mappings
                         .iter()
                         .any(|m| m.flags & 0x4 != 0 && target >= m.vaddr && target < m.vaddr + m.size);
-                    if in_code && !functions.iter().any(|f| f.entry == target) {
-                        functions.push(NativeFunction {
-                            entry: target,
-                            name: format!("FUN_{target:08x}"),
-                            size: 1,
-                        });
+                    if in_code {
+                        reloc_candidates.push(target);
                     }
                 }
             }
@@ -668,16 +691,17 @@ pub fn import_elf(data: &[u8]) -> Result<NativeImport> {
                 if loc >= m.vaddr && loc + 8 <= m.vaddr + m.size {
                     let file_off = m.file_off + (loc - m.vaddr);
                     if let Ok(target) = u64_at(data, file_off as usize) {
-                        relocated_pointers.push((loc, target));
-                        let in_code = mappings.iter().any(|cm| {
-                            cm.flags & 0x4 != 0 && target >= cm.vaddr && target < cm.vaddr + cm.size
+                        xrefs.push(NativeXref::with_provenance(
+                            loc,
+                            target,
+                            "DATA",
+                            "native-import:elf-reloc",
+                        ));
+                        let in_code = mappings.iter().any(|m| {
+                            m.flags & 0x4 != 0 && target >= m.vaddr && target < m.vaddr + m.size
                         });
-                        if in_code && !functions.iter().any(|f| f.entry == target) {
-                            functions.push(NativeFunction {
-                                entry: target,
-                                name: format!("FUN_{target:08x}"),
-                                size: 1,
-                            });
+                        if in_code {
+                            reloc_candidates.push(target);
                         }
                     }
                     break;
@@ -697,9 +721,9 @@ pub fn import_elf(data: &[u8]) -> Result<NativeImport> {
     Ok(NativeImport {
         mappings,
         functions,
-        xrefs: Vec::new(),
+        xrefs,
         externals,
-        relocated_pointers,
+        reloc_candidates,
         format: "ELF".into(),
         language,
         ..Default::default()
@@ -793,7 +817,8 @@ pub fn import_pe(data: &[u8]) -> Result<NativeImport> {
         })
     };
 
-    let mut relocated_pointers: Vec<(u64, u64)> = Vec::new();
+    let mut reloc_candidates: Vec<u64> = Vec::new();
+    let mut xrefs: Vec<NativeXref> = Vec::new();
     if let Some(reloc_bytes) = reloc_raw_data {
         let mut pos = 0usize;
         while pos + 8 <= reloc_bytes.len() {
@@ -838,14 +863,13 @@ pub fn import_pe(data: &[u8]) -> Result<NativeImport> {
                                     None
                                 };
                                 if let Some(target) = code_target {
-                                    relocated_pointers.push((loc, target));
-                                    if !functions.iter().any(|f| f.entry == target) {
-                                        functions.push(NativeFunction {
-                                            entry: target,
-                                            name: format!("FUN_{target:08x}"),
-                                            size: 1,
-                                        });
-                                    }
+                                    reloc_candidates.push(target);
+                                    xrefs.push(NativeXref::with_provenance(
+                                        loc,
+                                        target,
+                                        "DATA",
+                                        "native-import:pe-reloc",
+                                    ));
                                 }
                             }
                         }
@@ -865,14 +889,13 @@ pub fn import_pe(data: &[u8]) -> Result<NativeImport> {
                                     None
                                 };
                                 if let Some(target) = code_target {
-                                    relocated_pointers.push((loc, target));
-                                    if !functions.iter().any(|f| f.entry == target) {
-                                        functions.push(NativeFunction {
-                                            entry: target,
-                                            name: format!("FUN_{target:08x}"),
-                                            size: 1,
-                                        });
-                                    }
+                                    reloc_candidates.push(target);
+                                    xrefs.push(NativeXref::with_provenance(
+                                        loc,
+                                        target,
+                                        "DATA",
+                                        "native-import:pe-reloc",
+                                    ));
                                 }
                             }
                         }
@@ -889,9 +912,9 @@ pub fn import_pe(data: &[u8]) -> Result<NativeImport> {
     Ok(NativeImport {
         mappings,
         functions,
-        xrefs: Vec::new(),
+        xrefs,
         externals: Vec::new(),
-        relocated_pointers,
+        reloc_candidates,
         format: "PE".into(),
         language: "x86:LE:64:default".into(),
         ..Default::default()
@@ -937,15 +960,15 @@ pub fn sweep_ppc_calls(imp: &mut NativeImport) {
                     addr.wrapping_add(li as i64 as u64)
                 };
                 if in_maps(target) {
-                    xrefs.push(NativeXref {
-                        from: addr,
-                        to: target,
-                        kind: if lk {
-                            "UNCONDITIONAL_CALL".into()
+                    xrefs.push(NativeXref::new(
+                        addr,
+                        target,
+                        if lk {
+                            "UNCONDITIONAL_CALL"
                         } else {
-                            "UNCONDITIONAL_JUMP".into()
+                            "UNCONDITIONAL_JUMP"
                         },
-                    });
+                    ));
                 }
             } else if op == 16 {
                 let aa = (word & 2) != 0;
@@ -960,15 +983,15 @@ pub fn sweep_ppc_calls(imp: &mut NativeImport) {
                     addr.wrapping_add(bd as i64 as u64)
                 };
                 if in_maps(target) {
-                    xrefs.push(NativeXref {
-                        from: addr,
-                        to: target,
-                        kind: if lk {
-                            "UNCONDITIONAL_CALL".into()
+                    xrefs.push(NativeXref::new(
+                        addr,
+                        target,
+                        if lk {
+                            "UNCONDITIONAL_CALL"
                         } else {
-                            "CONDITIONAL_JUMP".into()
+                            "CONDITIONAL_JUMP"
                         },
-                    });
+                    ));
                 }
             }
             i += 4;
@@ -1218,25 +1241,13 @@ pub fn store_import(
             kind: x.kind.clone(),
             // Containment resolves at query time from the function table.
             function: None,
+            provenance: if x.provenance.is_empty() {
+                "native-import".into()
+            } else {
+                x.provenance.clone()
+            },
         })
         .collect();
-    if !imp.relocated_pointers.is_empty() {
-        let sym_rows: Vec<lre_model::SymbolRow> = imp
-            .relocated_pointers
-            .iter()
-            .map(|(loc, target)| lre_model::SymbolRow {
-                name: format!("reloc_ptr_{target:08x}"),
-                address: lre_model::Address::ram(*loc),
-                external: false,
-                source: if imp.format == "PE" {
-                    "native-import:pe-reloc".into()
-                } else {
-                    "native-import:relative-reloc".into()
-                },
-            })
-            .collect();
-        let _ = db.replace_symbols(pid, &sym_rows);
-    }
     db.replace_xrefs(pid, &xrows)?;
     Ok(ProgramSummary {
         program: program.to_string(),
@@ -1293,7 +1304,7 @@ fn discover_strings(imp: &NativeImport) -> Vec<StringRow> {
 
 #[cfg(feature = "x86_decoder")]
 fn sweep_calls_x86(imp: &mut NativeImport) {
-    let mut xrefs = Vec::new();
+    let mut xrefs = imp.xrefs.clone();
     let in_maps = |addr: u64| {
         imp.mappings
             .iter()
@@ -1324,35 +1335,19 @@ fn sweep_calls_x86(imp: &mut NativeImport) {
             }
             match info.flow {
                 crate::disasm::Flow::Call(t) => {
-                    xrefs.push(NativeXref {
-                        from: addr,
-                        to: t,
-                        kind: "UNCONDITIONAL_CALL".into(),
-                    });
+                    xrefs.push(NativeXref::new(addr, t, "UNCONDITIONAL_CALL"));
                 }
                 crate::disasm::Flow::Jump(t) => {
-                    xrefs.push(NativeXref {
-                        from: addr,
-                        to: t,
-                        kind: "UNCONDITIONAL_JUMP".into(),
-                    });
+                    xrefs.push(NativeXref::new(addr, t, "UNCONDITIONAL_JUMP"));
                 }
                 crate::disasm::Flow::JumpCond(t) => {
-                    xrefs.push(NativeXref {
-                        from: addr,
-                        to: t,
-                        kind: "CONDITIONAL_JUMP".into(),
-                    });
+                    xrefs.push(NativeXref::new(addr, t, "CONDITIONAL_JUMP"));
                 }
                 _ => {}
             }
             if let Some(target) = info.rip_data {
                 if in_maps(target) {
-                    xrefs.push(NativeXref {
-                        from: addr,
-                        to: target,
-                        kind: "DATA".into(),
-                    });
+                    xrefs.push(NativeXref::new(addr, target, "DATA"));
                 }
             }
             let step = (info.len as usize).min(b.len() - i).max(1);
@@ -1408,9 +1403,19 @@ fn flow_discover_x86(imp: &mut NativeImport) {
         .entries
         .iter()
         .copied()
+        .chain(imp.reloc_candidates.iter().copied())
         .filter(|e| !initial_seeds.contains(e))
         .collect();
+    unseeded_candidates.sort_unstable();
+    unseeded_candidates.dedup();
 
+    // Reject candidates that fall strictly inside the body of a known function
+    unseeded_candidates.retain(|&cand| {
+        let inside_known = d.entries.iter().zip(&d.sizes).any(|(&entry, &size)| {
+            cand > entry && cand < entry + size
+        });
+        !inside_known
+    });
     if !unseeded_candidates.is_empty() && imp.cfg.console_path.as_ref().map_or(false, |p| p.is_file()) {
         use crate::native_runtime::{ConsoleSession, FlowKind};
         if let Ok(mut session) = ConsoleSession::new(&imp.cfg) {
@@ -1502,20 +1507,12 @@ fn flow_discover_x86(imp: &mut NativeImport) {
     let mut xrefs: Vec<NativeXref> = imp.xrefs.clone();
     for (from, to) in &d.calls {
         if !xrefs.iter().any(|x| x.from == *from && x.to == *to) {
-            xrefs.push(NativeXref {
-                from: *from,
-                to: *to,
-                kind: "UNCONDITIONAL_CALL".into(),
-            });
+            xrefs.push(NativeXref::new(*from, *to, "UNCONDITIONAL_CALL"));
         }
     }
     for (from, to) in &d.data_refs {
         if !xrefs.iter().any(|x| x.from == *from && x.to == *to) {
-            xrefs.push(NativeXref {
-                from: *from,
-                to: *to,
-                kind: "DATA".into(),
-            });
+            xrefs.push(NativeXref::new(*from, *to, "DATA"));
         }
     }
     imp.xrefs = xrefs;
@@ -1549,11 +1546,24 @@ fn flow_discover_x86(imp: &mut NativeImport) {
 
     let code = code_ranges(imp);
     let in_code = |a: u64| code.iter().any(|(v, e)| a >= *v && a < *e);
+    let known_funcs = imp.functions.clone();
+    let valid_relocs: Vec<u64> = imp
+        .reloc_candidates
+        .iter()
+        .copied()
+        .filter(|&cand| {
+            in_code(cand)
+                && !known_funcs
+                    .iter()
+                    .any(|f| cand > f.entry && cand < f.entry + f.size)
+        })
+        .collect();
     let mut entries: Vec<u64> = imp
         .functions
         .iter()
         .map(|f| f.entry)
         .chain(imp.externals.iter().map(|(a, _)| *a))
+        .chain(valid_relocs)
         .filter(|a| *a != 0 && in_code(*a))
         .collect();
     entries.sort_unstable();
@@ -1699,11 +1709,7 @@ fn flow_discover_x86(imp: &mut NativeImport) {
     let mut xrefs = imp.xrefs.clone();
     for (from, to) in calls {
         if !xrefs.iter().any(|x| x.from == from && x.to == to) {
-            xrefs.push(NativeXref {
-                from,
-                to,
-                kind: "UNCONDITIONAL_CALL".into(),
-            });
+            xrefs.push(NativeXref::new(from, to, "UNCONDITIONAL_CALL"));
         }
     }
     imp.xrefs = xrefs;
