@@ -13,7 +13,8 @@
       "format": "elf",
       "functions_discovered": 10,
       "symbols_in_twin": 12,
-      "expected_language": "x86:LE:64:default"
+      "expected_language": "x86:LE:64:default",
+      "runtime_check": null
     },
     {
       "architecture": "x86_64",
@@ -23,7 +24,8 @@
       "format": "elf",
       "functions_discovered": 9,
       "symbols_in_twin": 12,
-      "expected_language": "x86:LE:64:default"
+      "expected_language": "x86:LE:64:default",
+      "runtime_check": null
     },
     {
       "architecture": "x86_64",
@@ -33,7 +35,8 @@
       "format": "elf",
       "functions_discovered": 8,
       "symbols_in_twin": 12,
-      "expected_language": "x86:LE:64:default"
+      "expected_language": "x86:LE:64:default",
+      "runtime_check": null
     },
     {
       "architecture": "x86_64",
@@ -41,9 +44,14 @@
       "status": "ok",
       "endian": "little",
       "format": "elf",
-      "functions_discovered": 9,
-      "symbols_in_twin": 19,
-      "expected_language": "x86:LE:64:default"
+      "functions_discovered": 14,
+      "symbols_in_twin": 20,
+      "expected_language": "x86:LE:64:default",
+      "runtime_check": {
+        "positive": 0,
+        "caught_exception": 1,
+        "runner": "native"
+      }
     },
     {
       "architecture": "x86_64",
@@ -53,7 +61,8 @@
       "format": "elf",
       "functions_discovered": 408,
       "symbols_in_twin": 410,
-      "expected_language": "x86:LE:64:default"
+      "expected_language": "x86:LE:64:default",
+      "runtime_check": null
     },
     {
       "architecture": "i386",
@@ -63,7 +72,8 @@
       "format": "elf",
       "functions_discovered": 7,
       "symbols_in_twin": 13,
-      "expected_language": "x86:LE:32:default"
+      "expected_language": "x86:LE:32:default",
+      "runtime_check": null
     },
     {
       "architecture": "i386",
@@ -73,7 +83,8 @@
       "format": "elf",
       "functions_discovered": 7,
       "symbols_in_twin": 13,
-      "expected_language": "x86:LE:32:default"
+      "expected_language": "x86:LE:32:default",
+      "runtime_check": null
     },
     {
       "architecture": "i386",
@@ -83,7 +94,8 @@
       "format": "elf",
       "functions_discovered": 9,
       "symbols_in_twin": 14,
-      "expected_language": "x86:LE:32:default"
+      "expected_language": "x86:LE:32:default",
+      "runtime_check": null
     },
     {
       "architecture": "i386",
@@ -91,9 +103,14 @@
       "status": "ok",
       "endian": "little",
       "format": "elf",
-      "functions_discovered": 7,
-      "symbols_in_twin": 20,
-      "expected_language": "x86:LE:32:default"
+      "functions_discovered": 13,
+      "symbols_in_twin": 21,
+      "expected_language": "x86:LE:32:default",
+      "runtime_check": {
+        "positive": 0,
+        "caught_exception": 1,
+        "runner": "qemu-i386"
+      }
     },
     {
       "architecture": "i386",
@@ -103,7 +120,8 @@
       "format": "elf",
       "functions_discovered": 6,
       "symbols_in_twin": 411,
-      "expected_language": "x86:LE:32:default"
+      "expected_language": "x86:LE:32:default",
+      "runtime_check": null
     },
     {
       "architecture": "aarch64",
@@ -113,7 +131,8 @@
       "format": "elf",
       "functions_discovered": 5,
       "symbols_in_twin": 14,
-      "expected_language": "AARCH64:LE:64:v8A"
+      "expected_language": "AARCH64:LE:64:v8A",
+      "runtime_check": null
     },
     {
       "architecture": "aarch64",
@@ -123,7 +142,8 @@
       "format": "elf",
       "functions_discovered": 5,
       "symbols_in_twin": 14,
-      "expected_language": "AARCH64:LE:64:v8A"
+      "expected_language": "AARCH64:LE:64:v8A",
+      "runtime_check": null
     },
     {
       "architecture": "aarch64",
@@ -133,7 +153,8 @@
       "format": "elf",
       "functions_discovered": 3,
       "symbols_in_twin": 14,
-      "expected_language": "AARCH64:LE:64:v8A"
+      "expected_language": "AARCH64:LE:64:v8A",
+      "runtime_check": null
     },
     {
       "architecture": "aarch64",
@@ -142,8 +163,13 @@
       "endian": "little",
       "format": "elf",
       "functions_discovered": 5,
-      "symbols_in_twin": 21,
-      "expected_language": "AARCH64:LE:64:v8A"
+      "symbols_in_twin": 22,
+      "expected_language": "AARCH64:LE:64:v8A",
+      "runtime_check": {
+        "positive": 0,
+        "caught_exception": 1,
+        "runner": "qemu-aarch64"
+      }
     },
     {
       "architecture": "aarch64",
@@ -153,7 +179,8 @@
       "format": "elf",
       "functions_discovered": 5,
       "symbols_in_twin": 412,
-      "expected_language": "AARCH64:LE:64:v8A"
+      "expected_language": "AARCH64:LE:64:v8A",
+      "runtime_check": null
     },
     {
       "architecture": "powerpc",
@@ -163,7 +190,8 @@
       "format": "elf",
       "functions_discovered": 10,
       "symbols_in_twin": 14,
-      "expected_language": "PowerPC:BE:32:default"
+      "expected_language": "PowerPC:BE:32:default",
+      "runtime_check": null
     },
     {
       "architecture": "powerpc",
@@ -173,7 +201,8 @@
       "format": "elf",
       "functions_discovered": 9,
       "symbols_in_twin": 14,
-      "expected_language": "PowerPC:BE:32:default"
+      "expected_language": "PowerPC:BE:32:default",
+      "runtime_check": null
     },
     {
       "architecture": "powerpc",
@@ -183,7 +212,8 @@
       "format": "elf",
       "functions_discovered": 13,
       "symbols_in_twin": 16,
-      "expected_language": "PowerPC:BE:32:default"
+      "expected_language": "PowerPC:BE:32:default",
+      "runtime_check": null
     },
     {
       "architecture": "powerpc",
@@ -191,9 +221,14 @@
       "status": "ok",
       "endian": "big",
       "format": "elf",
-      "functions_discovered": 9,
-      "symbols_in_twin": 21,
-      "expected_language": "PowerPC:BE:32:default"
+      "functions_discovered": 15,
+      "symbols_in_twin": 27,
+      "expected_language": "PowerPC:BE:32:default",
+      "runtime_check": {
+        "positive": 0,
+        "caught_exception": 1,
+        "runner": "qemu-ppc"
+      }
     },
     {
       "architecture": "powerpc",
@@ -203,7 +238,8 @@
       "format": "elf",
       "functions_discovered": 408,
       "symbols_in_twin": 411,
-      "expected_language": "PowerPC:BE:32:default"
+      "expected_language": "PowerPC:BE:32:default",
+      "runtime_check": null
     },
     {
       "architecture": "msvc",

@@ -94,6 +94,7 @@ import json
 import os
 import re
 import struct
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -373,15 +374,28 @@ for entry in run_manifest["entries"]:
             assert s_bin["raw_size"] == s_twin["raw_size"], f"PE Section SizeOfRawData mismatch for {s_bin['name']}"
             assert b_data[s_bin["raw_off"]:s_bin["raw_off"] + s_bin["raw_size"]] == t_data[s_twin["raw_off"]:s_twin["raw_off"] + s_twin["raw_size"]], f"Executable code bytes mismatch in PE section {s_bin['name']}"
 
-    if var == "cpp_o2" and arch in ("x86_64", "msvc"):
+    runtime_check = None
+    if var == "cpp_o2":
+        runners = {
+            "i386": ("qemu-i386", "i686-linux-gnu"),
+            "aarch64": ("qemu-aarch64", "aarch64-linux-gnu"),
+            "powerpc": ("qemu-ppc", "powerpc-linux-gnu"),
+        }
+        command = []
+        if arch in runners:
+            emulator, target = runners[arch]
+            assert shutil.which(emulator), f"Install qemu-user: missing {emulator}"
+            prefix = committed_lock_path.parent.parent / "third_party/sysroots" / arch / "usr" / target
+            command = [emulator, "-L", str(prefix)]
         for argument, expected_code, expected_output in (
             ("1", 0, "res: 52"), ("-1", 1, "caught: 1"),
         ):
-            result = subprocess.run([str(bin_path), argument], capture_output=True,
+            result = subprocess.run(command + [str(bin_path), argument], capture_output=True,
                                     text=True, timeout=10)
             assert (result.returncode, result.stdout.strip()) == (expected_code, expected_output), (
                 f"{arch} exception/TLS runtime failed for {argument}: {result}"
             )
+        runtime_check = {"positive": 0, "caught_exception": 1, "runner": command[0] if command else "native"}
 
     # Native import verification
     res = subprocess.run([str(cli_path), "import-native", str(bin_path), "--project", str(out_dir / "project")], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -404,6 +418,7 @@ for entry in run_manifest["entries"]:
         "functions_discovered": fn_count,
         "symbols_in_twin": sym_count,
         "expected_language": exp_lang,
+        "runtime_check": runtime_check,
     })
     print(f"PASS: {arch} {var} -> {fn_count} functions, language {exp_lang}")
 

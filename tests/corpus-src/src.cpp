@@ -1,15 +1,8 @@
 #include <stdio.h>
+#include <stdlib.h>
 
 thread_local int tls_var = 42;
 
-// Portable minimal exception personality and runtime stubs for cross-sysroot builds
-extern "C" {
-    void* __cxa_allocate_exception(unsigned long) { return (void*)0; }
-    void __cxa_throw(void*, void*, void*) { while(1); }
-    void* __cxa_begin_catch(void*) { return (void*)0; }
-    void __cxa_end_catch() {}
-    int __gxx_personality_v0() { return 0; }
-}
 
 int compute(int x) {
     switch (x) {
@@ -34,9 +27,10 @@ int do_work(int x) {
 
 int main(int argc, char **argv) {
     try {
-        printf("res: %d\n", do_work(argc));
-    } catch (...) {
-        return 1;
+        printf("res: %d\n", do_work(argc > 1 ? atoi(argv[1]) : 1));
+    } catch (int value) {
+        printf("caught: %d\n", value);
+        return value;
     }
     return 0;
 }

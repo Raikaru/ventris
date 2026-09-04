@@ -6,8 +6,8 @@
       "size": 134
     },
     "src.cpp": {
-      "sha256": "ee4cbc5ab8623acd2d39b61af27861f11634c02585034ff8f53c34b64d0174e9",
-      "size": 947
+      "sha256": "d6aa660131db5af3afb40fe5753d50e72d87126de8b799524742d385fca63035",
+      "size": 682
     },
     "many.c": {
       "sha256": "89a3a9566f7be236b70a07f16294be99b407bbb41b283c9ebe7d5e920d816b8c",
@@ -71,7 +71,7 @@
       "binary": "x86_64_cpp_o2.bin",
       "unstripped_twin": "x86_64_cpp_o2.unstripped",
       "min_symbols": 15,
-      "command": "clang++ --target=x86_64-linux-gnu -fuse-ld=lld -nostdlib++ -O2 -g tests/corpus-src/src.cpp -o $OUT/x86_64_cpp_o2.unstripped && llvm-strip --strip-all $OUT/x86_64_cpp_o2.bin"
+      "command": "clang++ --target=x86_64-linux-gnu -fuse-ld=lld -O2 -g tests/corpus-src/src.cpp -o $OUT/x86_64_cpp_o2.unstripped && llvm-strip --strip-all $OUT/x86_64_cpp_o2.bin"
     },
     {
       "architecture": "x86_64",
@@ -126,7 +126,7 @@
       "binary": "i386_cpp_o2.bin",
       "unstripped_twin": "i386_cpp_o2.unstripped",
       "min_symbols": 15,
-      "command": "clang++ --target=i686-linux-gnu -fuse-ld=lld -nostdlib++ --sysroot third_party/sysroots/i386 -B third_party/sysroots/i386/usr/lib/gcc-cross/i686-linux-gnu/12 -L third_party/sysroots/i386/usr/lib/gcc-cross/i686-linux-gnu/12 -O2 -g tests/corpus-src/src.cpp -o $OUT/i386_cpp_o2.unstripped && llvm-strip --strip-all $OUT/i386_cpp_o2.bin"
+      "command": "clang++ --target=i686-linux-gnu -fuse-ld=lld --sysroot third_party/sysroots/i386 -B third_party/sysroots/i386/usr/lib/gcc-cross/i686-linux-gnu/12 -L third_party/sysroots/i386/usr/lib/gcc-cross/i686-linux-gnu/12 -O2 -g tests/corpus-src/src.cpp -o $OUT/i386_cpp_o2.unstripped && llvm-strip --strip-all $OUT/i386_cpp_o2.bin"
     },
     {
       "architecture": "i386",
@@ -181,7 +181,7 @@
       "binary": "aarch64_cpp_o2.bin",
       "unstripped_twin": "aarch64_cpp_o2.unstripped",
       "min_symbols": 15,
-      "command": "clang++ --target=aarch64-linux-gnu -fuse-ld=lld -nostdlib++ --sysroot third_party/sysroots/aarch64 -B third_party/sysroots/aarch64/usr/lib/gcc-cross/aarch64-linux-gnu/12 -L third_party/sysroots/aarch64/usr/lib/gcc-cross/aarch64-linux-gnu/12 -O2 -g tests/corpus-src/src.cpp -o $OUT/aarch64_cpp_o2.unstripped && llvm-strip --strip-all $OUT/aarch64_cpp_o2.bin"
+      "command": "clang++ --target=aarch64-linux-gnu -fuse-ld=lld --sysroot third_party/sysroots/aarch64 -B third_party/sysroots/aarch64/usr/lib/gcc-cross/aarch64-linux-gnu/12 -L third_party/sysroots/aarch64/usr/lib/gcc-cross/aarch64-linux-gnu/12 -O2 -g tests/corpus-src/src.cpp -o $OUT/aarch64_cpp_o2.unstripped && llvm-strip --strip-all $OUT/aarch64_cpp_o2.bin"
     },
     {
       "architecture": "aarch64",
@@ -236,7 +236,7 @@
       "binary": "powerpc_cpp_o2.bin",
       "unstripped_twin": "powerpc_cpp_o2.unstripped",
       "min_symbols": 15,
-      "command": "clang++ --target=powerpc-linux-gnu -fuse-ld=lld -nostdlib++ --sysroot third_party/sysroots/powerpc -B third_party/sysroots/powerpc/usr/lib/gcc-cross/powerpc-linux-gnu/12 -L third_party/sysroots/powerpc/usr/lib/gcc-cross/powerpc-linux-gnu/12 -O2 -g tests/corpus-src/src.cpp -o $OUT/powerpc_cpp_o2.unstripped && llvm-strip --strip-all $OUT/powerpc_cpp_o2.bin"
+      "command": "clang++ --target=powerpc-linux-gnu -fuse-ld=lld --sysroot third_party/sysroots/powerpc -B third_party/sysroots/powerpc/usr/lib/gcc-cross/powerpc-linux-gnu/12 -L third_party/sysroots/powerpc/usr/lib/gcc-cross/powerpc-linux-gnu/12 -O2 -g tests/corpus-src/src.cpp -o $OUT/powerpc_cpp_o2.unstripped && llvm-strip --strip-all $OUT/powerpc_cpp_o2.bin"
     },
     {
       "architecture": "powerpc",

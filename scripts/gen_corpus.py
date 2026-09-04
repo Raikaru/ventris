@@ -37,7 +37,7 @@ ARCHITECTURES = {
         "format": "elf",
         "sysroot": None,
         "c_compiler": ["clang", "--target=x86_64-linux-gnu", "-fuse-ld=lld"],
-        "cxx_compiler": ["clang++", "--target=x86_64-linux-gnu", "-fuse-ld=lld", "-nostdlib++"],
+        "cxx_compiler": ["clang++", "--target=x86_64-linux-gnu", "-fuse-ld=lld"],
         "extra_flags": [],
     },
     "i386": {
@@ -46,7 +46,7 @@ ARCHITECTURES = {
         "format": "elf",
         "sysroot": SYSROOTS_DIR / "i386",
         "c_compiler": ["clang", "--target=i686-linux-gnu", "-fuse-ld=lld"],
-        "cxx_compiler": ["clang++", "--target=i686-linux-gnu", "-fuse-ld=lld", "-nostdlib++"],
+        "cxx_compiler": ["clang++", "--target=i686-linux-gnu", "-fuse-ld=lld"],
         "extra_flags": [
             "-B", str(SYSROOTS_DIR / "i386" / "usr" / "lib" / "gcc-cross" / "i686-linux-gnu" / "12"),
             "-L", str(SYSROOTS_DIR / "i386" / "usr" / "lib" / "gcc-cross" / "i686-linux-gnu" / "12"),
@@ -58,7 +58,7 @@ ARCHITECTURES = {
         "format": "elf",
         "sysroot": SYSROOTS_DIR / "aarch64",
         "c_compiler": ["clang", "--target=aarch64-linux-gnu", "-fuse-ld=lld"],
-        "cxx_compiler": ["clang++", "--target=aarch64-linux-gnu", "-fuse-ld=lld", "-nostdlib++"],
+        "cxx_compiler": ["clang++", "--target=aarch64-linux-gnu", "-fuse-ld=lld"],
         "extra_flags": [
             "-B", str(SYSROOTS_DIR / "aarch64" / "usr" / "lib" / "gcc-cross" / "aarch64-linux-gnu" / "12"),
             "-L", str(SYSROOTS_DIR / "aarch64" / "usr" / "lib" / "gcc-cross" / "aarch64-linux-gnu" / "12"),
@@ -70,7 +70,7 @@ ARCHITECTURES = {
         "format": "elf",
         "sysroot": SYSROOTS_DIR / "powerpc",
         "c_compiler": ["clang", "--target=powerpc-linux-gnu", "-fuse-ld=lld"],
-        "cxx_compiler": ["clang++", "--target=powerpc-linux-gnu", "-fuse-ld=lld", "-nostdlib++"],
+        "cxx_compiler": ["clang++", "--target=powerpc-linux-gnu", "-fuse-ld=lld"],
         "extra_flags": [
             "-B", str(SYSROOTS_DIR / "powerpc" / "usr" / "lib" / "gcc-cross" / "powerpc-linux-gnu" / "12"),
             "-L", str(SYSROOTS_DIR / "powerpc" / "usr" / "lib" / "gcc-cross" / "powerpc-linux-gnu" / "12"),
@@ -122,7 +122,9 @@ def sha256_file(p: Path) -> str:
 
 def ensure_sysroots():
     manifest = SYSROOTS_DIR / "sysroot-manifest.json"
-    if not manifest.exists():
+    runtimes = [cfg["sysroot"] / "usr" / cfg["target"] / "lib" / "libstdc++.so.6"
+                for cfg in ARCHITECTURES.values() if cfg["sysroot"]]
+    if not manifest.exists() or any(not path.exists() for path in runtimes):
         print("Fetching cross sysroots via tools/fetch_cross_sysroots.py...")
         subprocess.run([sys.executable, str(FETCH_SYSROOTS_SCRIPT)], check=True)
 

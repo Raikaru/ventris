@@ -30,6 +30,18 @@ script and this document are tracked.
 | **i386** | `libc6-dev-i386-cross 2.36-8cross1`, `libc6-i386-cross 2.36-8cross1`, `linux-libc-dev-i386-cross 6.1.4-1cross1`, `libgcc-12-dev-i386-cross 12.2.0-14cross1`, `libgcc-s1-i386-cross 12.2.0-14cross1` |
 | **PowerPC 32-bit BE** | `libc6-dev-powerpc-cross 2.36-8cross1`, `libc6-powerpc-cross 2.36-8cross1`, `linux-libc-dev-powerpc-cross 6.1.4-1cross1`, `libgcc-12-dev-powerpc-cross 12.2.0-13cross1`, `libgcc-s1-powerpc-cross 12.2.0-13cross1` |
 
+The C++ fixtures additionally use `libstdc++-12-dev-{arm64,i386}-cross` and
+`libstdc++6-{arm64,i386}-cross` at `12.2.0-14cross1`, and the corresponding
+PowerPC packages at `12.2.0-13cross1`. All six archive SHA-256 values are pinned
+in `tools/fetch_cross_sysroots.py`. These are corpus toolchain dependencies,
+not Rust crate runtime dependencies. Exception stubs and `-nostdlib++` are
+not used.
+
+The Linux gate requires `qemu-i386`, `qemu-aarch64` and `qemu-ppc` (Debian:
+`qemu-user`). It executes positive TLS arithmetic and negative throw/catch
+inputs on all four ELF targets, using `-L SYSROOT/usr/TARGET` for the cross
+loaders and libraries. Windows executes the same checks natively for MSVC.
+
 ## Target Architectures for Corpus (`m1-006`)
 
 Each architecture builds the 5 corpus variants:

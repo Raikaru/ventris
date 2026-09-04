@@ -76,6 +76,18 @@ SYSROOT_PACKAGES = {
                 "filename": "pool/main/g/gcc-12-cross/libgcc-s1-arm64-cross_12.2.0-14cross1_all.deb",
                 "sha256": "af1e686fc6a416228222e7bfb68317dd2fa2685236301ae29141fc6108a66cac",
             },
+            {
+                "name": "libstdc++-12-dev-arm64-cross",
+                "version": "12.2.0-14cross1",
+                "filename": "pool/main/g/gcc-12-cross/libstdc++-12-dev-arm64-cross_12.2.0-14cross1_all.deb",
+                "sha256": "942b5710c6b9792578dfa64f7a4633bc0d3cb205b56ded11297e240ff824f5da",
+            },
+            {
+                "name": "libstdc++6-arm64-cross",
+                "version": "12.2.0-14cross1",
+                "filename": "pool/main/g/gcc-12-cross/libstdc++6-arm64-cross_12.2.0-14cross1_all.deb",
+                "sha256": "9cba984b64d0cf11698978fc5e0fe93c7441d29b9f42f70f1c6c734cc9e2ea41",
+            },
         ],
     },
     "i386": {
@@ -113,6 +125,18 @@ SYSROOT_PACKAGES = {
                 "filename": "pool/main/g/gcc-12-cross/libgcc-s1-i386-cross_12.2.0-14cross1_all.deb",
                 "sha256": "0b31dd92565a7dbbc030c7643297d6030ebc4407f41d6f06b30513e6f43e4d31",
             },
+            {
+                "name": "libstdc++-12-dev-i386-cross",
+                "version": "12.2.0-14cross1",
+                "filename": "pool/main/g/gcc-12-cross/libstdc++-12-dev-i386-cross_12.2.0-14cross1_all.deb",
+                "sha256": "d63165e2605dd9c1740126fd0e4b7faec0eebd3f0f2f62d85b6727777610de6e",
+            },
+            {
+                "name": "libstdc++6-i386-cross",
+                "version": "12.2.0-14cross1",
+                "filename": "pool/main/g/gcc-12-cross/libstdc++6-i386-cross_12.2.0-14cross1_all.deb",
+                "sha256": "2302c4b9f6f705fe55fe039b4a64658df8a841c30ba886e92bc43f1704623e5f",
+            },
         ],
     },
     "powerpc": {
@@ -149,6 +173,18 @@ SYSROOT_PACKAGES = {
                 "version": "12.2.0-13cross1",
                 "filename": "pool/main/g/gcc-12-cross-ports/libgcc-s1-powerpc-cross_12.2.0-13cross1_all.deb",
                 "sha256": "7ba63eb8bb4ca392a0cbe8616086e4630f04c768dc0327fe8d2a2c8b258e4b28",
+            },
+            {
+                "name": "libstdc++-12-dev-powerpc-cross",
+                "version": "12.2.0-13cross1",
+                "filename": "pool/main/g/gcc-12-cross-ports/libstdc++-12-dev-powerpc-cross_12.2.0-13cross1_all.deb",
+                "sha256": "86272dcd16116d32f91fe82eee69672c1d590d1c8163f39bb7ec74eeb033b83d",
+            },
+            {
+                "name": "libstdc++6-powerpc-cross",
+                "version": "12.2.0-13cross1",
+                "filename": "pool/main/g/gcc-12-cross-ports/libstdc++6-powerpc-cross_12.2.0-13cross1_all.deb",
+                "sha256": "248999a52b8e3baa8892b9f815d37ede7e2d5af915c373fc8995e43c0517ccb3",
             },
         ],
     },
@@ -221,8 +257,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--base-url",
-        default="http://deb.debian.org/debian",
-        help="Debian mirror (default: http://deb.debian.org/debian)",
+        default="https://deb.debian.org/debian",
+        help="Debian mirror (default: https://deb.debian.org/debian)",
     )
     parser.add_argument(
         "--dry-run",

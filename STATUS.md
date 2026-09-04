@@ -600,6 +600,9 @@ M1 — Discovery becomes generic
   legacy corpus 5/5 and m1-006 Linux corpus 20/20; only 5 local MSVC skips allowed.
 - m1-006-b: replace C++ exception stubs with real cross-target runtimes; execute
   the exception/TLS fixture on supported hosts. Acceptance: corpus gate runtime checks.
+  Verified: exception/TLS inputs execute on all 4 ELF targets (native x86-64,
+  QEMU i386/AArch64/PPC32-BE), 8/8 expected outcomes. Corpus 20/20 imports;
+  3 integrity tests, 97 workspace tests and legacy corpus 5/5 pass.
 - m1-006-c: validate PDB streams, symbols and exact CodeView association; use
   the linker PDB. Acceptance: `tests/m1-006_pdb_test.py`.
 - Execute these sub-tasks separately; each commit must stay below 800 changed lines.
