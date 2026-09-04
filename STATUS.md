@@ -751,13 +751,40 @@ M1 — Discovery becomes generic
   then fix legitimate remaining misses without oracle-derived seeds.
 - m1-008b-e: required gates, generated reports and final verification.
 
+## m1-008b verified
+- Test-first commits: `9cbe142` (scoring policy), `35e07be` (pointer flow),
+  `e50bafb` (approved-score discovery). Implementation: `16555ca`, `9189859`.
+- Generated reports committed in `1c0cd74`:
+  `benchmarks/reports/m1-008b-scoring.json` and
+  `benchmarks/reports/m1-008b-v1.json`, both naming implementation `9189859`.
+  Historical failure/classification reports and raw `oracle/*.json` are unchanged.
+- All 20 ELF scoring views: 2,008 raw functions, 1,903 scored, 105 positively
+  identified synthetic external placeholders excluded. Every exclusion records
+  loader/block/thunk evidence; each view includes raw-reference/exporter hashes.
+  PLT stubs, thunks and unreferenced code remain scored. No permission-only or
+  address-range exclusion is used.
+- x86-64 plain_o0: 12/12 matches; cpp_o2: 20/20 matches. Recall and precision
+  are 1.0 for both; 0 misses, 0 extras. Recall threshold remains 0.98.
+  This is the two-input prerequisite gate, not cross-architecture discovery parity.
+- Native discovery now retains dynamic-symbol index zero, reads ELF unwind
+  function indexes and the PLT resolver entry, and flow-confirms initializer/data
+  pointers. Candidate traversal follows indirect-call fallthrough. The broad
+  linear-scan experiment was discarded; no oracle-derived seeds are used.
+- Verification: workspace 102 tests; core no-default 53; core x86_decoder 54.
+  Scoring acceptance 4 tests passed with 20 fresh temporary raw oracles and
+  20 fresh evidence exports; committed raw bytes stayed unchanged. CI runs this
+  isolated acceptance without depending on this workstation's compiler hashes.
+  Legacy corpus 5/5; DOL remains 633/644 matches, 699 native entries; support
+  matrix check passed. Isolated release libc import: 4,046 functions in 3.879 s
+  (<5 s). A run overlapping Ghidra verification took 5.454 s; no performance
+  claim is made for concurrent verification workloads. Rustfmt is unavailable.
+
 ## Blocked on
-- m1-010: the recorded m1-008b prerequisite must pass first.
+- None for the recorded m1-010 prerequisite.
 
 ## Next task
-- m1-008b: execute the approved sub-tasks above. The existing failing
-  acceptance is `tests/m1-008b_pointer_seeds.py`; complete this prerequisite
-  before m1-010.
+- m1-010. The m1-008b prerequisite is complete; m1-010 was not started in this
+  session.
 
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a

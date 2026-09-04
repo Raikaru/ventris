@@ -162,8 +162,8 @@ RUNS=3 VENTRIS_SLA=... ./benchmarks/gate.sh # memory/perf gates
   the SLEIGH console) while the stock baseline runs Ghidra's full analyzer.
   Speed/memory win is real but is *at the price of analysis depth* — a trade
   against Ghidra, not a replacement.
-- **Real-binary sample (`/usr/lib64/libc.so.6`, 2.48 MB, stripped, this
-  machine)**: native import recovers 3,999 functions in 0.54 s (exported
+- **Historical real-binary measurement (`/usr/lib64/libc.so.6`, 2.48 MB,
+  stripped, this machine)**: native import recovered 3,999 functions in 0.54 s (exported
   symbols, init/fini arrays, two-path flow closure); a real 192-byte varargs
   function (`__GI___asprintf`) decompiles natively in 0.9 s. Against the
   Ghidra oracle (3,987): intersection 3,930 — **precision 0.983, recall
