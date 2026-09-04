@@ -605,6 +605,10 @@ M1 — Discovery becomes generic
   3 integrity tests, 97 workspace tests and legacy corpus 5/5 pass.
 - m1-006-c: validate PDB streams, symbols and exact CodeView association; use
   the linker PDB. Acceptance: `tests/m1-006_pdb_test.py`.
+  Verified locally: real LLVM PE/PDB pair exposes 2 function symbols; 7 PDB
+  corruptions rejected (header-only, truncation, block reference, GUID, age,
+  missing symbol stream, malformed record). MSVC uses a separate compiler PDB
+  and explicit linker `/PDB`; Windows CI remains required for final acceptance.
 - Execute these sub-tasks separately; each commit must stay below 800 changed lines.
   m1-007 remains out of scope until these corrections and CI pass.
 

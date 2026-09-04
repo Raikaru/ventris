@@ -56,9 +56,14 @@ jobs:
       - name: Install LLVM tools
         run: sudo apt-get update && sudo apt-get install -y llvm lld clang qemu-user
       - name: Run Multi-Architecture Corpus Gate
-        run: bash tests/m1-006_corpus.sh
+        run: |
+          bash tests/m1-006_corpus.sh
+          git diff --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
       - name: Reject corrupt corpus manifests
         run: python3 tests/m1-006_integrity_test.py
+      - name: Reject corrupt PE symbol databases
+        run: python3 tests/m1-006_pdb_test.py
 
   corpus-windows:
     name: MSVC Corpus (windows-latest)
@@ -77,6 +82,8 @@ jobs:
             export PATH="$(cygpath -u "$VCToolsInstallDir")/bin/Hostx64/x64:$PATH"
           fi
           bash tests/m1-006_corpus.sh --msvc-only
+          git diff --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
 
   qt:
     name: Qt desktop (${{ matrix.os }})

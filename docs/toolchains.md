@@ -119,3 +119,10 @@ report, binaries and import database in a temporary directory.
 it preserves every recipe and matrix entry and does not build binaries.
 Recipe changes are reviewed edits to `tests/corpus.lock.json`. Per-run binary
 hashes belong in the generated manifest, not the cross-host recipe lock.
+
+MSVC builds put `/Fo` objects and `/Fd` compiler state under the temporary
+output directory. `/DEBUG:FULL /PDB:...` produces the separate linker PDB.
+Validation checks MSF block/stream bounds, PDB Info and DBI ages, exact RSDS
+GUID/age and filename association, and complete public function symbol records.
+The primary has no debug-directory reference; every executable section retains
+the twin's name, RVA, virtual/raw sizes and bytes.

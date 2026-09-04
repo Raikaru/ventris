@@ -258,7 +258,7 @@
       "binary": "msvc_plain_o0.exe",
       "unstripped_twin": "msvc_plain_o0.unstripped.exe",
       "symbol_artifact": "msvc_plain_o0.pdb",
-      "command": "cl /nologo /Od /Zi /FS tests/corpus-src/plain.c /Fe:$OUT/msvc_plain_o0.unstripped.exe /Fd:$OUT/msvc_plain_o0.pdb /link /DEBUG"
+      "command": "cl /nologo /Od /Zi /FS tests/corpus-src/plain.c /Fo$OUT/msvc_plain_o0.obj /Fe$OUT/msvc_plain_o0.unstripped.exe /Fd$OUT/msvc_plain_o0.compiler.pdb /link /DEBUG:FULL /INCREMENTAL:NO /PDB:$OUT/msvc_plain_o0.pdb"
     },
     {
       "architecture": "msvc",
@@ -269,7 +269,7 @@
       "binary": "msvc_plain_o2.exe",
       "unstripped_twin": "msvc_plain_o2.unstripped.exe",
       "symbol_artifact": "msvc_plain_o2.pdb",
-      "command": "cl /nologo /O2 /Zi /FS tests/corpus-src/plain.c /Fe:$OUT/msvc_plain_o2.unstripped.exe /Fd:$OUT/msvc_plain_o2.pdb /link /DEBUG"
+      "command": "cl /nologo /O2 /Zi /FS tests/corpus-src/plain.c /Fo$OUT/msvc_plain_o2.obj /Fe$OUT/msvc_plain_o2.unstripped.exe /Fd$OUT/msvc_plain_o2.compiler.pdb /link /DEBUG:FULL /INCREMENTAL:NO /PDB:$OUT/msvc_plain_o2.pdb"
     },
     {
       "architecture": "msvc",
@@ -280,7 +280,7 @@
       "binary": "msvc_plain_pie.exe",
       "unstripped_twin": "msvc_plain_pie.unstripped.exe",
       "symbol_artifact": "msvc_plain_pie.pdb",
-      "command": "cl /nologo /O2 /Zi /FS tests/corpus-src/plain.c /Fe:$OUT/msvc_plain_pie.unstripped.exe /Fd:$OUT/msvc_plain_pie.pdb /link /DEBUG"
+      "command": "cl /nologo /O2 /Zi /FS tests/corpus-src/plain.c /Fo$OUT/msvc_plain_pie.obj /Fe$OUT/msvc_plain_pie.unstripped.exe /Fd$OUT/msvc_plain_pie.compiler.pdb /link /DEBUG:FULL /INCREMENTAL:NO /PDB:$OUT/msvc_plain_pie.pdb"
     },
     {
       "architecture": "msvc",
@@ -291,7 +291,7 @@
       "binary": "msvc_cpp_o2.exe",
       "unstripped_twin": "msvc_cpp_o2.unstripped.exe",
       "symbol_artifact": "msvc_cpp_o2.pdb",
-      "command": "cl /nologo /O2 /EHsc /Zi /FS tests/corpus-src/src.cpp /Fe:$OUT/msvc_cpp_o2.unstripped.exe /Fd:$OUT/msvc_cpp_o2.pdb /link /DEBUG"
+      "command": "cl /nologo /O2 /EHsc /Zi /FS tests/corpus-src/src.cpp /Fo$OUT/msvc_cpp_o2.obj /Fe$OUT/msvc_cpp_o2.unstripped.exe /Fd$OUT/msvc_cpp_o2.compiler.pdb /link /DEBUG:FULL /INCREMENTAL:NO /PDB:$OUT/msvc_cpp_o2.pdb"
     },
     {
       "architecture": "msvc",
@@ -302,7 +302,7 @@
       "binary": "msvc_many_o2.exe",
       "unstripped_twin": "msvc_many_o2.unstripped.exe",
       "symbol_artifact": "msvc_many_o2.pdb",
-      "command": "cl /nologo /O1 /Zi /FS tests/corpus-src/many.c /Fe:$OUT/msvc_many_o2.unstripped.exe /Fd:$OUT/msvc_many_o2.pdb /link /DEBUG"
+      "command": "cl /nologo /O1 /Zi /FS tests/corpus-src/many.c /Fo$OUT/msvc_many_o2.obj /Fe$OUT/msvc_many_o2.unstripped.exe /Fd$OUT/msvc_many_o2.compiler.pdb /link /DEBUG:FULL /INCREMENTAL:NO /PDB:$OUT/msvc_many_o2.pdb"
     }
   ]
 }

@@ -329,14 +329,18 @@ def validate_elf_twin(bin_path: Path, twin_path: Path) -> int:
 
 
 def parse_pe_info(data: bytes):
+    assert len(data) >= 64, "Truncated DOS header"
     assert data[:2] == b"MZ"
     pe_off = struct.unpack("<I", data[0x3c:0x40])[0]
+    assert pe_off + 24 <= len(data), "Truncated PE header"
     assert data[pe_off:pe_off+4] == b"PE\0\0"
     machine = struct.unpack("<H", data[pe_off+4:pe_off+6])[0]
     num_sections = struct.unpack("<H", data[pe_off+6:pe_off+8])[0]
     opt_size = struct.unpack("<H", data[pe_off+20:pe_off+22])[0]
     opt = pe_off + 24
+    assert opt_size >= 112 and opt + opt_size <= len(data), "Truncated optional header"
     magic = struct.unpack("<H", data[opt:opt+2])[0]
+    assert (machine, magic) in ((0x8664, 0x20b), (0x14c, 0x10b)), "Unsupported PE machine/magic"
     is_64 = (magic == 0x20b)
     
     if is_64:
@@ -351,6 +355,7 @@ def parse_pe_info(data: bytes):
         dbg_rva, dbg_size = struct.unpack("<II", data[dbg_entry_off:dbg_entry_off+8])
         
     sec_table = opt + opt_size
+    assert sec_table + num_sections * 40 <= len(data), "Truncated section table"
     sections = []
     for i in range(num_sections):
         so = sec_table + i * 40
@@ -360,6 +365,7 @@ def parse_pe_info(data: bytes):
         raw_size = struct.unpack("<I", data[so+16:so+20])[0]
         raw_off = struct.unpack("<I", data[so+20:so+24])[0]
         chars = struct.unpack("<I", data[so+36:so+40])[0]
+        assert raw_off + raw_size <= len(data), "Truncated section data"
         sections.append({
             "name": name,
             "vsize": vsize,
@@ -370,11 +376,82 @@ def parse_pe_info(data: bytes):
             "exec": (chars & 0x20000000) != 0,
         })
     return {
+        "machine": machine,
         "is_64": is_64,
         "dbg_rva": dbg_rva,
         "dbg_size": dbg_size,
         "sections": sections,
     }
+
+
+def validate_pdb(pdb_path: Path, guid: bytes, age: int, machine: int) -> int:
+    """Read MSF7/PDB Info/DBI and complete public records; see docs/third-party.md."""
+    data = pdb_path.read_bytes()
+    assert len(data) >= 56 and data[:32] == b"Microsoft C/C++ MSF 7.00\r\n\x1aDS\0\0\0", "Truncated or invalid MSF header"
+    block_size, free_map, num_blocks, directory_size, _, block_map = struct.unpack_from("<6I", data, 32)
+    assert block_size in (512, 1024, 2048, 4096) and free_map in (1, 2), "Invalid MSF geometry"
+    assert num_blocks * block_size == len(data), "Truncated MSF file"
+    assert 4 <= directory_size <= len(data), "Invalid stream directory size"
+
+    def block(index):
+        assert 0 <= index < num_blocks, "MSF block outside file"
+        return data[index * block_size:(index + 1) * block_size]
+
+    directory_blocks = (directory_size + block_size - 1) // block_size
+    assert directory_blocks * 4 <= block_size, "Directory block map exceeds one block"
+    indices = struct.unpack_from(f"<{directory_blocks}I", block(block_map))
+    directory = b"".join(block(i) for i in indices)[:directory_size]
+    stream_count = struct.unpack_from("<I", directory)[0]
+    assert 4 + stream_count * 4 <= len(directory), "Truncated stream size table"
+    sizes = struct.unpack_from(f"<{stream_count}I", directory, 4)
+    cursor = 4 + stream_count * 4
+    streams = []
+    for size in sizes:
+        if size == 0xffffffff:
+            streams.append(None)
+            continue
+        assert size <= len(data), "Stream exceeds file size"
+        count = (size + block_size - 1) // block_size
+        assert cursor + count * 4 <= len(directory), "Truncated stream block table"
+        indices = struct.unpack_from(f"<{count}I", directory, cursor)
+        assert all(i < num_blocks for i in indices), "Stream block outside file"
+        streams.append((size, indices))
+        cursor += count * 4
+    assert cursor == len(directory), "Invalid stream directory length"
+
+    def stream(index):
+        assert 0 <= index < len(streams) and streams[index] is not None, "Missing PDB stream"
+        size, indices = streams[index]
+        return b"".join(block(i) for i in indices)[:size]
+
+    info = stream(1)
+    assert len(info) >= 28, "Truncated PDB Info stream"
+    assert age > 0 and struct.unpack_from("<I", info, 8)[0] == age, "PDB age mismatch"
+    assert info[12:28] == guid, "PDB GUID mismatch"
+    dbi = stream(3)
+    assert len(dbi) >= 64, "Truncated DBI stream"
+    assert struct.unpack_from("<i", dbi)[0] == -1, "Invalid DBI signature"
+    assert struct.unpack_from("<I", dbi, 8)[0] == age, "DBI age mismatch"
+    assert struct.unpack_from("<H", dbi, 58)[0] == machine, "DBI machine mismatch"
+    sub_sizes = [struct.unpack_from("<i", dbi, off)[0] for off in (24, 28, 32, 36, 40, 48, 52)]
+    assert all(size >= 0 for size in sub_sizes) and 64 + sum(sub_sizes) == len(dbi), "Invalid DBI substreams"
+    records = stream(struct.unpack_from("<H", dbi, 20)[0])
+    cursor = 0
+    functions = 0
+    while cursor < len(records):
+        assert cursor + 4 <= len(records), "Truncated CodeView record header"
+        length, kind = struct.unpack_from("<HH", records, cursor)
+        end = cursor + length + 2
+        assert length >= 2 and end <= len(records), "Truncated CodeView symbol record"
+        if kind == 0x110e:  # S_PUB32: flags, offset, segment, NUL-terminated name.
+            assert length >= 14 and b"\0" in records[cursor + 14:end], "Invalid public symbol"
+            flags, _, segment = struct.unpack_from("<IIH", records, cursor + 4)
+            if flags & 2:  # PublicSymFlags::Function
+                assert segment > 0 and records[cursor + 14] != 0, "Invalid function symbol"
+                functions += 1
+        cursor = end
+    assert functions > 0, "PDB contains no public function symbols"
+    return functions
 
 
 def validate_pe_twin(bin_path: Path, twin_path: Path, pdb_path: Path):
@@ -396,42 +473,35 @@ def validate_pe_twin(bin_path: Path, twin_path: Path, pdb_path: Path):
         f"Unstripped PE {twin_path.name} must have a non-empty debug directory"
     )
     
-    # Map dbg_rva to raw file offset
-    dbg_sec = next((s for s in twin_info["sections"] if twin_info["dbg_rva"] >= s["vaddr"] and twin_info["dbg_rva"] < s["vaddr"] + s["vsize"]), None)
-    assert dbg_sec is not None, f"Debug directory RVA {twin_info['dbg_rva']:#x} not in any section"
-    dbg_raw_off = dbg_sec["raw_off"] + (twin_info["dbg_rva"] - dbg_sec["vaddr"])
-    
-    # Locate CodeView entry (Type == 2)
-    entry_count = twin_info["dbg_size"] // 28
-    found_cv = False
-    for i in range(entry_count):
+    def raw_offset(rva, size):
+        for section in twin_info["sections"]:
+            delta = rva - section["vaddr"]
+            if 0 <= delta and delta + size <= section["raw_size"]:
+                return section["raw_off"] + delta
+        raise AssertionError("Debug RVA range is not backed by section bytes")
+
+    assert twin_info["dbg_size"] % 28 == 0, "Invalid debug-directory size"
+    dbg_raw_off = raw_offset(twin_info["dbg_rva"], twin_info["dbg_size"])
+    symbol_count = None
+    for i in range(twin_info["dbg_size"] // 28):
         eo = dbg_raw_off + i * 28
-        e_type = struct.unpack("<I", twin_data[eo+12:eo+16])[0]
-        e_raw_off = struct.unpack("<I", twin_data[eo+24:eo+28])[0]
-        if e_type == 2:  # IMAGE_DEBUG_TYPE_CODEVIEW
-            sig = twin_data[e_raw_off:e_raw_off+4]
-            assert sig == b"RSDS", f"Expected RSDS CodeView signature in {twin_path.name}, got {sig}"
-            pdb_str = twin_data[e_raw_off+24:].split(b"\0")[0].decode(errors="replace")
-            assert pdb_path.name in pdb_str or pdb_path.stem in pdb_str, (
-                f"PDB reference mismatch: expected {pdb_path.name} in {pdb_str}"
-            )
-            found_cv = True
-            break
-    assert found_cv, f"No CodeView RSDS entry found in unstripped PE {twin_path.name}"
-    
-    # 3. PDB artifact itself must be valid
-    assert pdb_path.exists(), f"PDB artifact {pdb_path} missing"
-    assert pdb_path.stat().st_size > 0, f"PDB artifact {pdb_path} empty"
-    with open(pdb_path, "rb") as f:
-        pdb_hdr = f.read(32)
-    assert pdb_hdr.startswith(b"Microsoft C/C++ MSF 7.00\r\n\x1a\x44\x53\x00\x00\x00"), (
-        f"Invalid PDB header in {pdb_path.name}"
-    )
+        kind, size, rva, offset = struct.unpack_from("<4I", twin_data, eo + 12)
+        if kind != 2:
+            continue
+        assert size >= 25 and offset + size <= len(twin_data), "Truncated CodeView payload"
+        assert raw_offset(rva, size) == offset, "CodeView RVA/raw offset mismatch"
+        payload = twin_data[offset:offset + size]
+        assert payload[:4] == b"RSDS" and b"\0" in payload[24:], "Invalid RSDS record"
+        referenced_name = payload[24:].split(b"\0", 1)[0].replace(b"\\", b"/").rsplit(b"/", 1)[-1]
+        assert referenced_name == pdb_path.name.encode(), "PDB filename mismatch"
+        symbol_count = validate_pdb(pdb_path, payload[4:20], struct.unpack_from("<I", payload, 20)[0], twin_info["machine"])
+    assert symbol_count is not None, "Missing CodeView entry"
+    assert bin_info["machine"] == twin_info["machine"], "PE machine mismatch"
     
     # 4. Compare every executable section: RVA, VirtualSize, and raw bytes must be identical
     bin_exec_secs = [s for s in bin_info["sections"] if s["exec"]]
     twin_exec_secs = [s for s in twin_info["sections"] if s["exec"]]
-    assert len(bin_exec_secs) == len(twin_exec_secs), "Number of executable PE sections mismatch"
+    assert bin_exec_secs and len(bin_exec_secs) == len(twin_exec_secs), "Number of executable PE sections mismatch"
     
     for s_bin, s_twin in zip(bin_exec_secs, twin_exec_secs):
         assert s_bin["name"] == s_twin["name"], f"Section name mismatch {s_bin['name']} != {s_twin['name']}"
@@ -442,6 +512,7 @@ def validate_pe_twin(bin_path: Path, twin_path: Path, pdb_path: Path):
         b_bytes = bin_data[s_bin["raw_off"]:s_bin["raw_off"] + s_bin["raw_size"]]
         t_bytes = twin_data[s_twin["raw_off"]:s_twin["raw_off"] + s_twin["raw_size"]]
         assert b_bytes == t_bytes, f"Executable code bytes mismatch in section {s_bin['name']}"
+    return symbol_count
 
 
 def main():
@@ -572,18 +643,22 @@ def main():
                 if var_cfg["is_cpp"]:
                     msvc_flags.append("/EHsc")
                 
-                # Build unstripped twin with PDB debug info
-                cmd_twin = ["cl", "/nologo"] + msvc_flags + ["/Zi", "/FS", str(src_file), f"/Fe:{twin_path}", f"/Fd:{pdb_path}", "/link", "/DEBUG"]
+                # /Fd is compiler state; /PDB names the final executable's symbol database.
+                compiler_pdb = out_dir / f"{base_name}.compiler.pdb"
+                obj_path = out_dir / f"{base_name}.obj"
+                cmd_twin = ["cl", "/nologo"] + msvc_flags + [
+                    "/Zi", "/FS", str(src_file), f"/Fo{obj_path}", f"/Fe{twin_path}",
+                    f"/Fd{compiler_pdb}", "/link", "/DEBUG:FULL", "/INCREMENTAL:NO", f"/PDB:{pdb_path}",
+                ]
                 build_binary(cmd_twin, twin_path)
 
                 # Derive stripped primary
                 shutil.copy2(twin_path, bin_path)
                 strip_binary(bin_path)
 
-                # Validate MSVC twin: PE debug directory, PDB header, and code bytes identity
-                validate_pe_twin(bin_path, twin_path, pdb_path)
-
-                cmd_display = ["cl", "/nologo"] + msvc_flags + ["/Zi", "/FS", f"tests/corpus-src/{var_cfg['source']}", f"/Fe:$OUT/{twin_path.name}", f"/Fd:$OUT/{pdb_path.name}", "/link", "/DEBUG"]
+                # The gate independently validates the same complete PE/PDB relationship.
+                symbol_count = validate_pe_twin(bin_path, twin_path, pdb_path)
+                cmd_display = [arg.replace(str(out_dir), "$OUT").replace(str(ROOT) + os.sep, "").replace("\\", "/") for arg in cmd_twin]
 
                 manifest_data["entries"].append({
                     "architecture": "msvc",
@@ -597,6 +672,7 @@ def main():
                     "unstripped_twin_sha256": sha256_file(twin_path),
                     "symbol_artifact": pdb_path.name,
                     "symbol_artifact_sha256": sha256_file(pdb_path),
+                    "symbol_count": symbol_count,
                     "command": " ".join(cmd_display),
                 })
                 print(f"Generated {bin_path.name}, {twin_path.name}, and {pdb_path.name}")

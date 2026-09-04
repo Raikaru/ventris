@@ -108,7 +108,7 @@ mode = sys.argv[6]
 assert mode in ("normal", "msvc"), "Invalid gate mode"
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(committed_lock_path.parent.parent / "scripts"))
-from gen_corpus import count_symtab_functions
+from gen_corpus import count_symtab_functions, validate_pe_twin
 
 with open(committed_lock_path, "r") as f:
     authoritative_lock = json.load(f)
@@ -168,42 +168,6 @@ for entry in run_manifest["entries"]:
         digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
         assert digest == entry[field + "_sha256"], f"Artifact hash mismatch: {name}"
 
-# Helpers for PE / ELF validation
-def parse_pe(data):
-    assert data[:2] == b"MZ"
-    pe_off = struct.unpack("<I", data[0x3c:0x40])[0]
-    assert data[pe_off:pe_off+4] == b"PE\0\0"
-    opt = pe_off + 24
-    magic = struct.unpack("<H", data[opt:opt+2])[0]
-    is_64 = (magic == 0x20b)
-    dbg_rva, dbg_size = 0, 0
-    if is_64:
-        num_rva = struct.unpack("<I", data[opt+108:opt+112])[0]
-        if num_rva > 6:
-            dbg_rva, dbg_size = struct.unpack("<II", data[opt+160:opt+168])
-    else:
-        num_rva = struct.unpack("<I", data[opt+92:opt+96])[0]
-        if num_rva > 6:
-            dbg_rva, dbg_size = struct.unpack("<II", data[opt+144:opt+152])
-    
-    num_sections = struct.unpack("<H", data[pe_off+6:pe_off+8])[0]
-    opt_size = struct.unpack("<H", data[pe_off+20:pe_off+22])[0]
-    sec_table = opt + opt_size
-    sections = []
-    for i in range(num_sections):
-        so = sec_table + i * 40
-        name = data[so:so+8].split(b"\0")[0].decode(errors="replace")
-        vsize = struct.unpack("<I", data[so+8:so+12])[0]
-        vaddr = struct.unpack("<I", data[so+12:so+16])[0]
-        raw_size = struct.unpack("<I", data[so+16:so+20])[0]
-        raw_off = struct.unpack("<I", data[so+20:so+24])[0]
-        chars = struct.unpack("<I", data[so+36:so+40])[0]
-        sections.append({
-            "name": name, "vsize": vsize, "vaddr": vaddr,
-            "raw_size": raw_size, "raw_off": raw_off, "chars": chars,
-            "exec": (chars & 0x20000000) != 0,
-        })
-    return {"is_64": is_64, "dbg_rva": dbg_rva, "dbg_size": dbg_size, "sections": sections}
 
 def parse_elf(data):
     assert data[:4] == b"\x7fELF"
@@ -327,52 +291,8 @@ for entry in run_manifest["entries"]:
             assert b1 == b2, f"Loadable code at {v1:#x} must be bit-for-bit identical between stripped and unstripped twin"
 
     elif auth["format"] == "pe":
-        with open(bin_path, "rb") as f:
-            b_data = f.read()
-        with open(twin_path, "rb") as f:
-            t_data = f.read()
-
-        b_info = parse_pe(b_data)
-        t_info = parse_pe(t_data)
-
-        # 1. Primary PE has NO debug-directory reference
-        assert b_info["dbg_rva"] == 0 and b_info["dbg_size"] == 0, f"Primary PE {bin_path.name} must have no debug-directory reference"
-
-        # 2. Unstripped PE has VALID debug-directory reference
-        assert t_info["dbg_rva"] > 0 and t_info["dbg_size"] > 0, f"Unstripped PE {twin_path.name} must have non-empty debug directory"
-
-        # Check CodeView RSDS record in unstripped PE
-        pdb_name = auth.get("symbol_artifact", f"{arch}_{var}.pdb")
-        pdb_path = out_dir / pdb_name
-        dbg_sec = next(s for s in t_info["sections"] if t_info["dbg_rva"] >= s["vaddr"] and t_info["dbg_rva"] < s["vaddr"] + s["vsize"])
-        dbg_raw_off = dbg_sec["raw_off"] + (t_info["dbg_rva"] - dbg_sec["vaddr"])
-        found_cv = False
-        for i in range(t_info["dbg_size"] // 28):
-            eo = dbg_raw_off + i * 28
-            e_type = struct.unpack("<I", t_data[eo+12:eo+16])[0]
-            e_raw_off = struct.unpack("<I", t_data[eo+24:eo+28])[0]
-            if e_type == 2:  # CODEVIEW
-                assert t_data[e_raw_off:e_raw_off+4] == b"RSDS", f"Missing RSDS signature in {twin_path.name}"
-                found_cv = True
-                break
-        assert found_cv, f"No CodeView RSDS entry found in unstripped PE {twin_path.name}"
-
-        # 3. PDB artifact exists and is valid MSF 7.00
-        assert pdb_path.exists(), f"PDB artifact {pdb_path} missing"
-        with open(pdb_path, "rb") as pf:
-            hdr = pf.read(32)
-        assert hdr.startswith(b"Microsoft C/C++ MSF 7.00\r\n\x1a\x44\x53\x00\x00\x00"), "Invalid PDB header"
-        sym_count = "PDB"
-
-        # 4. Compare every executable PE section's RVA, VirtualSize, and raw bytes
-        b_exec_secs = [s for s in b_info["sections"] if s["exec"]]
-        t_exec_secs = [s for s in t_info["sections"] if s["exec"]]
-        assert len(b_exec_secs) == len(t_exec_secs), "Number of executable PE sections mismatch"
-        for s_bin, s_twin in zip(b_exec_secs, t_exec_secs):
-            assert s_bin["vaddr"] == s_twin["vaddr"], f"PE Section RVA mismatch for {s_bin['name']}"
-            assert s_bin["vsize"] == s_twin["vsize"], f"PE Section VirtualSize mismatch for {s_bin['name']}"
-            assert s_bin["raw_size"] == s_twin["raw_size"], f"PE Section SizeOfRawData mismatch for {s_bin['name']}"
-            assert b_data[s_bin["raw_off"]:s_bin["raw_off"] + s_bin["raw_size"]] == t_data[s_twin["raw_off"]:s_twin["raw_off"] + s_twin["raw_size"]], f"Executable code bytes mismatch in PE section {s_bin['name']}"
+        sym_count = validate_pe_twin(bin_path, twin_path, out_dir / auth["symbol_artifact"])
+        assert sym_count == entry["symbol_count"], f"Incorrect PDB symbol count for {twin_path.name}"
 
     runtime_check = None
     if var == "cpp_o2":
