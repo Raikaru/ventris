@@ -88,6 +88,7 @@ jobs:
         run: |
           python3 tests/m1-007_oracle_test.py
           python3 tests/m1-008_languages.py
+          python3 tests/m1-008b_scoring_test.py
           git diff --exit-code
           test -z "$(git ls-files --others --exclude-standard)"
 

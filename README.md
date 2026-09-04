@@ -178,6 +178,29 @@ RUNS=3 VENTRIS_SLA=... ./benchmarks/gate.sh # memory/perf gates
   console-dependent differential steps — the worker/CLI parity steps run
   unconditionally and pass.
 
+## Code-function scoring
+
+Raw SHA-keyed `oracle/*.json` references remain unchanged. The separately
+versioned `oracle/scoring-v1/` views exclude only Ghidra synthetic external
+placeholders with positive loader evidence: an artificial `EXTERNAL` block,
+source `Elf Loader`, and a thunk to an external function. Each exclusion
+records its reason and evidence; each view hashes its raw reference and exporter.
+Permissions or address-range membership alone never exclude a function.
+Executable PLT stubs, thunks and unreferenced code remain scored.
+
+```sh
+python3 scripts/gen_function_scoring.py --corpus-dir CORPUS \
+  --check --report /tmp/function-scoring.json
+python3 tests/m1-008b_pointer_seeds.py --corpus-dir CORPUS
+```
+
+Omit `--check` to regenerate evidence with pinned Ghidra. `--oracle-dir` and
+`--output-dir` support isolated toolchain-specific references without replacing
+the committed raw corpus. The policy covers all 20 ELF inputs; the m1-008b
+discovery gate covers x86-64 `plain_o0` and `cpp_o2`, with recall >=0.98.
+Native ELF discovery uses unwind-index function entries and PLT metadata,
+flow-confirmed initializer/data pointers, and the existing batched flow walker.
+
 ## Support matrix
 
 | Input | Structural native import | Native flow/decode/decompile |

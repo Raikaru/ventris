@@ -24,9 +24,16 @@ class ScoringAcceptance(unittest.TestCase):
         if "CORPUS_DIR" not in os.environ:
             subprocess.run([sys.executable, "scripts/gen_corpus.py", "--architectures",
                             "x86_64,i386,aarch64,powerpc", "--out-dir", str(cls.corpus)], cwd=ROOT, check=True)
-        cls.before = {p: p.read_bytes() for p in (ROOT / "oracle").glob("*.json")}
+        cls.oracles = Path(os.environ.get("ORACLE_DIR", str(cls.work / "oracle")))
+        if "ORACLE_DIR" not in os.environ:
+            subprocess.run([sys.executable, "scripts/gen_oracle.py", "--corpus-dir",
+                            str(cls.corpus), "--output-dir", str(cls.oracles),
+                            "--report", str(cls.work / "oracles.json")], cwd=ROOT, check=True)
+        cls.before = {p: p.read_bytes() for directory in (ROOT / "oracle", cls.oracles)
+                      for p in directory.glob("*.json")}
         cls.command = [sys.executable, str(ROOT / "scripts/gen_function_scoring.py"),
                        "--corpus-dir", str(cls.corpus), "--output-dir", str(cls.work / "views"),
+                       "--oracle-dir", str(cls.oracles),
                        "--report", str(cls.work / "report.json")]
         result = subprocess.run(cls.command, cwd=ROOT, text=True, capture_output=True, timeout=900)
         if result.returncode:
@@ -37,7 +44,7 @@ class ScoringAcceptance(unittest.TestCase):
         self.assertEqual(self.report["summary"], {"pass": 20, "fail": 0, "skipped": 0})
         from gen_oracle import digest
         for row in self.report["corpus"]:
-            raw = ROOT / "oracle" / (row["sha256"] + ".json")
+            raw = self.oracles / (row["sha256"] + ".json")
             view = json.loads((self.work / "views" / raw.name).read_text())
             entries = set(json.loads(raw.read_text())["entries"])
             kept = set(view["entries"])
@@ -67,6 +74,13 @@ class ScoringAcceptance(unittest.TestCase):
             self.assertFalse(json.loads((self.work / "report.json").read_text())["passed"])
         finally:
             path.write_bytes(original)
+
+    def test_rejects_output_over_raw_oracles(self):
+        result = subprocess.run(self.command + ["--output-dir", str(self.oracles)],
+                                cwd=ROOT, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        for path, content in self.before.items():
+            self.assertEqual(path.read_bytes(), content, str(path))
 
 
 class ScoringPolicy(unittest.TestCase):

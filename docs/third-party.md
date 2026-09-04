@@ -30,3 +30,18 @@ Sparse console images use the pinned Ghidra `LoadImageXml` implementation
 (`third_party/ghidra/decompiler/loadimage_xml.cc`, Apache-2.0), without modifying
 the upstream tree. The private game binary and matching symbol ELF are local
 gate inputs, not redistributed repository fixtures.
+
+## ELF unwind indexes and synthetic external evidence
+
+The `.eh_frame_hdr` reader follows the published
+[LSB DWARF extensions](https://refspecs.linuxfoundation.org/LSB_5.0.0/LSB-Core-generic/LSB-Core-generic/dwarfext.html)
+and Ghidra 12.1.3's `ExceptionHandlerFrameHeader`, `FdeTable`,
+`DwarfEHDataDecodeFormat` and `DwarfEHDataApplicationMode` (Apache-2.0).
+The implementation reads metadata; it does not copy Ghidra implementation code.
+
+The oracle-only `ExportFunctionScoring.java` API calls were checked against
+the installed 12.1.3 Java sources. `ElfProgramBuilder.createExternalBlock`
+and `evaluateElfSymbol` establish the positive synthetic-placeholder evidence:
+an artificial `EXTERNAL` block sourced from `Elf Loader`, plus a thunk to an
+external function. The exporter lives outside the runtime bridge and does not
+change its fingerprint or the immutable raw oracle references.
