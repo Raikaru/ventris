@@ -694,12 +694,33 @@ M1 — Discovery becomes generic
   for sparse DOL discovery; do not modify the pinned upstream tree.
 - m1-009-d: commit the generated recall report, regression evidence and docs.
 
+## m1-009 verified
+- Acceptance test first: `56e8c31`; implementation: `f52d1f7`.
+  Generated real-input report committed in `a874753`:
+  `benchmarks/reports/m1-009.json`.
+- Matching GQFE78 `main.dol` / `boot.elf`: 644 oracle entries, 699 native
+  entries, 633 matches. Recall 0.982919 >= 0.95; precision 0.905579.
+  There are 11 misses and 66 native-only entries; both lists are recorded.
+  This passes the specified recall gate, not a broader precision/parity gate.
+- All 10 initialized section mappings and BSS zero fill checked through
+  the consumer memory API; malformed file ranges, address wrap and overlap
+  rejected. Unit tests also cover initialized data inside BSS and invalid entry.
+- Sparse XML loading uses the pinned console without upstream changes.
+  SLEIGH direct calls and return-boundary candidates feed the generic worklist.
+  Decoded instruction ranges, not distant-branch bounding spans, prove
+  candidate containment. The focused gap regression failed before the fix.
+- `cargo test --workspace`: 100 passed; no-default-feature core: 51 passed;
+  `tests/corpus.sh`: 5/5; README support-matrix check passed.
+  Actual DOL disassembly at `80680040`: `bl 80680154`, `bl 80680230`,
+  `li r0,-1`. Rust formatting could not run: `rustfmt` is not installed.
+- The private DOL/ELF pair is not redistributed; the real-input gate ran
+  locally, not in CI. Missing inputs remain skipped/non-passing.
+  `.rel` support is not implemented. No corpus or metric definition changed.
+
 ## Next task
-- m1-009: stripped GameCube `.dol` loader (section table to image), with
-  discovery through the generic worklist. `.rel` support is optional.
-  Acceptance: function recall against the matching `boot.elf` symbol oracle
-  is at least 0.95 on the real stripped `sys/main.dol`.
-  Execute the sub-tasks above; `.rel` support is optional.
+- m1-010. Preserve the architecture-specific accelerator restriction below.
+  Its acceptance test has not been written in this session; implementation
+  has not started.
 
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a
