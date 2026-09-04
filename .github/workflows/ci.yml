@@ -53,6 +53,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install LLVM tools
+        run: sudo apt-get update && sudo apt-get install -y llvm
       - name: Run Multi-Architecture Corpus Gate
         run: bash tests/m1-006_corpus.sh
 
@@ -64,9 +66,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: ilammy/msvc-dev-cmd@v1
+      - name: Build lre-cli
+        run: cargo build -p lre-cli
       - name: Run MSVC Corpus Gate
         shell: bash
-        run: bash tests/m1-006_corpus.sh --msvc-only
+        run: |
+          if [ -n "${VCToolsInstallDir:-}" ]; then
+            export PATH="$(cygpath -u "$VCToolsInstallDir")/bin/Hostx64/x64:$PATH"
+          fi
+          bash tests/m1-006_corpus.sh --msvc-only
 
   qt:
     name: Qt desktop (${{ matrix.os }})

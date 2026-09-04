@@ -11,26 +11,42 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-CLI="$ROOT/target/debug/lre-cli"
+if [ -f "$ROOT/target/debug/lre-cli.exe" ]; then
+    CLI="$ROOT/target/debug/lre-cli.exe"
+elif [ -f "$ROOT/target/debug/lre-cli" ]; then
+    CLI="$ROOT/target/debug/lre-cli"
+else
+    CLI="$ROOT/target/debug/lre-cli"
+fi
+
 CORPUS_SRC="$ROOT/tests/corpus-src"
 COMMITTED_LOCK="$ROOT/tests/corpus.lock.json"
 GEN_SCRIPT="$ROOT/scripts/gen_corpus.py"
 REPORT_OUT="${REPORT_OUT:-$ROOT/benchmarks/reports/m1-006.json}"
 
+PYTHON_BIN="python3"
+if ! command -v python3 >/dev/null 2>&1 && command -v python >/dev/null 2>&1; then
+    PYTHON_BIN="python"
+fi
+
 echo "=== m1-006: multi-architecture corpus generation gate ==="
 
-# 1. Build lre-cli inside the gate so it works from a clean checkout
-echo "Building lre-cli..."
-cargo build -p lre-cli --quiet
-if [ -f "$ROOT/target/debug/lre-cli.exe" ]; then
-    CLI="$ROOT/target/debug/lre-cli.exe"
-fi
-# 2. Check committed sources and committed lock exist
-if [ ! -d "$CORPUS_SRC" ]; then
-    echo "FAIL: corpus source directory $CORPUS_SRC does not exist"
-    exit 1
+# 1. Ensure MSVC linker takes precedence if VCToolsInstallDir is set in Git Bash on Windows
+if [ -n "${VCToolsInstallDir:-}" ]; then
+    if command -v cygpath >/dev/null 2>&1; then
+        export PATH="$(cygpath -u "$VCToolsInstallDir")/bin/Hostx64/x64:$PATH"
+    else
+        export PATH="$VCToolsInstallDir/bin/Hostx64/x64:$PATH"
+    fi
 fi
 
+# 2. Build lre-cli inside the gate if not already built so it works from a clean checkout
+if [ ! -f "$CLI" ]; then
+    echo "Building lre-cli..."
+    cargo build -p lre-cli --quiet
+fi
+
+# 3. Check committed sources and committed lock exist
 for src in plain.c src.cpp many.c; do
     if [ ! -f "$CORPUS_SRC/$src" ]; then
         echo "FAIL: expected committed source $CORPUS_SRC/$src missing"
@@ -54,13 +70,12 @@ if [ "${1:-}" = "--msvc-only" ]; then
 elif [ -n "${1:-}" ]; then
     ARCH_ARGS=("$@")
 fi
-
 echo "Running corpus generator..."
-python3 "$GEN_SCRIPT" --out-dir "$OUT_DIR" --lock "$TMP_LOCK" "${ARCH_ARGS[@]}"
+"$PYTHON_BIN" "$GEN_SCRIPT" --out-dir "$OUT_DIR" --lock "$TMP_LOCK" "${ARCH_ARGS[@]}"
 
 # 4. Run python verification and report generation
 echo "Validating multi-architecture corpus artifacts and generating gate report..."
-python3 - "$COMMITTED_LOCK" "$TMP_LOCK" "$OUT_DIR" "$CLI" "$REPORT_OUT" <<'EOF'
+"$PYTHON_BIN" - "$COMMITTED_LOCK" "$TMP_LOCK" "$OUT_DIR" "$CLI" "$REPORT_OUT" <<'EOF'
 import json
 import os
 import struct
