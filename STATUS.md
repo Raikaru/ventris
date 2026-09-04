@@ -799,11 +799,37 @@ M1 — Discovery becomes generic
   Keep each commit below 800 changed lines; no milestone pass until all rows
   and the architecture check pass.
 
+## m1-010 progress and sequencing blocker
+- Failing acceptance committed first in `bc0e10f`; the complete initial
+  20-input report was committed in `ea0fed1`. Shared flow worklist extraction
+  committed in `9f9bcf9`: no algorithm or caller behavior changed.
+- Gate results before/after extraction: 7 pass, 13 fail, 0 skipped.
+  All four PIE inputs have zero exact-address overlap. Smaller i386/AArch64
+  inputs miss functions; PPC also has native-only entries. Full address lists
+  remain in `benchmarks/reports/discovery-gate.json`. The legacy-route source
+  check still fails. M1 and m1-010 are not complete.
+- Concrete later-milestone dependency: stripped `i386_plain_o0`, SHA-256
+  `cea7cb1a23dbe84ab789761e612422415ee857945668ed2d28f06b5b1e3237ba`,
+  retains oracle entry `004014d0` (`register_tm_clones` in the source twin).
+  `llvm-objdump` shows its only direct transfer is `00401540: jmp 004014d0`
+  from `frame_dummy`. The stripped file contains zero absolute pointer
+  occurrences of that address; `llvm-dwarfdump --eh-frame` lists FDE starts
+  `00401440`, `00401470`, `00401550`, `00401570`, not `004014d0`.
+- Recovering that distinct entry requires thunk/tail-call recognition
+  (roadmap m2-009), not blanket branch-target promotion. Per the hard rule on
+  later-milestone dependencies, implementation stops for a sequencing decision.
+  No M2 analyzer, reference exclusion, corpus change or threshold change was made.
+- Extraction verification: workspace 102 tests; legacy corpus 5/5; real DOL
+  remains 633/644 matches with 699 native functions. Sub-tasks c–e are not
+  complete; the failing gate is evidence, not a passing milestone claim.
+
 ## Blocked on
-- None for the recorded m1-010 prerequisite.
+- m1-010: approved resequencing is needed for the m2-009 thunk/tail-call
+  prerequisite above. Do not start M2 or substitute branch promotion.
 
 ## Next task
-- m1-010-b: extract the shared worklist; acceptance is committed in `bc0e10f`.
+- m1-010-c, blocked on the sequencing decision above. The failing acceptance
+  exists; do not start a later-milestone task without that decision.
 
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a

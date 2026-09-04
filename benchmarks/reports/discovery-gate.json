@@ -2,7 +2,7 @@
   "gate": "discovery",
   "milestone": "M1",
   "scoring_policy": "code-functions-v1",
-  "commit": "bc0e10fb3e1fdba4ffbac3f0e534da206935fff3",
+  "commit": "9f9bcf9f67122732f498190fa896b9572e442c1f",
   "date": "2026-09-04",
   "machine": {
     "os": "Linux-7.1.12-200.fc44.x86_64-x86_64-with-glibc2.43",
@@ -11,8 +11,8 @@
   "architecture_check": {
     "passed": false,
     "core": "crates/lre-core/src/native/discovery.rs",
-    "core_sha256": "fd75e4ffd12f5dc1ac878e7dde5d7d96c0a42c2d27c9906eda297d2b648ca4ab",
-    "legacy_source_sha256": "31cdb72fd41400a6e5f41df35e3e62c7bdc30abe3b4b0283abc416a899e2204b",
+    "core_sha256": "b85202da1d5c3c30e8b23a590eb9eca9eeadf25ced022d04c25dbe4b2f53cc2f",
+    "legacy_source_sha256": "7b80437e2aca8ff95cc43e32db58eb7a5ccff6b391834a331462b25f31b76a7c",
     "legacy_discovery_definitions": [
       "sweep_ppc_calls",
       "sweep_calls",
@@ -21,9 +21,7 @@
       "sweep_calls_x86",
       "flow_discover_x86",
       "flow_discover_x86",
-      "flow_discover_console",
-      "flow_discover_with_provider",
-      "flow_discover_with_candidates"
+      "flow_discover_console"
     ],
     "isa_specific_lines": []
   },
