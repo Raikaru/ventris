@@ -502,6 +502,12 @@ green (82 tests across 20 suites); the CPack TGZ builds.
 M1 — Discovery becomes generic
 
 ## M1 progress
+- m1-005: implemented PE base relocations (.reloc directory 5, IMAGE_REL_BASED_DIR64/HIGHLOW),
+  entry point calculation fix (opt + 16), image base selection supporting PE32/PE32+,
+  and durable store writes of relocated pointer symbols (`reloc_ptr_<target>` with
+  source `native-import:pe-reloc`). On `tiny_pe.exe`, discovered functions grew from 1 to 38,
+  with 16 relocated pointer symbols recorded in the store. Acceptance test
+  `tests/m1-005_pe_relocs.sh` passes (PASS).
 - m1-003-f: hand decoder candidate pre-pass confirmed by batched flow; achieves
   fn.precision=1.0000 and exact set equality (3,955/3,955) on libc. Re-benchmarked
   with all corpus rows scored against unstripped references. Median speedup on libc:
@@ -537,12 +543,23 @@ M1 — Discovery becomes generic
 - m1-003-d: benchmark the two paths on libc and the x86-64 corpus and decide
   keep/delete `disasm.rs`.
 
+## Known gaps
+- Corpus-binary discovery vs unstripped symbols is far below the M1 threshold
+  (cpp_o2 p=0.43 r=0.56, plain_o0 0.80/0.80).
+- m1-008b (before m1-010): dump missed/extra entries for cpp_o2 and plain_o0;
+  classify each as (a) reference noise Ghidra also omits, (b) reachable only
+  via data pointers (vtables, init/fini arrays, function-pointer tables), or
+  (c) unreferenced. Add seeds for (b): scan .init_array/.fini_array, and pointer-sized
+  values in .data/.rodata/.data.rel.ro that land in executable sections and confirm
+  via batched flow. Acceptance: cpp_o2 and plain_o0 recall >= 0.98 against the
+  m1-007 Ghidra oracle.
+
 ## Next task
-- m1-005: PE relocations (base relocation directory `.reloc`, IMAGE_REL_BASED_*,
-  relocated pointers into store, image base selection); acceptance on PE corpus entries.
+- m1-006: multi-architecture corpus generation (x86-64, x86-32, AArch64, PPC32-BE)
+  across the 5 corpus variants ({C -O0, C -O2, C++ exceptions+TLS, stripped, PIE})
+  per docs/toolchains.md.
 
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a
   clearly separated accelerator module with an equivalence test, never in the
   discovery core. (Recorded per user direction; do not re-argue.)
-
