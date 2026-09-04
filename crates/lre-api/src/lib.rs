@@ -626,17 +626,19 @@ mod tests {
     use super::*;
     use std::path::Path;
     use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn service() -> ApiService {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        ApiService::new(Core::open(Path::new(&format!(
-            "/tmp/ventris-api-test-{nonce}"
-        )))
-        .unwrap())
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        let path = std::env::temp_dir().join(format!("ventris-api-test-{pid}-{nonce}-{id}"));
+        ApiService::new(Core::open(&path).unwrap())
     }
 
     #[test]
