@@ -733,25 +733,31 @@ M1 — Discovery becomes generic
   The other misses include unreferenced code and PLT resolver paths, not just
   data-pointer seeds. No implementation or oracle changes have been made.
 
-## Blocked on
-- m1-008b: human decision about synthetic external entries in the function
-  recall denominator. Per II.0/II.1, stop before any metric change.
-- m1-010: the explicitly recorded m1-008b prerequisite is not passed.
+## Approved scoring contract (m1-008b)
+- Human approved excluding positively identified Ghidra-created synthetic
+  external placeholders from code-function discovery scoring. This is not
+  blanket filtering by executable permissions or address-range membership.
+- Keep executable PLT stubs, thunks and unreferenced code. Preserve raw
+  `oracle/*.json` unchanged. Publish a separately versioned scoring view
+  with the raw-reference hash, evidence and reason for every exclusion.
+- Apply the rule consistently to all 20 ELF corpus entries. The m1-008b
+  discovery acceptance remains the two x86-64 variants and recall >=0.98.
+- m1-008b-a: failing scoring-view acceptance and policy edge cases.
+- m1-008b-b: oracle-only evidence exporter and scoring-view generator.
+- m1-008b-c: publish each corpus input's generated view as its own bounded
+  artifact sub-task/commit: x86_64, i386, aarch64, powerpc, each with
+  plain_o0, plain_o2, plain_pie, cpp_o2 and many_o2. Never rewrite raw refs.
+- m1-008b-d: update discovery acceptance to the approved scoring view,
+  then fix legitimate remaining misses without oracle-derived seeds.
+- m1-008b-e: required gates, generated reports and final verification.
 
-## Proposed changes
-- Recommended: define code-function discovery scoring to exclude Ghidra's
-  synthetic external entries outside the loaded input image. Keep executable
-  PLT functions and unreferenced code in the denominator. Preserve existing
-  raw references; produce separately versioned scoring evidence after approval.
-  This is a proposed metric change, not an applied filter or a passed gate.
-- Alternative: retain the existing denominator and explicitly expand native
-  import's contract to model loader-generated external function placeholders;
-  do not disguise those placeholders as flow-confirmed code.
+## Blocked on
+- m1-010: the recorded m1-008b prerequisite must pass first.
 
 ## Next task
-- m1-008b: blocked on the reserved decision above. Failing acceptance exists:
-  `tests/m1-008b_pointer_seeds.py`. Resolve the metric contract before
-  implementation, then return to m1-010. Neither implementation has started.
+- m1-008b: execute the approved sub-tasks above. The existing failing
+  acceptance is `tests/m1-008b_pointer_seeds.py`; complete this prerequisite
+  before m1-010.
 
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a
