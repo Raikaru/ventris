@@ -101,17 +101,31 @@ def build_fixtures(tmp: Path) -> dict:
         f.write('printf("%d",s);return 0;}\n')
 
     bins = {}
+    oracles = {}
     for name, source, compiler, flags in [
         ("plain_o0", plain_c, CC, ["-O0", "-g"]),
-        ("plain_o2", plain_c, CC, ["-O2", "-s"]),
-        ("plain_pie", plain_c, CC, ["-O2", "-s", "-fPIE", "-pie"]),
-        ("cpp_o2", src_cpp, CXX, ["-O2", "-s"]),
-        ("many_o2", many_c, CC, ["-O1", "-fno-inline", "-s"]),
+        ("plain_o2", plain_c, CC, ["-O2"]),
+        ("plain_pie", plain_c, CC, ["-O2", "-fPIE", "-pie"]),
+        ("cpp_o2", src_cpp, CXX, ["-O2"]),
+        ("many_o2", many_c, CC, ["-O1", "-fno-inline"]),
     ]:
+        unstripped = tmp / f"{name}.unstripped"
         out = tmp / f"{name}.bin"
-        run([compiler, *flags, str(source), "-o", str(out)])
+        run([compiler, *flags, str(source), "-o", str(unstripped)])
+        run(["strip", str(unstripped), "-o", str(out)])
         bins[name] = out
-    return bins
+
+        # Extract oracle function symbols from unstripped reference
+        sym_out = subprocess.check_output(["readelf", "-s", "-W", str(unstripped)]).decode()
+        oracle = set()
+        for line in sym_out.splitlines():
+            parts = line.split()
+            if len(parts) >= 8 and parts[3] == "FUNC" and parts[6] not in ("UND", "ABS"):
+                val = int(parts[1], 16)
+                if val != 0:
+                    oracle.add(f"{val:08x}")
+        oracles[name] = oracle
+    return bins, oracles
 
 
 def sha256_file(path: Path) -> str:
@@ -171,17 +185,16 @@ def machine_info() -> dict:
 
 def apply_rule(speedup: float, hand_metrics: tuple, console_metrics: tuple) -> dict:
     """Decision rule: keep disasm.rs only if it is >=2x faster AND
-    set-metrics are equal (within tolerance) against the oracle.
+    set-metrics are equal against the oracle.
     """
     hp, hr = hand_metrics
     cp, cr = console_metrics
-    # Equal recall and precision within 0.01.
-    metrics_equal = (abs(hr - cr) < 1e-6) and (abs(hp - cp) <= 0.01)
+    metrics_equal = (abs(hr - cr) < 1e-6) and (abs(hp - cp) < 1e-6)
     keep = (speedup >= 2.0) and metrics_equal
     if keep:
         reason = (
             f"hand decoder is {speedup:.1f}\u00d7 faster than console and "
-            "set-metrics are equal within 0.01 against the oracle; keep disasm.rs."
+            "set-metrics are equal against the oracle; keep disasm.rs."
         )
     else:
         reason = (
@@ -191,14 +204,13 @@ def apply_rule(speedup: float, hand_metrics: tuple, console_metrics: tuple) -> d
         )
     return {"keep_disasm_rs": keep, "speedup": round(speedup, 4), "reason": reason}
 
-
 def main():
     profile = "release" if os.environ.get("M1_003_RELEASE") else "debug"
     print(f"m1-003-d benchmark using cargo profile: {profile}")
 
     with tempfile.TemporaryDirectory(prefix="ventris-m1-003-") as tmp:
         tmp = Path(tmp)
-        fixtures = build_fixtures(tmp)
+        fixtures, corpus_oracles = build_fixtures(tmp)
 
         # Add libc as the primary real target.
         libc = Path("/usr/lib64/libc.so.6")
@@ -215,12 +227,11 @@ def main():
         console_exe = tmp / f"bench_load_native-console-{profile}"
         shutil.copy(console_src, console_exe)
 
-        oracle_for = {}
+        oracle_for = dict(corpus_oracles)
         oracle_path = ROOT / "oracle" / "01cccbe278d898add05282986a9346d4dda4b3d2b84bc496f9c04c66016528db.json"
         if "libc" in fixtures and oracle_path.is_file():
             with oracle_path.open() as f:
                 oracle_for["libc"] = {e.lower().zfill(8) for e in json.load(f)["entries"]}
-
         env = os.environ.copy()
         # Ensure the console is discoverable from the repo tree.
         if "VENTRIS_GHIDRA" not in env:

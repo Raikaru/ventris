@@ -502,14 +502,20 @@ green (82 tests across 20 suites); the CPack TGZ builds.
 M1 — Discovery becomes generic
 
 ## M1 progress
+- m1-003-f: hand decoder candidate pre-pass confirmed by batched flow; achieves
+  fn.precision=1.0000 and exact set equality (3,955/3,955) on libc. Re-benchmarked
+  with all corpus rows scored against unstripped references. Median speedup on libc:
+  4.2885×. hand decoder is 4.3× faster than console and set-metrics are equal against
+  the oracle; keep disasm.rs.
+- m1-003-e: implemented batched flow in the console (`flow <addr1> <addr2> ...`);
+  console-path libc import runs in 4.31s (acceptance threshold < 5.0s, PASS).
+
 - m1-004: implemented ELF PIE relative relocation discovery (SHT_RELA / R_*_RELATIVE
   and SHT_RELR packed relocations across architectures), image base selection
   via `elf_image_base` (minimum PT_LOAD vaddr or 0x100000/0x10000 default for ET_DYN),
   and durable store writes of relocated pointer symbols (`reloc_ptr_<target>`).
   Acceptance test `tests/m1-004_pie.sh` passes with fn.recall=1.0000 on both
   plain_pie (8/8 oracle functions) and relr_pie (12/12 oracle functions).
-
-- m1-003-d: benchmarked hand decoder vs console flow on libc and the x86-64 corpus. Median speedup on libc: 29.4447×. hand decoder is 29.4× faster than console and set-metrics are equal within 0.01 against the oracle; keep disasm.rs.
 - m1-001: implemented native SLEIGH console request `flow(addr)` extracting
   {length, fallthrough, targets, kind} from p-code (BRANCH, CBRANCH, BRANCHIND,
   CALL, CALLIND, RETURN, FALLTHROUGH) across loaded architectures. Unit test
@@ -532,8 +538,8 @@ M1 — Discovery becomes generic
   keep/delete `disasm.rs`.
 
 ## Next task
-- m1-005: generic indirect branch and jump table target recovery (p-code and pattern-based)
-  with acceptance test verifying jump table resolution across architectures.
+- m1-005: PE relocations (base relocation directory `.reloc`, IMAGE_REL_BASED_*,
+  relocated pointers into store, image base selection); acceptance on PE corpus entries.
 
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a

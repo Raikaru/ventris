@@ -385,12 +385,26 @@ pub fn discover(maps: &[(u64, u64, u64, &[u8])], seeds: &[u64]) -> Discovery {
                     addr += info.len as u64;
                 }
                 Flow::Jump(t) => {
-                    // Forward, in-map targets only: a backward jump would
-                    // underflow `addr - sv` at the offset computation and a
-                    // cross-map target would walk another region's bytes as
-                    // though they were this map's.
-                    if in_map(t) && t > addr {
-                        addr = t;
+                    // Forward, in-map targets advance the walk within the function.
+                    // If the jump is at the start of the function (a tail call /
+                    // forwarder stub like `endbr64; jmp target`), the target is
+                    // a function entry.
+                    if in_map(t) {
+                        let is_thunk = addr == start
+                            || (addr == start + 4 && bytes.get((start - sv) as usize..(start - sv) as usize + 4) == Some(&[0xf3, 0x0f, 0x1e, 0xfa]));
+                        if is_thunk && !entries.contains(&t) {
+                            entries.push(t);
+                            queue.push(t);
+                        }
+                        if t > addr {
+                            addr = t;
+                        } else {
+                            if paths.is_empty() {
+                                break;
+                            }
+                            addr = paths.pop().unwrap();
+                            continue;
+                        }
                     } else {
                         addr += info.len as u64;
                     }

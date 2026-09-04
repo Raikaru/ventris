@@ -10,103 +10,103 @@
   "targets": [
     {
       "id": "plain_o0",
-      "sha256": "fdcda9d89485d2168dc60d30cbd7d5040860f94ad778c78bc83275f21d121641",
-      "path": "/tmp/ventris-m1-003-q7nucnqs/plain_o0.bin",
+      "sha256": "8558ebd42f5dd484f778b0eaacd4d5bd9b96641ea3848134bab708c31a94e1ce",
+      "path": "/tmp/ventris-m1-003-euke6hcf/plain_o0.bin",
       "oracle_sha256": null,
       "runs": 3,
       "hand": {
-        "median_wall_s": 0.002201,
-        "count": 12,
-        "precision": null,
-        "recall": null
+        "median_wall_s": 0.077722,
+        "count": 10,
+        "precision": 0.8,
+        "recall": 0.8
       },
       "console": {
-        "median_wall_s": 0.085639,
-        "count": 12,
-        "precision": null,
-        "recall": null
+        "median_wall_s": 0.089891,
+        "count": 10,
+        "precision": 0.8,
+        "recall": 0.8
       },
-      "speedup": 38.9025
+      "speedup": 1.1566
     },
     {
       "id": "plain_o2",
-      "sha256": "dbeb47ff849b854bd1fda63d9079e332ace0796cc383d088db29813f079260ce",
-      "path": "/tmp/ventris-m1-003-q7nucnqs/plain_o2.bin",
+      "sha256": "8584fd222fdede0050074310db35458b5d5fa77987244ff24f6a262224ea16bf",
+      "path": "/tmp/ventris-m1-003-euke6hcf/plain_o2.bin",
       "oracle_sha256": null,
       "runs": 3,
       "hand": {
-        "median_wall_s": 0.006125,
-        "count": 8,
-        "precision": null,
-        "recall": null
+        "median_wall_s": 0.07558,
+        "count": 9,
+        "precision": 0.888889,
+        "recall": 0.888889
       },
       "console": {
-        "median_wall_s": 0.097491,
+        "median_wall_s": 0.099185,
         "count": 8,
-        "precision": null,
-        "recall": null
+        "precision": 0.875,
+        "recall": 0.777778
       },
-      "speedup": 15.9173
+      "speedup": 1.3123
     },
     {
       "id": "plain_pie",
-      "sha256": "d7d916dfbe9677625e5276ae91a3851ebae6cecb5d521a673bf4b7b8b595bb44",
-      "path": "/tmp/ventris-m1-003-q7nucnqs/plain_pie.bin",
+      "sha256": "7ca4a3a895657ee93f42268c68e96aab867499a682c45ac4776922d1bb2a0479",
+      "path": "/tmp/ventris-m1-003-euke6hcf/plain_pie.bin",
       "oracle_sha256": null,
       "runs": 3,
       "hand": {
-        "median_wall_s": 0.005934,
-        "count": 9,
-        "precision": null,
-        "recall": null
+        "median_wall_s": 0.077988,
+        "count": 10,
+        "precision": 0.8,
+        "recall": 1.0
       },
       "console": {
-        "median_wall_s": 0.096757,
+        "median_wall_s": 0.101169,
         "count": 9,
-        "precision": null,
-        "recall": null
+        "precision": 0.777778,
+        "recall": 0.875
       },
-      "speedup": 16.3042
+      "speedup": 1.2972
     },
     {
       "id": "cpp_o2",
-      "sha256": "d7b5f2dae8e8baf31eec44648bae084066df50d1eef2eeb252aac09b7cf02e9c",
-      "path": "/tmp/ventris-m1-003-q7nucnqs/cpp_o2.bin",
+      "sha256": "1f791ea358476a56372332edcaf807007f9c3d65fb24f9145d40950240fda7be",
+      "path": "/tmp/ventris-m1-003-euke6hcf/cpp_o2.bin",
       "oracle_sha256": null,
       "runs": 3,
       "hand": {
-        "median_wall_s": 0.005927,
-        "count": 20,
-        "precision": null,
-        "recall": null
+        "median_wall_s": 0.087198,
+        "count": 21,
+        "precision": 0.428571,
+        "recall": 0.5625
       },
       "console": {
-        "median_wall_s": 0.097729,
+        "median_wall_s": 0.109196,
         "count": 22,
-        "precision": null,
-        "recall": null
+        "precision": 0.454545,
+        "recall": 0.625
       },
-      "speedup": 16.4896
+      "speedup": 1.2523
     },
     {
       "id": "many_o2",
-      "sha256": "5fe7107a931cdf25e011061d4ab6e6f14ef0699d673b689d46a28d0e2cc5ccac",
-      "path": "/tmp/ventris-m1-003-q7nucnqs/many_o2.bin",
+      "sha256": "97b18b95d3b7e5e0dd1a2ab11c262ca8b8a5ad80f25b60a50a6cc8cac7018ef0",
+      "path": "/tmp/ventris-m1-003-euke6hcf/many_o2.bin",
       "oracle_sha256": null,
       "runs": 3,
       "hand": {
-        "median_wall_s": 0.006348,
-        "count": 408,
-        "precision": null,
-        "recall": null
+        "median_wall_s": 0.077344,
+        "count": 409,
+        "precision": 0.997555,
+        "recall": 0.997555
       },
       "console": {
-        "median_wall_s": 0.135001,
+        "median_wall_s": 0.137043,
         "count": 408,
-        "precision": null,
-        "recall": null
+        "precision": 0.997549,
+        "recall": 0.99511
       },
-      "speedup": 21.2678
+      "speedup": 1.7719
     },
     {
       "id": "libc",
@@ -115,24 +115,24 @@
       "oracle_sha256": "01cccbe278d898add05282986a9346d4dda4b3d2b84bc496f9c04c66016528db",
       "runs": 3,
       "hand": {
-        "median_wall_s": 1.42618,
-        "count": 3968,
-        "precision": 0.99622,
-        "recall": 0.991472
-      },
-      "console": {
-        "median_wall_s": 3.438404,
+        "median_wall_s": 0.853657,
         "count": 3955,
         "precision": 0.999494,
         "recall": 0.991472
       },
-      "speedup": 2.4109
+      "console": {
+        "median_wall_s": 3.660873,
+        "count": 3955,
+        "precision": 0.999494,
+        "recall": 0.991472
+      },
+      "speedup": 4.2885
     }
   ],
   "decision": {
     "keep_disasm_rs": true,
-    "speedup": 2.4109,
-    "reason": "hand decoder is 2.4\u00d7 faster than console and set-metrics are equal within 0.01 against the oracle; keep disasm.rs."
+    "speedup": 4.2885,
+    "reason": "hand decoder is 4.3\u00d7 faster than console and set-metrics are equal against the oracle; keep disasm.rs."
   },
   "passed": true
 }

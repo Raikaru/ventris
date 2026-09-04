@@ -14,9 +14,8 @@ fi
 BIN=/usr/lib64/libc.so.6
 CONSOLE_PROJECT=/tmp/m1-003-batched-console
 rm -rf "$CONSOLE_PROJECT"
-
-cargo build -q -p lre-cli --no-default-features
-CONSOLE=target/debug/lre-cli
+cargo build -q --release -p lre-cli --no-default-features
+CONSOLE=target/release/lre-cli
 
 START=$(python3 -c 'import time; print(time.time())')
 $CONSOLE import-native "$BIN" --name libc --project "$CONSOLE_PROJECT" 2>/dev/null

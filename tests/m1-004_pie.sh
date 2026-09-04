@@ -12,7 +12,7 @@ WORK="$(mktemp -d /tmp/m1-004-pie.XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 
 CLI="target/debug/lre-cli"
-[ -x "$CLI" ] || cargo build -q -p lre-cli
+cargo build -q -p lre-cli
 
 # Generate PIE corpus fixtures:
 # 1. plain_pie: standard PIE with -fPIE -pie (DT_RELA / R_X86_64_RELATIVE)

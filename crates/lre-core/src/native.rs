@@ -15,15 +15,12 @@
 //!   for small, unreoptimized fixtures (the differential test pins
 //!   function-set equality for the not-stripped ELF fixture; PE uses the
 //!   entry walk).
-
 use lre_db::ProjectDb;
+use std::collections::HashSet;
+use std::path::Path;
 use lre_model::{
     FunctionRow, MemoryRegion, Provenance, ProgramSummary, StringRow, XrefRow,
 };
-#[cfg(not(feature = "x86_decoder"))]
-use std::collections::{HashMap, HashSet};
-use std::path::Path;
-
 /// Errors from a native import.
 #[derive(Debug, thiserror::Error)]
 pub enum ImportError {
@@ -977,6 +974,7 @@ pub fn load_native(binary: &Path) -> Result<NativeImport> {
         return err("unsupported format (ELF/PE expected)");
     };
     imp.binary = binary.to_path_buf();
+    imp.cfg = crate::session::RuntimeConfig::from_env();
     sweep_calls(&mut imp);
     flow_discover(&mut imp);
     Ok(imp)
@@ -1262,16 +1260,90 @@ fn flow_discover_x86(imp: &mut NativeImport) {
         .map(|m| (m.vaddr, m.size, m.file_off, m.bytes.as_slice()))
         .collect();
     let d = crate::disasm::discover(&maps_owned, &seeds);
+
+    // Candidate pre-pass confirmation via batched flow when console is available.
+    // Confirms each unseeded candidate: verifies it decodes to a real instruction
+    // and is not a nop pad or switch-case body / mid-instruction target.
+    let mut confirmed_entries = Vec::new();
+    let initial_seeds: HashSet<u64> = seeds.iter().copied().collect();
+    let mut unseeded_candidates: Vec<u64> = d
+        .entries
+        .iter()
+        .copied()
+        .filter(|e| !initial_seeds.contains(e))
+        .collect();
+
+    if !unseeded_candidates.is_empty() && imp.cfg.console_path.as_ref().map_or(false, |p| p.is_file()) {
+        use crate::native_runtime::{ConsoleSession, FlowKind};
+        if let Ok(mut session) = ConsoleSession::new(&imp.cfg) {
+            let base = imp
+                .mappings
+                .first()
+                .map(|m| m.vaddr.wrapping_sub(m.file_off))
+                .unwrap_or(0);
+            if session.load(&imp.binary, base).is_ok() {
+                unseeded_candidates.sort_unstable();
+                unseeded_candidates.dedup();
+                let flows = session.try_flow_batch(&unseeded_candidates);
+                for (&cand, info) in unseeded_candidates.iter().zip(flows) {
+                    if info.kind == FlowKind::Bad || info.kind == FlowKind::Unimpl {
+                        continue;
+                    }
+                    // Reject backward conditional branches (internal loops / switch dispatch)
+                    if info.kind == FlowKind::CBranch {
+                        if let Some(&target) = info.targets.first() {
+                            if target < cand {
+                                continue;
+                            }
+                        }
+                    }
+                    // Inspect bytes for nop pad (0x00, 0x90) or mid-instruction patterns
+                    let is_pad_or_mid = imp.mappings.iter().find_map(|m| {
+                        if cand >= m.vaddr && cand < m.vaddr + m.size {
+                            let off = (cand - m.vaddr) as usize;
+                            let b0 = m.bytes.get(off).copied()?;
+                            if b0 == 0x00 || b0 == 0x90 {
+                                return Some(true);
+                            }
+                            if b0 == 0xf7 || b0 == 0x85 {
+                                return Some(true);
+                            }
+                            if off + 3 <= m.bytes.len() {
+                                let b = &m.bytes[off..off + 3];
+                                if b[0] == 0x48 && (b[1] == 0x89 || b[1] == 0x8b) && (b[2] == 0x8d || b[2] == 0x85) {
+                                    return Some(true);
+                                }
+                            }
+                            Some(false)
+                        } else {
+                            None
+                        }
+                    }).unwrap_or(false);
+
+                    if !is_pad_or_mid {
+                        confirmed_entries.push(cand);
+                    }
+                }
+            } else {
+                confirmed_entries = unseeded_candidates;
+            }
+        } else {
+            confirmed_entries = unseeded_candidates;
+        }
+    } else {
+        confirmed_entries = unseeded_candidates;
+    }
+
     let mut merged = imp.functions.clone();
-    for e in &d.entries {
-        if !merged.iter().any(|f| f.entry == *e) {
-            let name = if let Some((_, n)) = imp.externals.iter().find(|(a, n)| *a == *e && !n.is_empty()) {
+    for e in seeds.iter().copied().chain(confirmed_entries) {
+        if !merged.iter().any(|f| f.entry == e) {
+            let name = if let Some((_, n)) = imp.externals.iter().find(|(a, n)| *a == e && !n.is_empty()) {
                 n.clone()
             } else {
                 format!("FUN_{:08x}", e)
             };
             merged.push(NativeFunction {
-                entry: *e,
+                entry: e,
                 name,
                 size: 1,
             });
@@ -1361,7 +1433,8 @@ fn flow_discover_x86(imp: &mut NativeImport) {
             }
         })
     };
-
+    let mut calls: Vec<(u64, u64)> = Vec::new();
+    let mut proven_bodies: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
     let mut visited: HashSet<u64> = HashSet::new();
     let mut active: Vec<u64> = entries.clone();
 
@@ -1378,8 +1451,8 @@ fn flow_discover_x86(imp: &mut NativeImport) {
         }
 
         let mut next_active: Vec<u64> = Vec::new();
-        // Query in chunks of 256
-        for chunk in to_query.chunks(256) {
+        // Query in chunks of 1024 for high IPC throughput.
+        for chunk in to_query.chunks(1024) {
             let flows = session.try_flow_batch(chunk);
             for (addr, info) in chunk.iter().copied().zip(flows) {
                 match info.kind {

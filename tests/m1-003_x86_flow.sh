@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # m1-003 acceptance: console flow (x86_decoder off) vs in-Rust hand decoder.
 #
-# The console path is a strict subset of the hand path: it does not produce
-# the 13 hand-decoder false positives (PLT-nop / switch-case over-seeding).
-# Acceptance is therefore metric-based: precision must be 1.0 (no console-only
-# functions) and recall must be >= 0.9965 (the threshold from STATUS m1-003-c).
+# Hand decoder candidates are confirmed by batched flow, eliminating false
+# positives (PLT-nop / switch-case bodies). Acceptance asserts exact set
+# equality: fn.precision = 1.0000 and fn.recall = 1.0000.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
