@@ -641,13 +641,20 @@ mod tests {
         // kill handle on a sleep process.
         // (Documented: the wedge blocks at register; a full protocol fake
         // would complete register then wedge on decompileAt.)
-        let script = std::env::temp_dir().join("lre-fake-sleeper.sh");
-        std::fs::write(&script, "#!/bin/sh\nexec sleep 300\n").unwrap();
-        #[cfg(unix)]
-        {
+        #[cfg(windows)]
+        let script = {
+            let s = std::env::temp_dir().join("lre-fake-sleeper.bat");
+            std::fs::write(&s, "@echo off\r\nping -n 300 127.0.0.1 >nul\r\n").unwrap();
+            s
+        };
+        #[cfg(not(windows))]
+        let script = {
+            let s = std::env::temp_dir().join("lre-fake-sleeper.sh");
+            std::fs::write(&s, "#!/bin/sh\nexec sleep 300\n").unwrap();
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+            std::fs::set_permissions(&s, std::fs::Permissions::from_mode(0o755)).unwrap();
+            s
+        };
         let mut child = std::process::Command::new(&script)
             .stdin(std::process::Stdio::piped())
             .spawn()
