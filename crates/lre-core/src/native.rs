@@ -20,6 +20,8 @@ use std::collections::HashSet;
 use std::path::Path;
 pub(crate) mod dol;
 mod discovery;
+mod elf_pointers;
+mod elf_unwind;
 use lre_model::{
     FunctionRow, MemoryRegion, Provenance, ProgramSummary, StringRow, XrefRow,
 };
@@ -102,6 +104,10 @@ pub struct NativeImport {
     pub externals: Vec<(u64, String)>,
     /// Relocation code targets to be verified as candidate function entries.
     pub reloc_candidates: Vec<u64>,
+    /// Untrusted data pointers; never functions until flow confirms them.
+    pub pointer_candidates: Vec<u64>,
+    /// Loader-declared initializer entry points, also requiring valid flow.
+    pub initializer_candidates: Vec<u64>,
     pub format: String,
     /// Ghidra-compatible language id selected from the file machine.
     pub language: String,
@@ -291,23 +297,6 @@ fn import_elf32(data: &[u8], be: bool) -> Result<NativeImport> {
             }
         }
     }
-    // init/fini arrays: ELF32 carries 4-byte pointers.
-    for s in sections.iter().filter(|s| s.typ == 14 || s.typ == 15) {
-        let n = s.size as usize / 4;
-        for i in 0..n {
-            let off = s.off as usize + i * 4;
-            if let Ok(v) = rd32(off) {
-                let v = v as u64;
-                if v != 0 && !functions.iter().any(|f| f.entry == v) {
-                    functions.push(NativeFunction {
-                        entry: v,
-                        name: format!("FUN_{v:08x}"),
-                        size: 1,
-                    });
-                }
-            }
-        }
-    }
     if entry != 0 && !functions.iter().any(|f| f.entry == entry) {
         functions.push(NativeFunction {
             entry,
@@ -316,7 +305,7 @@ fn import_elf32(data: &[u8], be: bool) -> Result<NativeImport> {
         });
     }
     functions.sort_by_key(|f| f.entry);
-    Ok(NativeImport {
+    let mut import = NativeImport {
 
         format: "elf32".into(),
         language,
@@ -325,7 +314,10 @@ fn import_elf32(data: &[u8], be: bool) -> Result<NativeImport> {
         xrefs: Vec::new(),
         externals,
         ..Default::default()
-    })
+    };
+    elf_pointers::collect(data, &sections, &mut import, 4, be)?;
+    elf_unwind::collect(data, &sections, &mut import, 4, be);
+    Ok(import)
 }
 
 // ---- ELF64 ----------------------------------------------------------------
@@ -523,8 +515,9 @@ pub fn import_elf(data: &[u8]) -> Result<NativeImport> {
                 if shndx == 0 {
                     externals.push((0, name.clone()));
                 }
-                dynsyms.push(name);
             }
+            // Preserve index zero: relocation symbol indexes are absolute.
+            dynsyms.push(name);
             let _ = info;
         }
     }
@@ -585,40 +578,17 @@ pub fn import_elf(data: &[u8]) -> Result<NativeImport> {
             }
         }
     }
-    // init/fini array function pointers (frame_dummy, __do_global_dtors_aux
-    // and friends): non-PIE executables carry absolute addresses here, so
-    // the CRT helpers become seeds exactly like the entry point.
-    for s in sections.iter().filter(|s| s.typ == 14 || s.typ == 15) {
-        let n = s.size as usize / 8;
-        for i in 0..n {
-            let off = s.off as usize + i * 8;
-            if let Ok(v) = u64_at(data, off) {
-                if v != 0 && !functions.iter().any(|f| f.entry == v) {
-                    functions.push(NativeFunction {
-                        entry: v,
-                        name: format!("FUN_{v:08x}"),
-                        size: 1,
-                    });
-                }
-            }
-        }
-    }
     for s in &sections {
-        if s.flags & 0x4 != 0 && s.size > 0 {
-            if s.name == ".init" && s.addr != 0 && !functions.iter().any(|f| f.entry == s.addr) {
-                functions.push(NativeFunction {
-                    entry: s.addr,
-                    name: "_init".into(),
-                    size: s.size.max(1),
-                });
-            } else if s.name == ".fini" && s.addr != 0 && !functions.iter().any(|f| f.entry == s.addr) {
-                functions.push(NativeFunction {
-                    entry: s.addr,
-                    name: "_fini".into(),
-                    size: s.size.max(1),
-                });
-            }
+        if s.flags & 4 == 0 || s.size == 0 || s.addr == 0 || functions.iter().any(|f| f.entry == s.addr) {
+            continue;
         }
+        let (name, size) = match s.name.as_str() {
+            ".init" => ("_init", s.size),
+            ".fini" => ("_fini", s.size),
+            ".plt" => ("_plt", 1),
+            _ => continue,
+        };
+        functions.push(NativeFunction { entry: s.addr, name: name.into(), size });
     }
     // R_*_RELATIVE relocations: SHT_RELA (typ=4) and SHT_RELR (typ=19).
     // x86-64 R_X86_64_RELATIVE = 8, AArch64 R_AARCH64_RELATIVE = 1027,
@@ -719,7 +689,7 @@ pub fn import_elf(data: &[u8]) -> Result<NativeImport> {
     }
     functions.sort_by_key(|f| f.entry);
     functions.dedup_by_key(|f| f.entry);
-    Ok(NativeImport {
+    let mut import = NativeImport {
         mappings,
         functions,
         xrefs,
@@ -728,7 +698,10 @@ pub fn import_elf(data: &[u8]) -> Result<NativeImport> {
         format: "ELF".into(),
         language,
         ..Default::default()
-    })
+    };
+    elf_pointers::collect(data, &sections, &mut import, 8, false)?;
+    elf_unwind::collect(data, &sections, &mut import, 8, false);
+    Ok(import)
 }
 
 pub fn import_pe(data: &[u8]) -> Result<NativeImport> {
@@ -1166,6 +1139,7 @@ pub fn load_native(binary: &Path) -> Result<NativeImport> {
     if imp.format == "dol" {
         discovery::discover_mapped(&mut imp)?;
     } else {
+        elf_pointers::confirm_initializers(&mut imp);
         sweep_calls(&mut imp);
         flow_discover(&mut imp);
     }
@@ -1531,6 +1505,8 @@ fn flow_discover_x86(imp: &mut NativeImport) {
     let valid_reloc_candidates: Vec<u64> = imp
         .reloc_candidates
         .iter()
+        .chain(imp.pointer_candidates.iter())
+        .chain(imp.initializer_candidates.iter())
         .copied()
         .filter(|&cand| {
             !extents.iter().any(|&(entry, size)| {
@@ -1833,6 +1809,8 @@ fn flow_discover_with_candidates<F: FnMut(&[u64]) -> Vec<crate::native_runtime::
     let unvisited_relocs: Vec<u64> = imp
         .reloc_candidates
         .iter()
+        .chain(imp.pointer_candidates.iter())
+        .chain(imp.initializer_candidates.iter())
         .chain(candidates.iter())
         .copied()
         .filter(|&cand| in_code(cand) && !visited.contains(&cand) && !entries.contains(&cand))
@@ -1920,7 +1898,7 @@ fn flow_discover_with_candidates<F: FnMut(&[u64]) -> Vec<crate::native_runtime::
                                     next_active.push(fall);
                                 }
                             }
-                            FlowKind::Fallthrough => {
+                            FlowKind::Fallthrough | FlowKind::CallInd => {
                                 let fall = info.fallthrough.unwrap_or(addr + info.length as u64);
                                 merge_reached_candidate(fall, origin, &reloc_set, &mut addr_origin, &mut proven_bodies);
                                 if in_code(fall) && !visited.contains(&fall) {
