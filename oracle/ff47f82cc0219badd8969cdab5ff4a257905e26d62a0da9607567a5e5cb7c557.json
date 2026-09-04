@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "sha256": "ff47f82cc0219badd8969cdab5ff4a257905e26d62a0da9607567a5e5cb7c557",
+  "binary_size": 3264,
+  "producer": "ghidra-bridge",
+  "upstream_version": "12.1.3",
+  "upstream_revision": "8b4c91d4d5bd1549622bfbade0df199585b98365",
+  "bridge_sources_sha256": "22cbedc03aea3c0d788db78b314f80eabbe0731d2d84c8bd035a110860644a81",
+  "analysis": "GhidraProject.analyze:defaults",
+  "language_selection": "automatic",
+  "address_basis": "ghidra",
+  "language": "PowerPC:BE:32:e500",
+  "image_base": "10000000",
+  "imported_function_count": 15,
+  "entries": [
+    "100103f0",
+    "10010430",
+    "10010460",
+    "100104a0",
+    "100104e0",
+    "100104e4",
+    "10010510",
+    "10010568",
+    "10010578",
+    "10010588",
+    "100105cc",
+    "100105dc",
+    "10031000",
+    "10031004",
+    "10031010"
+  ]
+}
