@@ -634,10 +634,28 @@ M1 — Discovery becomes generic
 - m1-007-f: commit the generated report and verification evidence.
   Generated reference arrays are split by architecture to keep each commit
   below 800 changed lines. The existing libc reference is unchanged.
+- Completed: 20/20 ELF references committed, 0 failed, 0 skipped.
+  `benchmarks/reports/m1-007.json` was generated from implementation
+  `dfed639191be266c07079231c03ff8ef8ee69c2d` and committed in `718128a`.
+  Non-external function totals: x86-64 488, i386 505, AArch64 526, PPC32-BE 489.
+  Each architecture has 5 SHA-keyed references; total 2,008 entries.
+  Provenance includes Ghidra 12.1.3 revision, bridge source SHA-256, automatic
+  language selection and image base. Addresses remain in Ghidra coordinates.
+  Ghidra selected `PowerPC:BE:32:e500` for all 5 PPC inputs; no native language
+  selection or frozen discovery metric was changed.
+- Verification: `tests/m1-007_oracle_test.py` passes 4 tests, including 20 fresh
+  imports, 20 cache hits without Java, 4 invalid-cache cases and missing-primary
+  rejection. Published-cache `--check`: 20 hits, 0 generated, 0 skips.
+  `cargo test --workspace`: 97 passed; `tests/corpus.sh`: 5/5 passed;
+  README support matrix check passed. Artifact commits contain 573, 590, 611
+  and 574 added lines respectively. Added a Linux CI oracle job using the
+  SHA-256-verified official Ghidra release.
 
 ## Next task
-- m1-007: Ghidra oracle corpus generation; execute the sub-tasks above.
-  Scope: the 20 ELF entries required by II.4; no discovery/scoring changes.
+- m1-008: language-id selection for ELF32 (x86-32, ARM32) and PE32.
+  Acceptance: corpus imports pick the correct `.ldefs` entry.
+  No m1-008 implementation or acceptance test was started in this session.
+
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a
   clearly separated accelerator module with an equivalence test, never in the
