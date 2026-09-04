@@ -658,6 +658,9 @@ M1 — Discovery becomes generic
   bytes. This is a bulk generated-source deletion, not a source modification.
 - cache-c: verify local hashes are unchanged and the pushed branch tree has
   no `.ghidra-java` entry. Historical commits remain unchanged.
+- Local verification: all 5,382 files retained with identical SHA-256 hashes;
+  0 files remain tracked under `.ghidra-java/`. The root ignore rule prevents
+  re-adding the extraction during ordinary staging.
 
 ## Next task
 - m1-008: language-id selection for ELF32 (x86-32, ARM32) and PE32.
