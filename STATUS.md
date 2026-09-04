@@ -592,6 +592,17 @@ M1 — Discovery becomes generic
   gate report benchmarks/reports/m1-006.json (including local MSVC skips with reasons).
   Added dedicated Windows CI job (corpus-windows with MSVC activation) and Linux CI job (corpus-linux).
 
+## m1-006 corrective sub-tasks
+- m1-006-a: reject missing/duplicate entries; enforce recipes, hashes and isolated
+  gate outputs; preserve the recipe schema in explicit lock updates.
+  Acceptance: `tests/m1-006_integrity_test.py`.
+- m1-006-b: replace C++ exception stubs with real cross-target runtimes; execute
+  the exception/TLS fixture on supported hosts. Acceptance: corpus gate runtime checks.
+- m1-006-c: validate PDB streams, symbols and exact CodeView association; use
+  the linker PDB. Acceptance: `tests/m1-006_pdb_test.py`.
+- Execute these sub-tasks separately; each commit must stay below 800 changed lines.
+  m1-007 remains out of scope until these corrections and CI pass.
+
 ## Next task
 - m1-006: multi-architecture corpus generation (x86-64, x86-32, AArch64, PPC32-BE)
   with unstripped twin for each entry, sources + lock committed, MSVC via Windows CI
