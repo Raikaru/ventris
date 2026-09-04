@@ -1990,6 +1990,47 @@ fn flow_discover_with_candidates<F: FnMut(&[u64]) -> Vec<crate::native_runtime::
 mod tests {
     use super::*;
     #[test]
+    fn elf_data_pointer_waits_for_flow_and_walks_indirect_call_fallthrough() {
+        use crate::native_runtime::{FlowKind, FlowResult};
+        let mut bytes = vec![0; 0x300];
+        bytes[..6].copy_from_slice(b"\x7fELF\x02\x01");
+        for (offset, value) in [(16, 2_u16), (18, 0x3e), (58, 64), (60, 4), (62, 3)] {
+            bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        for (offset, value) in [(24, 0x1000_u64), (40, 0x200),
+                                (0x248, 6), (0x250, 0x1000), (0x258, 0x100), (0x260, 0x80),
+                                (0x288, 3), (0x290, 0x2000), (0x298, 0x180), (0x2a0, 16),
+                                (0x2d8, 0x1a0), (0x2e0, 13),
+                                (0x180, 0x1020), (0x188, 0x1030)] {
+            bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        for (offset, value) in [(0x240, 1_u32), (0x244, 1), (0x280, 7), (0x284, 1), (0x2c4, 3)] {
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        bytes[0x100..0x180].fill(1);
+        bytes[0x1a0..0x1ad].copy_from_slice(b"\0.text\0.data\0");
+        let mut imp = import_elf(&bytes).unwrap();
+        assert!(!imp.functions.iter().any(|f| f.entry == 0x1020));
+        flow_discover_with_provider(&mut imp, |_| Vec::new());
+        assert!(!imp.functions.iter().any(|f| f.entry == 0x1020));
+        flow_discover_with_provider(&mut imp, |addresses| addresses.iter().map(|&address| {
+            let (kind, fallthrough, targets) = match address {
+                0x1020 => (FlowKind::CallInd, Some(0x1024), vec![]),
+                0x1024 => (FlowKind::Call, Some(0x1028), vec![0x1040]),
+                0x1030 => (FlowKind::Bad, None, vec![]),
+                _ => (FlowKind::Return, None, vec![]),
+            };
+            FlowResult { address, length: 4, fallthrough, targets, kind }
+        }).collect());
+        assert!(imp.functions.iter().any(|f| f.entry == 0x1020));
+        assert!(imp.functions.iter().any(|f| f.entry == 0x1040),
+                "pointer-rooted traversal must continue after an indirect call");
+        assert!(!imp.functions.iter().any(|f| f.entry == 0x1030));
+        assert!(imp.xrefs.iter().any(|x| x.from == 0x2000 && x.to == 0x1020
+                && x.kind == "DATA" && x.provenance == "native-import:elf-pointer"));
+    }
+
+    #[test]
     fn distant_branch_does_not_claim_unvisited_gap() {
         use crate::native_runtime::{FlowKind, FlowResult};
         let mut imp = NativeImport {
