@@ -373,6 +373,16 @@ for entry in run_manifest["entries"]:
             assert s_bin["raw_size"] == s_twin["raw_size"], f"PE Section SizeOfRawData mismatch for {s_bin['name']}"
             assert b_data[s_bin["raw_off"]:s_bin["raw_off"] + s_bin["raw_size"]] == t_data[s_twin["raw_off"]:s_twin["raw_off"] + s_twin["raw_size"]], f"Executable code bytes mismatch in PE section {s_bin['name']}"
 
+    if var == "cpp_o2" and arch in ("x86_64", "msvc"):
+        for argument, expected_code, expected_output in (
+            ("1", 0, "res: 52"), ("-1", 1, "caught: 1"),
+        ):
+            result = subprocess.run([str(bin_path), argument], capture_output=True,
+                                    text=True, timeout=10)
+            assert (result.returncode, result.stdout.strip()) == (expected_code, expected_output), (
+                f"{arch} exception/TLS runtime failed for {argument}: {result}"
+            )
+
     # Native import verification
     res = subprocess.run([str(cli_path), "import-native", str(bin_path), "--project", str(out_dir / "project")], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     assert res.returncode == 0, f"import-native failed on {bin_path.name}: {res.stderr.decode()}"
