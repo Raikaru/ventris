@@ -651,6 +651,14 @@ M1 — Discovery becomes generic
   and 574 added lines respectively. Added a Linux CI oracle job using the
   SHA-256-verified official Ghidra release.
 
+## Extracted-source tracking cleanup
+- Human-requested maintenance; no milestone implementation changes.
+- cache-a: ignore `/.ghidra-java/` and record this tracking-only cleanup.
+- cache-b: remove the 5,382 extracted files from the Git index, retaining local
+  bytes. This is a bulk generated-source deletion, not a source modification.
+- cache-c: verify local hashes are unchanged and the pushed branch tree has
+  no `.ghidra-java` entry. Historical commits remain unchanged.
+
 ## Next task
 - m1-008: language-id selection for ELF32 (x86-32, ARM32) and PE32.
   Acceptance: corpus imports pick the correct `.ldefs` entry.
