@@ -1,0 +1,88 @@
+{
+  "gate": "m1-008",
+  "milestone": "M1",
+  "commit": "5d3bd2fada6e79fc95a299448f377e607e4fb61a",
+  "date": "2026-09-04",
+  "machine": {
+    "os": "Linux-7.1.12-200.fc44.x86_64-x86_64-with-glibc2.43",
+    "cpu": "x86_64",
+    "ram_gb": 14.84
+  },
+  "corpus": [
+    {
+      "id": "elf32_i386",
+      "sha256": "5f53253d5a851159f25caa56f0cea25f84dadecf58af9be6a2bd74336f48924d",
+      "status": "pass",
+      "metrics": {},
+      "thresholds": {},
+      "runs": 1,
+      "expected_language": "x86:LE:32:default",
+      "selected_language": "x86:LE:32:default",
+      "slafile": "x86.sla"
+    },
+    {
+      "id": "elf32_arm_le",
+      "sha256": "51d2a67740705d77aa80dcee79113fa81f29f08a7adf7b539530c4c2155658d7",
+      "status": "pass",
+      "metrics": {},
+      "thresholds": {},
+      "runs": 1,
+      "expected_language": "ARM:LE:32:v7",
+      "elf_flags": "0x05000200",
+      "selected_language": "ARM:LE:32:v7",
+      "slafile": "ARM7_le.sla"
+    },
+    {
+      "id": "elf32_arm_be32",
+      "sha256": "a655fbd3d31a645b7db71117a42e5ae098f98bb187e83eb10d1abd3d333a10f3",
+      "status": "pass",
+      "metrics": {},
+      "thresholds": {},
+      "runs": 1,
+      "expected_language": "ARM:BE:32:v7",
+      "elf_flags": "0x05000200",
+      "selected_language": "ARM:BE:32:v7",
+      "slafile": "ARM7_be.sla"
+    },
+    {
+      "id": "elf32_arm_be8",
+      "sha256": "e3d8787e778a26fd3d10ebb63442b2dd9669ab0b9d3600b49b7994cae4e909d4",
+      "status": "pass",
+      "metrics": {},
+      "thresholds": {},
+      "runs": 1,
+      "expected_language": "ARM:LEBE:32:v7LEInstruction",
+      "elf_flags": "0x05800200",
+      "selected_language": "ARM:LEBE:32:v7LEInstruction",
+      "slafile": "ARM7_le.sla"
+    },
+    {
+      "id": "pe32_i386",
+      "sha256": "e501460e220763d39ecb29c42f12eaec21a35d58bbf3f812d38b0efa006526ae",
+      "status": "pass",
+      "metrics": {},
+      "thresholds": {},
+      "runs": 1,
+      "expected_language": "x86:LE:32:default",
+      "selected_language": "x86:LE:32:default",
+      "slafile": "x86.sla"
+    },
+    {
+      "id": "elf64_control",
+      "sha256": "d5ec2e9c90627ef34dd4ce24f1518cbd0d405a6b68d97983ea344c396a6e8dce",
+      "status": "pass",
+      "metrics": {},
+      "thresholds": {},
+      "runs": 1,
+      "expected_language": "x86:LE:64:default",
+      "selected_language": "x86:LE:64:default",
+      "slafile": "x86-64.sla"
+    }
+  ],
+  "summary": {
+    "pass": 6,
+    "fail": 0,
+    "skipped": 0
+  },
+  "passed": true
+}
