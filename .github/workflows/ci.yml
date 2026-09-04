@@ -46,6 +46,27 @@ jobs:
         run: python tests/agents_policy_test.py
       - name: Check README support matrix is not stale
         run: python scripts/gen_support_matrix.py --check
+  corpus-linux:
+    name: Multi-Arch Corpus (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run Multi-Architecture Corpus Gate
+        run: bash tests/m1-006_corpus.sh
+
+  corpus-windows:
+    name: MSVC Corpus (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Run MSVC Corpus Gate
+        shell: bash
+        run: bash tests/m1-006_corpus.sh --msvc-only
 
   qt:
     name: Qt desktop (${{ matrix.os }})

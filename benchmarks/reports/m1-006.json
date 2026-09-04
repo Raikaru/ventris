@@ -1,0 +1,219 @@
+{
+  "gate": "m1-006",
+  "total_entries": 25,
+  "passed_entries": 20,
+  "skipped_entries": 5,
+  "pass": true,
+  "entries": [
+    {
+      "architecture": "x86_64",
+      "variant": "plain_o0",
+      "status": "ok",
+      "endian": "little",
+      "functions_discovered": 10,
+      "symbols_in_twin": 12,
+      "expected_language": "x86:LE:64:default"
+    },
+    {
+      "architecture": "x86_64",
+      "variant": "plain_o2",
+      "status": "ok",
+      "endian": "little",
+      "functions_discovered": 9,
+      "symbols_in_twin": 12,
+      "expected_language": "x86:LE:64:default"
+    },
+    {
+      "architecture": "x86_64",
+      "variant": "plain_pie",
+      "status": "ok",
+      "endian": "little",
+      "functions_discovered": 8,
+      "symbols_in_twin": 12,
+      "expected_language": "x86:LE:64:default"
+    },
+    {
+      "architecture": "x86_64",
+      "variant": "cpp_o2",
+      "status": "ok",
+      "endian": "little",
+      "functions_discovered": 9,
+      "symbols_in_twin": 19,
+      "expected_language": "x86:LE:64:default"
+    },
+    {
+      "architecture": "x86_64",
+      "variant": "many_o2",
+      "status": "ok",
+      "endian": "little",
+      "functions_discovered": 408,
+      "symbols_in_twin": 410,
+      "expected_language": "x86:LE:64:default"
+    },
+    {
+      "architecture": "i386",
+      "variant": "plain_o0",
+      "status": "ok",
+      "endian": "little",
+      "functions_discovered": 7,
+      "symbols_in_twin": 13,
+      "expected_language": "x86:LE:32:default"
+    },
+    {
+      "architecture": "i386",
+      "variant": "plain_o2",
+      "status": "ok",
+      "endian": "little",
+      "functions_discovered": 7,
+      "symbols_in_twin": 13,
+      "expected_language": "x86:LE:32:default"
+    },
+    {
+      "architecture": "i386",
+      "variant": "plain_pie",
+      "status": "ok",
+      "endian": "little",
+      "functions_discovered": 9,
+      "symbols_in_twin": 14,
+      "expected_language": "x86:LE:32:default"
+    },
+    {
+      "architecture": "i386",
+      "variant": "cpp_o2",
+      "status": "ok",
+      "endian": "little",
+      "functions_discovered": 7,
+      "symbols_in_twin": 20,
+      "expected_language": "x86:LE:32:default"
+    },
+    {
+      "architecture": "i386",
+      "variant": "many_o2",
+      "status": "ok",
+      "endian": "little",
+      "functions_discovered": 6,
+      "symbols_in_twin": 411,
+      "expected_language": "x86:LE:32:default"
+    },
+    {
+      "architecture": "aarch64",
+      "variant": "plain_o0",
+      "status": "ok",
+      "endian": "little",
+      "functions_discovered": 5,
+      "symbols_in_twin": 14,
+      "expected_language": "AARCH64:LE:64:v8A"
+    },
+    {
+      "architecture": "aarch64",
+      "variant": "plain_o2",
+      "status": "ok",
+      "endian": "little",
+      "functions_discovered": 5,
+      "symbols_in_twin": 14,
+      "expected_language": "AARCH64:LE:64:v8A"
+    },
+    {
+      "architecture": "aarch64",
+      "variant": "plain_pie",
+      "status": "ok",
+      "endian": "little",
+      "functions_discovered": 3,
+      "symbols_in_twin": 14,
+      "expected_language": "AARCH64:LE:64:v8A"
+    },
+    {
+      "architecture": "aarch64",
+      "variant": "cpp_o2",
+      "status": "ok",
+      "endian": "little",
+      "functions_discovered": 5,
+      "symbols_in_twin": 21,
+      "expected_language": "AARCH64:LE:64:v8A"
+    },
+    {
+      "architecture": "aarch64",
+      "variant": "many_o2",
+      "status": "ok",
+      "endian": "little",
+      "functions_discovered": 5,
+      "symbols_in_twin": 412,
+      "expected_language": "AARCH64:LE:64:v8A"
+    },
+    {
+      "architecture": "powerpc",
+      "variant": "plain_o0",
+      "status": "ok",
+      "endian": "big",
+      "functions_discovered": 10,
+      "symbols_in_twin": 14,
+      "expected_language": "PowerPC:BE:32:default"
+    },
+    {
+      "architecture": "powerpc",
+      "variant": "plain_o2",
+      "status": "ok",
+      "endian": "big",
+      "functions_discovered": 9,
+      "symbols_in_twin": 14,
+      "expected_language": "PowerPC:BE:32:default"
+    },
+    {
+      "architecture": "powerpc",
+      "variant": "plain_pie",
+      "status": "ok",
+      "endian": "big",
+      "functions_discovered": 13,
+      "symbols_in_twin": 16,
+      "expected_language": "PowerPC:BE:32:default"
+    },
+    {
+      "architecture": "powerpc",
+      "variant": "cpp_o2",
+      "status": "ok",
+      "endian": "big",
+      "functions_discovered": 9,
+      "symbols_in_twin": 21,
+      "expected_language": "PowerPC:BE:32:default"
+    },
+    {
+      "architecture": "powerpc",
+      "variant": "many_o2",
+      "status": "ok",
+      "endian": "big",
+      "functions_discovered": 408,
+      "symbols_in_twin": 411,
+      "expected_language": "PowerPC:BE:32:default"
+    },
+    {
+      "architecture": "msvc",
+      "variant": "plain_o0",
+      "status": "skipped",
+      "reason": "MSVC requires Windows host with Visual Studio (verified via Windows CI)"
+    },
+    {
+      "architecture": "msvc",
+      "variant": "plain_o2",
+      "status": "skipped",
+      "reason": "MSVC requires Windows host with Visual Studio (verified via Windows CI)"
+    },
+    {
+      "architecture": "msvc",
+      "variant": "plain_pie",
+      "status": "skipped",
+      "reason": "MSVC requires Windows host with Visual Studio (verified via Windows CI)"
+    },
+    {
+      "architecture": "msvc",
+      "variant": "cpp_o2",
+      "status": "skipped",
+      "reason": "MSVC requires Windows host with Visual Studio (verified via Windows CI)"
+    },
+    {
+      "architecture": "msvc",
+      "variant": "many_o2",
+      "status": "skipped",
+      "reason": "MSVC requires Windows host with Visual Studio (verified via Windows CI)"
+    }
+  ]
+}

@@ -17,243 +17,293 @@
   "entries": [
     {
       "architecture": "x86_64",
-      "variant": "plain_o0",
-      "status": "ok",
-      "binary": "x86_64_plain_o0.bin",
-      "binary_sha256": "fc25106ff6b68589649210e5bf69230a4d7b94429c026d94314a16163c237e9d",
-      "unstripped_twin": "x86_64_plain_o0.unstripped",
-      "unstripped_twin_sha256": "fc25106ff6b68589649210e5bf69230a4d7b94429c026d94314a16163c237e9d",
-      "command": "clang --target=x86_64-linux-gnu -fuse-ld=lld -O0 -g tests/corpus-src/plain.c -o $OUT/x86_64_plain_o0.bin"
-    },
-    {
-      "architecture": "x86_64",
-      "variant": "plain_o2",
-      "status": "ok",
-      "binary": "x86_64_plain_o2.bin",
-      "binary_sha256": "ed6632559f75c22a6f983b869b59797bf21859902efb7f3ae8175c1506ead88b",
-      "unstripped_twin": "x86_64_plain_o2.unstripped",
-      "unstripped_twin_sha256": "1cb15ed8e8ae142fc09d68a832a9decd9aed2054a6cdc1e9f7b4996782a9cde0",
-      "command": "clang --target=x86_64-linux-gnu -fuse-ld=lld -O2 -s tests/corpus-src/plain.c -o $OUT/x86_64_plain_o2.bin"
-    },
-    {
-      "architecture": "x86_64",
-      "variant": "plain_pie",
-      "status": "ok",
-      "binary": "x86_64_plain_pie.bin",
-      "binary_sha256": "a9917ee8940419a5fd0e84b79a23f20a078ef697ab375df12afe11a37782fdc1",
-      "unstripped_twin": "x86_64_plain_pie.unstripped",
-      "unstripped_twin_sha256": "9e5339a12c6ba9338af52eb765794212afb822e574189dd25f02822e686cd3b7",
-      "command": "clang --target=x86_64-linux-gnu -fuse-ld=lld -O2 -s -fPIE -pie tests/corpus-src/plain.c -o $OUT/x86_64_plain_pie.bin"
-    },
-    {
-      "architecture": "x86_64",
+      "endian": "little",
       "variant": "cpp_o2",
       "status": "ok",
       "binary": "x86_64_cpp_o2.bin",
-      "binary_sha256": "f837bf23dac9d57792d99b0c53c088d2906612eb877cba8218b3b89767bcebdd",
+      "binary_sha256": "a5d0059daea75aed5f53114f9fe13751b8a5ad809c2f1c88bb97846f055fe3bf",
       "unstripped_twin": "x86_64_cpp_o2.unstripped",
       "unstripped_twin_sha256": "cb660ce6c191272de2765c0bc3fc00a8bea121e8b98ffe9913411036082fd8bf",
-      "command": "clang++ --target=x86_64-linux-gnu -fuse-ld=lld -nostdlib++ -O2 -s tests/corpus-src/src.cpp -o $OUT/x86_64_cpp_o2.bin"
+      "symbol_count": 19,
+      "command": "clang++ --target=x86_64-linux-gnu -fuse-ld=lld -nostdlib++ -O2 -g tests/corpus-src/src.cpp -o $OUT/x86_64_cpp_o2.unstripped && llvm-strip --strip-all $OUT/x86_64_cpp_o2.bin"
     },
     {
       "architecture": "x86_64",
+      "endian": "little",
       "variant": "many_o2",
       "status": "ok",
       "binary": "x86_64_many_o2.bin",
-      "binary_sha256": "022e6ef083ac4c706c5cf63f24c27eaf6479b9b86dbc16495fd64f72d6630d0f",
+      "binary_sha256": "13f9b71ab975d5c441a383812e0f261ba1e91a7c38bb5b3160d3d48ad2af4f75",
       "unstripped_twin": "x86_64_many_o2.unstripped",
       "unstripped_twin_sha256": "8f85ae21cea8a7c8a38276ca2bf12ba1715906acedf1018ccdae3afa2b5b483d",
-      "command": "clang --target=x86_64-linux-gnu -fuse-ld=lld -O1 -fno-inline -s tests/corpus-src/many.c -o $OUT/x86_64_many_o2.bin"
+      "symbol_count": 410,
+      "command": "clang --target=x86_64-linux-gnu -fuse-ld=lld -O1 -fno-inline -g tests/corpus-src/many.c -o $OUT/x86_64_many_o2.unstripped && llvm-strip --strip-all $OUT/x86_64_many_o2.bin"
     },
     {
-      "architecture": "i386",
+      "architecture": "x86_64",
+      "endian": "little",
       "variant": "plain_o0",
       "status": "ok",
-      "binary": "i386_plain_o0.bin",
-      "binary_sha256": "0a5f83884f4c5507faacdbc78f7f7193500a68c38a709f240631c5c17f9b5cba",
-      "unstripped_twin": "i386_plain_o0.unstripped",
-      "unstripped_twin_sha256": "0a5f83884f4c5507faacdbc78f7f7193500a68c38a709f240631c5c17f9b5cba",
-      "command": "clang --target=i686-linux-gnu -fuse-ld=lld --sysroot /home/raikaru/ventris/third_party/sysroots/i386 -B /home/raikaru/ventris/third_party/sysroots/i386/usr/lib/gcc-cross/i686-linux-gnu/12 -L /home/raikaru/ventris/third_party/sysroots/i386/usr/lib/gcc-cross/i686-linux-gnu/12 -O0 -g tests/corpus-src/plain.c -o $OUT/i386_plain_o0.bin"
+      "binary": "x86_64_plain_o0.bin",
+      "binary_sha256": "ec6f8b8aa9e8579fbc0dd2235b939b1e30f943a398a46bb63b5cd65cb05ff4cd",
+      "unstripped_twin": "x86_64_plain_o0.unstripped",
+      "unstripped_twin_sha256": "fc25106ff6b68589649210e5bf69230a4d7b94429c026d94314a16163c237e9d",
+      "symbol_count": 12,
+      "command": "clang --target=x86_64-linux-gnu -fuse-ld=lld -O0 -g tests/corpus-src/plain.c -o $OUT/x86_64_plain_o0.unstripped && llvm-strip --strip-all $OUT/x86_64_plain_o0.bin"
     },
     {
-      "architecture": "i386",
+      "architecture": "x86_64",
+      "endian": "little",
       "variant": "plain_o2",
       "status": "ok",
-      "binary": "i386_plain_o2.bin",
-      "binary_sha256": "bef1b0d652e1d663bd9beeb329510d9a229541f4e131f21d94cd4853b5fdab43",
-      "unstripped_twin": "i386_plain_o2.unstripped",
-      "unstripped_twin_sha256": "7110a5c2d8e3c32f4b6863d253ec21197f5949d7c0f5d24a9ef97e8e8c1d1fba",
-      "command": "clang --target=i686-linux-gnu -fuse-ld=lld --sysroot /home/raikaru/ventris/third_party/sysroots/i386 -B /home/raikaru/ventris/third_party/sysroots/i386/usr/lib/gcc-cross/i686-linux-gnu/12 -L /home/raikaru/ventris/third_party/sysroots/i386/usr/lib/gcc-cross/i686-linux-gnu/12 -O2 -s tests/corpus-src/plain.c -o $OUT/i386_plain_o2.bin"
+      "binary": "x86_64_plain_o2.bin",
+      "binary_sha256": "8d8449402227ed0a84038427f1504af8ca306652943d316abaf67de884998c3e",
+      "unstripped_twin": "x86_64_plain_o2.unstripped",
+      "unstripped_twin_sha256": "1cb15ed8e8ae142fc09d68a832a9decd9aed2054a6cdc1e9f7b4996782a9cde0",
+      "symbol_count": 12,
+      "command": "clang --target=x86_64-linux-gnu -fuse-ld=lld -O2 -g tests/corpus-src/plain.c -o $OUT/x86_64_plain_o2.unstripped && llvm-strip --strip-all $OUT/x86_64_plain_o2.bin"
     },
     {
-      "architecture": "i386",
+      "architecture": "x86_64",
+      "endian": "little",
       "variant": "plain_pie",
       "status": "ok",
-      "binary": "i386_plain_pie.bin",
-      "binary_sha256": "d19ed2b3988ae0309f9f9692bebe9275dc4fd943f816e21f397bfb21c9f41623",
-      "unstripped_twin": "i386_plain_pie.unstripped",
-      "unstripped_twin_sha256": "9d0db8fbd3db207c5a7eceae9afd138fe27d2954184a423784e20c03107236d0",
-      "command": "clang --target=i686-linux-gnu -fuse-ld=lld --sysroot /home/raikaru/ventris/third_party/sysroots/i386 -B /home/raikaru/ventris/third_party/sysroots/i386/usr/lib/gcc-cross/i686-linux-gnu/12 -L /home/raikaru/ventris/third_party/sysroots/i386/usr/lib/gcc-cross/i686-linux-gnu/12 -O2 -s -fPIE -pie tests/corpus-src/plain.c -o $OUT/i386_plain_pie.bin"
+      "binary": "x86_64_plain_pie.bin",
+      "binary_sha256": "8896d98e0b536f5cbf80fb81a26236965c234abb64f5ea34519480c95a8d7f8d",
+      "unstripped_twin": "x86_64_plain_pie.unstripped",
+      "unstripped_twin_sha256": "9e5339a12c6ba9338af52eb765794212afb822e574189dd25f02822e686cd3b7",
+      "symbol_count": 12,
+      "command": "clang --target=x86_64-linux-gnu -fuse-ld=lld -O2 -g -fPIE -pie tests/corpus-src/plain.c -o $OUT/x86_64_plain_pie.unstripped && llvm-strip --strip-all $OUT/x86_64_plain_pie.bin"
     },
     {
       "architecture": "i386",
+      "endian": "little",
       "variant": "cpp_o2",
       "status": "ok",
       "binary": "i386_cpp_o2.bin",
-      "binary_sha256": "127cb508bf5efe711a2ba9ad32f74eea89a8e78741566a973f59f95161e11180",
+      "binary_sha256": "fc5c3466fa9d944c6ffb947dfef915ea5542f51b1dd63a14be99860774f15e87",
       "unstripped_twin": "i386_cpp_o2.unstripped",
       "unstripped_twin_sha256": "6b7ac46538bc3ca858c98117c9dc97f3b77375014886cbfb505992b08098437b",
-      "command": "clang++ --target=i686-linux-gnu -fuse-ld=lld -nostdlib++ --sysroot /home/raikaru/ventris/third_party/sysroots/i386 -B /home/raikaru/ventris/third_party/sysroots/i386/usr/lib/gcc-cross/i686-linux-gnu/12 -L /home/raikaru/ventris/third_party/sysroots/i386/usr/lib/gcc-cross/i686-linux-gnu/12 -O2 -s tests/corpus-src/src.cpp -o $OUT/i386_cpp_o2.bin"
+      "symbol_count": 20,
+      "command": "clang++ --target=i686-linux-gnu -fuse-ld=lld -nostdlib++ --sysroot third_party/sysroots/i386 -B third_party/sysroots/i386/usr/lib/gcc-cross/i686-linux-gnu/12 -L third_party/sysroots/i386/usr/lib/gcc-cross/i686-linux-gnu/12 -O2 -g tests/corpus-src/src.cpp -o $OUT/i386_cpp_o2.unstripped && llvm-strip --strip-all $OUT/i386_cpp_o2.bin"
     },
     {
       "architecture": "i386",
+      "endian": "little",
       "variant": "many_o2",
       "status": "ok",
       "binary": "i386_many_o2.bin",
-      "binary_sha256": "46d6f65ce179c96cb8017f86b1cf5eef362e32540f360d2fd32e7644b72a4748",
+      "binary_sha256": "9b6dd63608b16cb652f13ad8332b0a78b0864eb574c78d2f85740b174632a70f",
       "unstripped_twin": "i386_many_o2.unstripped",
       "unstripped_twin_sha256": "0164176fd5ac2f28275c4187b52507e9722e18f9f7e2aa53c2e65804f07f9d0f",
-      "command": "clang --target=i686-linux-gnu -fuse-ld=lld --sysroot /home/raikaru/ventris/third_party/sysroots/i386 -B /home/raikaru/ventris/third_party/sysroots/i386/usr/lib/gcc-cross/i686-linux-gnu/12 -L /home/raikaru/ventris/third_party/sysroots/i386/usr/lib/gcc-cross/i686-linux-gnu/12 -O1 -fno-inline -s tests/corpus-src/many.c -o $OUT/i386_many_o2.bin"
+      "symbol_count": 411,
+      "command": "clang --target=i686-linux-gnu -fuse-ld=lld --sysroot third_party/sysroots/i386 -B third_party/sysroots/i386/usr/lib/gcc-cross/i686-linux-gnu/12 -L third_party/sysroots/i386/usr/lib/gcc-cross/i686-linux-gnu/12 -O1 -fno-inline -g tests/corpus-src/many.c -o $OUT/i386_many_o2.unstripped && llvm-strip --strip-all $OUT/i386_many_o2.bin"
     },
     {
-      "architecture": "aarch64",
+      "architecture": "i386",
+      "endian": "little",
       "variant": "plain_o0",
       "status": "ok",
-      "binary": "aarch64_plain_o0.bin",
-      "binary_sha256": "3aa0bf7efbab75891c725118f175beac8e9c2ffeb51be6731bc16dc96648aaad",
-      "unstripped_twin": "aarch64_plain_o0.unstripped",
-      "unstripped_twin_sha256": "3aa0bf7efbab75891c725118f175beac8e9c2ffeb51be6731bc16dc96648aaad",
-      "command": "clang --target=aarch64-linux-gnu -fuse-ld=lld --sysroot /home/raikaru/ventris/third_party/sysroots/aarch64 -B /home/raikaru/ventris/third_party/sysroots/aarch64/usr/lib/gcc-cross/aarch64-linux-gnu/12 -L /home/raikaru/ventris/third_party/sysroots/aarch64/usr/lib/gcc-cross/aarch64-linux-gnu/12 -O0 -g tests/corpus-src/plain.c -o $OUT/aarch64_plain_o0.bin"
+      "binary": "i386_plain_o0.bin",
+      "binary_sha256": "cea7cb1a23dbe84ab789761e612422415ee857945668ed2d28f06b5b1e3237ba",
+      "unstripped_twin": "i386_plain_o0.unstripped",
+      "unstripped_twin_sha256": "0a5f83884f4c5507faacdbc78f7f7193500a68c38a709f240631c5c17f9b5cba",
+      "symbol_count": 13,
+      "command": "clang --target=i686-linux-gnu -fuse-ld=lld --sysroot third_party/sysroots/i386 -B third_party/sysroots/i386/usr/lib/gcc-cross/i686-linux-gnu/12 -L third_party/sysroots/i386/usr/lib/gcc-cross/i686-linux-gnu/12 -O0 -g tests/corpus-src/plain.c -o $OUT/i386_plain_o0.unstripped && llvm-strip --strip-all $OUT/i386_plain_o0.bin"
     },
     {
-      "architecture": "aarch64",
+      "architecture": "i386",
+      "endian": "little",
       "variant": "plain_o2",
       "status": "ok",
-      "binary": "aarch64_plain_o2.bin",
-      "binary_sha256": "e8045934e2bd54c7c017c38c5f70fdc0730a667074691690fa1d3420dfd21059",
-      "unstripped_twin": "aarch64_plain_o2.unstripped",
-      "unstripped_twin_sha256": "1a5355a6fdf07651017d6866c59bdd016d0b613f8f8bb8f2bde066d8cf19454d",
-      "command": "clang --target=aarch64-linux-gnu -fuse-ld=lld --sysroot /home/raikaru/ventris/third_party/sysroots/aarch64 -B /home/raikaru/ventris/third_party/sysroots/aarch64/usr/lib/gcc-cross/aarch64-linux-gnu/12 -L /home/raikaru/ventris/third_party/sysroots/aarch64/usr/lib/gcc-cross/aarch64-linux-gnu/12 -O2 -s tests/corpus-src/plain.c -o $OUT/aarch64_plain_o2.bin"
+      "binary": "i386_plain_o2.bin",
+      "binary_sha256": "7af25a75c98eb8752c1bf478d9d538d4871a29a571de81dc53560cd25b02a4e3",
+      "unstripped_twin": "i386_plain_o2.unstripped",
+      "unstripped_twin_sha256": "7110a5c2d8e3c32f4b6863d253ec21197f5949d7c0f5d24a9ef97e8e8c1d1fba",
+      "symbol_count": 13,
+      "command": "clang --target=i686-linux-gnu -fuse-ld=lld --sysroot third_party/sysroots/i386 -B third_party/sysroots/i386/usr/lib/gcc-cross/i686-linux-gnu/12 -L third_party/sysroots/i386/usr/lib/gcc-cross/i686-linux-gnu/12 -O2 -g tests/corpus-src/plain.c -o $OUT/i386_plain_o2.unstripped && llvm-strip --strip-all $OUT/i386_plain_o2.bin"
     },
     {
-      "architecture": "aarch64",
+      "architecture": "i386",
+      "endian": "little",
       "variant": "plain_pie",
       "status": "ok",
-      "binary": "aarch64_plain_pie.bin",
-      "binary_sha256": "e1ad24f93702dca97209926e0698238f36722ee2f391a80106daa8e632a38677",
-      "unstripped_twin": "aarch64_plain_pie.unstripped",
-      "unstripped_twin_sha256": "20d555bb798d4dc6f52279846df3181cdf005b80161d50cb0243022a2727a11e",
-      "command": "clang --target=aarch64-linux-gnu -fuse-ld=lld --sysroot /home/raikaru/ventris/third_party/sysroots/aarch64 -B /home/raikaru/ventris/third_party/sysroots/aarch64/usr/lib/gcc-cross/aarch64-linux-gnu/12 -L /home/raikaru/ventris/third_party/sysroots/aarch64/usr/lib/gcc-cross/aarch64-linux-gnu/12 -O2 -s -fPIE -pie tests/corpus-src/plain.c -o $OUT/aarch64_plain_pie.bin"
+      "binary": "i386_plain_pie.bin",
+      "binary_sha256": "0898f32174a89ab70623820982c066d63ad2d2124524068e663cef8d9910d05c",
+      "unstripped_twin": "i386_plain_pie.unstripped",
+      "unstripped_twin_sha256": "9d0db8fbd3db207c5a7eceae9afd138fe27d2954184a423784e20c03107236d0",
+      "symbol_count": 14,
+      "command": "clang --target=i686-linux-gnu -fuse-ld=lld --sysroot third_party/sysroots/i386 -B third_party/sysroots/i386/usr/lib/gcc-cross/i686-linux-gnu/12 -L third_party/sysroots/i386/usr/lib/gcc-cross/i686-linux-gnu/12 -O2 -g -fPIE -pie tests/corpus-src/plain.c -o $OUT/i386_plain_pie.unstripped && llvm-strip --strip-all $OUT/i386_plain_pie.bin"
     },
     {
       "architecture": "aarch64",
+      "endian": "little",
       "variant": "cpp_o2",
       "status": "ok",
       "binary": "aarch64_cpp_o2.bin",
-      "binary_sha256": "39251648d539128b0a320e372e2e7cf7dc84135f5e938a524a6dbf8fd78c589a",
+      "binary_sha256": "1e912c15594bcfdf1dff6fde63b58ce559b2b042e71e2a4e5647e2e8f141552a",
       "unstripped_twin": "aarch64_cpp_o2.unstripped",
       "unstripped_twin_sha256": "b2efb20f255e3f159b169347fc62b18f448eecdd1f18948b5a8d78ac2378790b",
-      "command": "clang++ --target=aarch64-linux-gnu -fuse-ld=lld -nostdlib++ --sysroot /home/raikaru/ventris/third_party/sysroots/aarch64 -B /home/raikaru/ventris/third_party/sysroots/aarch64/usr/lib/gcc-cross/aarch64-linux-gnu/12 -L /home/raikaru/ventris/third_party/sysroots/aarch64/usr/lib/gcc-cross/aarch64-linux-gnu/12 -O2 -s tests/corpus-src/src.cpp -o $OUT/aarch64_cpp_o2.bin"
+      "symbol_count": 21,
+      "command": "clang++ --target=aarch64-linux-gnu -fuse-ld=lld -nostdlib++ --sysroot third_party/sysroots/aarch64 -B third_party/sysroots/aarch64/usr/lib/gcc-cross/aarch64-linux-gnu/12 -L third_party/sysroots/aarch64/usr/lib/gcc-cross/aarch64-linux-gnu/12 -O2 -g tests/corpus-src/src.cpp -o $OUT/aarch64_cpp_o2.unstripped && llvm-strip --strip-all $OUT/aarch64_cpp_o2.bin"
     },
     {
       "architecture": "aarch64",
+      "endian": "little",
       "variant": "many_o2",
       "status": "ok",
       "binary": "aarch64_many_o2.bin",
-      "binary_sha256": "f41a88dda28db1e600bf557292f8afdcff60a4e5a34edc2f5f3ad438a2ae127f",
+      "binary_sha256": "61f5eecf169c1a4ba8405b79d6a08c19a7d4359a7eccaea426dfaee430f60809",
       "unstripped_twin": "aarch64_many_o2.unstripped",
       "unstripped_twin_sha256": "2d9c54d3c99b3c7f3a36191c5ac8370e677245b91f535a81becfd85ed18656ad",
-      "command": "clang --target=aarch64-linux-gnu -fuse-ld=lld --sysroot /home/raikaru/ventris/third_party/sysroots/aarch64 -B /home/raikaru/ventris/third_party/sysroots/aarch64/usr/lib/gcc-cross/aarch64-linux-gnu/12 -L /home/raikaru/ventris/third_party/sysroots/aarch64/usr/lib/gcc-cross/aarch64-linux-gnu/12 -O1 -fno-inline -s tests/corpus-src/many.c -o $OUT/aarch64_many_o2.bin"
+      "symbol_count": 412,
+      "command": "clang --target=aarch64-linux-gnu -fuse-ld=lld --sysroot third_party/sysroots/aarch64 -B third_party/sysroots/aarch64/usr/lib/gcc-cross/aarch64-linux-gnu/12 -L third_party/sysroots/aarch64/usr/lib/gcc-cross/aarch64-linux-gnu/12 -O1 -fno-inline -g tests/corpus-src/many.c -o $OUT/aarch64_many_o2.unstripped && llvm-strip --strip-all $OUT/aarch64_many_o2.bin"
     },
     {
-      "architecture": "powerpc",
+      "architecture": "aarch64",
+      "endian": "little",
       "variant": "plain_o0",
       "status": "ok",
-      "binary": "powerpc_plain_o0.bin",
-      "binary_sha256": "97b3662bd95e93df818571151aac96950dcb3b269bddefeb696f5251a5098e46",
-      "unstripped_twin": "powerpc_plain_o0.unstripped",
-      "unstripped_twin_sha256": "97b3662bd95e93df818571151aac96950dcb3b269bddefeb696f5251a5098e46",
-      "command": "clang --target=powerpc-linux-gnu -fuse-ld=lld --sysroot /home/raikaru/ventris/third_party/sysroots/powerpc -B /home/raikaru/ventris/third_party/sysroots/powerpc/usr/lib/gcc-cross/powerpc-linux-gnu/12 -L /home/raikaru/ventris/third_party/sysroots/powerpc/usr/lib/gcc-cross/powerpc-linux-gnu/12 -O0 -g tests/corpus-src/plain.c -o $OUT/powerpc_plain_o0.bin"
+      "binary": "aarch64_plain_o0.bin",
+      "binary_sha256": "66f3eb9783d1ab80a3bab9b6e4fd27d226a45a18d1e2c7d2f8079ef8fe64195f",
+      "unstripped_twin": "aarch64_plain_o0.unstripped",
+      "unstripped_twin_sha256": "3aa0bf7efbab75891c725118f175beac8e9c2ffeb51be6731bc16dc96648aaad",
+      "symbol_count": 14,
+      "command": "clang --target=aarch64-linux-gnu -fuse-ld=lld --sysroot third_party/sysroots/aarch64 -B third_party/sysroots/aarch64/usr/lib/gcc-cross/aarch64-linux-gnu/12 -L third_party/sysroots/aarch64/usr/lib/gcc-cross/aarch64-linux-gnu/12 -O0 -g tests/corpus-src/plain.c -o $OUT/aarch64_plain_o0.unstripped && llvm-strip --strip-all $OUT/aarch64_plain_o0.bin"
     },
     {
-      "architecture": "powerpc",
+      "architecture": "aarch64",
+      "endian": "little",
       "variant": "plain_o2",
       "status": "ok",
-      "binary": "powerpc_plain_o2.bin",
-      "binary_sha256": "ea5a684a3c403dbd0077e4f48892640c21c59ddcaac0e7679f691d0b3235b300",
-      "unstripped_twin": "powerpc_plain_o2.unstripped",
-      "unstripped_twin_sha256": "a2aa29568245f14890b5e36c748dfb26f5a4871bcef84cc3e66ff86e26ad5493",
-      "command": "clang --target=powerpc-linux-gnu -fuse-ld=lld --sysroot /home/raikaru/ventris/third_party/sysroots/powerpc -B /home/raikaru/ventris/third_party/sysroots/powerpc/usr/lib/gcc-cross/powerpc-linux-gnu/12 -L /home/raikaru/ventris/third_party/sysroots/powerpc/usr/lib/gcc-cross/powerpc-linux-gnu/12 -O2 -s tests/corpus-src/plain.c -o $OUT/powerpc_plain_o2.bin"
+      "binary": "aarch64_plain_o2.bin",
+      "binary_sha256": "ad94df285201e3991d655094de17778d47ddb823bf2f3300405f0f79c9526c4a",
+      "unstripped_twin": "aarch64_plain_o2.unstripped",
+      "unstripped_twin_sha256": "1a5355a6fdf07651017d6866c59bdd016d0b613f8f8bb8f2bde066d8cf19454d",
+      "symbol_count": 14,
+      "command": "clang --target=aarch64-linux-gnu -fuse-ld=lld --sysroot third_party/sysroots/aarch64 -B third_party/sysroots/aarch64/usr/lib/gcc-cross/aarch64-linux-gnu/12 -L third_party/sysroots/aarch64/usr/lib/gcc-cross/aarch64-linux-gnu/12 -O2 -g tests/corpus-src/plain.c -o $OUT/aarch64_plain_o2.unstripped && llvm-strip --strip-all $OUT/aarch64_plain_o2.bin"
     },
     {
-      "architecture": "powerpc",
+      "architecture": "aarch64",
+      "endian": "little",
       "variant": "plain_pie",
       "status": "ok",
-      "binary": "powerpc_plain_pie.bin",
-      "binary_sha256": "e8efc09d9e8b4ad1b8dcf11478c4bcc63d053ad5ad878b10c26e5f21bb0aa12b",
-      "unstripped_twin": "powerpc_plain_pie.unstripped",
-      "unstripped_twin_sha256": "b3e0062dde8ee5d4435cbc2ef95314d267746e58b234d8b7bd106b9f2822fce8",
-      "command": "clang --target=powerpc-linux-gnu -fuse-ld=lld --sysroot /home/raikaru/ventris/third_party/sysroots/powerpc -B /home/raikaru/ventris/third_party/sysroots/powerpc/usr/lib/gcc-cross/powerpc-linux-gnu/12 -L /home/raikaru/ventris/third_party/sysroots/powerpc/usr/lib/gcc-cross/powerpc-linux-gnu/12 -O2 -s -fPIE -pie tests/corpus-src/plain.c -o $OUT/powerpc_plain_pie.bin"
+      "binary": "aarch64_plain_pie.bin",
+      "binary_sha256": "130cc59f1a678db98aaca4ad7116d8912d8ae366c1000ef744ce0871547e5555",
+      "unstripped_twin": "aarch64_plain_pie.unstripped",
+      "unstripped_twin_sha256": "20d555bb798d4dc6f52279846df3181cdf005b80161d50cb0243022a2727a11e",
+      "symbol_count": 14,
+      "command": "clang --target=aarch64-linux-gnu -fuse-ld=lld --sysroot third_party/sysroots/aarch64 -B third_party/sysroots/aarch64/usr/lib/gcc-cross/aarch64-linux-gnu/12 -L third_party/sysroots/aarch64/usr/lib/gcc-cross/aarch64-linux-gnu/12 -O2 -g -fPIE -pie tests/corpus-src/plain.c -o $OUT/aarch64_plain_pie.unstripped && llvm-strip --strip-all $OUT/aarch64_plain_pie.bin"
     },
     {
       "architecture": "powerpc",
+      "endian": "big",
       "variant": "cpp_o2",
       "status": "ok",
       "binary": "powerpc_cpp_o2.bin",
-      "binary_sha256": "1e12eb5f620e8d37b95f71262ed91de841662258d167bbf669059936b1331be7",
+      "binary_sha256": "239c2286df2ed745a038328f0cd2f742a8dd83482ecd0a6069fb8d44208bd0da",
       "unstripped_twin": "powerpc_cpp_o2.unstripped",
       "unstripped_twin_sha256": "89b940f636a4339fec79fa87450002ea2cc69561bfa9362518d9d6938e0b24a6",
-      "command": "clang++ --target=powerpc-linux-gnu -fuse-ld=lld -nostdlib++ --sysroot /home/raikaru/ventris/third_party/sysroots/powerpc -B /home/raikaru/ventris/third_party/sysroots/powerpc/usr/lib/gcc-cross/powerpc-linux-gnu/12 -L /home/raikaru/ventris/third_party/sysroots/powerpc/usr/lib/gcc-cross/powerpc-linux-gnu/12 -O2 -s tests/corpus-src/src.cpp -o $OUT/powerpc_cpp_o2.bin"
+      "symbol_count": 21,
+      "command": "clang++ --target=powerpc-linux-gnu -fuse-ld=lld -nostdlib++ --sysroot third_party/sysroots/powerpc -B third_party/sysroots/powerpc/usr/lib/gcc-cross/powerpc-linux-gnu/12 -L third_party/sysroots/powerpc/usr/lib/gcc-cross/powerpc-linux-gnu/12 -O2 -g tests/corpus-src/src.cpp -o $OUT/powerpc_cpp_o2.unstripped && llvm-strip --strip-all $OUT/powerpc_cpp_o2.bin"
     },
     {
       "architecture": "powerpc",
+      "endian": "big",
       "variant": "many_o2",
       "status": "ok",
       "binary": "powerpc_many_o2.bin",
-      "binary_sha256": "22492adde375eb1a6315b65ebda16b321d6285e08e479b3fd5d433c8bf93dd0e",
+      "binary_sha256": "4b5d370ec6ccdd53e77eb4c9c0bf69212d3c614c38f840579cded8471c3247b3",
       "unstripped_twin": "powerpc_many_o2.unstripped",
       "unstripped_twin_sha256": "019ba2359b9a494d642933df418a9f33d83879b1dd0437371d407a3fc4c9cd32",
-      "command": "clang --target=powerpc-linux-gnu -fuse-ld=lld --sysroot /home/raikaru/ventris/third_party/sysroots/powerpc -B /home/raikaru/ventris/third_party/sysroots/powerpc/usr/lib/gcc-cross/powerpc-linux-gnu/12 -L /home/raikaru/ventris/third_party/sysroots/powerpc/usr/lib/gcc-cross/powerpc-linux-gnu/12 -O1 -fno-inline -s tests/corpus-src/many.c -o $OUT/powerpc_many_o2.bin"
+      "symbol_count": 411,
+      "command": "clang --target=powerpc-linux-gnu -fuse-ld=lld --sysroot third_party/sysroots/powerpc -B third_party/sysroots/powerpc/usr/lib/gcc-cross/powerpc-linux-gnu/12 -L third_party/sysroots/powerpc/usr/lib/gcc-cross/powerpc-linux-gnu/12 -O1 -fno-inline -g tests/corpus-src/many.c -o $OUT/powerpc_many_o2.unstripped && llvm-strip --strip-all $OUT/powerpc_many_o2.bin"
     },
     {
-      "architecture": "msvc",
+      "architecture": "powerpc",
+      "endian": "big",
       "variant": "plain_o0",
-      "status": "skipped",
-      "reason": "MSVC requires Windows host with Visual Studio (verified via Windows CI)",
-      "binary": "msvc_plain_o0.exe",
-      "unstripped_twin": "msvc_plain_o0.unstripped"
+      "status": "ok",
+      "binary": "powerpc_plain_o0.bin",
+      "binary_sha256": "ff47f82cc0219badd8969cdab5ff4a257905e26d62a0da9607567a5e5cb7c557",
+      "unstripped_twin": "powerpc_plain_o0.unstripped",
+      "unstripped_twin_sha256": "97b3662bd95e93df818571151aac96950dcb3b269bddefeb696f5251a5098e46",
+      "symbol_count": 14,
+      "command": "clang --target=powerpc-linux-gnu -fuse-ld=lld --sysroot third_party/sysroots/powerpc -B third_party/sysroots/powerpc/usr/lib/gcc-cross/powerpc-linux-gnu/12 -L third_party/sysroots/powerpc/usr/lib/gcc-cross/powerpc-linux-gnu/12 -O0 -g tests/corpus-src/plain.c -o $OUT/powerpc_plain_o0.unstripped && llvm-strip --strip-all $OUT/powerpc_plain_o0.bin"
     },
     {
-      "architecture": "msvc",
+      "architecture": "powerpc",
+      "endian": "big",
       "variant": "plain_o2",
-      "status": "skipped",
-      "reason": "MSVC requires Windows host with Visual Studio (verified via Windows CI)",
-      "binary": "msvc_plain_o2.exe",
-      "unstripped_twin": "msvc_plain_o2.unstripped"
+      "status": "ok",
+      "binary": "powerpc_plain_o2.bin",
+      "binary_sha256": "27b28ed915b89555b6ca45880d36f1f1c28615d70c8c98d3df34a270452ca8a9",
+      "unstripped_twin": "powerpc_plain_o2.unstripped",
+      "unstripped_twin_sha256": "a2aa29568245f14890b5e36c748dfb26f5a4871bcef84cc3e66ff86e26ad5493",
+      "symbol_count": 14,
+      "command": "clang --target=powerpc-linux-gnu -fuse-ld=lld --sysroot third_party/sysroots/powerpc -B third_party/sysroots/powerpc/usr/lib/gcc-cross/powerpc-linux-gnu/12 -L third_party/sysroots/powerpc/usr/lib/gcc-cross/powerpc-linux-gnu/12 -O2 -g tests/corpus-src/plain.c -o $OUT/powerpc_plain_o2.unstripped && llvm-strip --strip-all $OUT/powerpc_plain_o2.bin"
     },
     {
-      "architecture": "msvc",
+      "architecture": "powerpc",
+      "endian": "big",
       "variant": "plain_pie",
-      "status": "skipped",
-      "reason": "MSVC requires Windows host with Visual Studio (verified via Windows CI)",
-      "binary": "msvc_plain_pie.exe",
-      "unstripped_twin": "msvc_plain_pie.unstripped"
+      "status": "ok",
+      "binary": "powerpc_plain_pie.bin",
+      "binary_sha256": "0748d6bdf5d167bdbc75102c31a09a8792215e646e10ba723d16fef0cde78452",
+      "unstripped_twin": "powerpc_plain_pie.unstripped",
+      "unstripped_twin_sha256": "b3e0062dde8ee5d4435cbc2ef95314d267746e58b234d8b7bd106b9f2822fce8",
+      "symbol_count": 16,
+      "command": "clang --target=powerpc-linux-gnu -fuse-ld=lld --sysroot third_party/sysroots/powerpc -B third_party/sysroots/powerpc/usr/lib/gcc-cross/powerpc-linux-gnu/12 -L third_party/sysroots/powerpc/usr/lib/gcc-cross/powerpc-linux-gnu/12 -O2 -g -fPIE -pie tests/corpus-src/plain.c -o $OUT/powerpc_plain_pie.unstripped && llvm-strip --strip-all $OUT/powerpc_plain_pie.bin"
     },
     {
       "architecture": "msvc",
+      "endian": "little",
       "variant": "cpp_o2",
       "status": "skipped",
       "reason": "MSVC requires Windows host with Visual Studio (verified via Windows CI)",
       "binary": "msvc_cpp_o2.exe",
-      "unstripped_twin": "msvc_cpp_o2.unstripped"
+      "unstripped_twin": "msvc_cpp_o2.unstripped.exe",
+      "symbol_artifact": "msvc_cpp_o2.pdb"
     },
     {
       "architecture": "msvc",
+      "endian": "little",
       "variant": "many_o2",
       "status": "skipped",
       "reason": "MSVC requires Windows host with Visual Studio (verified via Windows CI)",
       "binary": "msvc_many_o2.exe",
-      "unstripped_twin": "msvc_many_o2.unstripped"
+      "unstripped_twin": "msvc_many_o2.unstripped.exe",
+      "symbol_artifact": "msvc_many_o2.pdb"
+    },
+    {
+      "architecture": "msvc",
+      "endian": "little",
+      "variant": "plain_o0",
+      "status": "skipped",
+      "reason": "MSVC requires Windows host with Visual Studio (verified via Windows CI)",
+      "binary": "msvc_plain_o0.exe",
+      "unstripped_twin": "msvc_plain_o0.unstripped.exe",
+      "symbol_artifact": "msvc_plain_o0.pdb"
+    },
+    {
+      "architecture": "msvc",
+      "endian": "little",
+      "variant": "plain_o2",
+      "status": "skipped",
+      "reason": "MSVC requires Windows host with Visual Studio (verified via Windows CI)",
+      "binary": "msvc_plain_o2.exe",
+      "unstripped_twin": "msvc_plain_o2.unstripped.exe",
+      "symbol_artifact": "msvc_plain_o2.pdb"
+    },
+    {
+      "architecture": "msvc",
+      "endian": "little",
+      "variant": "plain_pie",
+      "status": "skipped",
+      "reason": "MSVC requires Windows host with Visual Studio (verified via Windows CI)",
+      "binary": "msvc_plain_pie.exe",
+      "unstripped_twin": "msvc_plain_pie.unstripped.exe",
+      "symbol_artifact": "msvc_plain_pie.pdb"
     }
   ]
 }

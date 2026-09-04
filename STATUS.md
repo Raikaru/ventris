@@ -572,20 +572,31 @@ M1 — Discovery becomes generic
   values in .data/.rodata/.data.rel.ro that land in executable sections and confirm
   via batched flow. Acceptance: cpp_o2 and plain_o0 recall >= 0.98 against the
   m1-007 Ghidra oracle.
+- Commit rule note: commit `e0db463` exceeded the 800 changed line limit
+  (1,386 insertions across committed corpus sources including many.c (806 lines),
+  lockfile, and generator script); per II.0, recorded as an acknowledged violation
+  without history rewriting.
 
 - m1-006: generated multi-architecture corpus across 4 target architectures (x86-64,
   x86-32, aarch64, powerpc) × 5 variants (plain_o0, plain_o2, plain_pie, cpp_o2, many_o2)
   = 20 binaries + 20 unstripped twins containing .symtab function symbols. Committed sources
-  in tests/corpus-src/ (plain.c, src.cpp, many.c) and lockfile tests/corpus.lock.json.
-  Added scripts/gen_corpus.py; MSVC entries skipped on non-Windows host (verified via Windows CI).
+  in tests/corpus-src/ (plain.c, src.cpp, many.c) and lockfile tests/corpus.lock.json (with
+  zero host-specific absolute paths). Added scripts/gen_corpus.py with --architectures and
+  --msvc-only support. Primaries derived by stripping copies of twins (via llvm-strip --strip-all
+  or PE debug directory zeroing), ensuring bit-for-bit loadable code identity while stripped
+  primaries lack .symtab and twins contain function symbols (plain_o0 stripped).
   Added machine 0x3 (EM_386) to elf_language in lre-core, enabling native ELF32 x86 import.
   All 20 binaries import cleanly natively: x86-64 (8..408 functions), i386 (6..14 functions),
-  aarch64 (3..11 functions), and powerpc (9..408 functions). Acceptance test tests/m1-006_corpus.sh passes (PASS).
+  aarch64 (3..11 functions), and powerpc (9..408 functions). Added read-only reproducible
+  gate tests/m1-006_corpus.sh (builds lre-cli, validates against temporary lock, checks source/artifact
+  hashes, entry coverage, symbols, architectures, endianness, and native imports) and committed
+  gate report benchmarks/reports/m1-006.json (including local MSVC skips with reasons).
+  Added dedicated Windows CI job (corpus-windows with MSVC activation) and Linux CI job (corpus-linux).
 
 ## Next task
-- m1-007: multi-architecture Ghidra oracle generation and scoring baseline across the corpus
-  (bridge import + export_facts for oracle function entries, scoring discovery against oracle
-  and unstripped twin symbols, per §II.4 and M1 gate criteria).
+- m1-006: multi-architecture corpus generation (x86-64, x86-32, AArch64, PPC32-BE)
+  with unstripped twin for each entry, sources + lock committed, MSVC via Windows CI
+  with local skipped, per §II.4 and docs/toolchains.md (running Linux and Windows CI corpus gates).
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a
   clearly separated accelerator module with an equivalence test, never in the
