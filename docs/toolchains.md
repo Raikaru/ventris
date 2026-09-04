@@ -186,3 +186,8 @@ big-endian ARM remains `ARM:BE:32:v7`; ELF32 i386 and PE32 remain
 `--update-report` explicitly writes `benchmarks/reports/m1-008.json`; normal
 runs leave the working tree unchanged. All six cases must pass, with zero
 allowed skips.
+
+The x86 probes use Linux GNU targets and explicit `-fno-pie -no-pie`.
+Ubuntu LLVM 18 routes generic `*-none-elf` x86 links through GCC, whose
+default PIE mode rejects the probes' absolute relocations. The explicit
+targets/model avoid that host-dependent driver behavior.
