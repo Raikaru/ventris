@@ -671,10 +671,15 @@ M1 — Discovery becomes generic
 - `tests/m1-008_languages.py`: 6/6 passed, 0 failed, 0 skipped. It checks real
   compiler-produced ELF32 inputs, the existing PE32 fixture, an ELF64 control,
   installed `.ldefs`/SLA metadata and the native architecture catalog.
-  Generated report committed in `ad14d0e`: `benchmarks/reports/m1-008.json`.
+  Generated report: `benchmarks/reports/m1-008.json`.
 - `cargo test --workspace`: 97 passed; legacy corpus: 5/5; m1-006 Linux corpus:
   20/20 (5 MSVC skips permitted on Linux). README matrix check passed.
   The existing Ghidra CI job also runs the language gate.
+- CI run `33919780791` passed all ARM/PE language cases but exposed 2 x86
+  probe link failures with Ubuntu LLVM 18: generic ELF targets routed through
+  GCC's default PIE link. Both failures were reproduced; explicit Linux GNU
+  targets with `-fno-pie -no-pie` passed both compiler checks. The corrected
+  full local gate again passed 6/6; compiler stderr is retained on failures.
 
 ## Next task
 - m1-009: stripped GameCube `.dol` loader (section table to image), with

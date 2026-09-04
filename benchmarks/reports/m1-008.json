@@ -1,7 +1,7 @@
 {
   "gate": "m1-008",
   "milestone": "M1",
-  "commit": "5d3bd2fada6e79fc95a299448f377e607e4fb61a",
+  "commit": "a52b19ed8456e3afd2cf0e36a249822269f1d5ea",
   "date": "2026-09-04",
   "machine": {
     "os": "Linux-7.1.12-200.fc44.x86_64-x86_64-with-glibc2.43",
