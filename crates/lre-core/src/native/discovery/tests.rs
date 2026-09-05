@@ -689,7 +689,9 @@ fn pattern_entries_require_defined_boundaries_and_valid_code() {
     };
     cfg.console_path = Some(console);
     cfg.language_id = "AARCH64:LE:64:v8A".into();
-    cfg.language_dir = cfg.ghidra_install.join("Ghidra/Processors/AARCH64/data/languages");
+    cfg.language_dir = cfg
+        .ghidra_install
+        .join("Ghidra/Processors/AARCH64/data/languages");
     const RET: u32 = 0xd65f03c0;
     const NOP: u32 = 0xd503201f;
     const STP: u32 = 0xa9be7bfd;
@@ -698,16 +700,43 @@ fn pattern_entries_require_defined_boundaries_and_valid_code() {
     const ADD: u32 = 0x910043ff;
     let cases: &[(&str, &[u32], &[u64], &[(u64, u64)])] = &[
         // Validation may cross existing instructions; ownership may not.
-        ("adjacent entry", &[RET, NOP, STP, MOV, RET], &[0x1000, 0x1008],
-            &[(0x1000, 4), (0x1004, 4), (0x1008, 12)]),
-        ("owned prefix", &[NOP, NOP, STP, MOV, RET], &[0x1000, 0x1008],
-            &[(0x1000, 8), (0x1008, 12)]),
-        ("three valid instructions", &[RET, SUB, ADD, RET], &[0x1000],
-            &[(0x1000, 4), (0x1004, 12)]),
-        ("early return", &[RET, SUB, RET, NOP], &[0x1000], &[(0x1000, 4)]),
-        ("invalid instruction", &[RET, SUB, 0, NOP], &[0x1000], &[(0x1000, 4)]),
+        (
+            "adjacent entry",
+            &[RET, NOP, STP, MOV, RET],
+            &[0x1000, 0x1008],
+            &[(0x1000, 4), (0x1004, 4), (0x1008, 12)],
+        ),
+        (
+            "owned prefix",
+            &[NOP, NOP, STP, MOV, RET],
+            &[0x1000, 0x1008],
+            &[(0x1000, 8), (0x1008, 12)],
+        ),
+        (
+            "three valid instructions",
+            &[RET, SUB, ADD, RET],
+            &[0x1000],
+            &[(0x1000, 4), (0x1004, 12)],
+        ),
+        (
+            "early return",
+            &[RET, SUB, RET, NOP],
+            &[0x1000],
+            &[(0x1000, 4)],
+        ),
+        (
+            "invalid instruction",
+            &[RET, SUB, 0, NOP],
+            &[0x1000],
+            &[(0x1000, 4)],
+        ),
         // Bytes matching RET are not an already-defined predecessor instruction.
-        ("undefined predecessor", &[RET, RET, SUB, ADD, RET], &[0x1000], &[(0x1000, 4)]),
+        (
+            "undefined predecessor",
+            &[RET, RET, SUB, ADD, RET],
+            &[0x1000],
+            &[(0x1000, 4)],
+        ),
     ];
     for &(case, words, entries, expected) in cases {
         let bytes: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
@@ -716,11 +745,20 @@ fn pattern_entries_require_defined_boundaries_and_valid_code() {
             language: cfg.language_id.clone(),
             format: "ELF".into(),
             mappings: vec![Mapping {
-                vaddr: 0x1000, size: bytes.len() as u64, file_off: 0, flags: 6, bytes,
+                vaddr: 0x1000,
+                size: bytes.len() as u64,
+                file_off: 0,
+                flags: 6,
+                bytes,
             }],
-            functions: entries.iter().map(|&entry| NativeFunction {
-                entry, size: 1, name: format!("seed_{entry:x}"),
-            }).collect(),
+            functions: entries
+                .iter()
+                .map(|&entry| NativeFunction {
+                    entry,
+                    size: 1,
+                    name: format!("seed_{entry:x}"),
+                })
+                .collect(),
             ..Default::default()
         };
         discover_seeded(&mut import);
@@ -732,38 +770,59 @@ fn pattern_entries_require_defined_boundaries_and_valid_code() {
 #[test]
 fn conditional_return_preserves_its_nonreturning_path() {
     let mut import = image();
-    flow_discover_with_provider(&mut import, |addresses| addresses.iter().map(|&address| {
-        let mut flow = result(address, FlowKind::Return, None, false);
-        if address == 0x1000 {
-            flow.conditional = true;
-            flow.fallthrough = Some(0x1002);
-        } else if address == 0x1002 {
-            flow = result(address, FlowKind::Call, Some(0x2000), false);
-            flow.fallthrough = Some(0x1004);
-        }
-        flow
-    }).collect());
-    assert!(import.functions.iter().any(|function| function.entry == 0x2000));
-    assert!(import.xrefs.iter().any(|xref| xref.from == 0x1002 && xref.to == 0x2000
-        && xref.kind == "UNCONDITIONAL_CALL"));
+    flow_discover_with_provider(&mut import, |addresses| {
+        addresses
+            .iter()
+            .map(|&address| {
+                let mut flow = result(address, FlowKind::Return, None, false);
+                if address == 0x1000 {
+                    flow.conditional = true;
+                    flow.fallthrough = Some(0x1002);
+                } else if address == 0x1002 {
+                    flow = result(address, FlowKind::Call, Some(0x2000), false);
+                    flow.fallthrough = Some(0x1004);
+                }
+                flow
+            })
+            .collect()
+    });
+    assert!(import
+        .functions
+        .iter()
+        .any(|function| function.entry == 0x2000));
+    assert!(import
+        .xrefs
+        .iter()
+        .any(|xref| xref.from == 0x1002 && xref.to == 0x2000 && xref.kind == "UNCONDITIONAL_CALL"));
 }
 
 #[test]
 fn terminal_call_does_not_invent_fallthrough() {
     let mut import = image();
-    flow_discover_with_provider(&mut import, |addresses| addresses.iter().map(|&address| {
-        if address == 0x1000 {
-            let mut flow = result(address, FlowKind::Call, Some(0x2000), false);
-            flow.terminal = true;
-            flow.return_op = true;
-            flow.fallthrough = None;
-            flow
-        } else if address == 0x1002 {
-            result(address, FlowKind::Call, Some(0x2100), false)
-        } else {
-            result(address, FlowKind::Return, None, false)
-        }
-    }).collect());
-    assert_eq!(import.functions.iter().map(|function| function.entry).collect::<Vec<_>>(),
-        [0x1000, 0x2000]);
+    flow_discover_with_provider(&mut import, |addresses| {
+        addresses
+            .iter()
+            .map(|&address| {
+                if address == 0x1000 {
+                    let mut flow = result(address, FlowKind::Call, Some(0x2000), false);
+                    flow.terminal = true;
+                    flow.return_op = true;
+                    flow.fallthrough = None;
+                    flow
+                } else if address == 0x1002 {
+                    result(address, FlowKind::Call, Some(0x2100), false)
+                } else {
+                    result(address, FlowKind::Return, None, false)
+                }
+            })
+            .collect()
+    });
+    assert_eq!(
+        import
+            .functions
+            .iter()
+            .map(|function| function.entry)
+            .collect::<Vec<_>>(),
+        [0x1000, 0x2000]
+    );
 }
