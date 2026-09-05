@@ -237,47 +237,52 @@ fn undefined_elf32_symbols_are_not_function_definitions() {
     }
 }
 
+fn external_fixture(width: usize, be: bool, relocation: u64, image_base: u64) -> Vec<u8> {
+    let mut data = fixture(width, be, relocation, image_base);
+    let stride = if width == 8 { 64 } else { 40 };
+    let mut put = |offset: usize, size: usize, value: u64| {
+        for i in 0..size {
+            data[offset + i] = (value >> (8 * if be { size - 1 - i } else { i })) as u8;
+        }
+    };
+    put(if width == 8 { 60 } else { 48 }, 2, 6);
+    put(0x100 + 4 * stride + 8 + 3 * width, width, 0x60);
+    let rel = 0x100 + 3 * stride;
+    put(
+        rel + 8 + 3 * width,
+        width,
+        (if relocation == 4 { 3 } else { 2 }) * width as u64,
+    );
+    put(rel + 8 + 4 * width, 4, 5);
+    let sym = 0x100 + 5 * stride;
+    put(sym + 4, 4, 11); // SHT_DYNSYM
+    put(sym + 8 + 2 * width, width, 0x500);
+    put(sym + 8 + 3 * width, width, if width == 8 { 48 } else { 32 });
+    put(sym + 8 + 4 * width, 4, 4); // names in section 4
+    let symbol = 0x500 + if width == 8 { 24 } else { 16 };
+    put(symbol, 4, 0x40);
+    put(symbol + if width == 8 { 4 } else { 12 }, 1, 0x12);
+    put(0x480, width, image_base + 0x2000);
+    put(
+        0x480 + width,
+        width,
+        if width == 8 {
+            (1 << 32) | 7
+        } else {
+            (1 << 8) | if be { 21 } else { 7 }
+        },
+    );
+    if relocation == 4 {
+        put(0x480 + 2 * width, width, 0);
+    }
+    data[0x3c0..0x3c9].copy_from_slice(b"imported\0");
+    data
+}
+
 #[test]
 fn external_relocation_slots_are_loaded_facts_without_code_promotion() {
     for (width, be, relocation) in [(4, false, 9), (4, true, 4), (8, false, 4)] {
-        let mut data = fixture(width, be, relocation, 0);
-        let stride = if width == 8 { 64 } else { 40 };
-        let mut put = |offset: usize, size: usize, value: u64| {
-            for i in 0..size {
-                data[offset + i] = (value >> (8 * if be { size - 1 - i } else { i })) as u8;
-            }
-        };
-        put(if width == 8 { 60 } else { 48 }, 2, 6);
-        put(0x100 + 4 * stride + 8 + 3 * width, width, 0x60);
-        let rel = 0x100 + 3 * stride;
-        put(
-            rel + 8 + 3 * width,
-            width,
-            (if relocation == 4 { 3 } else { 2 }) * width as u64,
-        );
-        put(rel + 8 + 4 * width, 4, 5);
-        let sym = 0x100 + 5 * stride;
-        put(sym + 4, 4, 11); // SHT_DYNSYM
-        put(sym + 8 + 2 * width, width, 0x500);
-        put(sym + 8 + 3 * width, width, if width == 8 { 48 } else { 32 });
-        put(sym + 8 + 4 * width, 4, 4); // names in section 4
-        let symbol = 0x500 + if width == 8 { 24 } else { 16 };
-        put(symbol, 4, 0x40);
-        put(symbol + if width == 8 { 4 } else { 12 }, 1, 0x12);
-        put(0x480, width, 0x2000);
-        put(
-            0x480 + width,
-            width,
-            if width == 8 {
-                (1 << 32) | 7
-            } else {
-                (1 << 8) | if be { 21 } else { 7 }
-            },
-        );
-        if relocation == 4 {
-            put(0x480 + 2 * width, width, 0);
-        }
-        data[0x3c0..0x3c9].copy_from_slice(b"imported\0");
+        let data = external_fixture(width, be, relocation, 0);
         let import = import_elf(&data).unwrap();
         let bias = if width == 8 { 0x100000 } else { 0x10000 };
         assert!(import
@@ -296,4 +301,67 @@ fn external_relocation_slots_are_loaded_facts_without_code_promotion() {
             .iter()
             .any(|function| function.name == "imported"));
     }
+}
+
+#[test]
+fn unreferenced_plt_entry_requires_executable_table_and_bound_slot() {
+    let cfg = lre_core::session::RuntimeConfig::from_env();
+    if lre_core::native_runtime::find_console(&cfg).is_err() {
+        eprintln!("SKIP: SLEIGH console not available");
+        return;
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("ventris-plt-{}-{stamp}", std::process::id()));
+    for width in [4, 8] {
+        for (executable, bound) in [(true, true), (false, true), (true, false)] {
+            let mut data = external_fixture(width, false, if width == 8 { 4 } else { 9 }, 0x400000);
+            let stride = if width == 8 { 64 } else { 40 };
+            let mut put = |offset: usize, size: usize, value: u64| {
+                for i in 0..size {
+                    data[offset + i] = (value >> (8 * i)) as u8;
+                }
+            };
+            put(if width == 8 { 60 } else { 48 }, 2, 7);
+            if width == 8 {
+                put(18, 2, 183); // AArch64
+                put(0x488, 8, (1 << 32) | if bound { 1026 } else { 0 });
+            } else if !bound {
+                put(0x484, 4, 0);
+            }
+            let table = 0x100 + 6 * stride;
+            put(table, 4, 0x50);
+            put(table + 4, 4, 1);
+            for (i, value) in [if executable { 6 } else { 2 }, 0x403000, 0x580, 32]
+                .into_iter()
+                .enumerate()
+            {
+                put(table + 8 + i * width, width, value);
+            }
+            put(table + if width == 8 { 56 } else { 36 }, width, 16);
+            data[0x3d0..0x3d5].copy_from_slice(b".plt\0");
+            if width == 8 {
+                data[0x400..0x404].copy_from_slice(&[0xc0, 0x03, 0x5f, 0xd6]);
+                // LLVM: adrp x16,#-4096; ldr x17,[x16]; add x16,x16,#0; br x17.
+                data[0x590..0x5a0].copy_from_slice(&[
+                    0xf0, 0xff, 0xff, 0xf0, 0x11, 0x02, 0x40, 0xf9,
+                    0x10, 0x02, 0x00, 0x91, 0x20, 0x02, 0x1f, 0xd6,
+                ]);
+            } else {
+                data[0x400] = 0xc3;
+                data[0x590..0x596].copy_from_slice(&[0xff, 0x25, 0x00, 0x20, 0x40, 0x00]);
+            }
+            std::fs::write(&path, data).unwrap();
+            let import = lre_core::native::load_native(&path).unwrap();
+            let function = import.functions.iter().find(|function| function.entry == 0x403010);
+            assert_eq!(function.is_some(), executable && bound,
+                "width={width}, executable={executable}, bound={bound}");
+            if let Some(function) = function {
+                assert_eq!(function.name, "imported");
+            }
+        }
+    }
+    std::fs::remove_file(path).unwrap();
 }
