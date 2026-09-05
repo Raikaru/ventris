@@ -1034,6 +1034,19 @@ M1 — Discovery becomes generic
 - Function-start/PLT prerequisite research proceeds against pinned Ghidra
   processor patterns and analyzers. No reference or metric is changed.
 
+## m1-010-d4 prerequisite sub-tasks
+- d4b: record loaded external relocation slots for ELF32/ELF64, independently
+  of instruction decoding; preserve symbol-table linkage and endian/load bias.
+- d4c: expose bounded SLEIGH p-code linkage-thunk evidence, rejecting unknown
+  inputs, stores and non-thunk control flow.
+- d4d: consume that evidence for PLT and branch-target discovery; remove the
+  ELF64 x86 byte-scan path rather than maintaining two discovery conventions.
+- d4e: add the function-start prerequisite for independently justified
+  adjacent entries. Match actual upstream action semantics: `validcode="function"`
+  requires an already-defined function; it is not a new-entry validation rule.
+- d4f: rerun the unchanged complete gate and commit fresh evidence.
+  Each implementation/test commit range stays below 800 changed lines.
+
 ## Authorized prerequisite sequencing
 - The maintainer authorized scheduling necessary later-milestone analyzer
   prerequisites autonomously so the current milestone can pass unchanged gates.
@@ -1048,9 +1061,9 @@ M1 — Discovery becomes generic
   above. The current M1 discovery gate remains 11 pass / 9 fail.
 
 ## Next task
-- m1-010-d4b: implement the necessary approved function-start/PLT analyzer
-  prerequisites. Existing full discovery acceptance, corpus, references
-  and thresholds remain unchanged. Sub-task e remains open.
+- m1-010-d4b: loaded external relocation facts, acceptance in
+  `crates/lre-core/tests/elf_image.rs`. Complete the d4 prerequisites above
+  against unchanged full discovery acceptance; sub-task e remains open.
 
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a

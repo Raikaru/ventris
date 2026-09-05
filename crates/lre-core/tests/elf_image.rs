@@ -236,3 +236,64 @@ fn undefined_elf32_symbols_are_not_function_definitions() {
         assert!(!import.externals.iter().any(|(_, name)| name == "imported"));
     }
 }
+
+#[test]
+fn external_relocation_slots_are_loaded_facts_without_code_promotion() {
+    for (width, be, relocation) in [(4, false, 9), (4, true, 4), (8, false, 4)] {
+        let mut data = fixture(width, be, relocation, 0);
+        let stride = if width == 8 { 64 } else { 40 };
+        let mut put = |offset: usize, size: usize, value: u64| {
+            for i in 0..size {
+                data[offset + i] = (value >> (8 * if be { size - 1 - i } else { i })) as u8;
+            }
+        };
+        put(if width == 8 { 60 } else { 48 }, 2, 6);
+        put(0x100 + 4 * stride + 8 + 3 * width, width, 0x60);
+        let rel = 0x100 + 3 * stride;
+        put(
+            rel + 8 + 3 * width,
+            width,
+            (if relocation == 4 { 3 } else { 2 }) * width as u64,
+        );
+        put(rel + 8 + 4 * width, 4, 5);
+        let sym = 0x100 + 5 * stride;
+        put(sym + 4, 4, 11); // SHT_DYNSYM
+        put(sym + 8 + 2 * width, width, 0x500);
+        put(sym + 8 + 3 * width, width, if width == 8 { 48 } else { 32 });
+        put(sym + 8 + 4 * width, 4, 4); // names in section 4
+        let symbol = 0x500 + if width == 8 { 24 } else { 16 };
+        put(symbol, 4, 0x40);
+        put(symbol + if width == 8 { 4 } else { 12 }, 1, 0x12);
+        put(0x480, width, 0x2000);
+        put(
+            0x480 + width,
+            width,
+            if width == 8 {
+                (1 << 32) | 7
+            } else {
+                (1 << 8) | if be { 21 } else { 7 }
+            },
+        );
+        if relocation == 4 {
+            put(0x480 + 2 * width, width, 0);
+        }
+        data[0x3c0..0x3c9].copy_from_slice(b"imported\0");
+        let import = import_elf(&data).unwrap();
+        let bias = if width == 8 { 0x100000 } else { 0x10000 };
+        assert!(import
+            .externals
+            .iter()
+            .any(|(address, name)| *address == 0 && name == "imported"));
+        assert!(
+            import
+                .externals
+                .iter()
+                .any(|(address, name)| *address == bias + 0x2000 && name == "imported"),
+            "external relocation identity must not depend on finding an instruction stub"
+        );
+        assert!(!import
+            .functions
+            .iter()
+            .any(|function| function.name == "imported"));
+    }
+}
