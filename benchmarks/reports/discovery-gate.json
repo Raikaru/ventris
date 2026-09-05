@@ -2,7 +2,7 @@
   "gate": "discovery",
   "milestone": "M1",
   "scoring_policy": "code-functions-v1",
-  "commit": "6d32467b74e0e7116e0531bcb5a47a37c708aded",
+  "commit": "27721f2672289895ed03d222efe484479dc027c5",
   "date": "2026-09-05",
   "machine": {
     "os": "Linux-7.1.12-200.fc44.x86_64-x86_64-with-glibc2.43",
@@ -11,8 +11,8 @@
   "architecture_check": {
     "passed": true,
     "core": "crates/lre-core/src/native/discovery.rs",
-    "core_sha256": "dec3ada060d747614b826cf0b34f669d349232d4c3b85909cffc279ace09a447",
-    "legacy_source_sha256": "74fbb8d3196f69ddba4b08dbe17bcfd8b732019e2ce63290422a7d8d93b2ddf9",
+    "core_sha256": "2af7e7ba90d83cc2da789b9a726d3e14141c73bc974e62f2f4b2047046824ab3",
+    "legacy_source_sha256": "165729b3e5c28e8ab3a08d6970685bb13d93949e0a3bd31a8432a19613c6acdf",
     "retired_decoder_discovery": [],
     "retired_feature_switches": [],
     "retired_console_discovery": [],
@@ -22,10 +22,10 @@
   "corpus": [
     {
       "id": "x86_64_plain_o0",
-      "status": "fail",
+      "status": "pass",
       "metrics": {
         "fn.precision": 1.0,
-        "fn.recall": 0.9166666666666666
+        "fn.recall": 1.0
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -37,20 +37,18 @@
       "scoring_view_sha256": "a94b3a47bed688dc8ea888bf4708f7a20cfe1aa7d1cdb2ecd25b33f90ad6d49b",
       "raw_oracle_functions": 15,
       "excluded_functions": 3,
-      "native_functions": 11,
+      "native_functions": 12,
       "oracle_functions": 12,
-      "matched_functions": 11,
-      "missing_entries": [
-        "00201600"
-      ],
+      "matched_functions": 12,
+      "missing_entries": [],
       "extra_entries": []
     },
     {
       "id": "x86_64_plain_o2",
-      "status": "fail",
+      "status": "pass",
       "metrics": {
         "fn.precision": 1.0,
-        "fn.recall": 0.9166666666666666
+        "fn.recall": 1.0
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -62,12 +60,10 @@
       "scoring_view_sha256": "773b996b9e753418c54c92a32e99f3a8474abe74b069dd32e8fbf6c9ad44a7d3",
       "raw_oracle_functions": 15,
       "excluded_functions": 3,
-      "native_functions": 11,
+      "native_functions": 12,
       "oracle_functions": 12,
-      "matched_functions": 11,
-      "missing_entries": [
-        "002015f0"
-      ],
+      "matched_functions": 12,
+      "missing_entries": [],
       "extra_entries": []
     },
     {
@@ -87,7 +83,7 @@
       "scoring_view_sha256": "fc2043b5af13a8f10c9763d4d98112f9186e1e43364439e9a7c0a063b1d9fd25",
       "raw_oracle_functions": 18,
       "excluded_functions": 6,
-      "native_functions": 11,
+      "native_functions": 12,
       "oracle_functions": 12,
       "matched_functions": 0,
       "missing_entries": [
@@ -107,6 +103,7 @@
       "extra_entries": [
         "00001630",
         "00001660",
+        "00001690",
         "000016d0",
         "00001710",
         "00001720",
@@ -120,10 +117,10 @@
     },
     {
       "id": "x86_64_cpp_o2",
-      "status": "fail",
+      "status": "pass",
       "metrics": {
         "fn.precision": 1.0,
-        "fn.recall": 0.95
+        "fn.recall": 1.0
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -135,12 +132,10 @@
       "scoring_view_sha256": "fbf90f22bd97325d8324d2d7cbae04866cc3b61a46f8aa64ff38598021648b1f",
       "raw_oracle_functions": 29,
       "excluded_functions": 9,
-      "native_functions": 19,
+      "native_functions": 20,
       "oracle_functions": 20,
-      "matched_functions": 19,
-      "missing_entries": [
-        "00201900"
-      ],
+      "matched_functions": 20,
+      "missing_entries": [],
       "extra_entries": []
     },
     {
@@ -148,7 +143,7 @@
       "status": "pass",
       "metrics": {
         "fn.precision": 1.0,
-        "fn.recall": 0.9975550122249389
+        "fn.recall": 1.0
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -160,12 +155,10 @@
       "scoring_view_sha256": "e5bbd0f8b0419f081f646ed9acc95cf0ebb23519f6e462ff556bdacbb2a1f018",
       "raw_oracle_functions": 411,
       "excluded_functions": 2,
-      "native_functions": 408,
+      "native_functions": 409,
       "oracle_functions": 409,
-      "matched_functions": 408,
-      "missing_entries": [
-        "00204150"
-      ],
+      "matched_functions": 409,
+      "missing_entries": [],
       "extra_entries": []
     },
     {
@@ -655,8 +648,8 @@
     }
   ],
   "summary": {
-    "pass": 4,
-    "fail": 16,
+    "pass": 7,
+    "fail": 13,
     "skipped": 0
   },
   "passed": false

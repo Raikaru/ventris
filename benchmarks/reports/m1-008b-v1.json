@@ -2,8 +2,8 @@
   "gate": "m1-008b",
   "milestone": "M1",
   "scoring_policy": "code-functions-v1",
-  "commit": "9189859bcb367b321abe7c5d279031afd09b17f7",
-  "date": "2026-09-04",
+  "commit": "27721f2672289895ed03d222efe484479dc027c5",
+  "date": "2026-09-05",
   "machine": {
     "os": "Linux-7.1.12-200.fc44.x86_64-x86_64-with-glibc2.43",
     "cpu": "x86_64"

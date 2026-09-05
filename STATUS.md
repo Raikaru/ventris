@@ -912,14 +912,37 @@ M1 — Discovery becomes generic
 - Acceptance: native::discovery::tests plus existing m1-008b and full discovery
   gates. Complete d1 only; remaining loader/seed failures remain m1-010-d.
 
+## m1-010-d1 verified
+- Failing acceptance committed in `1883c39`; implementation in `27721f2`.
+  Three landing regressions cover entry/extent/xref preservation, prefix and
+  target rejection, and jump-chain return into the source body. All 11 generic
+  discovery tests pass.
+- The rebuilt console reports `00201670` as length 4, `no_op=1`, falling to
+  `00201674`; that instruction is length 2, `pure_jump=1`, targeting `00201600`.
+  The destination's first MOV is `no_op=0`. Native import persists separate
+  function extents of 6 and 49 bytes, and a jump xref from `00201674` with
+  `native-import:thunk` provenance, not a call or an entry at the jump itself.
+- m1-008b restored: x86-64 plain_o0 12/12 and cpp_o2 20/20, precision 1.0.
+  Full discovery: 7 pass, 13 fail, 0 skipped; architecture check passes.
+  All four non-PIE x86-64 rows have precision/recall 1.0. Remaining PIE and
+  non-x86 loader/seed failures are not marked resolved.
+- Workspace 108 tests; core no-default 60; legacy corpus 5/5; DOL unchanged
+  at 633/644 matches, 698 native functions and 65 extras, with 10 mappings and
+  BSS checked. Isolated release libc import: 4,049 functions in 4.059 s (<5 s).
+  Generated discovery, m1-008b and DOL reports name `27721f2`.
+- No ISA-specific discovery, mnemonic matching, reference exclusions, metric
+  changes or pinned-source edits. The approved prerequisite is complete;
+  broader m2-009 remains outside scope and M1 remains incomplete.
+
 ## Blocked on
-- None for the approved m1-010-d1 landing-prefix prerequisite.
+- None for the remaining M1 loader/seed work; the landing-prefix blocker is resolved.
   Full multi-instruction/indirect thunk analysis is not authorized.
 
 ## Next task
-- m1-010-d1: implement the approved single landing-prefix prerequisite test-first.
-  Acceptance already exists in `benchmarks/discovery_gate.py`; thresholds,
-  references and corpus remain unchanged.
+- m1-010-d: fix remaining M1 loader/seed/flow failures exposed by
+  `benchmarks/discovery_gate.py`. The acceptance already exists; thresholds,
+  references and corpus remain unchanged. Stop for approval if another M2
+  analyzer is necessary. Sub-task e remains open.
 
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a
