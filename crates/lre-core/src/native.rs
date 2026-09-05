@@ -1427,7 +1427,6 @@ mod tests {
                 let _ = import_elf(&bytes);
                 let _ = import_pe(&bytes);
                 if len >= 4 {
-                    #[cfg(feature = "x86_decoder")]
                     let _ = crate::disasm::decode(&bytes, 0x400000);
                 }
                 // magic-only truncated variants

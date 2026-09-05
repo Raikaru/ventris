@@ -17,6 +17,22 @@ fn image() -> NativeImport {
 }
 
 #[test]
+fn conditional_fallthrough_discovers_call_target() {
+    let mut imp = image();
+    flow_discover_with_provider(&mut imp, |addresses| addresses.iter().map(|&a| {
+        let mut flow = match a {
+            0x1000 => result(a, FlowKind::CBranch, Some(0x1100), false),
+            0x1002 => result(a, FlowKind::Call, Some(0x2000), false),
+            _ => result(a, FlowKind::Return, None, false),
+        };
+        if a == 0x1000 || a == 0x1002 { flow.fallthrough = Some(a + 2); }
+        flow
+    }).collect());
+    assert_eq!(imp.functions.iter().map(|f| f.entry).collect::<Vec<_>>(), vec![0x1000, 0x2000]);
+    assert!(imp.xrefs.iter().any(|x| x.from == 0x1002 && x.to == 0x2000 && x.kind == "UNCONDITIONAL_CALL"));
+}
+
+#[test]
 fn candidate_entry_uses_flow_instead_of_opcode_prefix() {
     for (byte, kind) in [(0x90, FlowKind::Return), (0x01, FlowKind::Fallthrough), (0x01, FlowKind::Call)] {
         let mut imp = image();
