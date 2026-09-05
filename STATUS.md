@@ -934,15 +934,33 @@ M1 — Discovery becomes generic
   changes or pinned-source edits. The approved prerequisite is complete;
   broader m2-009 remains outside scope and M1 remains incomplete.
 
+## m1-010-d execution slices
+- d2: share existing ELF64 `.init`, `.fini` and `.plt` section-start seeds
+  with ELF32. Acceptance: `native::tests::elf32_startup_section_seeds`,
+  covering little/big-endian inputs and non-executable section rejection;
+  existing full discovery gate measures the resulting function sets.
+- Source-twin inspection identifies i386 misses as `__x86.get_pc_thunk.bx`,
+  `_init`, `_fini` and the PLT header. PowerPC misses include `_init`, `_fini`
+  and `plt_call32` stubs. No symbol names are used as scoring exceptions.
+- d3: fix PIE load bias consistently across imported mappings, address facts,
+  memory readers and native runtime consumers. Ghidra preserves nonzero
+  prelinked bases; zero-based ET_DYN defaults are 0x100000 for ELF64 and
+  0x10000 for ELF32. Do not normalize addresses inside the scorer.
+- d4: investigate remaining flow/seed misses without extending the approved
+  thunk prerequisite. AArch64 plain_o0 misses `0021078c` (NOP immediately
+  before the existing `00210790` function) and `002108a0` (`__gmon_start__`
+  PLT stub). PowerPC cpp_o2 extra `10010980` is the `.glink` section start.
+- Execute d2 first; d3/d4 and sub-task e remain open. References, corpus,
+  metric definitions and thresholds remain unchanged.
+
 ## Blocked on
 - None for the remaining M1 loader/seed work; the landing-prefix blocker is resolved.
   Full multi-instruction/indirect thunk analysis is not authorized.
 
 ## Next task
-- m1-010-d: fix remaining M1 loader/seed/flow failures exposed by
-  `benchmarks/discovery_gate.py`. The acceptance already exists; thresholds,
-  references and corpus remain unchanged. Stop for approval if another M2
-  analyzer is necessary. Sub-task e remains open.
+- m1-010-d2: share ELF startup section seeds across ELF classes. Write and
+  observe the acceptance above failing before implementation. Remaining
+  m1-010-d3/d4 work is recorded above; stop if another M2 analyzer is necessary.
 
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a

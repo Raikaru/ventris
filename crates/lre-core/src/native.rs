@@ -1319,6 +1319,44 @@ mod tests {
     }
 
     #[test]
+    fn elf32_startup_section_seeds() {
+        for be in [false, true] {
+            let word = |v: u32| if be { v.to_be_bytes() } else { v.to_le_bytes() };
+            let half = |v: u16| if be { v.to_be_bytes() } else { v.to_le_bytes() };
+            let mut data = vec![0u8; 0x400];
+            data[..6].copy_from_slice(if be { b"\x7fELF\x01\x02" } else { b"\x7fELF\x01\x01" });
+            for (offset, value) in [(16, 2), (18, if be { 20 } else { 3 }),
+                                    (46, 40), (48, 5), (50, 4)] {
+                data[offset..offset + 2].copy_from_slice(&half(value));
+            }
+            data[32..36].copy_from_slice(&word(0x100));
+            let names = b"\0.init\0.fini\0.plt\0.shstrtab\0";
+            data[0x300..0x300 + names.len()].copy_from_slice(names);
+            for (index, name, typ, flags, addr, offset, size) in [
+                (1usize, 1, 1, 6, 0x1000, 0x340, 16),
+                (2, 7, 1, 6, 0x2000, 0x350, 16),
+                (3, 13, 1, 6, 0x3000, 0x360, 32),
+                (4, 18, 3, 0, 0, 0x300, names.len() as u32),
+            ] {
+                let start = 0x100 + index * 40;
+                for (field, value) in [name, typ, flags, addr, offset, size].into_iter().enumerate() {
+                    data[start + field * 4..start + field * 4 + 4].copy_from_slice(&word(value));
+                }
+            }
+            let import = import_elf(&data).unwrap();
+            let entries: Vec<_> = import.functions.iter().map(|f| (f.entry, f.name.as_str())).collect();
+            assert_eq!(entries, [(0x1000, "_init"), (0x2000, "_fini"), (0x3000, "_plt")],
+                       "stripped ELF32 must retain loader-declared executable starts");
+            // Section names alone do not make data executable.
+            for index in 1..=3 {
+                let flags = 0x100 + index * 40 + 8;
+                data[flags..flags + 4].copy_from_slice(&word(2));
+            }
+            assert!(import_elf(&data).unwrap().functions.is_empty());
+        }
+    }
+
+    #[test]
     fn elf_load_populates_functions() {
         // Build a tiny synthetic ELF64 with one symtab entry.
         let mut b = vec![0u8; 0x1000];
