@@ -266,6 +266,8 @@ fn branch_target_requires_proven_linkage_and_imported_slot() {
         if let Some(function) = function {
             assert_eq!(function.name, "libc_entry");
             assert_eq!(function.size, 16);
+            assert_eq!(import.functions.iter().find(|f| f.entry == 0x1000).unwrap().size, 8,
+                "a separate linkage entry must not remain in the caller's body");
         }
     }
 }
