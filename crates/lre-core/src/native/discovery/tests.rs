@@ -227,3 +227,41 @@ fn entry_jump_chain_returning_to_own_body_is_not_a_thunk_chain() {
     }).collect());
     assert_eq!(imp.functions.iter().map(|f| f.entry).collect::<Vec<_>>(), vec![0x1000]);
 }
+
+#[test]
+fn branch_target_requires_proven_linkage_and_imported_slot() {
+    let mut cfg = crate::session::RuntimeConfig::from_env();
+    if crate::native_runtime::find_console(&cfg).is_err() {
+        eprintln!("SKIP: SLEIGH console not available");
+        return;
+    }
+    cfg.language_id = "PowerPC:BE:32:default".into();
+    cfg.language_dir = cfg.ghidra_install.join("Ghidra/Processors/PowerPC/data/languages");
+    for (bound, conditional, promoted) in [(true, false, true), (false, false, false), (true, true, false)] {
+        let mut bytes = vec![0; 0x50];
+        bytes[..4].copy_from_slice(&[0x38, 0x60, 0, 0]); // li r3,0: caller setup, not a pure-entry jump
+        bytes[4..8].copy_from_slice(&if conditional { [0x40, 0x82, 0, 0x3c] } else { [0x48, 0, 0, 0x3c] });
+        bytes[8..12].copy_from_slice(&[0x4e, 0x80, 0, 0x20]);
+        bytes[0x40..].copy_from_slice(&[
+            0x3d, 0x60, 0, 0, 0x81, 0x6b, 0x30, 0,
+            0x7d, 0x69, 3, 0xa6, 0x4e, 0x80, 4, 0x20,
+        ]); // lis/lwz/mtctr/bctr through the imported slot at 0x3000
+        let mut import = NativeImport {
+            cfg: cfg.clone(), language: cfg.language_id.clone(), format: "elf32".into(),
+            mappings: vec![
+                Mapping { vaddr: 0x1000, size: bytes.len() as u64, file_off: 0, flags: 6, bytes },
+                Mapping { vaddr: 0x3000, size: 4, file_off: 0, flags: 2, bytes: vec![0; 4] },
+            ],
+            functions: vec![NativeFunction { entry: 0x1000, name: "_entry".into(), size: 1 }],
+            externals: if bound { vec![(0x3000, "libc_entry".into())] } else { Vec::new() },
+            ..Default::default()
+        };
+        discover_mapped(&mut import).unwrap();
+        let function = import.functions.iter().find(|function| function.entry == 0x1040);
+        assert_eq!(function.is_some(), promoted, "bound={bound}, conditional={conditional}");
+        if let Some(function) = function {
+            assert_eq!(function.name, "libc_entry");
+            assert_eq!(function.size, 16);
+        }
+    }
+}
