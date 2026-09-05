@@ -864,7 +864,8 @@ M1 — Discovery becomes generic
   route-selection feature flags; retain instruction decoding used by listing
   and graph consumers. No discovery accelerator is retained.
 - c3: retire the obsolete hand-versus-console benchmark producer and its
-  acceptance wrapper, then publish the existing all-input gate and regressions.
+  acceptance wrapper, plus the unreferenced console text-discovery API and
+  its seed/next-entry-size helpers. Publish the existing gate and regressions.
   Historical benchmark reports remain unchanged. Each slice is a separate
   commit below 800 changed lines; c1/c2/c3 precede m1-010-d.
 - Acceptance is the existing discovery gate architecture check, extended to
@@ -872,7 +873,13 @@ M1 — Discovery becomes generic
   candidate-flow regression. Precision/recall thresholds remain unchanged.
 
 ## Blocked on
-- None for m1-010-c; the approved minimal thunk prerequisite is resolved.
+- m1-010-d: generic discovery misses x86-64 `register_tm_clones` behind
+  `frame_dummy`'s `endbr64; jmp`. On x86_64_plain_o0 the source is `00201670`,
+  jump `00201674`, destination `00201600`. The approved prerequisite requires
+  the first instruction itself to be a pure direct jump; skipping a landing
+  instruction is outside that approval. Do not implement broader m2-009
+  recognition without a sequencing decision. Finish c's already-scoped
+  retirement and verification only; do not begin d.
 
 ## Next task
 - m1-010-c: remove legacy architecture-specific production discovery routes.

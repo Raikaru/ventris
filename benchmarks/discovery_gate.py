@@ -33,10 +33,14 @@ def architecture_check():
     switches = [str(path.relative_to(ROOT)) for path in (
         ROOT / "crates/lre-core/Cargo.toml", ROOT / "crates/lre-cli/Cargo.toml")
         if re.search(r"(?m)^x86_decoder\s*=", path.read_text())]
-    return {"passed": not legacy and not isa_lines and not retired and not switches,
+    runtime = ROOT / "crates/lre-core/src/native_runtime.rs"
+    console_legacy = re.findall(r"(?m)^pub fn (console_discover|console_seeds)\s*[<(]",
+                                runtime.read_text())
+    return {"passed": not legacy and not isa_lines and not retired and not switches and not console_legacy,
             "core": str(core.relative_to(ROOT)), "core_sha256": digest(core),
             "legacy_source_sha256": digest(native),
             "retired_decoder_discovery": retired, "retired_feature_switches": switches,
+            "retired_console_discovery": console_legacy,
             "legacy_discovery_definitions": legacy, "isa_specific_lines": isa_lines}
 
 
