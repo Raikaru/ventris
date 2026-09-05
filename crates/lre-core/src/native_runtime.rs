@@ -1111,4 +1111,71 @@ mod tests {
             "stores and unbounded chains are not thunks"
         );
     }
+
+    #[test]
+    fn function_pattern_queries_preserve_prefix_marks_and_range_bounds() {
+        let mut cfg = crate::session::RuntimeConfig::from_env();
+        let Ok(console) = find_console(&cfg) else {
+            eprintln!("SKIP: SLEIGH console not available");
+            return;
+        };
+        cfg.console_path = Some(console);
+        cfg.language_id = "AARCH64:LE:64:v8A".into();
+        cfg.language_dir = cfg
+            .ghidra_install
+            .join("Ghidra/Processors/AARCH64/data/languages");
+        let query = |session: &mut ConsoleSession, end: u64| {
+            session
+                .send(&format!("functionstarts 0x1000 0x{end:x}\n"))
+                .unwrap();
+            let response = read_until_prompt(&mut session.reader).unwrap();
+            let payload = response
+                .lines()
+                .find_map(|line| line.strip_prefix("PATTERNS "))
+                .unwrap_or_else(|| panic!("missing pattern response: {response}"));
+            let parsed: serde_json::Value = serde_json::from_str(payload).unwrap();
+            let mut addresses: Vec<_> = parsed["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["address"].as_u64().unwrap())
+                .collect();
+            addresses.sort_unstable();
+            addresses.dedup();
+            addresses
+        };
+        let cases: &[(&[u32], &[u64])] = &[
+            // ret; nop; stp x29,x30,[sp,#-32]!; mov x29,sp; ret.
+            // Both the wildcard prefix and the pair's post-pattern mark match.
+            (
+                &[0xd65f03c0, 0xd503201f, 0xa9be7bfd, 0x910003fd, 0xd65f03c0],
+                &[0x1004, 0x1008],
+            ),
+            // ret; sub sp,sp,#16; add sp,sp,#16; ret: pair-only match.
+            (&[0xd65f03c0, 0xd10043ff, 0x910043ff, 0xd65f03c0], &[0x1004]),
+        ];
+        for &(words, expected) in cases {
+            let bytes: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+            let end = 0x1000 + bytes.len() as u64;
+            let mut session = ConsoleSession::new(&cfg).unwrap();
+            session
+                .load_mapped(&NativeImport {
+                    language: cfg.language_id.clone(),
+                    mappings: vec![crate::native::Mapping {
+                        vaddr: 0x1000,
+                        size: bytes.len() as u64,
+                        file_off: 0,
+                        flags: 6,
+                        bytes,
+                    }],
+                    ..Default::default()
+                })
+                .unwrap();
+            assert_eq!(query(&mut session, end).as_slice(), expected);
+            assert!(
+                query(&mut session, 0x1007).is_empty(),
+                "a pattern must not read past the requested mapped range"
+            );
+        }
+    }
 }

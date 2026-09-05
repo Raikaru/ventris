@@ -1098,6 +1098,14 @@ M1 — Discovery becomes generic
 - Release libc: 3959 functions in 4.619 seconds on one isolated run.
 - Remaining failures are the AArch64 prefix entries listed above; d4e is next.
 
+## m1-010-d4e implementation slices
+- d4e1: expose native pattern selection and matching using the pinned XML
+  grammar and existing parser. Acceptance: native-runtime
+  `function_pattern_queries_preserve_prefix_marks_and_range_bounds`.
+- d4e2: apply upstream function-start actions against established code,
+  function ownership and validated flow; commit eligibility regressions first.
+  Keep each test/implementation commit below 800 changed lines.
+
 ## m1-010-d4 prerequisite sub-tasks
 - d4b: record loaded external relocation slots for ELF32/ELF64, independently
   of instruction decoding; preserve symbol-table linkage and endian/load bias.
@@ -1125,8 +1133,8 @@ M1 — Discovery becomes generic
   above. The current M1 discovery gate remains 16 pass / 4 fail.
 
 ## Next task
-- m1-010-d4e: complete the pinned function-start prerequisite, then fresh
-  full-gate evidence (d4f). Per-caller PIC linkage (d4d) is complete.
+- m1-010-d4e1: native pattern selection and matching, then d4e2 action
+  eligibility and d4f full-gate evidence. Per-caller PIC linkage is complete.
   The oracle, scorer and corpus remain unchanged; sub-task e is open.
 
 ## Reserved decisions
