@@ -1,32 +1,113 @@
 //! Mapped-image discovery: SLEIGH supplies instruction lengths and call targets;
 //! the existing worklist supplies control-flow closure. No ISA-specific decoder.
-use super::{close_call_targets, code_ranges, extern_name, filter_candidate, CandidateFilterContext, ImportError, NativeFunction, NativeImport, NativeXref, Result};
-use crate::native_runtime::{ConsoleSession, FlowKind};
+use super::{
+    close_call_targets, code_ranges, extern_name, filter_candidate, CandidateFilterContext,
+    ImportError, NativeFunction, NativeImport, NativeXref, Result,
+};
+use crate::native_runtime::{
+    ConsoleSession, FlowKind, FlowResult, LinkageResult, NativeRuntimeError,
+};
 use std::collections::{HashMap, HashSet};
 
 #[cfg(test)]
 mod tests;
 
+trait FlowProvider {
+    fn flow(&mut self, addresses: &[u64]) -> Vec<FlowResult>;
+    fn linkages(&mut self, addresses: &[u64]) -> Vec<LinkageResult>;
+}
+
+struct ConsoleProvider {
+    session: ConsoleSession,
+    decoded: Option<HashMap<u64, FlowResult>>,
+    failure: Option<NativeRuntimeError>,
+}
+
+impl FlowProvider for ConsoleProvider {
+    fn flow(&mut self, addresses: &[u64]) -> Vec<FlowResult> {
+        // Seeded walking already visits each instruction once. Only the
+        // section sweep has decoded results worth retaining and reusing.
+        let Some(decoded) = self.decoded.as_mut() else {
+            return self.session.flow_batch(addresses).unwrap_or_else(|error| {
+                self.failure = Some(error);
+                Vec::new()
+            });
+        };
+        let missing: Vec<_> = addresses
+            .iter()
+            .copied()
+            .filter(|address| !decoded.contains_key(address))
+            .collect();
+        if !missing.is_empty() {
+            match self.session.flow_batch(&missing) {
+                Ok(flows) => {
+                    decoded.extend(flows.into_iter().map(|flow| (flow.address, flow)));
+                }
+                Err(error) => {
+                    self.failure = Some(error);
+                    return Vec::new();
+                }
+            }
+        }
+        addresses
+            .iter()
+            .filter_map(|address| decoded.get(address).cloned())
+            .collect()
+    }
+
+    fn linkages(&mut self, addresses: &[u64]) -> Vec<LinkageResult> {
+        match self.session.linkage_batch(addresses) {
+            Ok(results) => results,
+            Err(error) => {
+                self.failure = Some(error);
+                Vec::new()
+            }
+        }
+    }
+}
+
 /// ELF/PE retain structural facts when the optional console is unavailable.
 /// All supported languages use the same mapped addresses and flow worklist.
 pub(super) fn discover_seeded(import: &mut NativeImport) {
     if import.mappings.is_empty()
-        || import.cfg.console_path.as_ref().map_or(true, |path| !path.is_file())
+        || import
+            .cfg
+            .console_path
+            .as_ref()
+            .map_or(true, |path| !path.is_file())
     {
         return;
     }
-    let Ok(mut session) = ConsoleSession::new(&import.cfg) else { return; };
-    if session.load_mapped(import).is_err() { return; }
-    flow_discover_with_provider(import, |chunk| session.try_flow_batch(chunk));
+    let Ok(mut session) = ConsoleSession::new(&import.cfg) else {
+        return;
+    };
+    if session.load_mapped(import).is_err() {
+        return;
+    }
+    let mut provider = ConsoleProvider {
+        session,
+        decoded: None,
+        failure: None,
+    };
+    flow_discover_with_candidates(import, &[], &mut provider);
 }
 
 pub(super) fn discover_mapped(import: &mut NativeImport) -> Result<()> {
-    let mut session = ConsoleSession::new(&import.cfg)
+    let mut session =
+        ConsoleSession::new(&import.cfg).map_err(|e| ImportError::Bad(e.to_string()))?;
+    session
+        .load_mapped(import)
         .map_err(|e| ImportError::Bad(e.to_string()))?;
-    session.load_mapped(import).map_err(|e| ImportError::Bad(e.to_string()))?;
     let ranges = code_ranges(import);
-    let in_code = |address| ranges.iter().any(|&(start, end)| start <= address && address < end);
-    let mut cursors: Vec<_> = ranges.iter().map(|&(start, end)| (start, end, true)).collect();
+    let in_code = |address| {
+        ranges
+            .iter()
+            .any(|&(start, end)| start <= address && address < end)
+    };
+    let mut cursors: Vec<_> = ranges
+        .iter()
+        .map(|&(start, end)| (start, end, true))
+        .collect();
     let mut candidates = Vec::new();
     let mut addresses = Vec::with_capacity(cursors.len());
     let mut decoded = HashMap::new();
@@ -52,7 +133,9 @@ pub(super) fn discover_mapped(import: &mut NativeImport) -> Result<()> {
             if flow.kind == FlowKind::Call {
                 for &target in &flow.targets {
                     if in_code(target) {
-                        import.xrefs.push(NativeXref::new(*address, target, "UNCONDITIONAL_CALL"));
+                        import
+                            .xrefs
+                            .push(NativeXref::new(*address, target, "UNCONDITIONAL_CALL"));
                     }
                 }
             }
@@ -63,21 +146,13 @@ pub(super) fn discover_mapped(import: &mut NativeImport) -> Result<()> {
         cursors.retain(|&(address, end, _)| address < end);
     }
     close_call_targets(import);
-    let mut failure = None;
-    flow_discover_with_candidates(import, &candidates, |chunk| {
-        let mut results = Vec::with_capacity(chunk.len());
-        for address in chunk {
-            if !decoded.contains_key(address) {
-                match session.flow(*address) {
-                    Ok(flow) => { decoded.insert(*address, flow); }
-                    Err(error) => { failure = Some(error); return Vec::new(); }
-                }
-            }
-            results.push(decoded[address].clone());
-        }
-        results
-    });
-    if let Some(error) = failure {
+    let mut provider = ConsoleProvider {
+        session,
+        decoded: Some(decoded),
+        failure: None,
+    };
+    flow_discover_with_candidates(import, &candidates, &mut provider);
+    if let Some(error) = provider.failure {
         return Err(ImportError::Bad(error.to_string()));
     }
     Ok(())
@@ -130,21 +205,33 @@ fn merge_reached_candidate(
 }
 
 /// Core flow-based discovery over a provided control-flow resolver.
+#[cfg(test)]
 pub fn flow_discover_with_provider<F: FnMut(&[u64]) -> Vec<crate::native_runtime::FlowResult>>(
     imp: &mut NativeImport,
     flow_provider: F,
 ) {
-    flow_discover_with_candidates(imp, &[], flow_provider);
+    struct TestProvider<F>(F);
+    impl<F: FnMut(&[u64]) -> Vec<FlowResult>> FlowProvider for TestProvider<F> {
+        fn flow(&mut self, addresses: &[u64]) -> Vec<FlowResult> {
+            (self.0)(addresses)
+        }
+        fn linkages(&mut self, _: &[u64]) -> Vec<LinkageResult> {
+            Vec::new()
+        }
+    }
+    flow_discover_with_candidates(imp, &[], &mut TestProvider(flow_provider));
 }
 
-fn flow_discover_with_candidates<F: FnMut(&[u64]) -> Vec<crate::native_runtime::FlowResult>>(
+fn flow_discover_with_candidates<P: FlowProvider>(
     imp: &mut NativeImport,
     candidates: &[u64],
-    mut flow_provider: F,
+    flow_provider: &mut P,
 ) {
     use crate::native_runtime::FlowKind;
     let code = code_ranges(imp);
     let in_code = |a: u64| code.iter().any(|(v, e)| a >= *v && a < *e);
+    let has_linkage_slots = imp.externals.iter().any(|(address, _)| *address != 0);
+    let mut examined_linkages = HashSet::new();
     // Initial discovery from trusted seeds first:
     let mut entries: Vec<u64> = imp
         .functions
@@ -163,8 +250,10 @@ fn flow_discover_with_candidates<F: FnMut(&[u64]) -> Vec<crate::native_runtime::
     let mut thunk_roots = HashMap::new();
     let mut thunk_continuations = HashMap::new();
     let mut landing_entries = HashMap::new();
-    let mut proven_bodies: std::collections::HashMap<u64, u64> = std::collections::HashMap::with_capacity(4096);
-    let mut addr_origin: std::collections::HashMap<u64, u64> = std::collections::HashMap::with_capacity(32768);
+    let mut proven_bodies: std::collections::HashMap<u64, u64> =
+        std::collections::HashMap::with_capacity(4096);
+    let mut addr_origin: std::collections::HashMap<u64, u64> =
+        std::collections::HashMap::with_capacity(32768);
     for &s in &entries {
         addr_origin.insert(s, s);
     }
@@ -183,15 +272,89 @@ fn flow_discover_with_candidates<F: FnMut(&[u64]) -> Vec<crate::native_runtime::
 
         let mut next_active: Vec<u64> = Vec::new();
         for chunk in to_query.chunks(1024) {
-            let flows = flow_provider(chunk);
-            let thunks = confirmed_thunks(imp, &entries, &landing_entries, &visited, &instruction_extents, chunk, &flows, &mut flow_provider);
+            let flows = flow_provider.flow(chunk);
+            // Only an unconditional branch to a proven imported-slot stub
+            // establishes an independent linkage entry; ordinary labels do not.
+            if has_linkage_slots {
+                let mut targets: Vec<_> = chunk
+                    .iter()
+                    .zip(&flows)
+                    .filter(|(address, flow)| {
+                        flow.address == **address
+                            && flow.length != 0
+                            && flow.kind == FlowKind::Branch
+                            && flow.targets.len() == 1
+                    })
+                    .map(|(_, flow)| flow.targets[0])
+                    .filter(|target| {
+                        in_code(*target)
+                            && !entries.contains(target)
+                            && !visited.contains(target)
+                            && !instruction_extents
+                                .iter()
+                                .any(|&(start, size)| *target > start && *target - start < size)
+                            && !flows.iter().any(|flow| {
+                                *target > flow.address
+                                    && *target - flow.address < flow.length as u64
+                            })
+                            && examined_linkages.insert(*target)
+                    })
+                    .collect();
+                targets.sort_unstable();
+                for linkage in flow_provider.linkages(&targets) {
+                    let Some(slot) = linkage.slot else {
+                        continue;
+                    };
+                    if linkage.length == 0
+                        || targets.binary_search(&linkage.address).is_err()
+                        || !code.iter().any(|&(start, end)| {
+                            start <= linkage.address
+                                && linkage.address < end
+                                && linkage.length as u64 <= end - linkage.address
+                        })
+                    {
+                        continue;
+                    }
+                    let Some((_, name)) = imp
+                        .externals
+                        .iter()
+                        .find(|(address, _)| *address == slot && slot != 0)
+                    else {
+                        continue;
+                    };
+                    entries.push(linkage.address);
+                    addr_origin.insert(linkage.address, linkage.address);
+                    imp.functions.push(NativeFunction {
+                        entry: linkage.address,
+                        name: name.clone(),
+                        size: linkage.length as u64,
+                    });
+                }
+            }
+            let thunks = confirmed_thunks(
+                imp,
+                &entries,
+                &landing_entries,
+                &visited,
+                &instruction_extents,
+                chunk,
+                &flows,
+                flow_provider,
+            );
             for (addr, info) in chunk.iter().copied().zip(flows) {
-                if info.address == addr && info.no_op && info.length != 0
-                    && info.kind == FlowKind::Fallthrough && info.targets.is_empty()
+                if info.address == addr
+                    && info.no_op
+                    && info.length != 0
+                    && info.kind == FlowKind::Fallthrough
+                    && info.targets.is_empty()
                     && info.fallthrough == addr.checked_add(info.length as u64)
                     && entries.contains(&addr)
-                    && imp.mappings.iter().any(|m| m.flags & 4 != 0 && addr >= m.vaddr
-                        && addr - m.vaddr < m.size && info.length as u64 <= m.size - (addr - m.vaddr))
+                    && imp.mappings.iter().any(|m| {
+                        m.flags & 4 != 0
+                            && addr >= m.vaddr
+                            && addr - m.vaddr < m.size
+                            && info.length as u64 <= m.size - (addr - m.vaddr)
+                    })
                 {
                     // Only the first instruction may be skipped, never a no-op chain.
                     if let Some(fall) = info.fallthrough {
@@ -204,7 +367,13 @@ fn flow_discover_with_candidates<F: FnMut(&[u64]) -> Vec<crate::native_runtime::
                     if thunk_roots.get(&get_canonical_origin(addr, &addr_origin)) == Some(&root) {
                         for (&target, &owner) in &thunk_roots {
                             if owner == root {
-                                merge_reached_candidate(target, root, &thunk_candidates, &mut addr_origin, &mut proven_bodies);
+                                merge_reached_candidate(
+                                    target,
+                                    root,
+                                    &thunk_candidates,
+                                    &mut addr_origin,
+                                    &mut proven_bodies,
+                                );
                             }
                         }
                     }
@@ -232,7 +401,13 @@ fn flow_discover_with_candidates<F: FnMut(&[u64]) -> Vec<crate::native_runtime::
                             }
                         }
                         let fall = info.fallthrough.unwrap_or(addr + info.length as u64);
-                        merge_reached_candidate(fall, origin, &thunk_candidates, &mut addr_origin, &mut proven_bodies);
+                        merge_reached_candidate(
+                            fall,
+                            origin,
+                            &thunk_candidates,
+                            &mut addr_origin,
+                            &mut proven_bodies,
+                        );
                         if in_code(fall) && !visited.contains(&fall) {
                             addr_origin.insert(fall, origin);
                             next_active.push(fall);
@@ -250,10 +425,18 @@ fn flow_discover_with_candidates<F: FnMut(&[u64]) -> Vec<crate::native_runtime::
                                 }
                                 thunk_jumps.push((addr, t));
                                 addr_origin.insert(t, t);
-                                if !visited.contains(&t) { next_active.push(t); }
+                                if !visited.contains(&t) {
+                                    next_active.push(t);
+                                }
                                 continue;
                             }
-                            merge_reached_candidate(t, origin, &thunk_candidates, &mut addr_origin, &mut proven_bodies);
+                            merge_reached_candidate(
+                                t,
+                                origin,
+                                &thunk_candidates,
+                                &mut addr_origin,
+                                &mut proven_bodies,
+                            );
                             if in_code(t) && !visited.contains(&t) {
                                 addr_origin.insert(t, origin);
                                 next_active.push(t);
@@ -262,14 +445,26 @@ fn flow_discover_with_candidates<F: FnMut(&[u64]) -> Vec<crate::native_runtime::
                     }
                     FlowKind::CBranch => {
                         if let Some(&t) = info.targets.first() {
-                            merge_reached_candidate(t, origin, &thunk_candidates, &mut addr_origin, &mut proven_bodies);
+                            merge_reached_candidate(
+                                t,
+                                origin,
+                                &thunk_candidates,
+                                &mut addr_origin,
+                                &mut proven_bodies,
+                            );
                             if in_code(t) && !visited.contains(&t) {
                                 addr_origin.insert(t, origin);
                                 next_active.push(t);
                             }
                         }
                         let fall = info.fallthrough.unwrap_or(addr + info.length as u64);
-                        merge_reached_candidate(fall, origin, &thunk_candidates, &mut addr_origin, &mut proven_bodies);
+                        merge_reached_candidate(
+                            fall,
+                            origin,
+                            &thunk_candidates,
+                            &mut addr_origin,
+                            &mut proven_bodies,
+                        );
                         if in_code(fall) && !visited.contains(&fall) {
                             addr_origin.insert(fall, origin);
                             next_active.push(fall);
@@ -277,7 +472,13 @@ fn flow_discover_with_candidates<F: FnMut(&[u64]) -> Vec<crate::native_runtime::
                     }
                     FlowKind::CallInd => {
                         let fall = info.fallthrough.unwrap_or(addr + info.length as u64);
-                        merge_reached_candidate(fall, origin, &thunk_candidates, &mut addr_origin, &mut proven_bodies);
+                        merge_reached_candidate(
+                            fall,
+                            origin,
+                            &thunk_candidates,
+                            &mut addr_origin,
+                            &mut proven_bodies,
+                        );
                         if in_code(fall) && !visited.contains(&fall) {
                             addr_origin.insert(fall, origin);
                             next_active.push(fall);
@@ -285,7 +486,13 @@ fn flow_discover_with_candidates<F: FnMut(&[u64]) -> Vec<crate::native_runtime::
                     }
                     FlowKind::Fallthrough => {
                         let fall = info.fallthrough.unwrap_or(addr + info.length as u64);
-                        merge_reached_candidate(fall, origin, &thunk_candidates, &mut addr_origin, &mut proven_bodies);
+                        merge_reached_candidate(
+                            fall,
+                            origin,
+                            &thunk_candidates,
+                            &mut addr_origin,
+                            &mut proven_bodies,
+                        );
                         if in_code(fall) && !visited.contains(&fall) {
                             addr_origin.insert(fall, origin);
                             next_active.push(fall);
@@ -325,7 +532,7 @@ fn flow_discover_with_candidates<F: FnMut(&[u64]) -> Vec<crate::native_runtime::
         .collect();
 
     if !unvisited_relocs.is_empty() {
-        let flows = flow_provider(&unvisited_relocs);
+        let flows = flow_provider.flow(&unvisited_relocs);
         let confirmed_relocs: Vec<u64> = unvisited_relocs
             .into_iter()
             .zip(flows)
@@ -340,7 +547,11 @@ fn flow_discover_with_candidates<F: FnMut(&[u64]) -> Vec<crate::native_runtime::
                     addr_origin.insert(r, r);
                 }
             }
-            let reloc_set: HashSet<u64> = confirmed_relocs.iter().chain(thunk_candidates.iter()).copied().collect();
+            let reloc_set: HashSet<u64> = confirmed_relocs
+                .iter()
+                .chain(thunk_candidates.iter())
+                .copied()
+                .collect();
             let mut reloc_active = confirmed_relocs;
             while !reloc_active.is_empty() {
                 reloc_active.sort_unstable();
@@ -354,7 +565,7 @@ fn flow_discover_with_candidates<F: FnMut(&[u64]) -> Vec<crate::native_runtime::
                 }
                 let mut next_active: Vec<u64> = Vec::new();
                 for chunk in to_query.chunks(1024) {
-                    let flows = flow_provider(chunk);
+                    let flows = flow_provider.flow(chunk);
                     for (addr, info) in chunk.iter().copied().zip(flows) {
                         let origin = get_canonical_origin(addr, &addr_origin);
                         let span = addr + info.length as u64;
@@ -376,7 +587,13 @@ fn flow_discover_with_candidates<F: FnMut(&[u64]) -> Vec<crate::native_runtime::
                                     }
                                 }
                                 let fall = info.fallthrough.unwrap_or(addr + info.length as u64);
-                                merge_reached_candidate(fall, origin, &reloc_set, &mut addr_origin, &mut proven_bodies);
+                                merge_reached_candidate(
+                                    fall,
+                                    origin,
+                                    &reloc_set,
+                                    &mut addr_origin,
+                                    &mut proven_bodies,
+                                );
                                 if in_code(fall) && !visited.contains(&fall) {
                                     addr_origin.insert(fall, origin);
                                     next_active.push(fall);
@@ -384,7 +601,13 @@ fn flow_discover_with_candidates<F: FnMut(&[u64]) -> Vec<crate::native_runtime::
                             }
                             FlowKind::Branch => {
                                 if let Some(&t) = info.targets.first() {
-                                    merge_reached_candidate(t, origin, &reloc_set, &mut addr_origin, &mut proven_bodies);
+                                    merge_reached_candidate(
+                                        t,
+                                        origin,
+                                        &reloc_set,
+                                        &mut addr_origin,
+                                        &mut proven_bodies,
+                                    );
                                     if in_code(t) && !visited.contains(&t) {
                                         addr_origin.insert(t, origin);
                                         next_active.push(t);
@@ -393,14 +616,26 @@ fn flow_discover_with_candidates<F: FnMut(&[u64]) -> Vec<crate::native_runtime::
                             }
                             FlowKind::CBranch => {
                                 if let Some(&t) = info.targets.first() {
-                                    merge_reached_candidate(t, origin, &reloc_set, &mut addr_origin, &mut proven_bodies);
+                                    merge_reached_candidate(
+                                        t,
+                                        origin,
+                                        &reloc_set,
+                                        &mut addr_origin,
+                                        &mut proven_bodies,
+                                    );
                                     if in_code(t) && !visited.contains(&t) {
                                         addr_origin.insert(t, origin);
                                         next_active.push(t);
                                     }
                                 }
                                 let fall = info.fallthrough.unwrap_or(addr + info.length as u64);
-                                merge_reached_candidate(fall, origin, &reloc_set, &mut addr_origin, &mut proven_bodies);
+                                merge_reached_candidate(
+                                    fall,
+                                    origin,
+                                    &reloc_set,
+                                    &mut addr_origin,
+                                    &mut proven_bodies,
+                                );
                                 if in_code(fall) && !visited.contains(&fall) {
                                     addr_origin.insert(fall, origin);
                                     next_active.push(fall);
@@ -408,7 +643,13 @@ fn flow_discover_with_candidates<F: FnMut(&[u64]) -> Vec<crate::native_runtime::
                             }
                             FlowKind::Fallthrough | FlowKind::CallInd => {
                                 let fall = info.fallthrough.unwrap_or(addr + info.length as u64);
-                                merge_reached_candidate(fall, origin, &reloc_set, &mut addr_origin, &mut proven_bodies);
+                                merge_reached_candidate(
+                                    fall,
+                                    origin,
+                                    &reloc_set,
+                                    &mut addr_origin,
+                                    &mut proven_bodies,
+                                );
                                 if in_code(fall) && !visited.contains(&fall) {
                                     addr_origin.insert(fall, origin);
                                     next_active.push(fall);
@@ -423,7 +664,8 @@ fn flow_discover_with_candidates<F: FnMut(&[u64]) -> Vec<crate::native_runtime::
         }
     }
     // Canonicalize proven_bodies so descendant spans are merged into their root origins:
-    let mut canon_bodies: std::collections::HashMap<u64, u64> = std::collections::HashMap::with_capacity(proven_bodies.len());
+    let mut canon_bodies: std::collections::HashMap<u64, u64> =
+        std::collections::HashMap::with_capacity(proven_bodies.len());
     for (root, span_end) in proven_bodies.drain() {
         let canon = get_canonical_origin(root, &addr_origin);
         canon_bodies
@@ -440,9 +682,22 @@ fn flow_discover_with_candidates<F: FnMut(&[u64]) -> Vec<crate::native_runtime::
     entries.sort_unstable();
     entries.dedup();
     for (from, to) in thunk_jumps {
-        if !imp.xrefs.iter().any(|x| x.from == from && x.to == to && x.kind == "UNCONDITIONAL_JUMP") {
-            let provenance = if entries.contains(&to) { "native-import:thunk" } else { "native-import" };
-            imp.xrefs.push(NativeXref::with_provenance(from, to, "UNCONDITIONAL_JUMP", provenance));
+        if !imp
+            .xrefs
+            .iter()
+            .any(|x| x.from == from && x.to == to && x.kind == "UNCONDITIONAL_JUMP")
+        {
+            let provenance = if entries.contains(&to) {
+                "native-import:thunk"
+            } else {
+                "native-import"
+            };
+            imp.xrefs.push(NativeXref::with_provenance(
+                from,
+                to,
+                "UNCONDITIONAL_JUMP",
+                provenance,
+            ));
         }
     }
 
@@ -481,7 +736,7 @@ fn flow_discover_with_candidates<F: FnMut(&[u64]) -> Vec<crate::native_runtime::
 /// Conservative subset of Ghidra CreateThunkFunctionCmd.getSimpleFlow:
 /// an established entry's pure branch, optionally after one proven no-op.
 /// Unlike arbitrary branch closure, the destination must independently decode.
-fn confirmed_thunks<F: FnMut(&[u64]) -> Vec<crate::native_runtime::FlowResult>>(
+fn confirmed_thunks<P: FlowProvider>(
     imp: &NativeImport,
     entries: &[u64],
     landing_entries: &HashMap<u64, u64>,
@@ -489,39 +744,75 @@ fn confirmed_thunks<F: FnMut(&[u64]) -> Vec<crate::native_runtime::FlowResult>>(
     extents: &[(u64, u64)],
     addresses: &[u64],
     flows: &[crate::native_runtime::FlowResult],
-    provider: &mut F,
+    provider: &mut P,
 ) -> HashMap<u64, u64> {
     let mut candidates = HashMap::new();
     for (&address, flow) in addresses.iter().zip(flows) {
-        if flow.address != address || flow.length == 0 || !flow.pure_jump
-            || flow.kind != FlowKind::Branch || flow.fallthrough.is_some()
+        if flow.address != address
+            || flow.length == 0
+            || !flow.pure_jump
+            || flow.kind != FlowKind::Branch
+            || flow.fallthrough.is_some()
             || flow.targets.len() != 1
-            || !imp.mappings.iter().any(|m| m.flags & 4 != 0 && address >= m.vaddr
-                && address - m.vaddr < m.size && flow.length as u64 <= m.size - (address - m.vaddr)) {
+            || !imp.mappings.iter().any(|m| {
+                m.flags & 4 != 0
+                    && address >= m.vaddr
+                    && address - m.vaddr < m.size
+                    && flow.length as u64 <= m.size - (address - m.vaddr)
+            })
+        {
             continue;
         }
-        let entry = if entries.contains(&address) { address }
-                    else if let Some(&entry) = landing_entries.get(&address) { entry }
-                    else { continue; };
+        let entry = if entries.contains(&address) {
+            address
+        } else if let Some(&entry) = landing_entries.get(&address) {
+            entry
+        } else {
+            continue;
+        };
         let target = flow.targets[0];
-        if target == address || target == entry || (visited.contains(&target) && !entries.contains(&target))
-            || !imp.mappings.iter().any(|m| m.flags & 4 != 0 && target >= m.vaddr && target - m.vaddr < m.size)
-            || imp.functions.iter().any(|f| target > f.entry && target - f.entry < f.size)
-            || extents.iter().any(|&(start, size)| target > start && target - start < size) {
+        if target == address
+            || target == entry
+            || (visited.contains(&target) && !entries.contains(&target))
+            || !imp
+                .mappings
+                .iter()
+                .any(|m| m.flags & 4 != 0 && target >= m.vaddr && target - m.vaddr < m.size)
+            || imp
+                .functions
+                .iter()
+                .any(|f| target > f.entry && target - f.entry < f.size)
+            || extents
+                .iter()
+                .any(|&(start, size)| target > start && target - start < size)
+        {
             continue;
         }
         candidates.insert(address, target);
     }
-    if candidates.is_empty() { return candidates; }
+    if candidates.is_empty() {
+        return candidates;
+    }
     let mut targets: Vec<_> = candidates.values().copied().collect();
     targets.sort_unstable();
     targets.dedup();
-    let valid: Vec<_> = targets.iter().copied().zip(provider(&targets))
-        .filter(|&(target, ref flow)| flow.address == target && flow.length != 0
-            && !matches!(flow.kind, FlowKind::Bad | FlowKind::Unimpl)
-            && imp.mappings.iter().any(|m| m.flags & 4 != 0 && target >= m.vaddr
-                && target - m.vaddr < m.size && flow.length as u64 <= m.size - (target - m.vaddr)))
-        .map(|(target, _)| target).collect();
+    let valid: Vec<_> = targets
+        .iter()
+        .copied()
+        .zip(provider.flow(&targets))
+        .filter(|&(target, ref flow)| {
+            flow.address == target
+                && flow.length != 0
+                && !matches!(flow.kind, FlowKind::Bad | FlowKind::Unimpl)
+                && imp.mappings.iter().any(|m| {
+                    m.flags & 4 != 0
+                        && target >= m.vaddr
+                        && target - m.vaddr < m.size
+                        && flow.length as u64 <= m.size - (target - m.vaddr)
+                })
+        })
+        .map(|(target, _)| target)
+        .collect();
     candidates.retain(|_, target| valid.binary_search(target).is_ok());
     candidates
 }

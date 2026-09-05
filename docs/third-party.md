@@ -74,6 +74,10 @@ unused non-flag register writes are rejected. Bounds are 8 instructions,
 128 operations per instruction and 64 live values. Unique temporaries are
 discarded between instructions. A successful query alone does not create a
 function; discovery must associate the slot with loader metadata.
+Seeded ELF/PE imports and the DOL sweep share the same recognition rule:
+an unconditional branch target can establish a separate entry only when
+bounded SLEIGH linkage evidence resolves a loader-recorded external slot.
+Conditional targets and unresolved incoming-register values are not promoted.
 
 ## ELF loaded images and worker memory
 

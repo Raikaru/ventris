@@ -1056,6 +1056,20 @@ M1 — Discovery becomes generic
   Both console and worker builds pass; workspace 114 tests; corpus 5/5.
   Full discovery remains 11 pass / 9 fail / 0 skipped pending integration.
 
+## m1-010-d4d shared linkage-target discovery
+- Regressions `f989a8a` and `0a70260` cover sweep and seeded imports.
+  Ordinary ELF imports use the seeded path; DOL uses the section sweep.
+- Both paths now use the same flow/linkage provider and promotion rule.
+  Unconditional targets require bounded slot evidence plus an imported slot;
+  conditional targets and unbound indirect transfers remain internal.
+- Workspace 115 tests; corpus 5/5. Full gate improves to
+  14 pass / 6 fail / 0 skipped. All non-PIE PowerPC rows are 1.0/1.0.
+- Release libc: 3959 functions in 4.658 seconds on one isolated run.
+  Seeded imports do not retain a redundant instruction cache.
+- Remaining d4d sub-tasks: PLT-entry metadata and recognition; PIC register
+  context for PowerPC PIE (its stub reads incoming `r30`); removal of the old
+  ELF64 x86 byte scan. Do not assume one global `r30` value across functions.
+
 ## m1-010-d4 prerequisite sub-tasks
 - d4b: record loaded external relocation slots for ELF32/ELF64, independently
   of instruction decoding; preserve symbol-table linkage and endian/load bias.
@@ -1080,12 +1094,12 @@ M1 — Discovery becomes generic
 
 ## Blocked on
 - None for dependency-driven prerequisite sequencing; authorization is recorded
-  above. The current M1 discovery gate remains 11 pass / 9 fail.
+  above. The current M1 discovery gate remains 14 pass / 6 fail.
 
 ## Next task
-- m1-010-d4d: use loader metadata and bounded linkage evidence to discover
-  PLT and tail-branch entries, replacing the old ELF64 x86 scan.
-  Complete d4e/d4f against unchanged full discovery acceptance; sub-task e is open.
+- m1-010-d4d: finish PLT-entry discovery and PIC linkage context, then remove
+  the old ELF64 x86 scan. Complete d4e/d4f against unchanged full discovery
+  acceptance; sub-task e is open.
 
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a
