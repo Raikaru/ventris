@@ -1139,6 +1139,19 @@ M1 — Discovery becomes generic
 - Execute these prerequisites in order; each source commit stays below 800
   changed lines. The pending entry acceptance remains required throughout.
 
+## m1-010-d4e2b1 instruction flow metadata
+- `9a83b52` reproduced REP MOVSB incorrectly reporting a machine branch.
+  `33ad564` reproduced lost conditional-return paths and invented terminal-call
+  fallthrough. These regressions now pass; 10 targeted flow/linkage tests pass.
+- Native CLI: MIPS return reports length 8 with a four-byte delay slot; its
+  slot queried separately reports length 4 and no slots. ARM conditional return
+  reports both terminal and conditional flags with a real fallthrough address.
+- Console and worker builds pass. Entry-eligibility acceptance `66c48d9`
+  remains pending b2/b3; no full-workspace pass is claimed for this intermediate
+  state.
+- Corpus 5/5; full discovery 16 pass / 4 fail / 0 skipped, precision 1.0 on
+  all 20 rows. Architecture check passes with the shared fallthrough handling.
+
 ## m1-010-d4 prerequisite sub-tasks
 - d4b: record loaded external relocation slots for ELF32/ELF64, independently
   of instruction decoding; preserve symbol-table linkage and endian/load bias.

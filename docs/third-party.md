@@ -46,6 +46,23 @@ an artificial `EXTERNAL` block sourced from `Elf Loader`, plus a thunk to an
 external function. The exporter lives outside the runtime bridge and does not
 change its fingerprint or the immutable raw oracle references.
 
+## Instruction flow metadata
+
+`native/ventris_flow.hh` follows Ghidra 12.1.3
+`SleighInstructionPrototype.walkTemplates`, `flowListToFlowType`,
+`gatherFlags` and `convertFlowFlags` (Apache-2.0). The pinned-tree patch
+collects template flow facts during ordinary SLEIGH p-code generation, not
+through a second decode. Instruction-local labels and `inst_start`/`inst_next`
+branches are not exported as machine flow references.
+
+`FLOW` includes conditional/terminal classification, actual RETURN p-code
+evidence, and individual delay-slot lengths. Total length includes slots;
+slot effects do not alter the parent's prototype flow classification.
+Discovery follows the reported fallthrough, including conditional returns,
+and does not invent fallthrough after terminal calls. Console consumers require
+the enriched protocol; rebuild both native binaries after this cutover.
+Ordinary decompiler translation does not collect the optional flow metadata.
+
 ## Minimal direct-jump thunks
 
 The approved M1 prerequisite follows the single-jump case in Ghidra 12.1.3

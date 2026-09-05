@@ -428,6 +428,9 @@ fn flow_discover_with_candidates<P: FlowProvider>(
                 if has_linkage_slots && info.kind != FlowKind::Fallthrough {
                     flow_endings.push((addr, info.kind == FlowKind::BranchInd));
                 }
+                if info.conditional {
+                    conditional_targets.extend(info.targets.iter().copied());
+                }
                 proven_bodies
                     .entry(origin)
                     .and_modify(|e| *e = (*e).max(span))
@@ -444,18 +447,6 @@ fn flow_discover_with_candidates<P: FlowProvider>(
                             if *t != 0 {
                                 calls.push((addr, *t));
                             }
-                        }
-                        let fall = info.fallthrough.unwrap_or(addr + info.length as u64);
-                        merge_reached_candidate(
-                            fall,
-                            origin,
-                            &thunk_candidates,
-                            &mut addr_origin,
-                            &mut proven_bodies,
-                        );
-                        if in_code(fall) && !visited.contains(&fall) {
-                            addr_origin.insert(fall, origin);
-                            next_active.push(fall);
                         }
                     }
                     FlowKind::Branch => {
@@ -503,9 +494,6 @@ fn flow_discover_with_candidates<P: FlowProvider>(
                             if has_linkage_slots && t != span {
                                 branch_targets.push(t);
                             }
-                            if has_linkage_slots {
-                                conditional_targets.insert(t);
-                            }
                             merge_reached_candidate(
                                 t,
                                 origin,
@@ -518,48 +506,29 @@ fn flow_discover_with_candidates<P: FlowProvider>(
                                 next_active.push(t);
                             }
                         }
-                        let fall = info.fallthrough.unwrap_or(addr + info.length as u64);
-                        merge_reached_candidate(
-                            fall,
-                            origin,
-                            &thunk_candidates,
-                            &mut addr_origin,
-                            &mut proven_bodies,
-                        );
-                        if in_code(fall) && !visited.contains(&fall) {
-                            addr_origin.insert(fall, origin);
-                            next_active.push(fall);
-                        }
                     }
-                    FlowKind::CallInd => {
-                        let fall = info.fallthrough.unwrap_or(addr + info.length as u64);
-                        merge_reached_candidate(
-                            fall,
-                            origin,
-                            &thunk_candidates,
-                            &mut addr_origin,
-                            &mut proven_bodies,
-                        );
-                        if in_code(fall) && !visited.contains(&fall) {
-                            addr_origin.insert(fall, origin);
-                            next_active.push(fall);
-                        }
+                    FlowKind::CallInd
+                    | FlowKind::Fallthrough
+                    | FlowKind::BranchInd
+                    | FlowKind::Return
+                    | FlowKind::Bad
+                    | FlowKind::Unimpl => {}
+                }
+                if let Some(fall) = info
+                    .fallthrough
+                    .filter(|_| !matches!(info.kind, FlowKind::Bad | FlowKind::Unimpl))
+                {
+                    merge_reached_candidate(
+                        fall,
+                        origin,
+                        &thunk_candidates,
+                        &mut addr_origin,
+                        &mut proven_bodies,
+                    );
+                    if in_code(fall) && !visited.contains(&fall) {
+                        addr_origin.insert(fall, origin);
+                        next_active.push(fall);
                     }
-                    FlowKind::Fallthrough => {
-                        let fall = info.fallthrough.unwrap_or(addr + info.length as u64);
-                        merge_reached_candidate(
-                            fall,
-                            origin,
-                            &thunk_candidates,
-                            &mut addr_origin,
-                            &mut proven_bodies,
-                        );
-                        if in_code(fall) && !visited.contains(&fall) {
-                            addr_origin.insert(fall, origin);
-                            next_active.push(fall);
-                        }
-                    }
-                    FlowKind::BranchInd | FlowKind::Return | FlowKind::Bad | FlowKind::Unimpl => {}
                 }
             }
         }
@@ -631,6 +600,9 @@ fn flow_discover_with_candidates<P: FlowProvider>(
                     for (addr, info) in chunk.iter().copied().zip(flows) {
                         let origin = get_canonical_origin(addr, &addr_origin);
                         let span = addr + info.length as u64;
+                        if info.conditional {
+                            conditional_targets.extend(info.targets.iter().copied());
+                        }
                         if has_linkage_slots {
                             if !matches!(info.kind, FlowKind::Bad | FlowKind::Unimpl) {
                                 extents.push((addr, info.length as u64));
@@ -655,18 +627,6 @@ fn flow_discover_with_candidates<P: FlowProvider>(
                                     if *t != 0 {
                                         calls.push((addr, *t));
                                     }
-                                }
-                                let fall = info.fallthrough.unwrap_or(addr + info.length as u64);
-                                merge_reached_candidate(
-                                    fall,
-                                    origin,
-                                    &reloc_set,
-                                    &mut addr_origin,
-                                    &mut proven_bodies,
-                                );
-                                if in_code(fall) && !visited.contains(&fall) {
-                                    addr_origin.insert(fall, origin);
-                                    next_active.push(fall);
                                 }
                             }
                             FlowKind::Branch => {
@@ -699,9 +659,6 @@ fn flow_discover_with_candidates<P: FlowProvider>(
                                     if has_linkage_slots && t != span {
                                         branch_targets.push(t);
                                     }
-                                    if has_linkage_slots {
-                                        conditional_targets.insert(t);
-                                    }
                                     merge_reached_candidate(
                                         t,
                                         origin,
@@ -714,34 +671,24 @@ fn flow_discover_with_candidates<P: FlowProvider>(
                                         next_active.push(t);
                                     }
                                 }
-                                let fall = info.fallthrough.unwrap_or(addr + info.length as u64);
-                                merge_reached_candidate(
-                                    fall,
-                                    origin,
-                                    &reloc_set,
-                                    &mut addr_origin,
-                                    &mut proven_bodies,
-                                );
-                                if in_code(fall) && !visited.contains(&fall) {
-                                    addr_origin.insert(fall, origin);
-                                    next_active.push(fall);
-                                }
-                            }
-                            FlowKind::Fallthrough | FlowKind::CallInd => {
-                                let fall = info.fallthrough.unwrap_or(addr + info.length as u64);
-                                merge_reached_candidate(
-                                    fall,
-                                    origin,
-                                    &reloc_set,
-                                    &mut addr_origin,
-                                    &mut proven_bodies,
-                                );
-                                if in_code(fall) && !visited.contains(&fall) {
-                                    addr_origin.insert(fall, origin);
-                                    next_active.push(fall);
-                                }
                             }
                             _ => {}
+                        }
+                        if let Some(fall) = info
+                            .fallthrough
+                            .filter(|_| !matches!(info.kind, FlowKind::Bad | FlowKind::Unimpl))
+                        {
+                            merge_reached_candidate(
+                                fall,
+                                origin,
+                                &reloc_set,
+                                &mut addr_origin,
+                                &mut proven_bodies,
+                            );
+                            if in_code(fall) && !visited.contains(&fall) {
+                                addr_origin.insert(fall, origin);
+                                next_active.push(fall);
+                            }
                         }
                     }
                 }

@@ -438,6 +438,13 @@ pub struct FlowResult {
     /// True only when SLEIGH successfully decodes an instruction with no p-code.
     #[serde(default)]
     pub no_op: bool,
+    /// Instruction flow classification, including conditional terminal paths.
+    pub terminal: bool,
+    pub conditional: bool,
+    /// Actual RETURN p-code, distinct from a terminal instruction such as a loop.
+    pub return_op: bool,
+    /// Length of each delay-slot instruction; `length` includes these bytes.
+    pub delay_slots: Vec<u8>,
 }
 
 /// Bounded SLEIGH evidence for an indirect transfer through a pointer slot.
@@ -538,6 +545,11 @@ fn parse_flow_output(stdout: &str, expected_addr: u64) -> Result<FlowResult> {
             let mut targets = Vec::new();
             let mut pure_jump = false;
             let mut no_op = false;
+            let mut terminal = false;
+            let mut conditional = false;
+            let mut return_op = false;
+            let mut delay_slots = Vec::new();
+            let mut metadata = 0u8;
 
             for part in rest.split_whitespace() {
                 if let Some(val) = part.strip_prefix("len=") {
@@ -562,6 +574,28 @@ fn parse_flow_output(stdout: &str, expected_addr: u64) -> Result<FlowResult> {
                     pure_jump = val == "1";
                 } else if let Some(val) = part.strip_prefix("no_op=") {
                     no_op = val == "1";
+                } else if let Some(val) = part.strip_prefix("terminal=") {
+                    terminal = val == "1";
+                    metadata |= 1;
+                } else if let Some(val) = part.strip_prefix("conditional=") {
+                    conditional = val == "1";
+                    metadata |= 2;
+                } else if let Some(val) = part.strip_prefix("return_op=") {
+                    return_op = val == "1";
+                    metadata |= 4;
+                } else if let Some(val) = part.strip_prefix("delays=") {
+                    metadata |= 8;
+                    if !val.is_empty() {
+                        for item in val.split(',') {
+                            let length: u8 = item.parse().map_err(|_| {
+                                NativeRuntimeError("invalid delay-slot length".into())
+                            })?;
+                            if length == 0 {
+                                return err("zero delay-slot length");
+                            }
+                            delay_slots.push(length);
+                        }
+                    }
                 } else if let Some(val) = part.strip_prefix("targets=") {
                     for t in val.split(',') {
                         if let Some(target_addr) = parse_address_token(t) {
@@ -572,7 +606,17 @@ fn parse_flow_output(stdout: &str, expected_addr: u64) -> Result<FlowResult> {
                     addr = a;
                 }
             }
+            if metadata != 15 {
+                return err("console lacks instruction flow metadata; rebuild the native console");
+            }
+            if delay_slots.iter().map(|&size| size as usize).sum::<usize>() >= length as usize {
+                return err("delay slots exceed the instruction extent");
+            }
             return Ok(FlowResult {
+                terminal,
+                conditional,
+                return_op,
+                delay_slots,
                 no_op,
                 pure_jump,
                 address: addr,
@@ -709,6 +753,10 @@ impl ConsoleSession {
         // Bad addresses produce a "Low-level ERROR" line and no FLOW.
         if line.contains("Low-level ERROR") {
             return Ok(FlowResult {
+                terminal: false,
+                conditional: false,
+                return_op: false,
+                delay_slots: Vec::new(),
                 no_op: false,
                 pure_jump: false,
                 address,
@@ -726,6 +774,10 @@ impl ConsoleSession {
     /// length-1 `Bad` result so a walk can continue.
     pub fn try_flow(&mut self, address: u64) -> FlowResult {
         self.flow(address).unwrap_or(FlowResult {
+            terminal: false,
+            conditional: false,
+            return_op: false,
+            delay_slots: Vec::new(),
             no_op: false,
             pure_jump: false,
             address,
@@ -774,6 +826,10 @@ impl ConsoleSession {
             }
             if line.contains("Low-level ERROR") {
                 results.push(FlowResult {
+                    terminal: false,
+                    conditional: false,
+                    return_op: false,
+                    delay_slots: Vec::new(),
                     no_op: false,
                     pure_jump: false,
                     address: addr,
@@ -784,6 +840,10 @@ impl ConsoleSession {
                 });
             } else {
                 results.push(parse_flow_output(&line, addr).unwrap_or(FlowResult {
+                    terminal: false,
+                    conditional: false,
+                    return_op: false,
+                    delay_slots: Vec::new(),
                     no_op: false,
                     pure_jump: false,
                     address: addr,
@@ -810,6 +870,10 @@ impl ConsoleSession {
             addresses
                 .iter()
                 .map(|&addr| FlowResult {
+                    terminal: false,
+                    conditional: false,
+                    return_op: false,
+                    delay_slots: Vec::new(),
                     no_op: false,
                     pure_jump: false,
                     address: addr,
@@ -1121,21 +1185,30 @@ mod tests {
         };
         cfg.console_path = Some(console);
         cfg.language_id = "x86:LE:64:default".into();
-        cfg.language_dir = cfg.ghidra_install.join("Ghidra/Processors/x86/data/languages");
+        cfg.language_dir = cfg
+            .ghidra_install
+            .join("Ghidra/Processors/x86/data/languages");
         let mut session = ConsoleSession::new(&cfg).unwrap();
-        session.load_mapped(&NativeImport {
-            language: cfg.language_id.clone(),
-            mappings: vec![crate::native::Mapping {
-                vaddr: 0x1000, size: 3, file_off: 0, flags: 6,
-                bytes: vec![0xf3, 0xa4, 0xc3], // REP MOVSB; RET
-            }],
-            ..Default::default()
-        }).unwrap();
+        session
+            .load_mapped(&NativeImport {
+                language: cfg.language_id.clone(),
+                mappings: vec![crate::native::Mapping {
+                    vaddr: 0x1000,
+                    size: 3,
+                    file_off: 0,
+                    flags: 6,
+                    bytes: vec![0xf3, 0xa4, 0xc3], // REP MOVSB; RET
+                }],
+                ..Default::default()
+            })
+            .unwrap();
         let flows = session.flow_batch(&[0x1000]).unwrap();
         assert_eq!(flows[0].kind, FlowKind::Fallthrough);
         assert_eq!(flows[0].fallthrough, Some(0x1002));
-        assert!(flows[0].targets.is_empty(),
-            "instruction-local repeat branches are not machine flow references");
+        assert!(
+            flows[0].targets.is_empty(),
+            "instruction-local repeat branches are not machine flow references"
+        );
     }
 
     #[test]

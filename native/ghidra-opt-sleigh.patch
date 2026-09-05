@@ -289,16 +289,17 @@ diff --git a/decompiler/ifacedecomp.cc b/decompiler/ifacedecomp.cc
 index e62ab6a..6d42a2d 100644
 --- a/decompiler/ifacedecomp.cc
 +++ b/decompiler/ifacedecomp.cc
-@@ -16,6 +16,8 @@
+@@ -16,6 +16,9 @@
  #include "ifacedecomp.hh"
 +#include "ventris_linkage.hh"
 +#include "ventris_patterns.hh"
++#include "ventris_flow.hh"
  extern "C" {
  #include <time.h>
  }
  #include "pcodeparse.hh"
  #include "blockaction.hh"
-@@ -63,6 +65,9 @@ void IfaceDecompCapability::registerCommands(IfaceStatus *status)
+@@ -63,6 +66,9 @@ void IfaceDecompCapability::registerCommands(IfaceStatus *status)
    status->registerCom(new IfcMapconvert(),"map","convert");
    status->registerCom(new IfcMapunionfacet(), "map", "unionfacet");
    status->registerCom(new IfcPrintdisasm(),"disassemble");
@@ -308,7 +309,7 @@ index e62ab6a..6d42a2d 100644
    status->registerCom(new IfcDecompile(),"decompile");
    status->registerCom(new IfcDump(),"dump");
    status->registerCom(new IfcDumpbinary(),"binary");
-@@ -829,6 +834,18 @@ void IfcPrintdisasm::execute(istream &s)
+@@ -829,6 +835,18 @@ void IfcPrintdisasm::execute(istream &s)
    }
    IfaceAssemblyEmit assem(status->fileoptr,10);
    while(size > 0) {
@@ -327,7 +328,7 @@ index e62ab6a..6d42a2d 100644
      int4 sz;
      sz = glb->translate->printAssembly(assem,addr);
      addr = addr + sz;
-@@ -836,6 +853,123 @@ void IfcPrintdisasm::execute(istream &s)
+@@ -836,6 +854,79 @@ void IfcPrintdisasm::execute(istream &s)
    }
  }
  
@@ -337,33 +338,22 @@ index e62ab6a..6d42a2d 100644
 +  if (dcp->conf == (Architecture *)0)
 +    throw IfaceExecutionError("No architecture loaded");
 +
++  const Sleigh *sleigh = dynamic_cast<const Sleigh *>(dcp->conf->translate);
++  if (sleigh == nullptr)
++    throw IfaceExecutionError("Flow requires a SLEIGH translator");
 +  class FlowPcodeEmit : public PcodeEmit {
 +  public:
-+    struct Op {
-+      OpCode opc;
-+      Address target;
-+      bool has_target;
-+      bool direct_target;
-+      Op(void) : opc(CPUI_COPY), has_target(false), direct_target(false) {}
-+    };
-+    vector<Op> ops;
++    int4 count = 0;
++    bool firstBranch = false;
++    bool returnOp = false;
 +    virtual void dump(const Address &a,OpCode opc,VarnodeData *outvar,VarnodeData *vars,int4 isize) {
-+      Op op;
-+      op.opc = opc;
-+      op.has_target = false;
-+      if (isize > 0 && vars[0].space != (AddrSpace *)0) {
-+        if (vars[0].space->getType() == IPTR_CONSTANT) {
-+          op.target = Address(a.getSpace(),vars[0].offset);
-+          op.has_target = true;
-+        } else if (vars[0].space->getType() == IPTR_PROCESSOR) {
-+          op.target = Address(vars[0].space,vars[0].offset);
-+          op.has_target = true;
-+          op.direct_target = true;
-+        }
-+      }
-+      ops.push_back(op);
++      if (count++ == 0)
++        firstBranch = opc == CPUI_BRANCH && isize > 0
++          && vars[0].space->getType() == IPTR_PROCESSOR;
++      returnOp |= opc == CPUI_RETURN;
 +    }
 +  };
++  InstructionFlow flow;
 +
 +  while (true) {
 +    s >> ws;
@@ -380,69 +370,36 @@ index e62ab6a..6d42a2d 100644
 +    FlowPcodeEmit emitter;
 +    int4 length = 0;
 +    try {
-+      length = dcp->conf->translate->oneInstruction(emitter,addr);
++      length = sleigh->oneInstructionFlow(emitter,addr,flow);
 +    } catch(BadDataError &err) {
-+      *status->fileoptr << "FLOW " << addr.getShortcut() << "0x" << hex << addr.getOffset() << " len=1 fall=none kind=BAD targets=" << endl;
++      *status->fileoptr << "FLOW " << addr.getShortcut() << "0x" << hex << addr.getOffset() << " len=1 fall=none kind=BAD terminal=0 conditional=0 return_op=0 delays= targets=" << endl;
 +      continue;
 +    } catch(UnimplError &err) {
-+      *status->fileoptr << "FLOW " << addr.getShortcut() << "0x" << hex << addr.getOffset() << " len=1 fall=none kind=UNIMPL targets=" << endl;
++      *status->fileoptr << "FLOW " << addr.getShortcut() << "0x" << hex << addr.getOffset() << " len=1 fall=none kind=UNIMPL terminal=0 conditional=0 return_op=0 delays= targets=" << endl;
 +      continue;
 +    }
 +
-+    string kind = "FALLTHROUGH";
-+    bool has_fallthrough = true;
-+    vector<Address> targets;
-+
-+    for(size_t i=0;i<emitter.ops.size();++i) {
-+      OpCode opc = emitter.ops[i].opc;
-+      switch(opc) {
-+        case CPUI_BRANCH:
-+          kind = "BRANCH";
-+          has_fallthrough = false;
-+          if (emitter.ops[i].has_target) targets.push_back(emitter.ops[i].target);
-+          break;
-+        case CPUI_CBRANCH:
-+          kind = "CBRANCH";
-+          has_fallthrough = true;
-+          if (emitter.ops[i].has_target) targets.push_back(emitter.ops[i].target);
-+          break;
-+        case CPUI_BRANCHIND:
-+          kind = "BRANCHIND";
-+          has_fallthrough = false;
-+          break;
-+        case CPUI_CALL:
-+          kind = "CALL";
-+          has_fallthrough = true;
-+          if (emitter.ops[i].has_target) targets.push_back(emitter.ops[i].target);
-+          break;
-+        case CPUI_CALLIND:
-+          kind = "CALLIND";
-+          has_fallthrough = true;
-+          break;
-+        case CPUI_RETURN:
-+          kind = "RETURN";
-+          has_fallthrough = false;
-+          break;
-+        default:
-+          break;
-+      }
-+    }
++    InstructionFlow::Type type = flow.type();
 +
 +    *status->fileoptr << "FLOW " << addr.getShortcut() << "0x" << hex << addr.getOffset() << " len=" << dec << length;
-+    if (has_fallthrough) {
++    if (type.fallthrough) {
 +      Address fall = addr + length;
 +      *status->fileoptr << " fall=" << fall.getShortcut() << "0x" << hex << fall.getOffset();
 +    } else {
 +      *status->fileoptr << " fall=none";
 +    }
-+    bool pure_jump = emitter.ops.size() == 1 && emitter.ops[0].opc == CPUI_BRANCH
-+        && emitter.ops[0].direct_target;
-+    *status->fileoptr << " pure_jump=" << (pure_jump ? 1 : 0);
-+    *status->fileoptr << " no_op=" << (emitter.ops.empty() ? 1 : 0);
-+    *status->fileoptr << " kind=" << kind << " targets=";
-+    for(size_t i=0;i<targets.size();++i) {
++    *status->fileoptr << " pure_jump=" << (emitter.count == 1 && emitter.firstBranch ? 1 : 0);
++    *status->fileoptr << " no_op=" << (emitter.count == 0 ? 1 : 0);
++    *status->fileoptr << " terminal=" << (type.terminal ? 1 : 0) << " conditional=" << (type.conditional ? 1 : 0);
++    *status->fileoptr << " return_op=" << (emitter.returnOp ? 1 : 0) << " delays=";
++    for(size_t i=0;i<flow.delaySlots.size();++i) {
 +      if (i > 0) *status->fileoptr << ",";
-+      *status->fileoptr << targets[i].getShortcut() << "0x" << hex << targets[i].getOffset();
++      *status->fileoptr << dec << flow.delaySlots[i];
++    }
++    *status->fileoptr << " kind=" << type.kind << " targets=";
++    for(size_t i=0;i<flow.targets.size();++i) {
++      if (i > 0) *status->fileoptr << ",";
++      *status->fileoptr << flow.targets[i].getShortcut() << "0x" << hex << flow.targets[i].getOffset();
 +    }
 +    *status->fileoptr << endl;
 +  }
@@ -467,3 +424,126 @@ index 5958f67..1eb9d55 100644
  class IfcDump : public IfaceDecompCommand {
  public:
    virtual void execute(istream &s);
+diff --git a/decompiler/sleigh.hh b/decompiler/sleigh.hh
+--- a/decompiler/sleigh.hh
++++ b/decompiler/sleigh.hh
+@@ -129,6 +129,9 @@
+ /// But, through the \b delay-slot mechanism, build() may recursively visit
+ /// additional instructions.
++struct InstructionFlow;
++
+ class SleighBuilder : public PcodeBuilder {
+   virtual void dump( OpTpl *op );
++  InstructionFlow *instruction_flow;
+   AddrSpace *const_space;		///< The constant address space
+   AddrSpace *uniq_space;		///< The unique address space
+@@ -142,7 +145,7 @@ class SleighBuilder : public PcodeBuilder {
+   void generatePointerAdd(PcodeData *op,const VarnodeTpl *vntpl);
+   void setUniqueOffset(const Address &addr);	///< Set uniquifying bits for the current instruction
+ public:
+-  SleighBuilder(ParserWalker *w,DisassemblyCache *dcache,PcodeCacher *pc,AddrSpace *cspc,AddrSpace *uspc,uint4 umask);
++  SleighBuilder(ParserWalker *w,DisassemblyCache *dcache,PcodeCacher *pc,AddrSpace *cspc,AddrSpace *uspc,uint4 umask,InstructionFlow *flow=nullptr);
+   virtual void appendBuild(OpTpl *bld,int4 secnum);
+   virtual void delaySlot(OpTpl *op);
+   virtual void setLabel(OpTpl *op);
+@@ -166,6 +169,7 @@ class Sleigh : public SleighBase {
+   mutable DisassemblyCache *discache;	///< Cache of recently parsed instructions
+   mutable PcodeCacher pcode_cache;	///< Cache of p-code data just prior to emitting
+   void clearForDelete(void);		///< Delete the context and disassembly caches
++  int4 translateInstruction(PcodeEmit &emit,const Address &addr,InstructionFlow *flow) const;
+ protected:
+   ParserContext *obtainContext(const Address &addr,int4 state) const;
+   void resolve(ParserContext &pos) const;	///< Generate a parse tree suitable for disassembly
+@@ -179,6 +183,7 @@ public:
+   virtual void setContextDefault(const string &nm,uintm val);
+   virtual void allowContextSet(bool val) const;
+   virtual int4 instructionLength(const Address &baseaddr) const;
+   virtual int4 oneInstruction(PcodeEmit &emit,const Address &baseaddr) const;
++  int4 oneInstructionFlow(PcodeEmit &emit,const Address &baseaddr,InstructionFlow &flow) const;
+   virtual int4 printAssembly(AssemblyEmit &emit,const Address &baseaddr) const;
+ };
+diff --git a/decompiler/sleigh.cc b/decompiler/sleigh.cc
+--- a/decompiler/sleigh.cc
++++ b/decompiler/sleigh.cc
+@@ -14,6 +14,7 @@
+  * limitations under the License.
+  */
+ #include "sleigh.hh"
++#include "ventris_flow.hh"
+ #include "loadimage.hh"
+ 
+ namespace ghidra {
+@@ -221,6 +222,8 @@ void SleighBuilder::dump(OpTpl *op)
+ void SleighBuilder::dump(OpTpl *op)
+ 
+ {				// Dump on op through low-level dump interface
+ 				// filling in dynamic loads and stores if necessary
++  if (instruction_flow != nullptr)
++    instruction_flow->record(op,*walker);
+   PcodeData *thisop;
+   VarnodeData *invars;
+@@ -330,6 +333,7 @@
+ SleighBuilder::SleighBuilder(ParserWalker *w,DisassemblyCache *dcache,PcodeCacher *pc,AddrSpace *cspc,
+-			     AddrSpace *uspc,uint4 umask)
++			     AddrSpace *uspc,uint4 umask,InstructionFlow *flow)
+   : PcodeBuilder(0)
+ {
++  instruction_flow = flow;
+   walker = w;
+   discache = dcache;
+@@ -371,6 +375,8 @@ void SleighBuilder::delaySlot(OpTpl *op)
+   // Append pcode for an entire instruction (delay slot)
+   // in the middle of the current instruction
+   ParserWalker *tmp = walker;
+   uintb olduniqueoffset = uniqueoffset;
++  InstructionFlow *saved_flow = instruction_flow;
++  instruction_flow = nullptr;	// Slots do not change the parent instruction's flow type.
+ 
+   Address baseaddr = tmp->getAddr();
+@@ -395,10 +401,12 @@ void SleighBuilder::delaySlot(OpTpl *op)
+   walker = tmp;			// Restore original context
+   uniqueoffset = olduniqueoffset;
++  instruction_flow = saved_flow;
+ }
+ 
+ void SleighBuilder::setLabel(OpTpl *op)
+ 
+ {
++  if (instruction_flow != nullptr) instruction_flow->note(InstructionFlow::LABEL);
+   cache->addLabel( op->getIn(0)->getOffset().getReal()+getLabelBase() );
+ }
+ 
+@@ -741,6 +749,17 @@
+ int4 Sleigh::oneInstruction(PcodeEmit &emit,const Address &baseaddr) const
++{
++  return translateInstruction(emit,baseaddr,nullptr);
++}
++
++int4 Sleigh::oneInstructionFlow(PcodeEmit &emit,const Address &baseaddr,InstructionFlow &flow) const
++{
++  flow.clear();
++  return translateInstruction(emit,baseaddr,&flow);
++}
++
++int4 Sleigh::translateInstruction(PcodeEmit &emit,const Address &baseaddr,InstructionFlow *flow) const
+ 
+ {
+   int4 fallOffset;
+   if (alignment != 1) {
+     if ((baseaddr.getOffset() % alignment)!=0) {
+@@ -761,6 +780,7 @@ int4 Sleigh::oneInstruction(PcodeEmit &emit,const Address &baseaddr) const
+       ParserContext *delaypos = obtainContext(pos->getAddr() + fallOffset,ParserContext::pcode);
+       delaypos->applyCommits();
+       int4 len = delaypos->getLength();
++      if (flow != nullptr) flow->delaySlots.push_back(len);
+       fallOffset += len;
+       bytecount += len;
+     } while(bytecount < pos->getDelaySlot());
+@@ -770,6 +790,6 @@ int4 Sleigh::oneInstruction(PcodeEmit &emit,const Address &baseaddr) const
+   walker.baseState();
+   pcode_cache.clear();
+-  SleighBuilder builder(&walker,discache,&pcode_cache,getConstantSpace(),getUniqueSpace(),unique_allocatemask);
++  SleighBuilder builder(&walker,discache,&pcode_cache,getConstantSpace(),getUniqueSpace(),unique_allocatemask,flow);
+   try {
+     builder.build(walker.getConstructor()->getTempl(),-1);
+     pcode_cache.resolveRelatives();

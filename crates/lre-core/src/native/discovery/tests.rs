@@ -5,7 +5,9 @@ use crate::native_runtime::FlowResult;
 fn result(address: u64, kind: FlowKind, target: Option<u64>, pure_jump: bool) -> FlowResult {
     FlowResult { terminal: kind == FlowKind::Return, conditional: kind == FlowKind::CBranch,
         return_op: kind == FlowKind::Return, delay_slots: Vec::new(), no_op: false,
-        address, length: 2, fallthrough: None,
+        address, length: 2,
+        fallthrough: matches!(kind, FlowKind::Call | FlowKind::CallInd | FlowKind::CBranch | FlowKind::Fallthrough)
+            .then_some(address + 2),
         targets: target.into_iter().collect(), kind, pure_jump }
 }
 
