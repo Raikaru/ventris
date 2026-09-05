@@ -1113,6 +1113,43 @@ mod tests {
     }
 
     #[test]
+    fn elf_pattern_selection_uses_loader_compiler() {
+        let mut cfg = crate::session::RuntimeConfig::from_env();
+        let Ok(console) = find_console(&cfg) else {
+            eprintln!("SKIP: SLEIGH console not available");
+            return;
+        };
+        cfg.console_path = Some(console);
+        cfg.language_id = "x86:LE:64:default".into();
+        cfg.language_dir = cfg.ghidra_install.join("Ghidra/Processors/x86/data/languages");
+        // ELF64 with one allocated code section: ret; push rbp; mov rbp,rsp; ret.
+        // The pinned GCC patterns recognize the entry after ret; Windows does not.
+        let mut elf = vec![0u8; 0x200];
+        elf[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
+        for (offset, value) in [(16, 2u16), (18, 62), (58, 64), (60, 2)] {
+            elf[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        elf[40..48].copy_from_slice(&0x80u64.to_le_bytes());
+        elf[0xc4..0xc8].copy_from_slice(&1u32.to_le_bytes());
+        for (offset, value) in [(0xc8, 6u64), (0xd0, 0x1000), (0xd8, 0x180), (0xe0, 6)] {
+            elf[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        elf[0x180..0x186].copy_from_slice(&[0xc3, 0x55, 0x48, 0x89, 0xe5, 0xc3]);
+        let import = crate::native::import_elf(&elf).unwrap();
+        let mut session = ConsoleSession::new(&cfg).unwrap();
+        session.load_mapped(&import).unwrap();
+        session.send("functionstarts 0x1000 0x1006\n").unwrap();
+        let response = read_until_prompt(&mut session.reader).unwrap();
+        let payload = response.lines().find_map(|line| line.strip_prefix("PATTERNS "))
+            .unwrap_or_else(|| panic!("missing pattern response: {response}"));
+        let parsed: serde_json::Value = serde_json::from_str(payload).unwrap();
+        assert!(
+            parsed["matches"].as_array().unwrap().iter().any(|row| row["address"] == 0x1001),
+            "ELF compiler selection must recognize the GCC entry: {response}"
+        );
+    }
+
+    #[test]
     fn function_pattern_queries_preserve_prefix_marks_and_range_bounds() {
         let mut cfg = crate::session::RuntimeConfig::from_env();
         let Ok(console) = find_console(&cfg) else {
