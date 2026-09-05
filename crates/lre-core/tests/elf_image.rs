@@ -102,3 +102,29 @@ fn loaded_elf_addresses_and_relative_pointer_bytes_agree() {
     drop(image);
     std::fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn undefined_elf32_symbols_are_not_function_definitions() {
+    for be in [false, true] {
+        let mut data = fixture(4, be, 4, 0x400000);
+        let mut put = |offset: usize, value: u32| {
+            data[offset..offset + 4].copy_from_slice(&if be { value.to_be_bytes() } else { value.to_le_bytes() });
+        };
+        // Replace the relocation section with one dynamic function symbol.
+        for (offset, value) in [(0x17c, 11), (0x18c, 16), (0x190, 4), (0x1b4, 0x60),
+                                (0x480, 0x40), (0x484, 0x401010), (0x488, 4)] {
+            put(offset, value);
+        }
+        data[0x48c..0x490].copy_from_slice(&[0x12, 0, 0, 0]); // STT_FUNC, SHN_UNDEF
+        data[0x3c0..0x3c9].copy_from_slice(b"imported\0");
+        let import = import_elf(&data).unwrap();
+        assert!(!import.functions.iter().any(|f| f.entry == 0x401010),
+                "a nonzero undefined-symbol value does not define code");
+        assert!(import.externals.iter().any(|(address, name)| *address == 0 && name == "imported"));
+        // The same address remains a real function when the symbol is defined.
+        data[0x48e..0x490].copy_from_slice(&if be { 1u16.to_be_bytes() } else { 1u16.to_le_bytes() });
+        let import = import_elf(&data).unwrap();
+        assert!(import.functions.iter().any(|f| f.entry == 0x401010 && f.name == "imported"));
+        assert!(!import.externals.iter().any(|(_, name)| name == "imported"));
+    }
+}
