@@ -1250,15 +1250,28 @@ M2 — Program-model parity
   Rust and Qt build/package jobs pass on Linux, macOS and Windows.
   https://github.com/Raikaru/ventris/actions/runs/33966774392
 
+## m2-001 propagation implementation slices
+- Acceptance `b5073a3` fails on the missing `constants` command. Its x86-64
+  and PowerPC BE32 fixtures load a readonly pointer into mapped BSS, propagate
+  pointer arithmetic and reject an unmapped loaded value.
+- The named evaluator exists. It supplies policy; SymbolicPropogator and
+  VarnodeContext supply state, memory and call semantics. Reuse native
+  OpBehavior arithmetic and Funcdata flow rather than an ISA-specific decoder.
+- a: sparse known-bit/affine storage. C++11 smoke passes alias overwrites,
+  predecessor joins, temporary lifetime and 80,000 randomized reads in both
+  byte orders.
+- b: function propagation, mapped-memory policy and native console command;
+  the existing known-global-load acceptance must pass.
+- c: typed Rust query results, native-runtime CI execution and documentation.
+  Keep each implementation commit below 800 changed lines.
+
 ## Blocked on
 - None. M1 gate evidence is committed and enforced by passing hosted CI.
 
 ## Next task
-- m2-001: add the native console constant-propagation request, emitting
-  (pc, varnode, value) for pointer-sized constants in mapped sections.
-- Acceptance: `constant_propagation_reports_mapped_globals` in
-  `crates/lre-core/src/native_runtime.rs`, using a known-global-load fixture.
-  Verify the named `ConstantPropagationContextEvaluator` source before porting.
+- m2-001b / m2-001c: publish native function propagation and its typed runtime
+  integration after the known-global-load acceptance, call-stack regression
+  and workspace checks pass. Record fresh retained-discovery evidence next.
 
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a
