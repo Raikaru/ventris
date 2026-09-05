@@ -4,11 +4,11 @@
 # `import-native --discover`.
 #
 # The pinned third_party/ghidra tree is NEVER modified in place; this script
-# copies the decompiler sources aside and builds. Unlike ghidra_opt the
-# console needs no patch: it loads languages via `-s DIR` + SLEIGHHOME.
+# copies the decompiler sources aside and applies ghidra-opt-sleigh.patch.
+# The console loads languages via `-s DIR` + SLEIGHHOME.
 #
 # Prerequisite: binutils-devel (bfd.h) — the console links the BFD load
-# image, matching Ghidra's own native-build requirement (see AGENTS.md).
+# image, matching the pinned decompiler Makefile's requirement.
 #
 # Usage: native/build_console.sh [--jobs N] [OUTDIR]
 #   OUTDIR default: native/build; produces OUTDIR/decomp_native

@@ -1021,6 +1021,19 @@ M1 — Discovery becomes generic
 - No d4 analyzer implementation, oracle change or metric change was made.
   Implementation stops at the required later-milestone sequencing decision.
 
+## m1-010-d4a ELF32 symbol admission
+- Regression commit `d0b3e01` fails before implementation: a nonzero
+  `SHN_UNDEF` function symbol incorrectly becomes a native function.
+- Defined-symbol admission now requires a nonzero section index. The
+  regression covers little/big endian, retained external identity, and
+  the same symbol becoming a function when assigned a defined section.
+- Verification: workspace 112 tests; corpus 5/5. Full discovery now
+  11 pass / 9 fail / 0 skipped. PowerPC C++ precision rises to 1.0;
+  i386 C++ recall is 22/23 because its unreferenced PLT entry at
+  `004019f0` needs real discovery rather than undefined-symbol admission.
+- Function-start/PLT prerequisite research proceeds against pinned Ghidra
+  processor patterns and analyzers. No reference or metric is changed.
+
 ## Authorized prerequisite sequencing
 - The maintainer authorized scheduling necessary later-milestone analyzer
   prerequisites autonomously so the current milestone can pass unchanged gates.
@@ -1032,12 +1045,12 @@ M1 — Discovery becomes generic
 
 ## Blocked on
 - None for dependency-driven prerequisite sequencing; authorization is recorded
-  above. The current M1 discovery gate remains 12 pass / 8 fail.
+  above. The current M1 discovery gate remains 11 pass / 9 fail.
 
 ## Next task
-- m1-010-d4: resume with the SHN_UNDEF loader regression, then implement the
-  necessary approved analyzer prerequisites. Existing full discovery acceptance,
-  corpus, references and thresholds remain unchanged. Sub-task e remains open.
+- m1-010-d4b: implement the necessary approved function-start/PLT analyzer
+  prerequisites. Existing full discovery acceptance, corpus, references
+  and thresholds remain unchanged. Sub-task e remains open.
 
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a

@@ -289,7 +289,7 @@ fn import_elf32(data: &[u8], be: bool) -> Result<NativeImport> {
                 .map(|r| String::from_utf8_lossy(r).into_owned())
                 .unwrap_or_default();
             let typ = info & 0xf;
-            if typ == 2 && value != 0 && !name.is_empty() {
+            if typ == 2 && shndx != 0 && value != 0 && !name.is_empty() {
                 functions.push(NativeFunction {
                     entry: value,
                     name: name.clone(),
