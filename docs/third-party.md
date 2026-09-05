@@ -123,6 +123,12 @@ Parsed sequences are shared across pairs; bounded scan windows retain lookahead.
 These are raw matches, not functions. Consumers must enforce action prerequisites
 and ownership; `validcode="function"` is never new-function evidence.
 
+ELF imports carry the base compiler specification from the pinned processor
+`.opinion` files (Apache-2.0): x86 and RISC-V use `gcc`; AArch64, ARM, MIPS
+and PowerPC use `default`. Mapped console images retain this selection rather
+than replacing it with the architecture default (Windows on x86). This is
+base load-spec selection, not producer identification from Go/Swift metadata.
+
 
 ## ELF loaded images and worker memory
 

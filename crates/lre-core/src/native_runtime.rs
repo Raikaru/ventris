@@ -1121,7 +1121,9 @@ mod tests {
         };
         cfg.console_path = Some(console);
         cfg.language_id = "x86:LE:64:default".into();
-        cfg.language_dir = cfg.ghidra_install.join("Ghidra/Processors/x86/data/languages");
+        cfg.language_dir = cfg
+            .ghidra_install
+            .join("Ghidra/Processors/x86/data/languages");
         // ELF64 with one allocated code section: ret; push rbp; mov rbp,rsp; ret.
         // The pinned GCC patterns recognize the entry after ret; Windows does not.
         let mut elf = vec![0u8; 0x200];
@@ -1140,11 +1142,17 @@ mod tests {
         session.load_mapped(&import).unwrap();
         session.send("functionstarts 0x1000 0x1006\n").unwrap();
         let response = read_until_prompt(&mut session.reader).unwrap();
-        let payload = response.lines().find_map(|line| line.strip_prefix("PATTERNS "))
+        let payload = response
+            .lines()
+            .find_map(|line| line.strip_prefix("PATTERNS "))
             .unwrap_or_else(|| panic!("missing pattern response: {response}"));
         let parsed: serde_json::Value = serde_json::from_str(payload).unwrap();
         assert!(
-            parsed["matches"].as_array().unwrap().iter().any(|row| row["address"] == 0x1001),
+            parsed["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["address"] == 0x1001),
             "ELF compiler selection must recognize the GCC entry: {response}"
         );
     }

@@ -1117,6 +1117,15 @@ M1 — Discovery becomes generic
   that to Windows specifications. Retain loader compiler selection before
   applying compiler-specific patterns to ELF imports.
 
+## m1-010-d4e2a loader compiler selection
+- Acceptance `91be6d1` failed: ELF64 selected Windows rules and missed the GCC
+  prologue. The same native-console regression now passes with the loader spec.
+- ELF32/ELF64 retain base compiler opinions alongside their language ids:
+  gcc for x86/RISC-V, default for the other supported ELF machines.
+- Workspace 119 tests; corpus 5/5. Full discovery remains 16 pass / 4 fail /
+  0 skipped; precision 1.0 on all 20 rows. Architecture check passes.
+- No pattern action eligibility is enabled by this change.
+
 ## m1-010-d4 prerequisite sub-tasks
 - d4b: record loaded external relocation slots for ELF32/ELF64, independently
   of instruction decoding; preserve symbol-table linkage and endian/load bias.
@@ -1144,8 +1153,8 @@ M1 — Discovery becomes generic
   above. The current M1 discovery gate remains 16 pass / 4 fail.
 
 ## Next task
-- m1-010-d4e2: retain loader compiler selection, then apply upstream pattern
-  action eligibility; write regressions first. Follow with d4f full-gate evidence.
+- m1-010-d4e2b: apply upstream pattern action eligibility; write regressions
+  first. Loader compiler selection is complete. Follow with d4f full-gate evidence.
   The oracle, scorer and corpus remain unchanged; sub-task e is open.
 
 ## Reserved decisions

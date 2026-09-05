@@ -117,6 +117,8 @@ pub struct NativeImport {
     pub format: String,
     /// Ghidra-compatible language id selected from the file machine.
     pub language: String,
+    /// Loader-selected base compiler specification; absent for raw/default images.
+    pub compiler: Option<&'static str>,
     /// Runtime configuration used to reach the SLEIGH console/worker.
     pub cfg: crate::session::RuntimeConfig,
     /// Path to the binary used for console-driven x86 flow.
@@ -235,7 +237,7 @@ fn import_elf32(data: &[u8], be: bool) -> Result<NativeImport> {
             u16_at(data, o)
         }
     };
-    let language = elf_language(rd16(18)?, be, rd32(36)?)?;
+    let (language, compiler) = elf_specs(rd16(18)?, be, rd32(36)?)?;
     let entry = rd32(24)? as u64;
     let (mut sections, _shstr) = parse_elf32_sections(data, be)?;
 
@@ -312,7 +314,8 @@ fn import_elf32(data: &[u8], be: bool) -> Result<NativeImport> {
     let mut import = NativeImport {
 
         format: "elf32".into(),
-        language,
+        language: language.into(),
+        compiler: Some(compiler),
         mappings,
         functions,
         xrefs: Vec::new(),
@@ -395,24 +398,26 @@ fn parse_elf_sections(data: &[u8]) -> Result<(Vec<ElfSection>, Vec<u8>)> {
     Ok((sections, shstr))
 }
 
-fn elf_language(machine: u16, big_endian: bool, flags: u32) -> Result<String> {
+fn elf_specs(machine: u16, big_endian: bool, flags: u32) -> Result<(&'static str, &'static str)> {
     // ARM ELF EF_ARM_BE8: big-endian data, little-endian instructions.
     // The pinned ARM.ldefs calls this variant v7LEInstruction.
     const EF_ARM_BE8: u32 = 0x0080_0000;
+    // Base ELF compiler opinions from the pinned processor language directories.
+    // x86 and RISC-V use gcc, not the native architecture's default compiler.
     match (machine, big_endian) {
-        (0x03e, false) => Ok("x86:LE:64:default".into()),
-        (0x003, false) => Ok("x86:LE:32:default".into()),
-        (0x0b7, false) => Ok("AARCH64:LE:64:v8A".into()),
-        (0x028, false) => Ok("ARM:LE:32:v7".into()),
-        (0x028, true) if flags & EF_ARM_BE8 != 0 => Ok("ARM:LEBE:32:v7LEInstruction".into()),
-        (0x028, true) => Ok("ARM:BE:32:v7".into()),
-        (0x008, false) => Ok("MIPS:LE:32:default".into()),
-        (0x008, true) => Ok("MIPS:BE:32:default".into()),
-        (0x0f3, false) => Ok("RISCV:LE:64:default".into()),
-        (0x014, false) => Ok("PowerPC:LE:32:default".into()),
-        (0x014, true) => Ok("PowerPC:BE:32:default".into()),
-        (0x015, false) => Ok("PowerPC:LE:64:default".into()),
-        (0x015, true) => Ok("PowerPC:BE:64:default".into()),
+        (0x03e, false) => Ok(("x86:LE:64:default", "gcc")),
+        (0x003, false) => Ok(("x86:LE:32:default", "gcc")),
+        (0x0b7, false) => Ok(("AARCH64:LE:64:v8A", "default")),
+        (0x028, false) => Ok(("ARM:LE:32:v7", "default")),
+        (0x028, true) if flags & EF_ARM_BE8 != 0 => Ok(("ARM:LEBE:32:v7LEInstruction", "default")),
+        (0x028, true) => Ok(("ARM:BE:32:v7", "default")),
+        (0x008, false) => Ok(("MIPS:LE:32:default", "default")),
+        (0x008, true) => Ok(("MIPS:BE:32:default", "default")),
+        (0x0f3, false) => Ok(("RISCV:LE:64:default", "gcc")),
+        (0x014, false) => Ok(("PowerPC:LE:32:default", "default")),
+        (0x014, true) => Ok(("PowerPC:BE:32:default", "default")),
+        (0x015, false) => Ok(("PowerPC:LE:64:default", "default")),
+        (0x015, true) => Ok(("PowerPC:BE:64:default", "default")),
         (other, _) => err(format!("unsupported ELF machine {other:#x}")),
     }
 }
@@ -433,7 +438,7 @@ pub fn import_elf(data: &[u8]) -> Result<NativeImport> {
     if data[4] != 2 || data[5] != 1 {
         return err("ELF64 little-endian expected");
     }
-    let language = elf_language(u16_at(data, 18)?, false, u32_at(data, 48)?)?;
+    let (language, compiler) = elf_specs(u16_at(data, 18)?, false, u32_at(data, 48)?)?;
     let entry = u64_at(data, 24)?;
     let (mut sections, _shstr) = parse_elf_sections(data)?;
 
@@ -546,7 +551,8 @@ pub fn import_elf(data: &[u8]) -> Result<NativeImport> {
         functions,
         externals,
         format: "ELF".into(),
-        language,
+        language: language.into(),
+        compiler: Some(compiler),
         ..Default::default()
     };
     elf_image::prepare(data, &mut sections, &mut import, 8, false)?;
@@ -1175,9 +1181,9 @@ mod tests {
 
     #[test]
     fn architecture_selection_rejects_unsupported_machines() {
-        assert_eq!(elf_language(0x0b7, false, 0).unwrap(), "AARCH64:LE:64:v8A");
-        assert_eq!(elf_language(0x0f3, false, 0).unwrap(), "RISCV:LE:64:default");
-        assert!(elf_language(0xffff, false, 0).is_err());
+        assert_eq!(elf_specs(0x0b7, false, 0).unwrap().0, "AARCH64:LE:64:v8A");
+        assert_eq!(elf_specs(0x0f3, false, 0).unwrap().0, "RISCV:LE:64:default");
+        assert!(elf_specs(0xffff, false, 0).is_err());
     }
 
     #[test]

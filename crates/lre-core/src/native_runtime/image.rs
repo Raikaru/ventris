@@ -14,7 +14,8 @@ impl MappedImage {
         let mut file = std::fs::File::open(binary)
             .map_err(|e| NativeRuntimeError(format!("image probe: {e}")))?;
         let mut prefix = [0; 4];
-        let size = file.read(&mut prefix)
+        let size = file
+            .read(&mut prefix)
             .map_err(|e| NativeRuntimeError(format!("image probe: {e}")))?;
         if prefix[..2] == *b"MZ" {
             return Ok(None);
@@ -36,29 +37,58 @@ impl MappedImage {
 
     pub(super) fn new(import: &NativeImport) -> Result<Self> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let path = std::env::temp_dir().join(format!("ventris-image-{}-{}.xml",
-            std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
-        let file = std::fs::OpenOptions::new().write(true).create_new(true).open(&path)
+        let path = std::env::temp_dir().join(format!(
+            "ventris-image-{}-{}.xml",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
             .map_err(|e| NativeRuntimeError(format!("mapped image create: {e}")))?;
         let image = Self { path };
         let mut writer = std::io::BufWriter::new(file);
         let mut write_image = || -> std::io::Result<()> {
             // Full language + compiler id; resolveArchitecture uses loader.getArchType.
-            writeln!(writer, "<binaryimage arch=\"{}:default\">", import.language)?;
+            writeln!(
+                writer,
+                "<binaryimage arch=\"{}:{}\">",
+                import.language,
+                import.compiler.unwrap_or("default")
+            )?;
             for mapping in &import.mappings {
                 // BSS is non-executable and has no instruction bytes. Native
                 // ProgramImage supplies its zero-fill to memory/worker consumers.
-                if mapping.bytes.is_empty() { continue; }
-                write!(writer, "<bytechunk space=\"ram\" offset=\"0x{:x}\">", mapping.vaddr)?;
-                for byte in &mapping.bytes { write!(writer, "{byte:02x}")?; }
+                if mapping.bytes.is_empty() {
+                    continue;
+                }
+                write!(
+                    writer,
+                    "<bytechunk space=\"ram\" offset=\"0x{:x}\">",
+                    mapping.vaddr
+                )?;
+                for byte in &mapping.bytes {
+                    write!(writer, "{byte:02x}")?;
+                }
                 writeln!(writer, "</bytechunk>")?;
             }
             // Relocated BSS words have no file-backed mapping bytes.
             for relocation in &import.relocations {
-                if import.mappings.iter().any(|m| relocation.address >= m.vaddr
-                    && relocation.address - m.vaddr < m.bytes.len() as u64) { continue; }
-                write!(writer, "<bytechunk space=\"ram\" offset=\"0x{:x}\">", relocation.address)?;
-                for byte in &relocation.bytes[..relocation.width] { write!(writer, "{byte:02x}")?; }
+                if import.mappings.iter().any(|m| {
+                    relocation.address >= m.vaddr
+                        && relocation.address - m.vaddr < m.bytes.len() as u64
+                }) {
+                    continue;
+                }
+                write!(
+                    writer,
+                    "<bytechunk space=\"ram\" offset=\"0x{:x}\">",
+                    relocation.address
+                )?;
+                for byte in &relocation.bytes[..relocation.width] {
+                    write!(writer, "{byte:02x}")?;
+                }
                 writeln!(writer, "</bytechunk>")?;
             }
             writeln!(writer, "</binaryimage>")?;
