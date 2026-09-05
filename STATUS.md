@@ -1155,7 +1155,7 @@ M1 — Discovery becomes generic
 ## m1-010-d4e2b publication slices
 - Formatting plus new scheduling regressions exceeds 800 changed lines in the
   test module. Publish canonical formatting separately from behavioral tests.
-- b3a: format existing discovery tests with Rustfmt 1.98.
+- b3a: format existing tests in separate prefix and constrained-rule slices.
 - b3b: correct the constrained-rule fixture and add the two deferred-creation
   regressions (loader-derived conditional references; same-batch references).
 - b2: publish the pattern protocol and source-defined eligibility validator.
