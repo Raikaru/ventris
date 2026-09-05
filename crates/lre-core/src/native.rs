@@ -219,8 +219,8 @@ fn parse_elf32_sections(data: &[u8], be: bool) -> Result<(Vec<ElfSection>, Vec<u
 }
 
 /// ELF32 import (Phase 4 target: GameCube PowerPC BE, PS2 MIPS BE).
-/// Symbols come from SHT_SYMTAB (16-byte Elf32_Sym); the x86 GOT-stub scan
-/// and RELA processing do not apply and are skipped.
+/// Symbols use 16-byte Elf32_Sym entries. Relative relocation, pointer and
+/// unwind collection is shared with ELF64; its x86 GOT-stub scan is not used.
 fn import_elf32(data: &[u8], be: bool) -> Result<NativeImport> {
     let rd32 = |o: usize| -> Result<u32> {
         if be {

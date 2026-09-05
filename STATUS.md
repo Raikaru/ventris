@@ -1003,16 +1003,36 @@ M1 — Discovery becomes generic
   oracle, scoring policy, threshold or pinned-source changes. M1 is not passed.
 - d3 is complete; d4 and e remain open.
 
+## m1-010-d4 investigation
+- PowerPC plain_o0 `_start` at `100103f0` performs register/stack setup,
+  then branches from `10010420` to the missing `10010568` libc PLT stub.
+  This is an interior tail transfer, not the approved entry-jump case.
+  `.rela.plt` identifies GOT slot `1003074c` for `__libc_start_main`, not
+  stub entry `10010568`; its undefined dynamic symbol has value 0.
+  The two FDEs cover `100104e4..10010510` and `10010510..10010568`.
+- Fresh Ghidra evidence export confirms AArch64 `0021078c` is a separate
+  `FUN_0021078c` with no thunk target, followed by `_FINI_0` at `00210790`.
+  The missing `002108a0` entry is the `__gmon_start__` PLT thunk. Padding
+  entries must not be mislabeled as already-approved direct-jump thunks.
+- A separate M1 loader defect is identified: PowerPC cpp_o2 dynamic symbol
+  `__gxx_personality_v0` has nonzero value `10010980` but SHN_UNDEF. ELF32
+  currently admits it as a defined function. A symbol-definition regression
+  and repair remain pending; no scoring exclusion is proposed.
+- No d4 analyzer implementation, oracle change or metric change was made.
+  Implementation stops at the required later-milestone sequencing decision.
+
 ## Blocked on
-- None for the remaining M1 loader/seed work; the landing-prefix blocker is resolved.
-  Full multi-instruction/indirect thunk analysis is not authorized.
+- M1 discovery needs additional function-start/PLT/tail-transfer analysis
+  beyond the approved entry -> optional no-op -> pure direct jump rule.
+  Interior tail transfers and multi-instruction/indirect thunk recognition
+  remain outside its authorized scope (m2-009). Human sequencing approval
+  is required before extending that prerequisite; the 12/8 gate is not passed.
 
 ## Next task
-- m1-010-d4: resolve the remaining AArch64/PowerPC loader/seed/flow failures.
-  Acceptance is the existing full discovery gate; thresholds, references and
-  corpus remain unchanged. Account for loader-related function-set changes
-  without broadening scoring exclusions. Stop if another M2 analyzer is
-  necessary. Sub-task e remains open.
+- Await the M1 prerequisite sequencing decision above. Then resume
+  m1-010-d4, starting with the identified SHN_UNDEF loader regression.
+  Existing full discovery acceptance, corpus, references and thresholds
+  remain unchanged. Sub-task e remains open.
 
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a
