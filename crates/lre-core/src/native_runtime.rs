@@ -96,9 +96,8 @@ fn console_output(cfg: &RuntimeConfig, binary: &Path, address: &str) -> Result<S
     } else {
         format!("load file {} {}\n", bfd_target, binary.display())
     };
-    let script = format!(
-        "{load_script}map function {hex_addr} func\nload function func\ndisassemble\n",
-    );
+    let script =
+        format!("{load_script}map function {hex_addr} func\nload function func\ndisassemble\n",);
     let mut child = Command::new(&console)
         .arg("-s")
         .arg(&langs)
@@ -159,7 +158,12 @@ fn filtered_listing(output: &str, count: u32, include_structural: bool) -> Vec<S
 
 /// Performs `disasm-native`: one function mapped + disassembled by the
 /// SLEIGH console, returning only address-prefixed instruction lines.
-pub fn disasm_native(cfg: &RuntimeConfig, binary: &Path, address: &str, count: u32) -> Result<String> {
+pub fn disasm_native(
+    cfg: &RuntimeConfig,
+    binary: &Path,
+    address: &str,
+    count: u32,
+) -> Result<String> {
     let output = console_output(cfg, binary, address)?;
     let lines = filtered_listing(&output, count, false);
     if lines.is_empty() {
@@ -170,7 +174,12 @@ pub fn disasm_native(cfg: &RuntimeConfig, binary: &Path, address: &str, count: u
 
 /// Runs the same console request as `disasm_native`, preserving structural
 /// marker lines for the Core listing parser.
-pub fn listing_native(cfg: &RuntimeConfig, binary: &Path, address: &str, count: u32) -> Result<String> {
+pub fn listing_native(
+    cfg: &RuntimeConfig,
+    binary: &Path,
+    address: &str,
+    count: u32,
+) -> Result<String> {
     let output = console_output(cfg, binary, address)?;
     let lines = filtered_listing(&output, count, true);
     if !lines.iter().any(|line| instruction_line(line)) {
@@ -187,7 +196,12 @@ pub fn listing_native(cfg: &RuntimeConfig, binary: &Path, address: &str, count: 
 fn language_decompile_config(
     cfg: &RuntimeConfig,
     language: &str,
-) -> Result<(std::path::PathBuf, std::path::PathBuf, std::path::PathBuf, String)> {
+) -> Result<(
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    String,
+)> {
     // Explicit env wins (existing behavior).
     if let Some(sla) = &cfg.sla_path {
         return Ok((
@@ -211,14 +225,11 @@ fn language_decompile_config(
     // vendored spec bundle keyed by the language id.
     let specs = crate::architecture::discover(&cfg.ghidra_install)
         .map_err(|e| NativeRuntimeError(e.to_string()))?;
-    let spec = specs
-        .iter()
-        .find(|s| s.id == language)
-        .ok_or_else(|| {
-            NativeRuntimeError(format!(
-                "language {language} not found in the Ghidra install"
-            ))
-        })?;
+    let spec = specs.iter().find(|s| s.id == language).ok_or_else(|| {
+        NativeRuntimeError(format!(
+            "language {language} not found in the Ghidra install"
+        ))
+    })?;
     let lang_dir = std::path::PathBuf::from(&spec.language_dir);
     let slafile = crate::architecture::slafile_for_id(&lang_dir, language)
         .map_err(|e| NativeRuntimeError(e.to_string()))?
@@ -226,9 +237,7 @@ fn language_decompile_config(
             NativeRuntimeError(format!("no .sla listed for {language} in its .ldefs"))
         })?;
     let sla = lang_dir.join(slafile);
-    let bundle = cfg
-        .spec_root
-        .join(language.replace(':', "-"));
+    let bundle = cfg.spec_root.join(language.replace(':', "-"));
     if !bundle.join("tspec.xml").is_file() {
         return err(format!(
             "spec bundle missing for {language}: {} — generate it once with \
@@ -350,13 +359,10 @@ pub fn decompile_native_doc(
         .map_err(|e| NativeRuntimeError(format!("invalid structured worker document: {e}")))
 }
 
-
 /// Reads console output until the interactive prompt "[decomp]> " is seen.
 /// The prompt carries no trailing newline, so `read_line` deadlocks; the
 /// console also buffers, so the read must be byte-wise.
-fn read_until_prompt(
-    reader: &mut std::io::BufReader<std::process::ChildStdout>,
-) -> Result<String> {
+fn read_until_prompt(reader: &mut std::io::BufReader<std::process::ChildStdout>) -> Result<String> {
     use std::io::Read as _;
     const PROMPT: &[u8] = b"[decomp]> ";
     let mut buf: Vec<u8> = Vec::new();
@@ -389,15 +395,22 @@ fn bfd_target_for(language_id: &str, binary: &Path) -> Result<String> {
         .map_err(|e| NativeRuntimeError(format!("bfd target probe: {e}")))?;
     if got >= 2 && &magic[..2] == b"MZ" {
         let sixty_four = language_id.contains(":64:");
-        return Ok(if sixty_four { "pei-x86-64".into() } else { "pei-i386".into() });
+        return Ok(if sixty_four {
+            "pei-x86-64".into()
+        } else {
+            "pei-i386".into()
+        });
     }
     if language_id.starts_with("PowerPC:") {
         return Ok("PowerPC:BE:32:default".into());
     }
     let sixty_four = language_id.contains(":64:");
-    Ok(if sixty_four { "elf64-x86-64".into() } else { "elf32-i386".into() })
+    Ok(if sixty_four {
+        "elf64-x86-64".into()
+    } else {
+        "elf32-i386".into()
+    })
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FlowKind {
@@ -434,6 +447,15 @@ pub struct LinkageResult {
     pub address: u64,
     pub length: u32,
     pub slot: Option<u64>,
+    /// A possible local linkage shape, not proof of an imported function.
+    pub needs_context: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct LinkageContext {
+    pub origin: u64,
+    pub branch: u64,
+    pub target: u64,
 }
 
 pub fn console_flow(cfg: &RuntimeConfig, binary: &Path, address: u64) -> Result<FlowResult> {
@@ -496,9 +518,13 @@ pub fn console_flow(cfg: &RuntimeConfig, binary: &Path, address: u64) -> Result<
 }
 
 fn parse_address_token(text: &str) -> Option<u64> {
-    let clean = text.trim().trim_start_matches(|c: char| c.is_alphabetic() || c == ':');
+    let clean = text
+        .trim()
+        .trim_start_matches(|c: char| c.is_alphabetic() || c == ':');
     let hex = clean.trim_start_matches("0x");
-    (!hex.is_empty()).then(|| u64::from_str_radix(hex, 16).ok()).flatten()
+    (!hex.is_empty())
+        .then(|| u64::from_str_radix(hex, 16).ok())
+        .flatten()
 }
 
 fn parse_flow_output(stdout: &str, expected_addr: u64) -> Result<FlowResult> {
@@ -546,11 +572,15 @@ fn parse_flow_output(stdout: &str, expected_addr: u64) -> Result<FlowResult> {
                     addr = a;
                 }
             }
-            return Ok(FlowResult { no_op, pure_jump, address: addr,
-            length,
-            fallthrough,
-            targets,
-            kind, });
+            return Ok(FlowResult {
+                no_op,
+                pure_jump,
+                address: addr,
+                length,
+                fallthrough,
+                targets,
+                kind,
+            });
         }
     }
     err(format!("console produced no FLOW line: {stdout}"))
@@ -618,7 +648,11 @@ impl ConsoleSession {
         self.send(&script)?;
 
         // One prompt per command written (load + optional adjust).
-        let prompts = if self.language_id.starts_with("x86:") { 1 } else { 2 };
+        let prompts = if self.language_id.starts_with("x86:") {
+            1
+        } else {
+            2
+        };
         for _ in 0..prompts {
             let _ = read_until_prompt(&mut self.reader)?;
         }
@@ -674,11 +708,15 @@ impl ConsoleSession {
 
         // Bad addresses produce a "Low-level ERROR" line and no FLOW.
         if line.contains("Low-level ERROR") {
-            return Ok(FlowResult { no_op: false, pure_jump: false, address,
-            length: 1,
-            fallthrough: Some(address + 1),
-            targets: Vec::new(),
-            kind: FlowKind::Bad, });
+            return Ok(FlowResult {
+                no_op: false,
+                pure_jump: false,
+                address,
+                length: 1,
+                fallthrough: Some(address + 1),
+                targets: Vec::new(),
+                kind: FlowKind::Bad,
+            });
         }
 
         parse_flow_output(&line, address)
@@ -687,19 +725,23 @@ impl ConsoleSession {
     /// Same as `flow` but never fails: unparseable/missing output becomes a
     /// length-1 `Bad` result so a walk can continue.
     pub fn try_flow(&mut self, address: u64) -> FlowResult {
-        self.flow(address).unwrap_or(FlowResult { no_op: false, pure_jump: false, address,
-        length: 1,
-        fallthrough: Some(address + 1),
-        targets: Vec::new(),
-        kind: FlowKind::Bad, })
+        self.flow(address).unwrap_or(FlowResult {
+            no_op: false,
+            pure_jump: false,
+            address,
+            length: 1,
+            fallthrough: Some(address + 1),
+            targets: Vec::new(),
+            kind: FlowKind::Bad,
+        })
     }
     /// Queries control-flow for multiple addresses in a single batch request.
     pub fn flow_batch(&mut self, addresses: &[u64]) -> Result<Vec<FlowResult>> {
         if addresses.is_empty() {
             return Ok(Vec::new());
         }
-        use std::io::{BufRead as _, Read as _};
         use std::fmt::Write as _;
+        use std::io::{BufRead as _, Read as _};
         let mut script = String::with_capacity(addresses.len() * 12 + 8);
         script.push_str("flow");
         for addr in addresses {
@@ -731,17 +773,25 @@ impl ConsoleSession {
                 return err("console closed during flow_batch output");
             }
             if line.contains("Low-level ERROR") {
-                results.push(FlowResult { no_op: false, pure_jump: false, address: addr,
-                length: 1,
-                fallthrough: Some(addr + 1),
-                targets: Vec::new(),
-                kind: FlowKind::Bad, });
+                results.push(FlowResult {
+                    no_op: false,
+                    pure_jump: false,
+                    address: addr,
+                    length: 1,
+                    fallthrough: Some(addr + 1),
+                    targets: Vec::new(),
+                    kind: FlowKind::Bad,
+                });
             } else {
-                results.push(parse_flow_output(&line, addr).unwrap_or(FlowResult { no_op: false, pure_jump: false, address: addr,
-                length: 1,
-                fallthrough: Some(addr + 1),
-                targets: Vec::new(),
-                kind: FlowKind::Bad, }));
+                results.push(parse_flow_output(&line, addr).unwrap_or(FlowResult {
+                    no_op: false,
+                    pure_jump: false,
+                    address: addr,
+                    length: 1,
+                    fallthrough: Some(addr + 1),
+                    targets: Vec::new(),
+                    kind: FlowKind::Bad,
+                }));
             }
         }
 
@@ -759,11 +809,15 @@ impl ConsoleSession {
         self.flow_batch(addresses).unwrap_or_else(|_| {
             addresses
                 .iter()
-                .map(|&addr| FlowResult { no_op: false, pure_jump: false, address: addr,
-                length: 1,
-                fallthrough: Some(addr + 1),
-                targets: Vec::new(),
-                kind: FlowKind::Bad, })
+                .map(|&addr| FlowResult {
+                    no_op: false,
+                    pure_jump: false,
+                    address: addr,
+                    length: 1,
+                    fallthrough: Some(addr + 1),
+                    targets: Vec::new(),
+                    kind: FlowKind::Bad,
+                })
                 .collect()
         })
     }
@@ -778,22 +832,64 @@ impl ConsoleSession {
         self.query_linkages(addresses, "linkage --table")
     }
 
-    fn query_linkages(&mut self, addresses: &[u64], prefix: &str) -> Result<Vec<LinkageResult>> {
+    pub(crate) fn context_linkage_batch(
+        &mut self,
+        contexts: &[LinkageContext],
+    ) -> Result<Vec<LinkageResult>> {
         use std::fmt::Write as _;
-        if addresses.is_empty() { return Ok(Vec::new()); }
-        let mut command = String::with_capacity(addresses.len() * 19 + prefix.len() + 1);
-        command.push_str(prefix);
-        for address in addresses { let _ = write!(command, " 0x{address:x}"); }
+        if contexts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut command = String::with_capacity(contexts.len() * 57 + 15);
+        command.push_str("linkage --from");
+        for context in contexts {
+            let _ = write!(
+                command,
+                " 0x{:x} 0x{:x} 0x{:x}",
+                context.origin, context.branch, context.target
+            );
+        }
         command.push('\n');
         self.send(&command)?;
+        self.read_linkages(contexts.iter().map(|context| context.target))
+    }
+
+    fn query_linkages(&mut self, addresses: &[u64], prefix: &str) -> Result<Vec<LinkageResult>> {
+        use std::fmt::Write as _;
+        if addresses.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut command = String::with_capacity(addresses.len() * 19 + prefix.len() + 1);
+        command.push_str(prefix);
+        for address in addresses {
+            let _ = write!(command, " 0x{address:x}");
+        }
+        command.push('\n');
+        self.send(&command)?;
+        self.read_linkages(addresses.iter().copied())
+    }
+
+    fn read_linkages(
+        &mut self,
+        expected: impl ExactSizeIterator<Item = u64>,
+    ) -> Result<Vec<LinkageResult>> {
         let response = read_until_prompt(&mut self.reader)?;
-        let results: Vec<LinkageResult> = response.lines()
+        let results: Vec<LinkageResult> = response
+            .lines()
             .filter_map(|line| line.strip_prefix("LINKAGE "))
-            .map(|line| serde_json::from_str(line)
-                .map_err(|error| NativeRuntimeError(format!("invalid linkage response: {error}"))))
+            .map(|line| {
+                serde_json::from_str(line).map_err(|error| {
+                    NativeRuntimeError(format!("invalid linkage response: {error}"))
+                })
+            })
             .collect::<Result<_>>()?;
-        if results.len() != addresses.len() || results.iter().zip(addresses).any(|(result, address)|
-            result.address != *address || result.slot.is_some() != (result.length != 0)) {
+        if results.len() != expected.len()
+            || results.iter().zip(expected).any(|(result, address)| {
+                result.address != address
+                    || result.slot.is_some() != (result.length != 0)
+                    || (result.needs_context && result.length != 0)
+            })
+        {
             return err("incomplete or mismatched linkage response");
         }
         Ok(results)
@@ -850,19 +946,22 @@ mod tests {
         assert_eq!(flow_fall.kind, FlowKind::Fallthrough);
         assert_eq!(flow_fall.fallthrough, Some(0x400467));
 
-        let ppc_bin = Path::new("/home/raikaru/Projects/agent-under-fire/orig/GQFE78/files/base.elf");
+        let ppc_bin =
+            Path::new("/home/raikaru/Projects/agent-under-fire/orig/GQFE78/files/base.elf");
         if ppc_bin.is_file() {
             let mut ppc_cfg = cfg.clone();
             ppc_cfg.language_id = "PowerPC:BE:32:default".into();
             ppc_cfg.language_dir = ppc_cfg
                 .ghidra_install
                 .join("Ghidra/Processors/PowerPC/data/languages");
-            let flow_fall = console_flow(&ppc_cfg, ppc_bin, 0x80680000).expect("ppc fallthrough flow");
+            let flow_fall =
+                console_flow(&ppc_cfg, ppc_bin, 0x80680000).expect("ppc fallthrough flow");
             assert_eq!(flow_fall.length, 4);
             assert_eq!(flow_fall.kind, FlowKind::Fallthrough);
             assert_eq!(flow_fall.fallthrough, Some(0x80680004));
 
-            let flow_cbranch = console_flow(&ppc_cfg, ppc_bin, 0x8068001c).expect("ppc cbranch flow");
+            let flow_cbranch =
+                console_flow(&ppc_cfg, ppc_bin, 0x8068001c).expect("ppc cbranch flow");
             assert_eq!(flow_cbranch.length, 4);
             assert_eq!(flow_cbranch.kind, FlowKind::CBranch);
             assert_eq!(flow_cbranch.fallthrough, Some(0x80680020));
@@ -907,37 +1006,67 @@ mod tests {
     fn linkage_queries_require_bounded_side_effect_free_slot_flow() {
         let mut cfg = RuntimeConfig::from_env();
         cfg.language_id = "x86:LE:64:default".into();
-        cfg.language_dir = cfg.ghidra_install.join("Ghidra/Processors/x86/data/languages");
+        cfg.language_dir = cfg
+            .ghidra_install
+            .join("Ghidra/Processors/x86/data/languages");
         if find_console(&cfg).is_err() {
             eprintln!("SKIP: SLEIGH console not available");
             return;
         }
         // LLVM llvm-mc encodings; every positive computes the slot at 0x3008.
         let cases: &[(&str, &str, &[u8], &[u8], &[u8])] = &[
-            ("x86", "x86:LE:64:default",
-             &[0xff, 0x25, 0x02, 0x20, 0, 0], &[0xff, 0xe0], &[0xb8, 1, 0, 0, 0]),
-            ("x86", "x86:LE:32:default",
-             &[0xff, 0x25, 0x08, 0x30, 0, 0], &[0xff, 0xe0], &[0xb8, 1, 0, 0, 0]),
-            ("AARCH64", "AARCH64:LE:64:v8A",
-             &[0x10, 0, 0, 0xd0, 0x11, 6, 0x40, 0xf9, 0x20, 2, 0x1f, 0xd6],
-             &[0x20, 2, 0x1f, 0xd6], &[0x20, 0, 0x80, 0xd2]),
-            ("PowerPC", "PowerPC:BE:32:default",
-             &[0x3d, 0x60, 0, 0, 0x81, 0x6b, 0x30, 8, 0x7d, 0x69, 3, 0xa6, 0x4e, 0x80, 4, 0x20],
-             &[0x4e, 0x80, 4, 0x20], &[0x38, 0x60, 0, 1]),
+            (
+                "x86",
+                "x86:LE:64:default",
+                &[0xff, 0x25, 0x02, 0x20, 0, 0],
+                &[0xff, 0xe0],
+                &[0xb8, 1, 0, 0, 0],
+            ),
+            (
+                "x86",
+                "x86:LE:32:default",
+                &[0xff, 0x25, 0x08, 0x30, 0, 0],
+                &[0xff, 0xe0],
+                &[0xb8, 1, 0, 0, 0],
+            ),
+            (
+                "AARCH64",
+                "AARCH64:LE:64:v8A",
+                &[0x10, 0, 0, 0xd0, 0x11, 6, 0x40, 0xf9, 0x20, 2, 0x1f, 0xd6],
+                &[0x20, 2, 0x1f, 0xd6],
+                &[0x20, 0, 0x80, 0xd2],
+            ),
+            (
+                "PowerPC",
+                "PowerPC:BE:32:default",
+                &[
+                    0x3d, 0x60, 0, 0, 0x81, 0x6b, 0x30, 8, 0x7d, 0x69, 3, 0xa6, 0x4e, 0x80, 4, 0x20,
+                ],
+                &[0x4e, 0x80, 4, 0x20],
+                &[0x38, 0x60, 0, 1],
+            ),
         ];
         for &(processor, language, code, unknown, extra_write) in cases {
             let mut cfg = cfg.clone();
             cfg.language_id = language.into();
-            cfg.language_dir = cfg.ghidra_install.join(format!("Ghidra/Processors/{processor}/data/languages"));
+            cfg.language_dir = cfg
+                .ghidra_install
+                .join(format!("Ghidra/Processors/{processor}/data/languages"));
             let mut bytes = vec![0; 0x300];
             bytes[..code.len()].copy_from_slice(code);
             bytes[0x100..0x100 + unknown.len()].copy_from_slice(unknown);
             bytes[0x200..0x200 + extra_write.len()].copy_from_slice(extra_write);
-            bytes[0x200 + extra_write.len()..0x200 + extra_write.len() + code.len()].copy_from_slice(code);
+            bytes[0x200 + extra_write.len()..0x200 + extra_write.len() + code.len()]
+                .copy_from_slice(code);
             let import = NativeImport {
                 language: language.into(),
-                mappings: vec![crate::native::Mapping { vaddr: 0x1000, size: bytes.len() as u64,
-                    file_off: 0, flags: 6, bytes }],
+                mappings: vec![crate::native::Mapping {
+                    vaddr: 0x1000,
+                    size: bytes.len() as u64,
+                    file_off: 0,
+                    flags: 6,
+                    bytes,
+                }],
                 ..Default::default()
             };
             let mut session = ConsoleSession::new(&cfg).unwrap();
@@ -945,7 +1074,10 @@ mod tests {
             let rows = session.linkage_batch(&[0x1000, 0x1100, 0x1200]).unwrap();
             assert_eq!(rows[0].slot, Some(0x3008), "{language}");
             assert_eq!(rows[0].length as usize, code.len(), "{language}");
-            assert!(rows[1].slot.is_none(), "{language}: unknown incoming register");
+            assert!(
+                rows[1].slot.is_none(),
+                "{language}: unknown incoming register"
+            );
             assert!(rows[2].slot.is_none(), "{language}: unused register write");
             // A rejected query must not poison the following console request.
             assert_eq!(session.flow(0x1000).unwrap().address, 0x1000);
@@ -956,12 +1088,27 @@ mod tests {
         bytes[..13].copy_from_slice(&[0xc6, 5, 0, 0, 0, 0, 1, 0xff, 0x25, 0xfb, 0x1f, 0, 0]);
         // One load, seven self-copies, one jump: exceeds the eight-instruction bound.
         bytes[0x100..0x107].copy_from_slice(&[0x48, 0x8b, 5, 1, 0x1f, 0, 0]);
-        for i in 0..7 { bytes[0x107 + i * 3..0x10a + i * 3].copy_from_slice(&[0x48, 0x89, 0xc0]); }
+        for i in 0..7 {
+            bytes[0x107 + i * 3..0x10a + i * 3].copy_from_slice(&[0x48, 0x89, 0xc0]);
+        }
         bytes[0x11c..0x11e].copy_from_slice(&[0xff, 0xe0]);
-        session.load_mapped(&NativeImport { language: cfg.language_id.clone(),
-            mappings: vec![crate::native::Mapping { vaddr: 0x1000, size: bytes.len() as u64,
-                file_off: 0, flags: 6, bytes }], ..Default::default() }).unwrap();
+        session
+            .load_mapped(&NativeImport {
+                language: cfg.language_id.clone(),
+                mappings: vec![crate::native::Mapping {
+                    vaddr: 0x1000,
+                    size: bytes.len() as u64,
+                    file_off: 0,
+                    flags: 6,
+                    bytes,
+                }],
+                ..Default::default()
+            })
+            .unwrap();
         let rows = session.linkage_batch(&[0x1000, 0x1100]).unwrap();
-        assert!(rows.iter().all(|row| row.slot.is_none()), "stores and unbounded chains are not thunks");
+        assert!(
+            rows.iter().all(|row| row.slot.is_none()),
+            "stores and unbounded chains are not thunks"
+        );
     }
 }

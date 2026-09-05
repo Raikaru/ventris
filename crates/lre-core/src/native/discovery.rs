@@ -5,7 +5,7 @@ use super::{
     ImportError, NativeFunction, NativeImport, NativeXref, Result,
 };
 use crate::native_runtime::{
-    ConsoleSession, FlowKind, FlowResult, LinkageResult, NativeRuntimeError,
+    ConsoleSession, FlowKind, FlowResult, LinkageContext, LinkageResult, NativeRuntimeError,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -16,6 +16,7 @@ trait FlowProvider {
     fn flow(&mut self, addresses: &[u64]) -> Vec<FlowResult>;
     fn linkages(&mut self, addresses: &[u64]) -> Vec<LinkageResult>;
     fn plt_linkages(&mut self, addresses: &[u64]) -> Vec<LinkageResult>;
+    fn context_linkages(&mut self, contexts: &[LinkageContext]) -> Vec<LinkageResult>;
 }
 
 struct ConsoleProvider {
@@ -68,6 +69,16 @@ impl FlowProvider for ConsoleProvider {
 
     fn plt_linkages(&mut self, addresses: &[u64]) -> Vec<LinkageResult> {
         match self.session.plt_linkage_batch(addresses) {
+            Ok(results) => results,
+            Err(error) => {
+                self.failure = Some(error);
+                Vec::new()
+            }
+        }
+    }
+
+    fn context_linkages(&mut self, contexts: &[LinkageContext]) -> Vec<LinkageResult> {
+        match self.session.context_linkage_batch(contexts) {
             Ok(results) => results,
             Err(error) => {
                 self.failure = Some(error);
@@ -232,6 +243,9 @@ pub fn flow_discover_with_provider<F: FnMut(&[u64]) -> Vec<crate::native_runtime
         fn plt_linkages(&mut self, _: &[u64]) -> Vec<LinkageResult> {
             Vec::new()
         }
+        fn context_linkages(&mut self, _: &[LinkageContext]) -> Vec<LinkageResult> {
+            Vec::new()
+        }
     }
     flow_discover_with_candidates(imp, &[], &mut TestProvider(flow_provider));
 }
@@ -245,7 +259,11 @@ fn flow_discover_with_candidates<P: FlowProvider>(
     let code = code_ranges(imp);
     let in_code = |a: u64| code.iter().any(|(v, e)| a >= *v && a < *e);
     let has_linkage_slots = imp.externals.iter().any(|(address, _)| *address != 0);
-    let mut examined_linkages = HashSet::new();
+    let mut linkage_candidates = HashSet::new();
+    let mut conditional_targets = HashSet::new();
+    let mut flow_endings = Vec::new();
+    let mut context_edges = Vec::new();
+    let mut branch_targets = Vec::new();
     // Table metadata supplies boundaries, not functions. Each entry still needs
     // bounded p-code evidence ending in an indirect transfer through a known slot.
     if has_linkage_slots {
@@ -329,7 +347,7 @@ fn flow_discover_with_candidates<P: FlowProvider>(
             // Only an unconditional branch to a proven imported-slot stub
             // establishes an independent linkage entry; ordinary labels do not.
             if has_linkage_slots {
-                let mut targets: Vec<_> = chunk
+                for target in chunk
                     .iter()
                     .zip(&flows)
                     .filter(|(address, flow)| {
@@ -350,38 +368,9 @@ fn flow_discover_with_candidates<P: FlowProvider>(
                                 *target > flow.address
                                     && *target - flow.address < flow.length as u64
                             })
-                            && examined_linkages.insert(*target)
                     })
-                    .collect();
-                targets.sort_unstable();
-                for linkage in flow_provider.linkages(&targets) {
-                    let Some(slot) = linkage.slot else {
-                        continue;
-                    };
-                    if linkage.length == 0
-                        || targets.binary_search(&linkage.address).is_err()
-                        || !code.iter().any(|&(start, end)| {
-                            start <= linkage.address
-                                && linkage.address < end
-                                && linkage.length as u64 <= end - linkage.address
-                        })
-                    {
-                        continue;
-                    }
-                    let Some((_, name)) = imp
-                        .externals
-                        .iter()
-                        .find(|(address, _)| *address == slot && slot != 0)
-                    else {
-                        continue;
-                    };
-                    entries.push(linkage.address);
-                    addr_origin.insert(linkage.address, linkage.address);
-                    imp.functions.push(NativeFunction {
-                        entry: linkage.address,
-                        name: name.clone(),
-                        size: linkage.length as u64,
-                    });
+                {
+                    linkage_candidates.insert(target);
                 }
             }
             let thunks = confirmed_thunks(
@@ -436,6 +425,9 @@ fn flow_discover_with_candidates<P: FlowProvider>(
                 if !matches!(info.kind, FlowKind::Bad | FlowKind::Unimpl) {
                     instruction_extents.push((addr, info.length as u64));
                 }
+                if has_linkage_slots && info.kind != FlowKind::Fallthrough {
+                    flow_endings.push((addr, info.kind == FlowKind::BranchInd));
+                }
                 proven_bodies
                     .entry(origin)
                     .and_modify(|e| *e = (*e).max(span))
@@ -468,6 +460,16 @@ fn flow_discover_with_candidates<P: FlowProvider>(
                     }
                     FlowKind::Branch => {
                         if let Some(&t) = info.targets.first() {
+                            if has_linkage_slots && t != span {
+                                branch_targets.push(t);
+                            }
+                            if linkage_candidates.contains(&t)
+                                && code
+                                    .iter()
+                                    .any(|&(start, end)| start <= addr && span <= end)
+                            {
+                                context_edges.push((t, addr));
+                            }
                             if thunks.get(&addr) == Some(&t) {
                                 if !entries.contains(&t) {
                                     entries.push(t);
@@ -498,6 +500,12 @@ fn flow_discover_with_candidates<P: FlowProvider>(
                     }
                     FlowKind::CBranch => {
                         if let Some(&t) = info.targets.first() {
+                            if has_linkage_slots && t != span {
+                                branch_targets.push(t);
+                            }
+                            if has_linkage_slots {
+                                conditional_targets.insert(t);
+                            }
                             merge_reached_candidate(
                                 t,
                                 origin,
@@ -565,6 +573,7 @@ fn flow_discover_with_candidates<P: FlowProvider>(
         .filter(|f| f.size > 1)
         .map(|f| (f.entry, f.size))
         .collect();
+    let instruction_start = extents.len();
     extents.extend(instruction_extents);
 
     let filter_ctx = CandidateFilterContext {
@@ -622,6 +631,14 @@ fn flow_discover_with_candidates<P: FlowProvider>(
                     for (addr, info) in chunk.iter().copied().zip(flows) {
                         let origin = get_canonical_origin(addr, &addr_origin);
                         let span = addr + info.length as u64;
+                        if has_linkage_slots {
+                            if !matches!(info.kind, FlowKind::Bad | FlowKind::Unimpl) {
+                                extents.push((addr, info.length as u64));
+                            }
+                            if info.kind != FlowKind::Fallthrough {
+                                flow_endings.push((addr, info.kind == FlowKind::BranchInd));
+                            }
+                        }
                         proven_bodies
                             .entry(origin)
                             .and_modify(|e| *e = (*e).max(span))
@@ -654,6 +671,16 @@ fn flow_discover_with_candidates<P: FlowProvider>(
                             }
                             FlowKind::Branch => {
                                 if let Some(&t) = info.targets.first() {
+                                    if has_linkage_slots && t != span {
+                                        branch_targets.push(t);
+                                    }
+                                    if linkage_candidates.contains(&t)
+                                        && code
+                                            .iter()
+                                            .any(|&(start, end)| start <= addr && span <= end)
+                                    {
+                                        context_edges.push((t, addr));
+                                    }
                                     merge_reached_candidate(
                                         t,
                                         origin,
@@ -669,6 +696,12 @@ fn flow_discover_with_candidates<P: FlowProvider>(
                             }
                             FlowKind::CBranch => {
                                 if let Some(&t) = info.targets.first() {
+                                    if has_linkage_slots && t != span {
+                                        branch_targets.push(t);
+                                    }
+                                    if has_linkage_slots {
+                                        conditional_targets.insert(t);
+                                    }
                                     merge_reached_candidate(
                                         t,
                                         origin,
@@ -716,6 +749,129 @@ fn flow_discover_with_candidates<P: FlowProvider>(
             }
         }
     }
+    // A local linkage must reach an indirect branch in at most eight contiguous
+    // instructions. Reuse decoded flow to avoid probing ordinary branch labels.
+    let mut changed = false;
+    let mut context_targets = HashSet::new();
+    if !linkage_candidates.is_empty() {
+        extents[instruction_start..].sort_unstable();
+        flow_endings.sort_unstable();
+        let instructions = &extents[instruction_start..];
+        let mut targets: Vec<_> = linkage_candidates
+            .into_iter()
+            .filter(|&target| linkage_flow_shape(target, instructions, &flow_endings))
+            .collect();
+        targets.sort_unstable();
+        for chunk in targets.chunks(1024) {
+            for (&target, linkage) in chunk.iter().zip(flow_provider.linkages(chunk)) {
+                if linkage.address != target {
+                    continue;
+                }
+                if linkage.needs_context && !conditional_targets.contains(&target) {
+                    context_targets.insert(target);
+                } else {
+                    changed |= promote_linkage(
+                        imp,
+                        &mut entries,
+                        &mut addr_origin,
+                        instructions,
+                        &code,
+                        &linkage,
+                    );
+                }
+            }
+        }
+    }
+
+    // A local unresolved slot is only a request for evidence. Wait until every
+    // validated caller has been walked; no first-caller/global-register assumption.
+    if !context_targets.is_empty() {
+        context_edges
+            .retain(|(target, _)| context_targets.contains(target) && !entries.contains(target));
+        context_edges.sort_unstable();
+        context_edges.dedup();
+        branch_targets.sort_unstable();
+        branch_targets.dedup();
+        let mut pending = context_edges.as_slice();
+        let mut requests = Vec::new();
+        'candidate: while let Some(&(target, _)) = pending.first() {
+            let count = pending.partition_point(|&(address, _)| address == target);
+            let (group, rest) = pending.split_at(count);
+            pending = rest;
+            let mut proof = None;
+            for chunk in group.chunks(1024) {
+                requests.clear();
+                for &(_, branch) in chunk {
+                    let origin = get_canonical_origin(branch, &addr_origin);
+                    let incoming = branch_targets.partition_point(|address| *address <= origin);
+                    if origin > branch
+                        || branch_targets
+                            .get(incoming)
+                            .is_some_and(|address| *address <= branch)
+                        || entries
+                            .iter()
+                            .any(|entry| *entry > origin && *entry <= branch)
+                        || !code
+                            .iter()
+                            .any(|&(start, end)| start <= origin && branch < end)
+                    {
+                        continue 'candidate;
+                    }
+                    requests.push(LinkageContext {
+                        origin,
+                        branch,
+                        target,
+                    });
+                }
+                let results = flow_provider.context_linkages(&requests);
+                if results.len() != requests.len() {
+                    continue 'candidate;
+                }
+                for result in results {
+                    let Some(slot) = result.slot.filter(|slot| *slot != 0) else {
+                        continue 'candidate;
+                    };
+                    let evidence = (slot, result.length);
+                    if result.address != target
+                        || result.length == 0
+                        || result.needs_context
+                        || proof.is_some_and(|previous| previous != evidence)
+                    {
+                        continue 'candidate;
+                    }
+                    proof = Some(evidence);
+                }
+            }
+            let Some((slot, length)) = proof else {
+                continue;
+            };
+            changed |= promote_linkage(
+                imp,
+                &mut entries,
+                &mut addr_origin,
+                &extents[instruction_start..],
+                &code,
+                &LinkageResult {
+                    address: target,
+                    length,
+                    slot: Some(slot),
+                    needs_context: false,
+                },
+            );
+        }
+    }
+    if changed {
+        proven_bodies.clear();
+        for &(address, length) in &extents[instruction_start..] {
+            let origin = get_canonical_origin(address, &addr_origin);
+            let end = address + length;
+            proven_bodies
+                .entry(origin)
+                .and_modify(|span| *span = (*span).max(end))
+                .or_insert(end);
+        }
+    }
+
     // Canonicalize proven_bodies so descendant spans are merged into their root origins:
     let mut canon_bodies: std::collections::HashMap<u64, u64> =
         std::collections::HashMap::with_capacity(proven_bodies.len());
@@ -784,6 +940,72 @@ fn flow_discover_with_candidates<P: FlowProvider>(
     }
     imp.xrefs = xrefs;
     close_call_targets(imp);
+}
+
+fn linkage_flow_shape(target: u64, instructions: &[(u64, u64)], endings: &[(u64, bool)]) -> bool {
+    let ending = endings.partition_point(|&(address, _)| address < target);
+    let Some(&(terminal, true)) = endings.get(ending) else {
+        return false;
+    };
+    let start = instructions.partition_point(|&(address, _)| address < target);
+    let mut next = target;
+    for &(address, length) in instructions[start..].iter().take(8) {
+        if address != next || length == 0 {
+            return false;
+        }
+        if address == terminal {
+            return true;
+        }
+        let Some(end) = address.checked_add(length) else {
+            return false;
+        };
+        next = end;
+    }
+    false
+}
+
+fn promote_linkage(
+    imp: &mut NativeImport,
+    entries: &mut Vec<u64>,
+    origins: &mut HashMap<u64, u64>,
+    instructions: &[(u64, u64)],
+    code: &[(u64, u64)],
+    linkage: &LinkageResult,
+) -> bool {
+    let target = linkage.address;
+    if linkage.needs_context
+        || linkage.length == 0
+        || imp
+            .functions
+            .iter()
+            .any(|function| function.entry == target)
+        || !code.iter().any(|&(start, end)| {
+            start <= target && target < end && linkage.length as u64 <= end - target
+        })
+    {
+        return false;
+    }
+    let Some(slot) = linkage.slot.filter(|slot| *slot != 0) else {
+        return false;
+    };
+    let Some((_, name)) = imp.externals.iter().find(|(address, _)| *address == slot) else {
+        return false;
+    };
+    imp.functions.push(NativeFunction {
+        entry: target,
+        name: name.clone(),
+        size: linkage.length as u64,
+    });
+    entries.push(target);
+    origins.insert(target, target);
+    let start = instructions.partition_point(|&(address, _)| address < target);
+    for &(address, _) in &instructions[start..] {
+        if address - target >= linkage.length as u64 {
+            break;
+        }
+        origins.insert(address, target);
+    }
+    true
 }
 
 /// Conservative subset of Ghidra CreateThunkFunctionCmd.getSimpleFlow:

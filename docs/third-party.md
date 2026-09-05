@@ -77,7 +77,17 @@ function; discovery must associate the slot with loader metadata.
 Seeded ELF/PE imports and the DOL sweep share the same recognition rule:
 an unconditional branch target can establish a separate entry only when
 bounded SLEIGH linkage evidence resolves a loader-recorded external slot.
-Conditional targets and unresolved incoming-register values are not promoted.
+Conditional branches alone do not establish linkage entries. Local unresolved
+inputs require independent caller evidence, not an assumed global register value.
+For PIC linkage, the native evaluator follows at most 64 straight-line caller
+instructions, accepting direct transfers only to the next instruction (PC
+capture). Stores in this prefix do not supply memory values; only proven register
+constants propagate. The linkage body retains the strict 8-instruction rule.
+After strong and weak flow closure, every validated incoming caller must resolve
+the same slot and length. Conditional or setup-bypassing entries, unknown inputs
+and conflicting callers reject promotion. Already-decoded flow filters probes to
+contiguous indirect-branch-ending sequences; successful promotion splits actual
+instruction ownership rather than retaining the stub in its caller's body.
 
 PLT boundaries use ELF `sh_entsize`, executable mapped sections, and the
 canonical layouts documented by LLVM lld 19.1

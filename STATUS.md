@@ -1066,9 +1066,8 @@ M1 — Discovery becomes generic
   14 pass / 6 fail / 0 skipped. All non-PIE PowerPC rows are 1.0/1.0.
 - Release libc: 3959 functions in 4.658 seconds on one isolated run.
   Seeded imports do not retain a redundant instruction cache.
-- Remaining d4d sub-tasks: PLT-entry metadata and recognition; PIC register
-  context for PowerPC PIE (its stub reads incoming `r30`); removal of the old
-  ELF64 x86 byte scan. Do not assume one global `r30` value across functions.
+- Completed below: PLT-entry metadata, per-caller PIC context and removal of
+  the ELF64 x86 byte scan. No process-wide register value is assumed.
 
 ## m1-010-d4d PLT-entry cutover
 - Acceptance `69e8a93` fails before implementation on an unreferenced i386 PLT
@@ -1084,9 +1083,20 @@ M1 — Discovery becomes generic
   `001107fc` (PIE), `00210a8c` (C++), and PowerPC PIE `00020698`.
   The AArch64 case matches the pinned `possiblefuncstart` wildcard-prefix
   pattern; it is not another PLT entry.
-- Next d4d piece: per-caller PIC linkage context. PowerPC `_start` establishes
-  its GOT base from the PC before the branch; other functions use different
-  `r30` values. Keep source and measured-report commits below 800 changed lines.
+- PLT report: `benchmarks/reports/m1-010-d4d-plt.json`.
+
+## m1-010-d4d per-caller PIC linkage
+- Regressions `c7dd198`, `4ac12d4` and `94db212` cover unknown inputs,
+  conflicting strong/weak callers, setup-bypassing branches and caller extent.
+- Caller proof is bounded to 64 straight-line instructions; the linkage body
+  retains its 8-instruction, imported-slot and side-effect constraints.
+- Promotion follows strong and weak flow closure. Every validated caller must
+  agree; decoded flow filters probes and supplies exact ownership boundaries.
+- Workspace 117 tests; corpus 5/5; console and worker builds pass.
+- Full discovery: 16 pass / 4 fail / 0 skipped; precision 1.0 on all 20 rows.
+  PowerPC PIE now has precision 1.0 and recall 1.0 (13/13 functions).
+- Release libc: 3959 functions in 4.619 seconds on one isolated run.
+- Remaining failures are the AArch64 prefix entries listed above; d4e is next.
 
 ## m1-010-d4 prerequisite sub-tasks
 - d4b: record loaded external relocation slots for ELF32/ELF64, independently
@@ -1112,11 +1122,11 @@ M1 — Discovery becomes generic
 
 ## Blocked on
 - None for dependency-driven prerequisite sequencing; authorization is recorded
-  above. The current M1 discovery gate remains 15 pass / 5 fail.
+  above. The current M1 discovery gate remains 16 pass / 4 fail.
 
 ## Next task
-- m1-010-d4d: finish per-caller PIC linkage context. Then complete the pinned
-  function-start prerequisite (d4e) and fresh full-gate evidence (d4f).
+- m1-010-d4e: complete the pinned function-start prerequisite, then fresh
+  full-gate evidence (d4f). Per-caller PIC linkage (d4d) is complete.
   The oracle, scorer and corpus remain unchanged; sub-task e is open.
 
 ## Reserved decisions
