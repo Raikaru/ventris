@@ -51,7 +51,8 @@ fn conditional_interior_and_effectful_branches_are_not_thunks() {
             }
             result(a, FlowKind::Return, None, false)
         }).collect());
-        assert!(!imp.functions.iter().any(|f| f.entry == 0x2000), "{case}");
+        let expected = if case == "known-body" { vec![0x1000, 0x1ff0] } else { vec![0x1000] };
+        assert_eq!(imp.functions.iter().map(|f| f.entry).collect::<Vec<_>>(), expected, "{case}");
     }
 }
 
