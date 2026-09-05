@@ -91,6 +91,10 @@ jobs:
           test -z "$(git ls-files --others --exclude-standard)"
       - name: Build native discovery console
         run: bash native/build_console.sh --jobs 2
+      - name: Verify native function constant propagation
+        env:
+          VENTRIS_CONSOLE: ${{ github.workspace }}/native/build/decomp_native
+        run: cargo test -p lre-core native_runtime::tests::constant_propagation -- --nocapture
       - name: Generate matching discovery gate inputs
         run: |
           python3 scripts/gen_corpus.py \

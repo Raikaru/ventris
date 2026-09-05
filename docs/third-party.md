@@ -206,3 +206,35 @@ Worker short reads follow `DecompileCallback.getBytes` lines 150–171 and
 a mapped starting address may return available bytes followed by zeros in
 the requested-size buffer; an unmapped start remains unavailable. Ordinary
 Core memory reads retain their strict region-boundary contract.
+
+## Function constant propagation
+
+`native/ventris_constants.hh` follows Ghidra 12.1.3's
+`ConstantPropagationContextEvaluator`, `SymbolicPropogator` and
+`VarnodeContext` (Apache-2.0), checked against the extracted release sources.
+The evaluator supplies pointer policy; it is not itself a propagation engine.
+The native implementation uses the pinned `Funcdata`/`FlowInfo` raw graph,
+`OpBehavior` arithmetic, and prototype side-effect/stack-pop metadata.
+No pinned upstream files are modified in place.
+
+Sparse state distinguishes known bits, unknown values and affine incoming
+register values. Partial register writes invalidate overlapping relations;
+joins retain only agreeing facts. Unique temporaries are instruction-local.
+Virtual stack offsets are internal identities, never exported pointer values.
+Ordinary calls discard memory facts and non-preserved register facts, then
+apply the prototype's return stack adjustment. Call-to-next handling remains
+with the upstream raw-flow generation.
+The query temporarily registers an otherwise unknown function entry so that
+recursive calls remain calls. It removes only its own symbol after analysis;
+pre-existing functions and their analysis bodies are left intact.
+
+Initial-image reads follow the 1/2/4/8-byte, byte-order and nonzero rules.
+Writable initial memory requires explicit trust and becomes unknown after a
+call. Explicit stores remain separate from immutable image bytes. Unknown
+stores and unmodeled user operations invalidate affected knowledge rather
+than inventing values. Pointer candidates use the evaluator's 1024-byte low
+and 256-byte high speculative limits and sentinel exclusions, plus required
+membership in a supplied mapping. The function query bounds execution to
+one million p-code evaluations; failure returns no successful fact payload.
+Reference creation and durable provenance are separate consumers, not hidden
+side effects of this request.

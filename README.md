@@ -231,6 +231,23 @@ AArch64 and PowerPC BE32 row. The separate stripped-DOL acceptance matches
 634/644 reference functions (recall 0.984472; precision 0.940653).
 These are discovery results, not a claim of complete program-model parity.
 
+## Native function constants
+
+`ConsoleSession::constants(start, end, mappings, trust_writable)` evaluates
+the function over `[start, end)` using native p-code. It returns `ConstantFact`
+rows with `pc`, `value`, and varnode storage (`space`, `offset`, `size`).
+Only pointer-sized constants targeting supplied mappings are reported;
+symbolic register/stack offsets are never reported as literal addresses.
+
+The console command is `constants <start> <end-exclusive> <trust-writable:0|1>
+<map-start> <map-end> <flags> ...`, with mapping flags write=1, read=2,
+execute=4. Initial writable memory is untrusted unless explicitly enabled.
+Queries do not modify image bytes or persist references. Missing commands,
+undecodable flow and exhausted analysis limits produce errors, not successful
+empty analyses. Rebuild the native console after updating.
+This M2 primitive does not establish program-model parity or enable a new
+import analyzer by default.
+
 ## Support matrix
 
 | Input | Structural native import | Native flow/decode/decompile |

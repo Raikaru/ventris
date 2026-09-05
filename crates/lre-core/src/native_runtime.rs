@@ -12,7 +12,7 @@
 //! the CLI's env surface is preserved while everything below it is honest
 //! about its inputs.
 
-use crate::native::{elf_image_base, pe_image_base, NativeImport};
+use crate::native::{NativeImport, elf_image_base, pe_image_base};
 use crate::session::RuntimeConfig;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -71,7 +71,9 @@ pub fn find_console(cfg: &RuntimeConfig) -> Result<PathBuf> {
             return Ok(candidate);
         }
     }
-    err("SLEIGH console missing: build native/build_console.sh (needs binutils-devel) or configure console_path")
+    err(
+        "SLEIGH console missing: build native/build_console.sh (needs binutils-devel) or configure console_path",
+    )
 }
 
 fn console_output(cfg: &RuntimeConfig, binary: &Path, address: &str) -> Result<String> {
@@ -412,6 +414,21 @@ fn bfd_target_for(language_id: &str, binary: &Path) -> Result<String> {
     })
 }
 
+/// A pointer-sized constant observed at a p-code assignment.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ConstantFact {
+    pub pc: u64,
+    pub varnode: ConstantVarnode,
+    pub value: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ConstantVarnode {
+    pub space: String,
+    pub offset: u64,
+    pub size: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FlowKind {
     Branch,
@@ -741,6 +758,49 @@ impl ConsoleSession {
             return err(format!("mapped image load failed: {response}"));
         }
         Ok(())
+    }
+
+    /// Propagate a function over `[start, end)` without changing the loaded image.
+    ///
+    /// Facts contain only pointer-sized constants targeting a supplied mapping.
+    /// Writable initial memory is untrusted unless explicitly enabled; unknown
+    /// calls still invalidate it. Unsupported or failed requests return errors,
+    /// not an empty successful analysis.
+    pub fn constants(
+        &mut self,
+        start: u64,
+        end: u64,
+        mappings: &[crate::native::Mapping],
+        trust_writable: bool,
+    ) -> Result<Vec<ConstantFact>> {
+        use std::fmt::Write as _;
+        let mut script = String::with_capacity(64 + mappings.len() * 48);
+        let _ = write!(
+            script,
+            "constants 0x{start:x} 0x{end:x} {}",
+            u8::from(trust_writable)
+        );
+        for mapping in mappings.iter().filter(|mapping| mapping.size != 0) {
+            let mapping_end = mapping.vaddr.checked_add(mapping.size).ok_or_else(|| {
+                NativeRuntimeError("constant-propagation mapping range overflows".into())
+            })?;
+            let _ = write!(
+                script,
+                " 0x{:x} 0x{mapping_end:x} {}",
+                mapping.vaddr, mapping.flags
+            );
+        }
+        script.push('\n');
+        self.send(&script)?;
+        let response = read_until_prompt(&mut self.reader)?;
+        let payload = response
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("CONSTANTS "))
+            .ok_or_else(|| {
+                NativeRuntimeError(format!("constant-propagation query failed: {response}"))
+            })?;
+        serde_json::from_str(payload)
+            .map_err(|error| NativeRuntimeError(format!("invalid constant facts: {error}")))
     }
 
     /// Ask the console for the control-flow of one instruction.
@@ -1178,7 +1238,6 @@ mod tests {
                 }
             }
             let code_end = 0x1000 + code.len() as u64;
-            let data_end = 0x3000 + data.len() as u64;
             let import = NativeImport {
                 language: language.into(),
                 mappings: vec![
@@ -1208,37 +1267,107 @@ mod tests {
             };
             let mut session = ConsoleSession::new(&cfg).unwrap();
             session.load_mapped(&import).unwrap();
-            session
-                .send(&format!(
-                    "constants 0x1000 0x{code_end:x} 0 0x1000 0x{code_end:x} 6 \
-                 0x3000 0x{data_end:x} 2 0x5000 0x5010 3\n"
-                ))
+            let facts = session
+                .constants(0x1000, code_end, &import.mappings, false)
                 .unwrap();
-            let response = read_until_prompt(&mut session.reader).unwrap();
-            let payload = response
-                .lines()
-                .find_map(|line| line.trim().strip_prefix("CONSTANTS "))
-                .unwrap_or_else(|| panic!("{language}: missing constant facts: {response}"));
-            let facts: Vec<serde_json::Value> = serde_json::from_str(payload).unwrap();
             assert!(
                 facts.iter().any(|fact| {
-                    fact["pc"] == load_pc
-                        && fact["value"] == 0x5000u64
-                        && fact["varnode"]["space"] == "register"
-                        && fact["varnode"]["size"] == pointer_size
+                    fact.pc == load_pc
+                        && fact.value == 0x5000
+                        && fact.varnode.space == "register"
+                        && fact.varnode.size == pointer_size as u32
                 }),
                 "{language}: readonly global pointer into BSS"
             );
             assert!(
                 facts.iter().any(|fact| {
-                    fact["pc"] == add_pc && fact["value"] == 0x3000 + pointer_size as u64
+                    fact.pc == add_pc && fact.value == 0x3000 + pointer_size as u64
                 }),
                 "{language}: propagated pointer arithmetic"
             );
             assert!(
-                facts.iter().all(|fact| fact["value"] != 0x4000u64),
+                facts.iter().all(|fact| fact.value != 0x4000),
                 "{language}: unmapped values are not pointer facts"
             );
+        }
+    }
+
+    #[test]
+    fn constant_propagation_respects_call_stack_semantics() {
+        let mut cfg = RuntimeConfig::from_env();
+        cfg.language_id = "x86:LE:64:default".into();
+        cfg.language_dir = cfg
+            .ghidra_install
+            .join("Ghidra/Processors/x86/data/languages");
+        if find_console(&cfg).is_err() {
+            eprintln!("SKIP: SLEIGH console not available");
+            return;
+        }
+        // GNU as: retain rsp-8 in r12, call a separate RET, store a pointer
+        // through the restored rsp, then read through r12. The slots differ.
+        // The second case captures PC with CALL-to-next / POP, not a callee.
+        // A recursive call must remain a call, with a reachable continuation.
+        let cases: &[(&[u8], u64, Option<u64>)] = &[
+            (
+                &[
+                    0x4c, 0x8d, 0x64, 0x24, 0xf8, 0xe8, 0x13, 0, 0, 0, 0x48, 0xb8, 0, 0x50, 0, 0,
+                    0, 0, 0, 0, 0x48, 0x89, 0x04, 0x24, 0x49, 0x8b, 0x0c, 0x24, 0xc3, 0xc3,
+                ],
+                0x100a,
+                Some(0x1018),
+            ),
+            (
+                &[0xe8, 0, 0, 0, 0, 0x58, 0x48, 0x05, 0xfb, 0x3f, 0, 0, 0xc3],
+                0x1006,
+                None,
+            ),
+            (
+                &[
+                    0x41, 0x54, 0x49, 0xbc, 0, 0x50, 0, 0, 0, 0, 0, 0, 0x85, 0xff, 0x74, 0x0a,
+                    0xff, 0xcf, 0xe8, 0xe9, 0xff, 0xff, 0xff, 0x4c, 0x89, 0xe0, 0x41, 0x5c, 0xc3,
+                ],
+                0x1017,
+                None,
+            ),
+        ];
+        for &(code, known_pc, distinct_slot_pc) in cases {
+            let end = 0x1000 + code.len() as u64;
+            let import = NativeImport {
+                language: cfg.language_id.clone(),
+                mappings: vec![
+                    crate::native::Mapping {
+                        vaddr: 0x1000,
+                        size: code.len() as u64,
+                        file_off: 0,
+                        flags: 6,
+                        bytes: code.to_vec(),
+                    },
+                    crate::native::Mapping {
+                        vaddr: 0x5000,
+                        size: 16,
+                        file_off: 0,
+                        flags: 3,
+                        bytes: Vec::new(),
+                    },
+                ],
+                ..Default::default()
+            };
+            let mut session = ConsoleSession::new(&cfg).unwrap();
+            session.load_mapped(&import).unwrap();
+            let facts = session
+                .constants(0x1000, end, &import.mappings, false)
+                .unwrap();
+            assert!(facts.iter().any(|fact| {
+                fact.pc == known_pc && fact.value == 0x5000 && fact.varnode.space == "register"
+            }));
+            if let Some(pc) = distinct_slot_pc {
+                assert!(
+                    facts
+                        .iter()
+                        .all(|fact| fact.pc != pc || fact.value != 0x5000),
+                    "callee return must restore rsp before subsequent memory accesses: {facts:?}"
+                );
+            }
         }
     }
 
