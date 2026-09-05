@@ -25,8 +25,8 @@ Ghidra (C1), improvements over stock Ghidra measured against ground truth
 
 ## Remaining work
 
-- M1 discovery evidence is measured: all 20 ELF rows have precision/recall
-  1.0; the stripped DOL has recall 0.984472. Hosted CI verification is pending.
+- M1 is complete: all 20 ELF rows have precision/recall 1.0; the stripped DOL
+  has recall 0.984472. Hosted CI passes all 10 jobs; evidence is in `STATUS.md`.
 - M2 program-model parity: constant propagation, data references and strings,
   inferred prototypes, switch recovery, library identification and C++ facts.
   The parity gate, not discovery alone, establishes C1.

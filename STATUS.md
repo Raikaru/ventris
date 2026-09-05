@@ -499,7 +499,7 @@ green (82 tests across 20 suites); the CPack TGZ builds.
   staleness check and acceptance test `tests/support_matrix_test.py`.
 
 ## Current milestone
-M1 — discovery evidence complete; hosted CI verification pending
+M2 — Program-model parity
 
 ## M1 progress
 - m1-003-d: benchmarked hand decoder vs console flow on libc and the x86-64 corpus.
@@ -1244,16 +1244,21 @@ M1 — discovery evidence complete; hosted CI verification pending
   Final libc timing acceptance: 4.550281763 s < 5.0 s, 3,959 functions.
 - Native console and worker builds pass; MIPS delay-slot and ARM conditional
   return smoke checks are recorded above. No M2 parity claim is made.
-- Hosted CI still needs verification after this evidence is published.
+- Hosted CI run 33966774392 passes all 10 jobs on published commit
+  `3d768a4c219fc380efafb2513bc2ae6c185aabe2`. Its downloaded discovery report
+  has 20 pass / 0 fail / 0 skipped and precision/recall 1.0 on every row.
+  Rust and Qt build/package jobs pass on Linux, macOS and Windows.
+  https://github.com/Raikaru/ventris/actions/runs/33966774392
 
 ## Blocked on
-- No external prerequisite blocks publication. Hosted CI must finish before
-  advancing the milestone.
+- None. M1 gate evidence is committed and enforced by passing hosted CI.
 
 ## Next task
-- m1-010-d4f: publish the source-linked reports and verify hosted CI.
-  Then schedule m2-001, the constant-propagation console request and its
-  known-global-load acceptance fixture. No corpus or metric changes.
+- m2-001: add the native console constant-propagation request, emitting
+  (pc, varnode, value) for pointer-sized constants in mapped sections.
+- Acceptance: `constant_propagation_reports_mapped_globals` in
+  `crates/lre-core/src/native_runtime.rs`, using a known-global-load fixture.
+  Verify the named `ConstantPropagationContextEvaluator` source before porting.
 
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a
