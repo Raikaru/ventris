@@ -1285,7 +1285,15 @@ M2 — Program-model parity
   https://github.com/Raikaru/ventris/actions/runs/33979109416
 
 ## Blocked on
-- None. M1 gate evidence is committed and enforced by passing hosted CI.
+- m2-002 names `ReferenceCodeAnalyzer` and `ConstantPropagationAnalyzer`.
+  `ReferenceCodeAnalyzer.java` is absent from the extracted Java tree, the
+  pinned source tree and all 82 installed Ghidra 12.1.3 source archives;
+  `Base.jar` also contains no class with that name. The other named source
+  exists at `ghidra/app/plugin/core/analysis/ConstantPropagationAnalyzer.java`.
+  The roadmap requires stopping rather than guessing a replacement source.
+  Await a corrected citation or explicit authorization to identify the
+  equivalent reference implementation. No m2-002 implementation was written.
+  Acceptance remains xref recall >= 0.95 and precision >= 0.98 versus oracle.
 
 ## Next task
 - m2-002: persist inferred data-reference facts with provenance. Write and
