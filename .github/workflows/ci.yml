@@ -89,6 +89,35 @@ jobs:
           python3 tests/m1-008b_scoring_test.py
           git diff --exit-code
           test -z "$(git ls-files --others --exclude-standard)"
+      - name: Generate matching discovery gate inputs
+        run: |
+          python3 scripts/gen_corpus.py \
+            --architectures x86_64,i386,aarch64,powerpc \
+            --out-dir "$RUNNER_TEMP/discovery/corpus"
+          python3 scripts/gen_oracle.py \
+            --corpus-dir "$RUNNER_TEMP/discovery/corpus" \
+            --output-dir "$RUNNER_TEMP/discovery/oracle" \
+            --report "$RUNNER_TEMP/discovery/oracle-report.json"
+          python3 scripts/gen_function_scoring.py \
+            --corpus-dir "$RUNNER_TEMP/discovery/corpus" \
+            --oracle-dir "$RUNNER_TEMP/discovery/oracle" \
+            --output-dir "$RUNNER_TEMP/discovery/scoring" \
+            --report "$RUNNER_TEMP/discovery/scoring-report.json"
+      - name: Enforce complete M1 discovery gate
+        run: |
+          python3 benchmarks/discovery_gate.py \
+            --corpus-dir "$RUNNER_TEMP/discovery/corpus" \
+            --oracle-dir "$RUNNER_TEMP/discovery/oracle" \
+            --scoring-dir "$RUNNER_TEMP/discovery/scoring" \
+            --report "$RUNNER_TEMP/discovery/discovery-report.json"
+      - name: Retain discovery reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m1-discovery-reports
+          path: |
+            ${{ runner.temp }}/discovery/*-report.json
+            ${{ runner.temp }}/discovery/corpus/manifest.json
 
   corpus-windows:
     name: MSVC Corpus (windows-latest)
