@@ -834,12 +834,34 @@ M1 — Discovery becomes generic
   generic destination discovery, then verify the real i386 blocker and gates.
   Acceptance: `native::discovery::tests` and the existing discovery gate.
 
+## m1-010-t verified
+- Acceptance committed first in `ab61328`; implementation in `8be0ec7`.
+  The console now supplies `pure_jump` evidence only for a single direct
+  SLEIGH branch operation. Missing evidence defaults to false.
+- Six regressions cover thunk chains, conditional/interior/effectful branches,
+  invalid or mismatched destination flow, weak seeds, later-discovered body
+  containment, and entry jumps that return into their own body.
+- Real i386 blocker resolved: native import retains `00401540` with size 2
+  and `004014d0` with size 57; the connecting xref is
+  `UNCONDITIONAL_JUMP`, provenance `native-import:thunk`, not a call.
+- i386 plain_o0/plain_o2: 11/15 matches (previously 10/15); cpp_o2: 19/23
+  (previously 18/23); many_o2: 409/413 (previously 408/413). Precision is 1.0
+  for all four. The full discovery gate remains 7 pass, 13 fail, 0 skipped;
+  remaining PIE/loader/architecture-cutover failures are not marked resolved.
+- Verification: workspace 108 tests; core no-default 59; legacy corpus 5/5;
+  DOL unchanged at 633/644 matches, 699 native functions. An intermediate
+  DOL false-positive regression exposed jump-over-body sequences and was fixed
+  before committing. Isolated release libc import: 4,046 functions, 4.700 s
+  (<5 s). Rebuilt console from the out-of-tree patch; pinned source unchanged.
+- This completes the approved minimal prerequisite, not all of m2-009 or M1.
+  Raw references, scoring exclusions and thresholds remain unchanged.
+
 ## Blocked on
-- None for the approved minimal m1-010-t prerequisite; broader M2 work remains
-  outside this approval.
+- None for m1-010-c; the approved minimal thunk prerequisite is resolved.
 
 ## Next task
-- m1-010-t: implement the approved direct-thunk prerequisite test first.
+- m1-010-c: remove legacy architecture-specific production discovery routes.
+  The existing discovery gate is the acceptance; sub-tasks c–e remain open.
 
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a
