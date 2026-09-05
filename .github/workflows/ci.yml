@@ -64,7 +64,7 @@ jobs:
         run: python3 tests/m1-006_pdb_test.py
 
   corpus-oracle:
-    name: Ghidra Corpus Oracle (ubuntu-latest)
+    name: M1 Oracle and Discovery (ubuntu-latest)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -74,8 +74,8 @@ jobs:
         with:
           distribution: temurin
           java-version: '25'
-      - name: Install LLVM tools
-        run: sudo apt-get update && sudo apt-get install -y llvm lld clang
+      - name: Install corpus and console build tools
+        run: sudo apt-get update && sudo apt-get install -y llvm lld clang build-essential binutils-dev zlib1g-dev libzstd-dev
       - name: Install pinned Ghidra release
         run: |
           curl --fail --location --retry 3 https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.3_build/ghidra_12.1.3_PUBLIC_20260817.zip --output "$RUNNER_TEMP/ghidra.zip"
@@ -89,6 +89,8 @@ jobs:
           python3 tests/m1-008b_scoring_test.py
           git diff --exit-code
           test -z "$(git ls-files --others --exclude-standard)"
+      - name: Build native discovery console
+        run: bash native/build_console.sh --jobs 2
       - name: Generate matching discovery gate inputs
         run: |
           python3 scripts/gen_corpus.py \
@@ -104,6 +106,8 @@ jobs:
             --output-dir "$RUNNER_TEMP/discovery/scoring" \
             --report "$RUNNER_TEMP/discovery/scoring-report.json"
       - name: Enforce complete M1 discovery gate
+        env:
+          VENTRIS_CONSOLE: ${{ github.workspace }}/native/build/decomp_native
         run: |
           python3 benchmarks/discovery_gate.py \
             --corpus-dir "$RUNNER_TEMP/discovery/corpus" \

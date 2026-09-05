@@ -198,6 +198,11 @@ Omit `--check` to regenerate evidence with pinned Ghidra. `--oracle-dir` and
 `--output-dir` support isolated toolchain-specific references without replacing
 the committed raw corpus. The policy covers all 20 ELF inputs; the m1-008b
 discovery gate covers x86-64 `plain_o0` and `cpp_o2`, with recall >=0.98.
+The CI M1 job builds the native console and separately generates a matching
+corpus, raw oracles and scoring views before running `benchmarks/discovery_gate.py`
+over all 20 inputs. Its reports and corpus manifest are retained in the
+`m1-discovery-reports` artifact even when a step fails.
+
 Native ELF32/ELF64 discovery shares `.init`, `.fini` and `.plt` section-start
 seeds, alongside unwind-index entries, PLT metadata, flow-confirmed
 initializer/data pointers and the existing batched flow walker.

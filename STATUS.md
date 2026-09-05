@@ -1218,14 +1218,30 @@ M1 — Discovery becomes generic
 - Workspace 125 tests; corpus 5/5; local full discovery 20 pass / 0 fail /
   0 skipped with precision/recall 1.0. Final committed gate evidence remains d4f.
 
+## m1-010-e2 complete discovery CI
+- Acceptance `7f789bf` adds the full gate with matching generated inputs and
+  failed-report artifact retention. An unavailable-console smoke run exits 1
+  with 4 pass / 16 fail / 0 skipped.
+- The job now provisions the native console and its build dependencies.
+  Replaying its exact build/input/gate commands locally generates 20 raw
+  oracles, 20 scoring views and 20 passing discovery rows, with 0 skipped.
+- This verifies the CI commands locally, not a completed hosted CI run.
+
+## m1-010-e3 support claim scope
+- The matrix generator currently treats a passing discovery report as evidence
+  for ARM, MIPS and RISC-V, although the M1 ELF corpus covers x86-64, i386,
+  AArch64 and PowerPC BE32 only.
+- Before d4f publication, extend `tests/support_matrix_test.py` to reject those
+  unsupported claims and qualify PowerPC coverage. No corpus or metric changes.
+
 ## Blocked on
-- No external prerequisite blocks M1. CI does not yet enforce the complete
-  discovery gate; final committed evidence remains required.
+- No external prerequisite blocks M1. Correct the generated support claims
+  before committing final gate evidence.
 
 ## Next task
-- m1-010-e2: enforce the existing complete discovery gate in CI with matching
-  generated corpus, raw oracles and scoring views. Follow with d4f committed
-  evidence. The oracle, scorer and corpus remain unchanged.
+- m1-010-e3: restrict support claims to measured architectures in
+  `tests/support_matrix_test.py`, then publish d4f committed evidence.
+  The oracle, scorer and corpus remain unchanged.
 
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a
