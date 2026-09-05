@@ -1129,6 +1129,120 @@ mod tests {
     }
 
     #[test]
+    fn constant_propagation_reports_mapped_globals() {
+        let cfg = RuntimeConfig::from_env();
+        if find_console(&cfg).is_err() {
+            eprintln!("SKIP: SLEIGH console not available");
+            return;
+        }
+        // llvm-mc: materialize 0x3000, load its pointer, advance one pointer,
+        // load an unmapped pointer, return. The loaded 0x5000 targets BSS.
+        let cases: &[(&str, &str, usize, bool, &[u8], u64, u64)] = &[
+            (
+                "x86",
+                "x86:LE:64:default",
+                8,
+                false,
+                &[
+                    0x48, 0xb8, 0, 0x30, 0, 0, 0, 0, 0, 0, 0x48, 0x8b, 8, 0x48, 0x83, 0xc0, 8,
+                    0x48, 0x8b, 0x10, 0xc3,
+                ],
+                0x100a,
+                0x100d,
+            ),
+            (
+                "PowerPC",
+                "PowerPC:BE:32:default",
+                4,
+                true,
+                &[
+                    0x3c, 0x60, 0, 0, 0x60, 0x63, 0x30, 0, 0x80, 0x83, 0, 0, 0x38, 0x63, 0, 4,
+                    0x80, 0xa3, 0, 0, 0x4e, 0x80, 0, 0x20,
+                ],
+                0x1008,
+                0x100c,
+            ),
+        ];
+        for &(processor, language, pointer_size, big_endian, code, load_pc, add_pc) in cases {
+            let mut cfg = cfg.clone();
+            cfg.language_id = language.into();
+            cfg.language_dir = cfg
+                .ghidra_install
+                .join(format!("Ghidra/Processors/{processor}/data/languages"));
+            let mut data = Vec::new();
+            for pointer in [0x5000u64, 0x4000] {
+                if big_endian {
+                    data.extend_from_slice(&pointer.to_be_bytes()[8 - pointer_size..]);
+                } else {
+                    data.extend_from_slice(&pointer.to_le_bytes()[..pointer_size]);
+                }
+            }
+            let code_end = 0x1000 + code.len() as u64;
+            let data_end = 0x3000 + data.len() as u64;
+            let import = NativeImport {
+                language: language.into(),
+                mappings: vec![
+                    crate::native::Mapping {
+                        vaddr: 0x1000,
+                        size: code.len() as u64,
+                        file_off: 0,
+                        flags: 6,
+                        bytes: code.to_vec(),
+                    },
+                    crate::native::Mapping {
+                        vaddr: 0x3000,
+                        size: data.len() as u64,
+                        file_off: 0,
+                        flags: 2,
+                        bytes: data,
+                    },
+                    crate::native::Mapping {
+                        vaddr: 0x5000,
+                        size: 16,
+                        file_off: 0,
+                        flags: 3,
+                        bytes: Vec::new(),
+                    },
+                ],
+                ..Default::default()
+            };
+            let mut session = ConsoleSession::new(&cfg).unwrap();
+            session.load_mapped(&import).unwrap();
+            session
+                .send(&format!(
+                    "constants 0x1000 0x{code_end:x} 0 0x1000 0x{code_end:x} 6 \
+                 0x3000 0x{data_end:x} 2 0x5000 0x5010 3\n"
+                ))
+                .unwrap();
+            let response = read_until_prompt(&mut session.reader).unwrap();
+            let payload = response
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("CONSTANTS "))
+                .unwrap_or_else(|| panic!("{language}: missing constant facts: {response}"));
+            let facts: Vec<serde_json::Value> = serde_json::from_str(payload).unwrap();
+            assert!(
+                facts.iter().any(|fact| {
+                    fact["pc"] == load_pc
+                        && fact["value"] == 0x5000u64
+                        && fact["varnode"]["space"] == "register"
+                        && fact["varnode"]["size"] == pointer_size
+                }),
+                "{language}: readonly global pointer into BSS"
+            );
+            assert!(
+                facts.iter().any(|fact| {
+                    fact["pc"] == add_pc && fact["value"] == 0x3000 + pointer_size as u64
+                }),
+                "{language}: propagated pointer arithmetic"
+            );
+            assert!(
+                facts.iter().all(|fact| fact["value"] != 0x4000u64),
+                "{language}: unmapped values are not pointer facts"
+            );
+        }
+    }
+
+    #[test]
     fn linkage_queries_require_bounded_side_effect_free_slot_flow() {
         let mut cfg = RuntimeConfig::from_env();
         cfg.language_id = "x86:LE:64:default".into();
