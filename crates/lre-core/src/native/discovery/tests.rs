@@ -3,7 +3,9 @@ use crate::native::Mapping;
 use crate::native_runtime::FlowResult;
 
 fn result(address: u64, kind: FlowKind, target: Option<u64>, pure_jump: bool) -> FlowResult {
-    FlowResult { no_op: false, address, length: 2, fallthrough: None,
+    FlowResult { terminal: kind == FlowKind::Return, conditional: kind == FlowKind::CBranch,
+        return_op: kind == FlowKind::Return, delay_slots: Vec::new(), no_op: false,
+        address, length: 2, fallthrough: None,
         targets: target.into_iter().collect(), kind, pure_jump }
 }
 
@@ -383,4 +385,43 @@ fn pattern_entries_require_defined_boundaries_and_valid_code() {
         let actual: Vec<_> = import.functions.iter().map(|f| (f.entry, f.size)).collect();
         assert_eq!(actual, expected, "{case}");
     }
+}
+
+#[test]
+fn conditional_return_preserves_its_nonreturning_path() {
+    let mut import = image();
+    flow_discover_with_provider(&mut import, |addresses| addresses.iter().map(|&address| {
+        let mut flow = result(address, FlowKind::Return, None, false);
+        if address == 0x1000 {
+            flow.conditional = true;
+            flow.fallthrough = Some(0x1002);
+        } else if address == 0x1002 {
+            flow = result(address, FlowKind::Call, Some(0x2000), false);
+            flow.fallthrough = Some(0x1004);
+        }
+        flow
+    }).collect());
+    assert!(import.functions.iter().any(|function| function.entry == 0x2000));
+    assert!(import.xrefs.iter().any(|xref| xref.from == 0x1002 && xref.to == 0x2000
+        && xref.kind == "UNCONDITIONAL_CALL"));
+}
+
+#[test]
+fn terminal_call_does_not_invent_fallthrough() {
+    let mut import = image();
+    flow_discover_with_provider(&mut import, |addresses| addresses.iter().map(|&address| {
+        if address == 0x1000 {
+            let mut flow = result(address, FlowKind::Call, Some(0x2000), false);
+            flow.terminal = true;
+            flow.return_op = true;
+            flow.fallthrough = None;
+            flow
+        } else if address == 0x1002 {
+            result(address, FlowKind::Call, Some(0x2100), false)
+        } else {
+            result(address, FlowKind::Return, None, false)
+        }
+    }).collect());
+    assert_eq!(import.functions.iter().map(|function| function.entry).collect::<Vec<_>>(),
+        [0x1000, 0x2000]);
 }
