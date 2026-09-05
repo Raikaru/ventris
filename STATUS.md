@@ -1228,19 +1228,19 @@ M1 — Discovery becomes generic
 - This verifies the CI commands locally, not a completed hosted CI run.
 
 ## m1-010-e3 support claim scope
-- The matrix generator currently treats a passing discovery report as evidence
-  for ARM, MIPS and RISC-V, although the M1 ELF corpus covers x86-64, i386,
-  AArch64 and PowerPC BE32 only.
-- Before d4f publication, extend `tests/support_matrix_test.py` to reject those
-  unsupported claims and qualify PowerPC coverage. No corpus or metric changes.
+- Regression `0155d6e` failed because an M1 discovery pass changed the ARM
+  support claim. It now verifies unchanged ARM/MIPS/RISC-V claims, gated
+  AArch64 discovery and explicitly BE32-only PowerPC evidence.
+- The generator no longer extends discovery claims to unmeasured architectures.
+  CI runs the scope regression and README staleness check together; both pass.
 
 ## Blocked on
-- No external prerequisite blocks M1. Correct the generated support claims
-  before committing final gate evidence.
+- No external prerequisite blocks M1. Final committed gate evidence and
+  publication remain required.
 
 ## Next task
-- m1-010-e3: restrict support claims to measured architectures in
-  `tests/support_matrix_test.py`, then publish d4f committed evidence.
+- m1-010-d4f: generate and commit the unchanged complete discovery gate from
+  the final source commit, update measured status, and publish the changes.
   The oracle, scorer and corpus remain unchanged.
 
 ## Reserved decisions

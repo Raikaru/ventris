@@ -236,11 +236,11 @@ AArch64/PowerPC seed and flow failures stay open. M1 is not complete.
 |---|---|---|
 | ELF x86-64 | supported | **supported and gated** |
 | PE32+ x86-64 | supported | in progress |
-| ELF AARCH64 LE64 | supported | selected SLEIGH bundle required; not parity-gated |
+| ELF AARCH64 LE64 | supported | discovery gated; decompile parity pending |
 | ELF ARM LE32 | supported | selected SLEIGH bundle required; not parity-gated |
 | ELF MIPS LE32 | supported | selected SLEIGH bundle required; not parity-gated |
 | ELF RISC-V LE64 | supported | selected SLEIGH bundle required; not parity-gated |
-| ELF PowerPC LE32/LE64 | supported | e500 BE32 parity verified on Agent Under Fire; broader targets not gated |
+| ELF PowerPC | supported | BE32 discovery gated; e500 parity verified; other configurations not gated |
 
 The PE parser supports PE32+ (x86-64) and PE32 (i386). Non-x86 ELF
 imports preserve mappings, symbols, and the entry point for a matching

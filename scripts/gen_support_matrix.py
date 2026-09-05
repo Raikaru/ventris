@@ -60,10 +60,7 @@ def generate_matrix() -> str:
         ppc_status = "**supported and gated**"
     elif discovery_gate and discovery_gate.get("passed"):
         aarch64_status = "discovery gated; decompile parity pending"
-        arm_status = "discovery gated; decompile parity pending"
-        mips_status = "discovery gated; decompile parity pending"
-        riscv_status = "discovery gated; decompile parity pending"
-        ppc_status = "e500 verified; discovery gated; broader parity pending"
+        ppc_status = "BE32 discovery gated; e500 parity verified; other configurations not gated"
 
     rows = [
         (
@@ -80,7 +77,7 @@ def generate_matrix() -> str:
         ("ELF ARM LE32", "supported", arm_status),
         ("ELF MIPS LE32", "supported", mips_status),
         ("ELF RISC-V LE64", "supported", riscv_status),
-        ("ELF PowerPC LE32/LE64", "supported", ppc_status),
+        ("ELF PowerPC", "supported", ppc_status),
     ]
 
     header = [
