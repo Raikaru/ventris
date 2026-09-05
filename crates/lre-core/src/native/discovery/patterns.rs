@@ -39,6 +39,21 @@ fn contains(extents: &[(u64, u64)], address: u64) -> bool {
         .any(|&(start, end)| start <= address && address < end)
 }
 
+/// Instruction extents are sorted by address and their lengths come from the
+/// u8 FLOW protocol. A bounded look-behind also handles overlapping starts;
+/// checking only the closest preceding instruction would miss longer spans.
+fn nearby_instructions(
+    instructions: &[(u64, u64)],
+    start: u64,
+    end: u64,
+) -> impl Iterator<Item = &(u64, u64)> {
+    let lower = start.saturating_sub(u64::from(u8::MAX));
+    let first = instructions.partition_point(|&(address, _)| address < lower);
+    instructions[first..]
+        .iter()
+        .take_while(move |&&(address, _)| address < end)
+}
+
 /// Follows the source validator's bounded control-flow walk. Delay slots belong
 /// to the body but do not contribute to its contiguous instruction count.
 pub(super) fn valid_code<P: FlowProvider>(
@@ -101,7 +116,7 @@ pub(super) fn valid_code<P: FlowProvider>(
         let instruction_end = end - slots;
         // Existing starts are allowed; offcut decoding and overlapping pseudo
         // instructions are not. Extent inputs use (address, length).
-        if instructions.iter().any(|&(start, length)| {
+        if nearby_instructions(instructions, address, instruction_end).any(|&(start, length)| {
             let end = start.saturating_add(length);
             start < instruction_end && address < end && start != address
         }) || body
@@ -150,7 +165,7 @@ pub(super) fn valid_code<P: FlowProvider>(
                 return false;
             }
             let slot_end = slot_address + u64::from(length);
-            if instructions.iter().any(|&(start, length)| {
+            if nearby_instructions(instructions, slot_address, slot_end).any(|&(start, length)| {
                 start != address
                     && start < slot_end
                     && slot_address < start.saturating_add(length)
@@ -267,8 +282,7 @@ pub(super) fn collect<P: FlowProvider>(
         }
         if address % patterns.alignment != 0
             || functions.contains(&address)
-            || instructions
-                .iter()
+            || nearby_instructions(instructions, address, address.saturating_add(1))
                 .any(|&(start, length)| start <= address && address - start < length)
             || import.functions.iter().any(|function| {
                 function.entry < address && address - function.entry < function.size
@@ -322,9 +336,9 @@ pub(super) fn collect<P: FlowProvider>(
                             previous >= mapping.vaddr && previous - mapping.vaddr < mapping.size
                         })
                     });
-                let instruction_before = instructions
-                    .iter()
-                    .any(|&(start, length)| start < address && address - start <= length);
+                let instruction_before =
+                    nearby_instructions(instructions, address.saturating_sub(1), address)
+                        .any(|&(start, length)| start < address && address - start <= length);
                 let data_before = address
                     .checked_sub(1)
                     .is_some_and(|previous| contains(&data, previous));

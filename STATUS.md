@@ -1197,14 +1197,35 @@ M1 — Discovery becomes generic
   verbatim-content test/CI invocation are removed; no replacement agent-policy
   file is introduced.
 
+## m1-010-e remaining regression and CI work
+- Source `0332279` reaches precision/recall 1.0 on all 20 ELF rows locally.
+  DOL improves to 634/644 matches, 674 functions and 40 extras.
+- Existing `tests/m1-003_batched_flow.sh` fails: libc import takes
+  5.136486053 s against the unchanged 5.0 s threshold (3,959 functions).
+  Perf attributes 17.65% of sampled cycles to the shared worklist and 4.30%
+  to pattern eligibility. No timing pass is claimed.
+- e1: restore the existing timing acceptance without changing discovery sets.
+- e2: run the complete discovery gate in CI using the matching generated corpus,
+  raw oracles and scoring views; retain failed reports as artifacts.
+- M1 remains open until these regressions and committed gate evidence pass.
+
+## m1-010-e1 libc timing
+- The unchanged acceptance failed at 5.553236246 s before output buffering.
+  Flushing once per flow batch instead of per instruction reduces the measured
+  import to 4.635571003 s against the 5.0 s threshold, with 3,959 functions.
+- Candidate filtering avoids repeated address checks and uses bounded searches
+  over sorted instruction extents during pattern eligibility.
+- Workspace 125 tests; corpus 5/5; local full discovery 20 pass / 0 fail /
+  0 skipped with precision/recall 1.0. Final committed gate evidence remains d4f.
+
 ## Blocked on
-- None for dependency-driven prerequisite sequencing; authorization is recorded
-  above. The current M1 discovery gate remains 16 pass / 4 fail.
+- No external prerequisite blocks M1. CI does not yet enforce the complete
+  discovery gate; final committed evidence remains required.
 
 ## Next task
-- m1-010-d4e2b: apply upstream pattern action eligibility; write regressions
-  first. Loader compiler selection is complete. Follow with d4f full-gate evidence.
-  The oracle, scorer and corpus remain unchanged; sub-task e is open.
+- m1-010-e2: enforce the existing complete discovery gate in CI with matching
+  generated corpus, raw oracles and scoring views. Follow with d4f committed
+  evidence. The oracle, scorer and corpus remain unchanged.
 
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a

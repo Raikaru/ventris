@@ -1070,42 +1070,30 @@ pub struct CandidateFilterContext<'a> {
     pub initial_seeds: &'a HashSet<u64>,
 }
 
-/// Evaluates whether an unseeded candidate represents a genuine function entry point.
-pub fn filter_candidate<F: FnMut(u64) -> crate::native_runtime::FlowResult>(
+/// Rejects non-code and owned bytes before requesting SLEIGH evidence.
+pub fn candidate_address_is_valid(cand: u64, ctx: &CandidateFilterContext) -> bool {
+    ctx.mappings.iter().any(|mapping| {
+        mapping.flags & 0x4 != 0 && cand >= mapping.vaddr && cand - mapping.vaddr < mapping.size
+    }) && !ctx
+        .known_extents
+        .iter()
+        .any(|&(entry, size)| cand > entry && cand - entry < size)
+}
+
+/// Confirms an address-qualified candidate without copying its flow response.
+pub fn candidate_flow_is_valid(
     cand: u64,
     ctx: &CandidateFilterContext,
-    mut flow_fn: F,
+    info: &crate::native_runtime::FlowResult,
 ) -> bool {
     use crate::native_runtime::FlowKind;
-
-    // 1. Must fall inside executable memory
-    let in_code = ctx
-        .mappings
-        .iter()
-        .any(|m| m.flags & 0x4 != 0 && cand >= m.vaddr && cand < m.vaddr + m.size);
-    if !in_code {
-        return false;
-    }
-
-    // 2. Reject if strictly inside the body of an already known function:
-    // [f.entry + 1, f.entry + f.size)
-    let inside_known = ctx.known_extents.iter().any(|&(entry, size)| {
-        size > 1 && cand > entry && cand < entry + size
-    });
-    if inside_known {
-        return false;
-    }
-
-    // 3. Flow validity
-    let info = flow_fn(cand);
-    if info.kind == FlowKind::Bad || info.kind == FlowKind::Unimpl || info.length == 0 {
-        return false;
-    }
-
-    // Straight-line flow into an established entry does not establish a body.
-    // Calls can be distinct one-instruction functions even with adjacent entries.
-    info.kind != FlowKind::Fallthrough
-        || !info.fallthrough.is_some_and(|fall| ctx.initial_seeds.contains(&fall))
+    info.address == cand
+        && info.length != 0
+        && !matches!(info.kind, FlowKind::Bad | FlowKind::Unimpl)
+        && (info.kind != FlowKind::Fallthrough
+            || !info
+                .fallthrough
+                .is_some_and(|fall| ctx.initial_seeds.contains(&fall)))
 }
 
 
@@ -1466,13 +1454,28 @@ mod tests {
         };
 
         // Candidate 0x1020 is internal to 0x1000..0x1050.
-        // Mock flow returns a valid instruction with length 4.
-        let result = filter_candidate(0x1020, &ctx, |addr| FlowResult { terminal: false, conditional: false, return_op: false, delay_slots: Vec::new(), no_op: false, pure_jump: false, address: addr,
-        length: 4,
-        fallthrough: Some(addr + 4),
-        targets: Vec::new(),
-        kind: crate::native_runtime::FlowKind::Fallthrough, });
-        assert!(!result, "candidate inside known function must be rejected even with valid flow");
+        let result = candidate_address_is_valid(0x1020, &ctx)
+            && candidate_flow_is_valid(
+                0x1020,
+                &ctx,
+                &FlowResult {
+                    terminal: false,
+                    conditional: false,
+                    return_op: false,
+                    delay_slots: Vec::new(),
+                    no_op: false,
+                    pure_jump: false,
+                    address: 0x1020,
+                    length: 4,
+                    fallthrough: Some(0x1024),
+                    targets: Vec::new(),
+                    kind: crate::native_runtime::FlowKind::Fallthrough,
+                },
+            );
+        assert!(
+            !result,
+            "candidate inside known function must be rejected even with valid flow"
+        );
     }
 
     #[test]
@@ -1502,13 +1505,29 @@ mod tests {
             initial_seeds: &initial_seeds,
         };
 
-        // Candidate 0x2050 is in data mapping. Flow returns valid instruction.
-        let result = filter_candidate(0x2050, &ctx, |addr| FlowResult { terminal: false, conditional: false, return_op: false, delay_slots: Vec::new(), no_op: false, pure_jump: false, address: addr,
-        length: 4,
-        fallthrough: Some(addr + 4),
-        targets: Vec::new(),
-        kind: crate::native_runtime::FlowKind::Fallthrough, });
-        assert!(!result, "candidate outside executable mapping must be rejected even with valid flow");
+        // Candidate 0x2050 is in a data mapping despite its valid instruction.
+        let result = candidate_address_is_valid(0x2050, &ctx)
+            && candidate_flow_is_valid(
+                0x2050,
+                &ctx,
+                &FlowResult {
+                    terminal: false,
+                    conditional: false,
+                    return_op: false,
+                    delay_slots: Vec::new(),
+                    no_op: false,
+                    pure_jump: false,
+                    address: 0x2050,
+                    length: 4,
+                    fallthrough: Some(0x2054),
+                    targets: Vec::new(),
+                    kind: crate::native_runtime::FlowKind::Fallthrough,
+                },
+            );
+        assert!(
+            !result,
+            "candidate outside executable mapping must be rejected even with valid flow"
+        );
     }
 
     #[test]

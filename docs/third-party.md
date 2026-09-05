@@ -147,6 +147,20 @@ than replacing it with the architecture default (Windows on x86). This is
 base load-spec selection, not producer identification from Go/Swift metadata.
 
 
+## Native instruction-flow facts
+
+`native/ventris_flow.hh` follows Ghidra 12.1.3
+`SleighInstructionPrototype.walkTemplates`, `flowListToFlowType` and
+`convertFlowFlags` (Apache-2.0). It retains template distinctions that resolved
+p-code alone loses: instruction-local labels and J_START/J_NEXT are not
+independent machine branches.
+
+The `flow <address> ...` response carries terminal/conditional flags, actual
+RETURN p-code presence and delay-slot lengths. Parent instruction lengths
+include their delay slots; slot instructions remain separately queryable.
+Conditional returns preserve their fallthrough. The console flushes once per
+batch, including error rows, rather than once per instruction.
+
 ## Function-start eligibility and scheduling
 
 `crates/lre-core/src/native/discovery/patterns.rs` follows Ghidra 12.1.3

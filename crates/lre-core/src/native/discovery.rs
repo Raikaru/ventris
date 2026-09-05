@@ -1,8 +1,9 @@
 //! Mapped-image discovery: SLEIGH supplies instruction lengths and call targets;
 //! the existing worklist supplies control-flow closure. No ISA-specific decoder.
 use super::{
-    close_call_targets, code_ranges, extern_name, filter_candidate, CandidateFilterContext,
-    ImportError, NativeFunction, NativeImport, NativeXref, Result,
+    candidate_address_is_valid, candidate_flow_is_valid, close_call_targets, code_ranges,
+    extern_name, CandidateFilterContext, ImportError, NativeFunction, NativeImport, NativeXref,
+    Result,
 };
 use crate::native_runtime::{
     ConsoleSession, FlowKind, FlowResult, LinkageContext, LinkageResult, NativeRuntimeError,
@@ -374,19 +375,20 @@ fn flow_discover_with_candidates<P: FlowProvider>(
                             && flow.targets.len() == 1
                     })
                     .map(|(_, flow)| flow.targets[0])
-                    .filter(|target| {
-                        in_code(*target)
-                            && !entries.contains(target)
-                            && !visited.contains(target)
-                            && !instruction_extents
-                                .iter()
-                                .any(|&(start, size)| *target > start && *target - start < size)
-                            && !flows.iter().any(|flow| {
-                                *target > flow.address
-                                    && *target - flow.address < flow.length as u64
-                            })
-                    })
                 {
+                    if linkage_candidates.contains(&target)
+                        || visited.contains(&target)
+                        || !in_code(target)
+                        || entries.contains(&target)
+                        || instruction_extents
+                            .iter()
+                            .any(|&(start, size)| target > start && target - start < size)
+                        || flows.iter().any(|flow| {
+                            target > flow.address && target - flow.address < flow.length as u64
+                        })
+                    {
+                        continue;
+                    }
                     linkage_candidates.insert(target);
                 }
             }
@@ -567,6 +569,7 @@ fn flow_discover_with_candidates<P: FlowProvider>(
     for pattern_round in [false, true] {
         let pattern_candidates = if pattern_round {
             if let Some(patterns) = patterns {
+                extents[instruction_start..].sort_unstable();
                 patterns::collect(
                     imp,
                     patterns,
@@ -604,8 +607,12 @@ fn flow_discover_with_candidates<P: FlowProvider>(
                 .copied()
                 .collect()
         };
-        unvisited_relocs
-            .retain(|&cand| in_code(cand) && !visited.contains(&cand) && !entries.contains(&cand));
+        unvisited_relocs.retain(|&cand| {
+            in_code(cand)
+                && !visited.contains(&cand)
+                && !filter_ctx.initial_seeds.contains(&cand)
+                && (pattern_round || candidate_address_is_valid(cand, &filter_ctx))
+        });
         unvisited_relocs.sort_unstable();
         unvisited_relocs.dedup();
 
@@ -615,10 +622,13 @@ fn flow_discover_with_candidates<P: FlowProvider>(
                 .into_iter()
                 .zip(flows)
                 .filter(|&(c, ref info)| {
-                    info.address == c
-                        && info.length != 0
-                        && !matches!(info.kind, FlowKind::Bad | FlowKind::Unimpl)
-                        && (pattern_round || filter_candidate(c, &filter_ctx, |_| info.clone()))
+                    if pattern_round {
+                        info.address == c
+                            && info.length != 0
+                            && !matches!(info.kind, FlowKind::Bad | FlowKind::Unimpl)
+                    } else {
+                        candidate_flow_is_valid(c, &filter_ctx, info)
+                    }
                 })
                 .map(|(c, _)| c)
                 .collect();

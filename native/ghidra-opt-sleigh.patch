@@ -328,7 +328,7 @@ index e62ab6a..6d42a2d 100644
      int4 sz;
      sz = glb->translate->printAssembly(assem,addr);
      addr = addr + sz;
-@@ -836,6 +854,79 @@ void IfcPrintdisasm::execute(istream &s)
+@@ -836,6 +854,80 @@ void IfcPrintdisasm::execute(istream &s)
    }
  }
  
@@ -372,10 +372,10 @@ index e62ab6a..6d42a2d 100644
 +    try {
 +      length = sleigh->oneInstructionFlow(emitter,addr,flow);
 +    } catch(BadDataError &err) {
-+      *status->fileoptr << "FLOW " << addr.getShortcut() << "0x" << hex << addr.getOffset() << " len=1 fall=none kind=BAD terminal=0 conditional=0 return_op=0 delays= targets=" << endl;
++      *status->fileoptr << "FLOW " << addr.getShortcut() << "0x" << hex << addr.getOffset() << " len=1 fall=none kind=BAD terminal=0 conditional=0 return_op=0 delays= targets=" << '\n';
 +      continue;
 +    } catch(UnimplError &err) {
-+      *status->fileoptr << "FLOW " << addr.getShortcut() << "0x" << hex << addr.getOffset() << " len=1 fall=none kind=UNIMPL terminal=0 conditional=0 return_op=0 delays= targets=" << endl;
++      *status->fileoptr << "FLOW " << addr.getShortcut() << "0x" << hex << addr.getOffset() << " len=1 fall=none kind=UNIMPL terminal=0 conditional=0 return_op=0 delays= targets=" << '\n';
 +      continue;
 +    }
 +
@@ -401,8 +401,9 @@ index e62ab6a..6d42a2d 100644
 +      if (i > 0) *status->fileoptr << ",";
 +      *status->fileoptr << flow.targets[i].getShortcut() << "0x" << hex << flow.targets[i].getOffset();
 +    }
-+    *status->fileoptr << endl;
++    *status->fileoptr << '\n';
 +  }
++  status->fileoptr->flush();
 +}
 +
  /// \class IfcDump
