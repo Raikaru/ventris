@@ -2,7 +2,7 @@
   "gate": "discovery",
   "milestone": "M1",
   "scoring_policy": "code-functions-v1",
-  "commit": "081879b5cb262bb05ca9d142a61ca7fb69f90a44",
+  "commit": "d5e9e618e30d7ec1de909869154d1a43ea7bfb8d",
   "date": "2026-09-05",
   "machine": {
     "os": "Linux-7.1.12-200.fc44.x86_64-x86_64-with-glibc2.43",

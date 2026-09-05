@@ -1250,28 +1250,43 @@ M2 — Program-model parity
   Rust and Qt build/package jobs pass on Linux, macOS and Windows.
   https://github.com/Raikaru/ventris/actions/runs/33966774392
 
-## m2-001 propagation implementation slices
-- Acceptance `b5073a3` fails on the missing `constants` command. Its x86-64
+## m2-001 mapped pointer propagation complete
+- Acceptance `b5073a3` failed on the missing `constants` command. Its x86-64
   and PowerPC BE32 fixtures load a readonly pointer into mapped BSS, propagate
   pointer arithmetic and reject an unmapped loaded value.
 - The named evaluator exists. It supplies policy; SymbolicPropogator and
   VarnodeContext supply state, memory and call semantics. Reuse native
   OpBehavior arithmetic and Funcdata flow rather than an ISA-specific decoder.
-- a: sparse known-bit/affine storage. C++11 smoke passes alias overwrites,
-  predecessor joins, temporary lifetime and 80,000 randomized reads in both
-  byte orders.
-- b: function propagation, mapped-memory policy and native console command;
-  the existing known-global-load acceptance must pass.
-- c: typed Rust query results, native-runtime CI execution and documentation.
-  Keep each implementation commit below 800 changed lines.
+- a (`b8e7e82`): sparse known-bit/affine storage. C++11 smoke passes alias
+  overwrites, predecessor joins, temporary lifetime and 80,000 randomized
+  reads in both byte orders.
+- b (`e5b0162`): native function propagation and mapped-memory policy.
+  Query-scoped entry metadata preserves recursive calls without retaining
+  new symbols or replacing existing function bodies.
+- c (`d5e9e61`): typed Rust results, call-stack regressions, native CI and
+  query/source documentation. Implementation slices stay below 800 changed
+  lines per commit.
+- Two native acceptance tests pass, including readonly global loads on
+  x86-64/PowerPC BE32, ordinary-call stack restoration, CALL-to-next and
+  recursive-call continuation. The recursive case failed before the fix.
+- Fourteen native smoke scenarios pass with identical repeated-query results:
+  spills, partial registers, joins, call clobbers/preservation, opaque
+  pointers, writable-memory trust, stores, stack aliases, PC capture,
+  unknown-store joins and recursion. Throwaway drivers were removed.
+- Workspace: 127 tests pass. Corpus: 5/5. Native console and worker builds
+  pass. Support-matrix scope and staleness checks pass.
+- Retained M1 discovery evidence is regenerated from source `d5e9e61` in
+  `benchmarks/reports/discovery-gate.json`: 20 pass / 0 fail / 0 skipped,
+  precision/recall 1.0 on every row; architecture check passed.
+  This is not an M2 program-model parity gate or a new default analyzer.
 
 ## Blocked on
 - None. M1 gate evidence is committed and enforced by passing hosted CI.
 
 ## Next task
-- m2-001b / m2-001c: publish native function propagation and its typed runtime
-  integration after the known-global-load acceptance, call-stack regression
-  and workspace checks pass. Record fresh retained-discovery evidence next.
+- m2-002: persist inferred data-reference facts with provenance. Write and
+  commit its failing acceptance before implementation; m2-001 supplies the
+  mapped-pointer query, not reference creation.
 
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a
