@@ -200,6 +200,11 @@ the committed raw corpus. The policy covers all 20 ELF inputs; the m1-008b
 discovery gate covers x86-64 `plain_o0` and `cpp_o2`, with recall >=0.98.
 Native ELF discovery uses unwind-index function entries and PLT metadata,
 flow-confirmed initializer/data pointers, and the existing batched flow walker.
+Established function entries can also seed pure direct-jump thunk destinations.
+Rebuild the console with `native/build_console.sh` to supply the required
+single-operation p-code purity evidence. Missing evidence fails closed.
+Conditional/interior branches, weak seeds and jump chains returning into their
+own body do not establish additional functions.
 
 ## Support matrix
 

@@ -606,6 +606,9 @@ pub struct FlowResult {
     pub fallthrough: Option<u64>,
     pub targets: Vec<u64>,
     pub kind: FlowKind,
+    /// True only for a single, side-effect-free direct SLEIGH branch operation.
+    #[serde(default)]
+    pub pure_jump: bool,
 }
 
 pub fn console_flow(cfg: &RuntimeConfig, binary: &Path, address: u64) -> Result<FlowResult> {
@@ -682,6 +685,7 @@ fn parse_flow_output(stdout: &str, expected_addr: u64) -> Result<FlowResult> {
             let mut fallthrough = None;
             let mut kind = FlowKind::Fallthrough;
             let mut targets = Vec::new();
+            let mut pure_jump = false;
 
             for part in rest.split_whitespace() {
                 if let Some(val) = part.strip_prefix("len=") {
@@ -702,6 +706,8 @@ fn parse_flow_output(stdout: &str, expected_addr: u64) -> Result<FlowResult> {
                         "UNIMPL" => FlowKind::Unimpl,
                         _ => FlowKind::Fallthrough,
                     };
+                } else if let Some(val) = part.strip_prefix("pure_jump=") {
+                    pure_jump = val == "1";
                 } else if let Some(val) = part.strip_prefix("targets=") {
                     for t in val.split(',') {
                         if let Some(target_addr) = parse_address_token(t) {
@@ -712,13 +718,11 @@ fn parse_flow_output(stdout: &str, expected_addr: u64) -> Result<FlowResult> {
                     addr = a;
                 }
             }
-            return Ok(FlowResult {
-                address: addr,
-                length,
-                fallthrough,
-                targets,
-                kind,
-            });
+            return Ok(FlowResult { pure_jump, address: addr,
+            length,
+            fallthrough,
+            targets,
+            kind, });
         }
     }
     err(format!("console produced no FLOW line: {stdout}"))
@@ -842,13 +846,11 @@ impl ConsoleSession {
 
         // Bad addresses produce a "Low-level ERROR" line and no FLOW.
         if line.contains("Low-level ERROR") {
-            return Ok(FlowResult {
-                address,
-                length: 1,
-                fallthrough: Some(address + 1),
-                targets: Vec::new(),
-                kind: FlowKind::Bad,
-            });
+            return Ok(FlowResult { pure_jump: false, address,
+            length: 1,
+            fallthrough: Some(address + 1),
+            targets: Vec::new(),
+            kind: FlowKind::Bad, });
         }
 
         parse_flow_output(&line, address)
@@ -857,13 +859,11 @@ impl ConsoleSession {
     /// Same as `flow` but never fails: unparseable/missing output becomes a
     /// length-1 `Bad` result so a walk can continue.
     pub fn try_flow(&mut self, address: u64) -> FlowResult {
-        self.flow(address).unwrap_or(FlowResult {
-            address,
-            length: 1,
-            fallthrough: Some(address + 1),
-            targets: Vec::new(),
-            kind: FlowKind::Bad,
-        })
+        self.flow(address).unwrap_or(FlowResult { pure_jump: false, address,
+        length: 1,
+        fallthrough: Some(address + 1),
+        targets: Vec::new(),
+        kind: FlowKind::Bad, })
     }
     /// Queries control-flow for multiple addresses in a single batch request.
     pub fn flow_batch(&mut self, addresses: &[u64]) -> Result<Vec<FlowResult>> {
@@ -903,21 +903,17 @@ impl ConsoleSession {
                 return err("console closed during flow_batch output");
             }
             if line.contains("Low-level ERROR") {
-                results.push(FlowResult {
-                    address: addr,
-                    length: 1,
-                    fallthrough: Some(addr + 1),
-                    targets: Vec::new(),
-                    kind: FlowKind::Bad,
-                });
+                results.push(FlowResult { pure_jump: false, address: addr,
+                length: 1,
+                fallthrough: Some(addr + 1),
+                targets: Vec::new(),
+                kind: FlowKind::Bad, });
             } else {
-                results.push(parse_flow_output(&line, addr).unwrap_or(FlowResult {
-                    address: addr,
-                    length: 1,
-                    fallthrough: Some(addr + 1),
-                    targets: Vec::new(),
-                    kind: FlowKind::Bad,
-                }));
+                results.push(parse_flow_output(&line, addr).unwrap_or(FlowResult { pure_jump: false, address: addr,
+                length: 1,
+                fallthrough: Some(addr + 1),
+                targets: Vec::new(),
+                kind: FlowKind::Bad, }));
             }
         }
 
@@ -935,13 +931,11 @@ impl ConsoleSession {
         self.flow_batch(addresses).unwrap_or_else(|_| {
             addresses
                 .iter()
-                .map(|&addr| FlowResult {
-                    address: addr,
-                    length: 1,
-                    fallthrough: Some(addr + 1),
-                    targets: Vec::new(),
-                    kind: FlowKind::Bad,
-                })
+                .map(|&addr| FlowResult { pure_jump: false, address: addr,
+                length: 1,
+                fallthrough: Some(addr + 1),
+                targets: Vec::new(),
+                kind: FlowKind::Bad, })
                 .collect()
         })
     }

@@ -1658,7 +1658,7 @@ mod tests {
                 0x1030 => (FlowKind::Bad, None, vec![]),
                 _ => (FlowKind::Return, None, vec![]),
             };
-            FlowResult { address, length: 4, fallthrough, targets, kind }
+            FlowResult { pure_jump: false, address, length: 4, fallthrough, targets, kind }
         }).collect());
         assert!(imp.functions.iter().any(|f| f.entry == 0x1020));
         assert!(imp.functions.iter().any(|f| f.entry == 0x1040),
@@ -1681,11 +1681,9 @@ mod tests {
             ..Default::default()
         };
         flow_discover_with_provider(&mut imp, |addresses| addresses.iter().map(|&address| {
-            FlowResult {
-                address, length: 4, fallthrough: None,
-                targets: if address == 0x1000 { vec![0x3000] } else { vec![] },
-                kind: if address == 0x1000 { FlowKind::Branch } else { FlowKind::Return },
-            }
+            FlowResult { pure_jump: false, address, length: 4, fallthrough: None,
+            targets: if address == 0x1000 { vec![0x3000] } else { vec![] },
+            kind: if address == 0x1000 { FlowKind::Branch } else { FlowKind::Return }, }
         }).collect());
         assert!(imp.functions.iter().any(|f| f.entry == 0x2000),
                 "a distant branch must not suppress a function in the unvisited gap");
@@ -1984,13 +1982,11 @@ mod tests {
 
         // Candidate 0x1020 is internal to 0x1000..0x1050.
         // Mock flow returns a valid instruction with length 4.
-        let result = filter_candidate(0x1020, &ctx, |addr| FlowResult {
-            address: addr,
-            length: 4,
-            fallthrough: Some(addr + 4),
-            targets: Vec::new(),
-            kind: crate::native_runtime::FlowKind::Fallthrough,
-        });
+        let result = filter_candidate(0x1020, &ctx, |addr| FlowResult { pure_jump: false, address: addr,
+        length: 4,
+        fallthrough: Some(addr + 4),
+        targets: Vec::new(),
+        kind: crate::native_runtime::FlowKind::Fallthrough, });
         assert!(!result, "candidate inside known function must be rejected even with valid flow");
     }
 
@@ -2022,13 +2018,11 @@ mod tests {
         };
 
         // Candidate 0x2050 is in data mapping. Flow returns valid instruction.
-        let result = filter_candidate(0x2050, &ctx, |addr| FlowResult {
-            address: addr,
-            length: 4,
-            fallthrough: Some(addr + 4),
-            targets: Vec::new(),
-            kind: crate::native_runtime::FlowKind::Fallthrough,
-        });
+        let result = filter_candidate(0x2050, &ctx, |addr| FlowResult { pure_jump: false, address: addr,
+        length: 4,
+        fallthrough: Some(addr + 4),
+        targets: Vec::new(),
+        kind: crate::native_runtime::FlowKind::Fallthrough, });
         assert!(!result, "candidate outside executable mapping must be rejected even with valid flow");
     }
 
@@ -2158,69 +2152,51 @@ mod tests {
         flow_discover_with_provider(&mut imp, |chunk| {
             chunk.iter().map(|&addr| {
                 match addr {
-                    0x1000 => FlowResult {
-                        address: 0x1000,
-                        length: 1,
-                        fallthrough: Some(0x1001),
-                        targets: Vec::new(),
-                        kind: FlowKind::Fallthrough,
-                    },
-                    0x1001 => FlowResult {
-                        address: 0x1001,
-                        length: 3,
-                        fallthrough: Some(0x1004),
-                        targets: Vec::new(),
-                        kind: FlowKind::Fallthrough,
-                    },
-                    0x1004 => FlowResult {
-                        address: 0x1004,
-                        length: 1,
-                        fallthrough: None,
-                        targets: Vec::new(),
-                        kind: FlowKind::Return,
-                    },
-                    0x1040 => FlowResult {
-                        address: 0x1040,
-                        length: 1,
-                        fallthrough: Some(0x1041),
-                        targets: Vec::new(),
-                        kind: FlowKind::Fallthrough,
-                    },
-                    0x1041 => FlowResult {
-                        address: 0x1041,
-                        length: 3,
-                        fallthrough: Some(0x1044),
-                        targets: Vec::new(),
-                        kind: FlowKind::Fallthrough,
-                    },
-                    0x1044 => FlowResult {
-                        address: 0x1044,
-                        length: 5,
-                        fallthrough: Some(0x1049),
-                        targets: vec![0x1080],
-                        kind: FlowKind::Call,
-                    },
-                    0x1049 => FlowResult {
-                        address: 0x1049,
-                        length: 1,
-                        fallthrough: None,
-                        targets: Vec::new(),
-                        kind: FlowKind::Return,
-                    },
-                    0x1080 => FlowResult {
-                        address: 0x1080,
-                        length: 1,
-                        fallthrough: None,
-                        targets: Vec::new(),
-                        kind: FlowKind::Return,
-                    },
-                    other => FlowResult {
-                        address: other,
-                        length: 1,
-                        fallthrough: None,
-                        targets: Vec::new(),
-                        kind: FlowKind::Return,
-                    },
+                    0x1000 => FlowResult { pure_jump: false, address: 0x1000,
+                    length: 1,
+                    fallthrough: Some(0x1001),
+                    targets: Vec::new(),
+                    kind: FlowKind::Fallthrough, },
+                    0x1001 => FlowResult { pure_jump: false, address: 0x1001,
+                    length: 3,
+                    fallthrough: Some(0x1004),
+                    targets: Vec::new(),
+                    kind: FlowKind::Fallthrough, },
+                    0x1004 => FlowResult { pure_jump: false, address: 0x1004,
+                    length: 1,
+                    fallthrough: None,
+                    targets: Vec::new(),
+                    kind: FlowKind::Return, },
+                    0x1040 => FlowResult { pure_jump: false, address: 0x1040,
+                    length: 1,
+                    fallthrough: Some(0x1041),
+                    targets: Vec::new(),
+                    kind: FlowKind::Fallthrough, },
+                    0x1041 => FlowResult { pure_jump: false, address: 0x1041,
+                    length: 3,
+                    fallthrough: Some(0x1044),
+                    targets: Vec::new(),
+                    kind: FlowKind::Fallthrough, },
+                    0x1044 => FlowResult { pure_jump: false, address: 0x1044,
+                    length: 5,
+                    fallthrough: Some(0x1049),
+                    targets: vec![0x1080],
+                    kind: FlowKind::Call, },
+                    0x1049 => FlowResult { pure_jump: false, address: 0x1049,
+                    length: 1,
+                    fallthrough: None,
+                    targets: Vec::new(),
+                    kind: FlowKind::Return, },
+                    0x1080 => FlowResult { pure_jump: false, address: 0x1080,
+                    length: 1,
+                    fallthrough: None,
+                    targets: Vec::new(),
+                    kind: FlowKind::Return, },
+                    other => FlowResult { pure_jump: false, address: other,
+                    length: 1,
+                    fallthrough: None,
+                    targets: Vec::new(),
+                    kind: FlowKind::Return, },
                 }
             }).collect()
         });

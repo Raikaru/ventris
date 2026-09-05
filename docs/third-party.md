@@ -45,3 +45,15 @@ and `evaluateElfSymbol` establish the positive synthetic-placeholder evidence:
 an artificial `EXTERNAL` block sourced from `Elf Loader`, plus a thunk to an
 external function. The exporter lives outside the runtime bridge and does not
 change its fingerprint or the immutable raw oracle references.
+
+## Minimal direct-jump thunks
+
+The approved M1 prerequisite follows the single-jump case in Ghidra 12.1.3
+`CreateThunkFunctionCmd.getSimpleFlow` (Apache-2.0), checked in the extracted
+Java source. The native rule is narrower: an established entry must emit
+exactly one direct SLEIGH `BRANCH` operation, with no additional p-code effects.
+Its destination must independently decode and survive body-containment
+reconciliation. Weak data/boundary candidates do not establish further entries.
+Jump xrefs retain `native-import:thunk` provenance only for distinct retained
+destinations. This is not the full multi-instruction, indirect or call-return
+thunk analyzer.

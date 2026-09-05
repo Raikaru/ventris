@@ -316,7 +316,7 @@ index e62ab6a..6d42a2d 100644
      int4 sz;
      sz = glb->translate->printAssembly(assem,addr);
      addr = addr + sz;
-@@ -836,6 +849,117 @@ void IfcPrintdisasm::execute(istream &s)
+@@ -836,6 +849,122 @@ void IfcPrintdisasm::execute(istream &s)
    }
  }
  
@@ -332,7 +332,8 @@ index e62ab6a..6d42a2d 100644
 +      OpCode opc;
 +      Address target;
 +      bool has_target;
-+      Op(void) : opc(CPUI_COPY), has_target(false) {}
++      bool direct_target;
++      Op(void) : opc(CPUI_COPY), has_target(false), direct_target(false) {}
 +    };
 +    vector<Op> ops;
 +    virtual void dump(const Address &a,OpCode opc,VarnodeData *outvar,VarnodeData *vars,int4 isize) {
@@ -346,6 +347,7 @@ index e62ab6a..6d42a2d 100644
 +        } else if (vars[0].space->getType() == IPTR_PROCESSOR) {
 +          op.target = Address(vars[0].space,vars[0].offset);
 +          op.has_target = true;
++          op.direct_target = true;
 +        }
 +      }
 +      ops.push_back(op);
@@ -422,6 +424,9 @@ index e62ab6a..6d42a2d 100644
 +    } else {
 +      *status->fileoptr << " fall=none";
 +    }
++    bool pure_jump = emitter.ops.size() == 1 && emitter.ops[0].opc == CPUI_BRANCH
++        && emitter.ops[0].direct_target;
++    *status->fileoptr << " pure_jump=" << (pure_jump ? 1 : 0);
 +    *status->fileoptr << " kind=" << kind << " targets=";
 +    for(size_t i=0;i<targets.size();++i) {
 +      if (i > 0) *status->fileoptr << ",";
