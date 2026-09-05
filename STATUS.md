@@ -953,14 +953,34 @@ M1 — Discovery becomes generic
 - Execute d2 first; d3/d4 and sub-task e remain open. References, corpus,
   metric definitions and thresholds remain unchanged.
 
+## m1-010-d2 verified
+- Failing acceptance committed in `5dcc13b`; implementation in `f55b15d`.
+  ELF32 little- and big-endian startup sections produced 0 seeds before
+  the fix; the regression now passes and rejects non-executable namesakes.
+- ELF32 and ELF64 now use one section-start seed collector. No changes to
+  the generic flow worklist, thunk recognition or scoring policy.
+- i386 non-PIE matches: plain_o0 15/15, plain_o2 15/15, cpp_o2 23/23,
+  many_o2 413/413; precision and recall 1.0 for all four.
+- PowerPC matches: plain_o0/plain_o2 11/12 (previously 8/12), cpp_o2 18/19
+  with 19 native entries, many_o2 409/410. The remaining non-PIE miss is
+  the `__libc_start_main` PLT stub; cpp_o2 still has extra `10010980`.
+- Full gate: 10 pass, 10 fail, 0 skipped; architecture check passes.
+  `benchmarks/reports/discovery-gate.json` was generated from `f55b15d`.
+  PIE address alignment and remaining non-x86 failures are not resolved.
+- Workspace 109 tests; core no-default 61; legacy corpus 5/5. README
+  support-matrix staleness check passes. M1 is not passed.
+- d2 is complete. d3/d4 and e remain open.
+
 ## Blocked on
 - None for the remaining M1 loader/seed work; the landing-prefix blocker is resolved.
   Full multi-instruction/indirect thunk analysis is not authorized.
 
 ## Next task
-- m1-010-d2: share ELF startup section seeds across ELF classes. Write and
-  observe the acceptance above failing before implementation. Remaining
-  m1-010-d3/d4 work is recorded above; stop if another M2 analyzer is necessary.
+- m1-010-d3: fix PIE load bias across loader facts and native address
+  consumers, not scoring. Extend `tests/m1-004_pie.sh` and native acceptance
+  coverage to assert loaded addresses and consistent pointer/memory reads;
+  observe failure and commit tests before implementation. Preserve nonzero
+  prelinked bases. d4/e remain open; stop if another M2 analyzer is necessary.
 
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a

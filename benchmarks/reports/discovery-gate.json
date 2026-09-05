@@ -2,7 +2,7 @@
   "gate": "discovery",
   "milestone": "M1",
   "scoring_policy": "code-functions-v1",
-  "commit": "27721f2672289895ed03d222efe484479dc027c5",
+  "commit": "f55b15d459e832e133213dd32cec6f7db0b3e5cd",
   "date": "2026-09-05",
   "machine": {
     "os": "Linux-7.1.12-200.fc44.x86_64-x86_64-with-glibc2.43",
@@ -12,7 +12,7 @@
     "passed": true,
     "core": "crates/lre-core/src/native/discovery.rs",
     "core_sha256": "2af7e7ba90d83cc2da789b9a726d3e14141c73bc974e62f2f4b2047046824ab3",
-    "legacy_source_sha256": "165729b3e5c28e8ab3a08d6970685bb13d93949e0a3bd31a8432a19613c6acdf",
+    "legacy_source_sha256": "bd79e644b2ece6279e7b2bf8123fe71aadf6345af18e7a448b29527beefc8510",
     "retired_decoder_discovery": [],
     "retired_feature_switches": [],
     "retired_console_discovery": [],
@@ -163,10 +163,10 @@
     },
     {
       "id": "i386_plain_o0",
-      "status": "fail",
+      "status": "pass",
       "metrics": {
         "fn.precision": 1.0,
-        "fn.recall": 0.7333333333333333
+        "fn.recall": 1.0
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -178,23 +178,18 @@
       "scoring_view_sha256": "4d18c9661d92fe8a0bde6b7557cb6c8c5071aeaa6c84f98b83fbc609db7aa987",
       "raw_oracle_functions": 18,
       "excluded_functions": 3,
-      "native_functions": 11,
+      "native_functions": 15,
       "oracle_functions": 15,
-      "matched_functions": 11,
-      "missing_entries": [
-        "00401480",
-        "004015ac",
-        "004015cc",
-        "004015e0"
-      ],
+      "matched_functions": 15,
+      "missing_entries": [],
       "extra_entries": []
     },
     {
       "id": "i386_plain_o2",
-      "status": "fail",
+      "status": "pass",
       "metrics": {
         "fn.precision": 1.0,
-        "fn.recall": 0.7333333333333333
+        "fn.recall": 1.0
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -206,15 +201,10 @@
       "scoring_view_sha256": "1126477352a9cab2c99f78fa8599c973119f208be05a117aa2c226855b4eddcc",
       "raw_oracle_functions": 18,
       "excluded_functions": 3,
-      "native_functions": 11,
+      "native_functions": 15,
       "oracle_functions": 15,
-      "matched_functions": 11,
-      "missing_entries": [
-        "00401480",
-        "00401578",
-        "00401598",
-        "004015b0"
-      ],
+      "matched_functions": 15,
+      "missing_entries": [],
       "extra_entries": []
     },
     {
@@ -234,7 +224,7 @@
       "scoring_view_sha256": "611ac05b8088092975d4ddaf53cf68d588e89f893b036c012a08210aac2a4d56",
       "raw_oracle_functions": 22,
       "excluded_functions": 6,
-      "native_functions": 13,
+      "native_functions": 16,
       "oracle_functions": 16,
       "matched_functions": 0,
       "missing_entries": [
@@ -266,6 +256,9 @@
         "000015c5",
         "000015d0",
         "000015e0",
+        "0000160c",
+        "0000162c",
+        "00001640",
         "00001650",
         "00001660",
         "00001670"
@@ -273,10 +266,10 @@
     },
     {
       "id": "i386_cpp_o2",
-      "status": "fail",
+      "status": "pass",
       "metrics": {
         "fn.precision": 1.0,
-        "fn.recall": 0.8260869565217391
+        "fn.recall": 1.0
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -288,15 +281,10 @@
       "scoring_view_sha256": "1dfd4a9ffcab2d710d338fb525fdfb83a72c7e2885f69e33d833c116f6516f55",
       "raw_oracle_functions": 32,
       "excluded_functions": 9,
-      "native_functions": 19,
+      "native_functions": 23,
       "oracle_functions": 23,
-      "matched_functions": 19,
-      "missing_entries": [
-        "00401730",
-        "00401930",
-        "00401950",
-        "00401970"
-      ],
+      "matched_functions": 23,
+      "missing_entries": [],
       "extra_entries": []
     },
     {
@@ -304,7 +292,7 @@
       "status": "pass",
       "metrics": {
         "fn.precision": 1.0,
-        "fn.recall": 0.9903147699757869
+        "fn.recall": 1.0
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -316,15 +304,10 @@
       "scoring_view_sha256": "aa34df9aa211754ca6808205fe6fc6389f2071384ae18c8880c520303ffd89c4",
       "raw_oracle_functions": 415,
       "excluded_functions": 2,
-      "native_functions": 409,
+      "native_functions": 413,
       "oracle_functions": 413,
-      "matched_functions": 409,
-      "missing_entries": [
-        "00403fe0",
-        "00406ae8",
-        "00406b08",
-        "00406b20"
-      ],
+      "matched_functions": 413,
+      "missing_entries": [],
       "extra_entries": []
     },
     {
@@ -495,7 +478,7 @@
       "status": "fail",
       "metrics": {
         "fn.precision": 1.0,
-        "fn.recall": 0.6666666666666666
+        "fn.recall": 0.9166666666666666
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -507,14 +490,11 @@
       "scoring_view_sha256": "86ad5849850e87f24eaa3d94355ffdf787183a9a50ef8d8721fa7db0262059fb",
       "raw_oracle_functions": 15,
       "excluded_functions": 3,
-      "native_functions": 8,
+      "native_functions": 11,
       "oracle_functions": 12,
-      "matched_functions": 8,
+      "matched_functions": 11,
       "missing_entries": [
-        "10010568",
-        "10010588",
-        "100105cc",
-        "100105dc"
+        "10010568"
       ],
       "extra_entries": []
     },
@@ -523,7 +503,7 @@
       "status": "fail",
       "metrics": {
         "fn.precision": 1.0,
-        "fn.recall": 0.6666666666666666
+        "fn.recall": 0.9166666666666666
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -535,14 +515,11 @@
       "scoring_view_sha256": "c8927c0e0c7bbb30c24ab767f2445ed9903c12c2e3a6c71e70c889c016d866b2",
       "raw_oracle_functions": 15,
       "excluded_functions": 3,
-      "native_functions": 8,
+      "native_functions": 11,
       "oracle_functions": 12,
-      "matched_functions": 8,
+      "matched_functions": 11,
       "missing_entries": [
-        "10010520",
-        "10010540",
-        "10010584",
-        "10010594"
+        "10010520"
       ],
       "extra_entries": []
     },
@@ -563,7 +540,7 @@
       "scoring_view_sha256": "fd35952e947677b87c8bc33bce8580848b5526f7bfaff84b377734c7a3ecdd77",
       "raw_oracle_functions": 19,
       "excluded_functions": 6,
-      "native_functions": 4,
+      "native_functions": 7,
       "oracle_functions": 13,
       "matched_functions": 0,
       "missing_entries": [
@@ -585,15 +562,18 @@
         "000104c0",
         "00010644",
         "00010650",
-        "000106b8"
+        "000106b8",
+        "000106c8",
+        "0001070c",
+        "0001071c"
       ]
     },
     {
       "id": "powerpc_cpp_o2",
       "status": "fail",
       "metrics": {
-        "fn.precision": 0.9375,
-        "fn.recall": 0.7894736842105263
+        "fn.precision": 0.9473684210526315,
+        "fn.recall": 0.9473684210526315
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -605,14 +585,11 @@
       "scoring_view_sha256": "71f9ed74532c828f303f3f75aba487170359e8a8b35ae32ccee7008bff61df1f",
       "raw_oracle_functions": 28,
       "excluded_functions": 9,
-      "native_functions": 16,
+      "native_functions": 19,
       "oracle_functions": 19,
-      "matched_functions": 15,
+      "matched_functions": 18,
       "missing_entries": [
-        "10010890",
-        "10010900",
-        "10010944",
-        "10010954"
+        "10010890"
       ],
       "extra_entries": [
         "10010980"
@@ -623,7 +600,7 @@
       "status": "pass",
       "metrics": {
         "fn.precision": 1.0,
-        "fn.recall": 0.9902439024390244
+        "fn.recall": 0.9975609756097561
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -635,21 +612,18 @@
       "scoring_view_sha256": "afbaef542ecc9e34064f8c4577056bb632b9bcc4a0a0c3453a45025b299d584b",
       "raw_oracle_functions": 412,
       "excluded_functions": 2,
-      "native_functions": 406,
+      "native_functions": 409,
       "oracle_functions": 410,
-      "matched_functions": 406,
+      "matched_functions": 409,
       "missing_entries": [
-        "10014f98",
-        "10014fa8",
-        "10014fec",
-        "10014ffc"
+        "10014f98"
       ],
       "extra_entries": []
     }
   ],
   "summary": {
-    "pass": 7,
-    "fail": 13,
+    "pass": 10,
+    "fail": 10,
     "skipped": 0
   },
   "passed": false
