@@ -1177,5 +1177,76 @@ mod tests {
                 "a pattern must not read past the requested mapped range"
             );
         }
+
+        // A private pattern root exercises DSL boundaries without modifying the SDK.
+        struct PatternRoot(PathBuf);
+        impl Drop for PatternRoot {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let root =
+            std::env::temp_dir().join(format!("ventris-pattern-grammar-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let root = PatternRoot(root);
+        let patterns = root.0.join("Ghidra/Processors/Fixture/data/patterns");
+        std::fs::create_dir_all(&patterns).unwrap();
+        std::fs::write(
+            patterns.join("patternconstraints.xml"),
+            r#"
+<patternconstraints><language id="AARCH64:*:64:*">
+  <patternfile>grammar.xml</patternfile>
+  <compiler id="not-the-selected-compiler"><patternfile>missing.xml</patternfile></compiler>
+</language></patternconstraints>"#,
+        )
+        .unwrap();
+        std::fs::write(
+            patterns.join("grammar.xml"),
+            r#"
+<patternlist>
+  <pattern mark="0"><data>0xa. * 1011....</data>
+    <align mark="1" bits="2"/><possiblefuncstart/>
+  </pattern>
+  <patternpairs totalbits="9" postbits="4">
+    <prepatterns><data>0xc.</data></prepatterns>
+    <postpatterns><data>0xd.</data><funcstart/></postpatterns>
+  </patternpairs>
+  <patternpairs totalbits="8" postbits="5">
+    <prepatterns><data>0xe.</data></prepatterns>
+    <postpatterns><data>0xf.</data><funcstart/></postpatterns>
+  </patternpairs>
+</patternlist>"#,
+        )
+        .unwrap();
+        cfg.ghidra_install = root.0.clone();
+        let mut bytes = vec![0; 0x10002];
+        bytes[3..5].copy_from_slice(&[0xa1, 0xb2]);
+        bytes[0xffff..0x10001].copy_from_slice(&[0xa3, 0xb4]);
+        bytes[0x13..0x15].copy_from_slice(&[0xc1, 0xd2]);
+        bytes[0x17..0x19].copy_from_slice(&[0xe3, 0xf4]);
+        let mut session = ConsoleSession::new(&cfg).unwrap();
+        session
+            .load_mapped(&NativeImport {
+                language: cfg.language_id.clone(),
+                mappings: vec![crate::native::Mapping {
+                    vaddr: 0x1000,
+                    size: bytes.len() as u64,
+                    file_off: 0,
+                    flags: 6,
+                    bytes,
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            query(&mut session, 0x11002),
+            vec![0x1004, 0x11000],
+            "marks override attributes; alignment uses the raw start; fixed-bit thresholds apply"
+        );
+        assert_eq!(
+            query(&mut session, 0x11000),
+            vec![0x1004],
+            "a match across a scan-buffer boundary still needs its complete byte sequence"
+        );
     }
 }
