@@ -21,18 +21,18 @@ Nothing is "done" until its gate file is committed and continuous integration en
 - Each milestone defines a gate in `benchmarks/reports/*-gate.json` following the standard schema (II.2).
 - Never mark a gate passed without a committed gate report produced by the gate script in that session.
 - Never edit a committed `baseline-*.json` by hand.
-- Metric definitions are frozen (see `AGENTS.md` and roadmap). Never change a metric definition without human review.
+- Metric definitions are frozen (see roadmap). Never change a metric definition without human review.
 
 ## Operating loop and commit conventions
 
-All development follows the disciplined operating loop documented in `AGENTS.md` (Section II.0):
+Development uses the following test-first operating loop:
 
 1. **One task per commit range**: Work only on the task specified in `STATUS.md`.
 2. **Test-first discipline**: Write or extend the acceptance test named in the task before writing implementation code. The test must fail. Commit it as `<id>: test`.
 3. **Implementation**: Implement the minimum necessary to make the test pass. Run `cargo test --workspace`, `tests/corpus.sh`, and the relevant gate scripts. Commit as `<id>: <summary>`.
 4. **Metrics in STATUS.md**: Update `STATUS.md` with concrete measurements (numbers, not adjectives), and record the next task ID.
-5. **No skipping**: Never start a task from a later milestone. If blocked, document the blocker in `STATUS.md` and stop.
+5. **Dependency-driven sequencing**: Necessary prerequisites may move ahead of milestone order under the maintainer's authorization. Record the sequencing decision in `STATUS.md`; keep every acceptance gate intact.
 
 ## Human-reserved decisions
 
-Certain architectural, legal, and operational decisions are strictly reserved for the project maintainer. See `AGENTS.md` Section II.1 for the complete list.
+Architectural, legal, and operational decisions explicitly reserved for the project maintainer still require approval.

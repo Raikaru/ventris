@@ -1021,18 +1021,23 @@ M1 — Discovery becomes generic
 - No d4 analyzer implementation, oracle change or metric change was made.
   Implementation stops at the required later-milestone sequencing decision.
 
+## Authorized prerequisite sequencing
+- The maintainer authorized scheduling necessary later-milestone analyzer
+  prerequisites autonomously so the current milestone can pass unchanged gates.
+  This includes required function-start and indirect-thunk/tail-call work,
+  not changes to corpus, metrics, release policy or other reserved decisions.
+- The maintainer requested deletion of `AGENTS.md`. The file and its obsolete
+  verbatim-content test/CI invocation are removed; no replacement agent-policy
+  file is introduced.
+
 ## Blocked on
-- M1 discovery needs additional function-start/PLT/tail-transfer analysis
-  beyond the approved entry -> optional no-op -> pure direct jump rule.
-  Interior tail transfers and multi-instruction/indirect thunk recognition
-  remain outside its authorized scope (m2-009). Human sequencing approval
-  is required before extending that prerequisite; the 12/8 gate is not passed.
+- None for dependency-driven prerequisite sequencing; authorization is recorded
+  above. The current M1 discovery gate remains 12 pass / 8 fail.
 
 ## Next task
-- Await the M1 prerequisite sequencing decision above. Then resume
-  m1-010-d4, starting with the identified SHN_UNDEF loader regression.
-  Existing full discovery acceptance, corpus, references and thresholds
-  remain unchanged. Sub-task e remains open.
+- m1-010-d4: resume with the SHN_UNDEF loader regression, then implement the
+  necessary approved analyzer prerequisites. Existing full discovery acceptance,
+  corpus, references and thresholds remain unchanged. Sub-task e remains open.
 
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a
