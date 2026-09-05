@@ -69,6 +69,10 @@ thunk analyzer.
 ELF record layouts and relative-relocation constants are checked against the
 public GNU C Library `elf.h` SDK header (LGPL-2.1-or-later). No implementation
 code is copied. REL/RELA/RELR materialization uses ELF word size and byte order.
+External GLOB_DAT/JUMP_SLOT records use the same public header constants.
+Their linked dynamic symbol table supplies loaded GOT-slot identities for
+ELF32/ELF64 REL/RELA in the image's byte order. Recording a slot does not
+establish a function; that requires independent instruction/flow evidence.
 Ghidra 12.1.3 `ElfLoaderOptionsFactory` and `ElfProgramBuilder` (Apache-2.0)
 establish the default image-base policy: zero-based ET_DYN images receive
 0x100000 for ELF64 or 0x10000 for ELF32; prelinked bases remain unchanged.

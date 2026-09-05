@@ -1034,6 +1034,15 @@ M1 — Discovery becomes generic
 - Function-start/PLT prerequisite research proceeds against pinned Ghidra
   processor patterns and analyzers. No reference or metric is changed.
 
+## m1-010-d4b loaded external relocation facts
+- Regression commit `172bf78` fails before implementation when an imported
+  function's relocated GOT slot has no instruction stub in the image.
+- REL/RELA linkage records now retain loaded slot addresses and names through
+  their linked dynamic symbol/string tables, including ELF32 big endian.
+  Undefined symbols do not become function definitions through this path.
+- Workspace: 113 tests. Full discovery remains 11 pass / 9 fail / 0 skipped.
+  No new entry-discovery capability or gate pass is claimed for loader facts.
+
 ## m1-010-d4 prerequisite sub-tasks
 - d4b: record loaded external relocation slots for ELF32/ELF64, independently
   of instruction decoding; preserve symbol-table linkage and endian/load bias.
@@ -1061,9 +1070,9 @@ M1 — Discovery becomes generic
   above. The current M1 discovery gate remains 11 pass / 9 fail.
 
 ## Next task
-- m1-010-d4b: loaded external relocation facts, acceptance in
-  `crates/lre-core/tests/elf_image.rs`. Complete the d4 prerequisites above
-  against unchanged full discovery acceptance; sub-task e remains open.
+- m1-010-d4c: bounded SLEIGH linkage-thunk evidence, then integrate it into
+  discovery under d4d. Complete the d4 prerequisites above against unchanged
+  full discovery acceptance; sub-task e remains open.
 
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a
