@@ -856,6 +856,21 @@ M1 — Discovery becomes generic
 - This completes the approved minimal prerequisite, not all of m2-009 or M1.
   Raw references, scoring exclusions and thresholds remain unchanged.
 
+## m1-010-c execution slices
+- c1: remove native.rs ISA dispatch/sweeps and decoder-backed discovery;
+  ELF/PE use the shared SLEIGH worklist, DOL retains its mapped-image seed scan.
+  Candidate admission uses decoded flow, not architecture-specific pad bytes.
+- c2: delete the now-unused hand-decoder discovery implementation and its
+  route-selection feature flags; retain instruction decoding used by listing
+  and graph consumers. No discovery accelerator is retained.
+- c3: retire the obsolete hand-versus-console benchmark producer and its
+  acceptance wrapper, then publish the existing all-input gate and regressions.
+  Historical benchmark reports remain unchanged. Each slice is a separate
+  commit below 800 changed lines; c1/c2/c3 precede m1-010-d.
+- Acceptance is the existing discovery gate architecture check, extended to
+  cover retired decoder discovery and feature switches, plus a failing
+  candidate-flow regression. Precision/recall thresholds remain unchanged.
+
 ## Blocked on
 - None for m1-010-c; the approved minimal thunk prerequisite is resolved.
 

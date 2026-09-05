@@ -28,9 +28,15 @@ def architecture_check():
     isa_lines = [{"line": n, "text": line.strip()}
                  for n, line in enumerate(core.read_text().splitlines(), 1)
                  if re.search(r"x86|PowerPC|AARCH64|disasm::", line, re.IGNORECASE)]
-    return {"passed": not legacy and not isa_lines,
+    decoder = ROOT / "crates/lre-core/src/disasm.rs"
+    retired = re.findall(r"(?m)^pub fn (discover)\s*[<(]", decoder.read_text())
+    switches = [str(path.relative_to(ROOT)) for path in (
+        ROOT / "crates/lre-core/Cargo.toml", ROOT / "crates/lre-cli/Cargo.toml")
+        if re.search(r"(?m)^x86_decoder\s*=", path.read_text())]
+    return {"passed": not legacy and not isa_lines and not retired and not switches,
             "core": str(core.relative_to(ROOT)), "core_sha256": digest(core),
             "legacy_source_sha256": digest(native),
+            "retired_decoder_discovery": retired, "retired_feature_switches": switches,
             "legacy_discovery_definitions": legacy, "isa_specific_lines": isa_lines}
 
 
