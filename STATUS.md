@@ -16,10 +16,10 @@ workflow baseline (39.6 MB peak vs 375 MiB stock; see gate numbers below and
   Dolphin GDB-RSP memory client for the live overlay, durable trace timeline
   events, and a deterministic, idempotent collaboration operation log exposed
   by Core/API/Qt/SDK.
-- Native ELF64 structural import selects Ghidra language ids for x86-64,
-  AARCH64, ARM, MIPS, RISC-V, and PowerPC. The fallback flow walker remains
-  x86-64-specific; the worker workflow is verified for x86-64 and the
-  Agent Under Fire PPC e500 target with matching SLEIGH/spec bundles.
+- Native ELF structural import selects Ghidra language ids for x86-64,
+  AARCH64, ARM, MIPS, RISC-V and PowerPC. ELF/PE discovery now uses the generic
+  SLEIGH worklist; without the console, only structural facts remain. Worker
+  verification covers x86-64 and the Agent Under Fire PPC e500 target.
 - `lre-cli architectures --project DIR` scans the installed `.ldefs` catalog.
   Non-x86 native decompile parity is not claimed without a matching compiled
   SLEIGH language and normalized specification bundle.

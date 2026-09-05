@@ -142,9 +142,9 @@ RUNS=3 VENTRIS_SLA=... ./benchmarks/gate.sh # memory/perf gates
 
 ## Honest status
 
-- **Supported (gated, tested)**: x86-64 ELF + PE (PE32/PE32+) native import (section
-  maps, symtab/dynsym, PLT/GOT naming, flow-based function discovery with
-  the `_start` → `main` RDI convention and init/fini-array seeds); store
+- **Previously gated workflow**: x86-64 ELF + PE (PE32/PE32+) native import
+  (section maps, symbols, PLT/GOT naming, unwind and pointer/init seeds);
+  current discovery cutover limits are recorded below. Store
   browsing/reopen/rename; SLEIGH disassembly via the pinned console;
   decompilation via the raw-SLEIGH worker — token-identical to the Ghidra
   bridge oracle on the pinned fixtures (differential test).
@@ -206,6 +206,19 @@ single-operation p-code purity evidence. Missing evidence fails closed.
 Conditional/interior branches, weak seeds and jump chains returning into their
 own body do not establish additional functions.
 
+ELF/PE discovery now uses the generic SLEIGH worklist over native mappings;
+without the optional console, only structural facts are retained. The
+`x86_decoder` discovery feature and hand-versus-console comparison scripts
+are removed. The small instruction decoder remains for listing and graph
+consumers, not as a discovery accelerator.
+
+The all-20 discovery gate currently reports **4 pass, 16 fail, 0 skipped**.
+The cutover loses the x86-64 `register_tm_clones` entry behind
+`frame_dummy`'s `endbr64; jmp`: the approved thunk rule covers only a pure
+jump in the first instruction. PIE address alignment and remaining loader/seed
+failures also remain open. These results supersede earlier discovery counts,
+not the immutable historical reports.
+
 ## Support matrix
 
 | Input | Structural native import | Native flow/decode/decompile |
@@ -236,10 +249,8 @@ smoke check. CI remains authoritative for the cross-platform package.
 CMake configure and visual UI verification remain unavailable on machines
 without the Qt development package.
 
-Known limits remain: indirect-only CRT helpers (`_init`,
-`register_tm_clones`, PLT shims) are not recovered by native discovery; PE
-discovery uses the entry walk (closure granularity differs from Ghidra's
-analyzer: 310 vs 138 on the fixture); the x86-64 worker needs `VENTRIS_SLA`
+Known limits remain: the all-input discovery gate is incomplete and PE
+function-set parity is not claimed. The x86-64 worker needs `VENTRIS_SLA`
 and a patched `ghidra_opt`; the API HTTP listener is localhost-oriented and
 does not provide authentication; the Python plugin host is the capability
 boundary for untrusted scripts. The live overlay was also smoke-tested against
