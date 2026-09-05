@@ -1152,6 +1152,17 @@ M1 — Discovery becomes generic
 - Corpus 5/5; full discovery 16 pass / 4 fail / 0 skipped, precision 1.0 on
   all 20 rows. Architecture check passes with the shared fallthrough handling.
 
+## m1-010-d4e2b publication slices
+- Formatting plus new scheduling regressions exceeds 800 changed lines in the
+  test module. Publish canonical formatting separately from behavioral tests.
+- b3a: format existing discovery tests with Rustfmt 1.98.
+- b3b: correct the constrained-rule fixture and add the two deferred-creation
+  regressions (loader-derived conditional references; same-batch references).
+- b2: publish the pattern protocol and source-defined eligibility validator.
+- b3c: publish phased scheduling and ownership reconciliation.
+- d4f: generate and commit the complete unchanged gate from the source commit.
+  Each publication commit stays below 800 changed lines.
+
 ## m1-010-d4 prerequisite sub-tasks
 - d4b: record loaded external relocation slots for ELF32/ELF64, independently
   of instruction decoding; preserve symbol-table linkage and endian/load bias.
