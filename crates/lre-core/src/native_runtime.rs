@@ -1205,7 +1205,7 @@ mod tests {
             r#"
 <patternlist>
   <pattern mark="0"><data>0xa. * 1011....</data>
-    <align mark="1" bits="2"/><possiblefuncstart/>
+    <align mark="0x100000001" bits="2"/><possiblefuncstart/>
   </pattern>
   <patternpairs totalbits="9" postbits="4">
     <prepatterns><data>0xc.</data></prepatterns>
