@@ -899,18 +899,27 @@ M1 — Discovery becomes generic
 - c1–c3 are complete. Retired hand-versus-console comparison scripts cannot
   compare distinct routes after this cutover; historical results remain in git.
 
+## Approved landing-prefix prerequisite
+- Human approved extending minimal thunk recognition to one SLEIGH-verified
+  landing instruction before the pure direct jump. Ghidra
+  CreateThunkFunctionCmd.getThunkedAddr skips one empty-p-code instruction
+  (extracted source lines 567–572, explicitly mentioning ENDBR64).
+- m1-010-d1: emit explicit empty-p-code evidence; accept one contiguous,
+  valid no-op at an established entry, followed immediately by the already
+  validated pure branch. Preserve original entry, actual jump xref and both
+  instruction extents. Missing evidence, extra prefixes, effects, weak seeds,
+  invalid destinations and source-body jump-back chains remain rejected.
+- Acceptance: native::discovery::tests plus existing m1-008b and full discovery
+  gates. Complete d1 only; remaining loader/seed failures remain m1-010-d.
+
 ## Blocked on
-- m1-010-d: generic discovery misses x86-64 `register_tm_clones` behind
-  `frame_dummy`'s `endbr64; jmp`. On x86_64_plain_o0 the source is `00201670`,
-  jump `00201674`, destination `00201600`. The approved prerequisite requires
-  the first instruction itself to be a pure direct jump; skipping a landing
-  instruction is outside that approval. Do not implement broader m2-009
-  recognition without a sequencing decision. c is complete; do not begin d.
+- None for the approved m1-010-d1 landing-prefix prerequisite.
+  Full multi-instruction/indirect thunk analysis is not authorized.
 
 ## Next task
-- m1-010-d, blocked on the landing-instruction thunk sequencing decision above.
-  Acceptance already exists in `benchmarks/discovery_gate.py`; no threshold,
-  reference or corpus changes are authorized. Sub-tasks d–e remain open.
+- m1-010-d1: implement the approved single landing-prefix prerequisite test-first.
+  Acceptance already exists in `benchmarks/discovery_gate.py`; thresholds,
+  references and corpus remain unchanged.
 
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a

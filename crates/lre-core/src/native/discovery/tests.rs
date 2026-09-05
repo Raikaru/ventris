@@ -16,6 +16,76 @@ fn image() -> NativeImport {
     }
 }
 
+fn landing(address: u64) -> FlowResult {
+    let mut flow = result(address, FlowKind::Fallthrough, None, false);
+    flow.length = 4;
+    flow.fallthrough = Some(address + 4);
+    flow.no_op = true;
+    flow
+}
+
+#[test]
+fn landing_prefix_preserves_entry_extent_and_actual_jump_xref() {
+    let mut imp = image();
+    flow_discover_with_provider(&mut imp, |addresses| addresses.iter().map(|&a| match a {
+        0x1000 | 0x2000 => landing(a),
+        0x1004 => result(a, FlowKind::Branch, Some(0x2000), true),
+        0x2004 => result(a, FlowKind::Branch, Some(0x2100), true),
+        _ => result(a, FlowKind::Return, None, false),
+    }).collect());
+    assert_eq!(imp.functions.iter().map(|f| (f.entry, f.size)).collect::<Vec<_>>(),
+               vec![(0x1000, 6), (0x2000, 6), (0x2100, 2)]);
+    for (from, to) in [(0x1004, 0x2000), (0x2004, 0x2100)] {
+        assert!(imp.xrefs.iter().any(|x| x.from == from && x.to == to
+            && x.kind == "UNCONDITIONAL_JUMP" && x.provenance == "native-import:thunk"));
+    }
+    assert!(!imp.xrefs.iter().any(|x| x.kind.contains("CALL")));
+}
+
+#[test]
+fn landing_prefix_requires_exact_single_no_op_and_valid_jump() {
+    for case in ["missing-evidence", "wrong-address", "zero-length", "noncontiguous",
+                 "multiple", "effects", "conditional", "self", "invalid-target", "weak"] {
+        let mut imp = image();
+        if case == "weak" {
+            imp.functions[0].entry = 0x1100;
+            imp.pointer_candidates.push(0x1000);
+        }
+        flow_discover_with_provider(&mut imp, |addresses| addresses.iter().map(|&a| {
+            if a == 0x1000 {
+                let mut flow = landing(a);
+                if case == "missing-evidence" { flow.no_op = false; }
+                if case == "wrong-address" { flow.address += 1; }
+                if case == "zero-length" { flow.length = 0; }
+                if case == "noncontiguous" { flow.fallthrough = Some(0x1008); }
+                return flow;
+            }
+            if a == 0x1004 && case == "multiple" { return landing(a); }
+            if a == 0x1004 || a == 0x1008 {
+                return result(a, if case == "conditional" { FlowKind::CBranch } else { FlowKind::Branch },
+                    Some(if case == "self" { 0x1000 } else { 0x2000 }), case != "effects");
+            }
+            result(a, if a == 0x2000 && case == "invalid-target" { FlowKind::Bad } else { FlowKind::Return }, None, false)
+        }).collect());
+        assert!(!imp.functions.iter().any(|f| f.entry == 0x2000), "{case}");
+        assert!(!imp.xrefs.iter().any(|x| x.provenance == "native-import:thunk"), "{case}");
+    }
+}
+
+#[test]
+fn landing_jump_chain_returning_to_source_body_is_demoted() {
+    let mut imp = image();
+    flow_discover_with_provider(&mut imp, |addresses| addresses.iter().map(|&a| match a {
+        0x1000 => landing(a),
+        0x1004 => result(a, FlowKind::Branch, Some(0x1100), true),
+        0x1100 => result(a, FlowKind::Branch, Some(0x1200), true),
+        0x1200 => result(a, FlowKind::Branch, Some(0x1006), true),
+        _ => result(a, FlowKind::Return, None, false),
+    }).collect());
+    assert_eq!(imp.functions.iter().map(|f| f.entry).collect::<Vec<_>>(), vec![0x1000]);
+    assert!(!imp.xrefs.iter().any(|x| x.provenance == "native-import:thunk"));
+}
+
 #[test]
 fn conditional_fallthrough_discovers_call_target() {
     let mut imp = image();
