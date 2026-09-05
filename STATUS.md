@@ -980,16 +980,39 @@ M1 — Discovery becomes generic
 - Before implementation: the image regression fails at the first rebased
   entry; both real PIE fixtures have 0 oracle matches at loaded addresses.
 
+## m1-010-d3 verified
+- Acceptance commits: `4024f16` (loaded ELF addresses/pointers) and `21250ec`
+  (worker short reads). Implementation: `ed6bbf1`.
+- One loader path applies PIE bias and REL/RELA/RELR words for ELF64 LE and
+  ELF32 LE/BE. Mmap readers and console images retain identical relocated
+  bytes; both worker entry points use ProgramImage instead of raw-file maps.
+  Nonzero prelinked bases, BSS zero-fill and user-patch precedence are checked.
+- Real PIE smoke: pointer at `00103010` reads `0010300c`; its pointee reads 41.
+  Console listing at `00100469` loads that pointer; worker output is
+  `return *piRam0000000000103010 + 1`. End-of-section `_fini` at `00100488`
+  reproduced DataUnavailError and now decompiles after the bounded-read fix.
+- PIE acceptance: plain 8/8 and RELR 12/12 symbol matches at loaded addresses.
+  Full gate: 12 pass, 8 fail, 0 skipped. All ten x86-64/i386 rows have
+  precision/recall 1.0. PowerPC PIE improves to 12/13 matches, precision 1.0.
+- Workspace 111 tests; core no-default 62; legacy corpus 5/5. m1-008b remains
+  12/12 and 20/20. DOL remains 633/644 matches, 698 native functions, 65 extras,
+  with 10 mappings and BSS checked.
+- Isolated release libc import: 3,959 functions in 3.949 s (<5 s); this is
+  a timing/function-count result, not an oracle-recall measurement.
+- Discovery, m1-008b and DOL reports were generated from `ed6bbf1`. No raw
+  oracle, scoring policy, threshold or pinned-source changes. M1 is not passed.
+- d3 is complete; d4 and e remain open.
+
 ## Blocked on
 - None for the remaining M1 loader/seed work; the landing-prefix blocker is resolved.
   Full multi-instruction/indirect thunk analysis is not authorized.
 
 ## Next task
-- m1-010-d3: fix PIE load bias across loader facts and native address
-  consumers, not scoring. Extend `tests/m1-004_pie.sh` and native acceptance
-  coverage to assert loaded addresses and consistent pointer/memory reads;
-  observe failure and commit tests before implementation. Preserve nonzero
-  prelinked bases. d4/e remain open; stop if another M2 analyzer is necessary.
+- m1-010-d4: resolve the remaining AArch64/PowerPC loader/seed/flow failures.
+  Acceptance is the existing full discovery gate; thresholds, references and
+  corpus remain unchanged. Account for loader-related function-set changes
+  without broadening scoring exclusions. Stop if another M2 analyzer is
+  necessary. Sub-task e remains open.
 
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a

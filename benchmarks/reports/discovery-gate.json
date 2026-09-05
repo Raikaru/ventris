@@ -2,7 +2,7 @@
   "gate": "discovery",
   "milestone": "M1",
   "scoring_policy": "code-functions-v1",
-  "commit": "f55b15d459e832e133213dd32cec6f7db0b3e5cd",
+  "commit": "ed6bbf1b09f7933b05c51e18b7bca55b55a130c8",
   "date": "2026-09-05",
   "machine": {
     "os": "Linux-7.1.12-200.fc44.x86_64-x86_64-with-glibc2.43",
@@ -12,7 +12,7 @@
     "passed": true,
     "core": "crates/lre-core/src/native/discovery.rs",
     "core_sha256": "2af7e7ba90d83cc2da789b9a726d3e14141c73bc974e62f2f4b2047046824ab3",
-    "legacy_source_sha256": "bd79e644b2ece6279e7b2bf8123fe71aadf6345af18e7a448b29527beefc8510",
+    "legacy_source_sha256": "45bc03285e9c5879cf688a39bef84a4f67a9d39598f0c01bff2b9ab8d69b858f",
     "retired_decoder_discovery": [],
     "retired_feature_switches": [],
     "retired_console_discovery": [],
@@ -68,10 +68,10 @@
     },
     {
       "id": "x86_64_plain_pie",
-      "status": "fail",
+      "status": "pass",
       "metrics": {
-        "fn.precision": 0.0,
-        "fn.recall": 0.0
+        "fn.precision": 1.0,
+        "fn.recall": 1.0
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -85,35 +85,9 @@
       "excluded_functions": 6,
       "native_functions": 12,
       "oracle_functions": 12,
-      "matched_functions": 0,
-      "missing_entries": [
-        "00101630",
-        "00101660",
-        "00101690",
-        "001016d0",
-        "00101710",
-        "00101720",
-        "00101730",
-        "00101748",
-        "00101764",
-        "00101780",
-        "00101790",
-        "001017a0"
-      ],
-      "extra_entries": [
-        "00001630",
-        "00001660",
-        "00001690",
-        "000016d0",
-        "00001710",
-        "00001720",
-        "00001730",
-        "00001748",
-        "00001764",
-        "00001780",
-        "00001790",
-        "000017a0"
-      ]
+      "matched_functions": 12,
+      "missing_entries": [],
+      "extra_entries": []
     },
     {
       "id": "x86_64_cpp_o2",
@@ -209,10 +183,10 @@
     },
     {
       "id": "i386_plain_pie",
-      "status": "fail",
+      "status": "pass",
       "metrics": {
-        "fn.precision": 0.0,
-        "fn.recall": 0.0
+        "fn.precision": 1.0,
+        "fn.recall": 1.0
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -226,43 +200,9 @@
       "excluded_functions": 6,
       "native_functions": 16,
       "oracle_functions": 16,
-      "matched_functions": 0,
-      "missing_entries": [
-        "000114a0",
-        "000114c8",
-        "000114d0",
-        "000114e0",
-        "00011520",
-        "00011570",
-        "000115c0",
-        "000115c5",
-        "000115d0",
-        "000115e0",
-        "0001160c",
-        "0001162c",
-        "00011640",
-        "00011650",
-        "00011660",
-        "00011670"
-      ],
-      "extra_entries": [
-        "000014a0",
-        "000014c8",
-        "000014d0",
-        "000014e0",
-        "00001520",
-        "00001570",
-        "000015c0",
-        "000015c5",
-        "000015d0",
-        "000015e0",
-        "0000160c",
-        "0000162c",
-        "00001640",
-        "00001650",
-        "00001660",
-        "00001670"
-      ]
+      "matched_functions": 16,
+      "missing_entries": [],
+      "extra_entries": []
     },
     {
       "id": "i386_cpp_o2",
@@ -366,8 +306,8 @@
       "id": "aarch64_plain_pie",
       "status": "fail",
       "metrics": {
-        "fn.precision": 0.0,
-        "fn.recall": 0.0
+        "fn.precision": 1.0,
+        "fn.recall": 0.8823529411764706
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -381,43 +321,12 @@
       "excluded_functions": 7,
       "native_functions": 15,
       "oracle_functions": 17,
-      "matched_functions": 0,
+      "matched_functions": 15,
       "missing_entries": [
-        "00110740",
-        "00110774",
-        "00110790",
-        "001107c0",
         "001107fc",
-        "00110800",
-        "00110850",
-        "00110854",
-        "0011085c",
-        "00110880",
-        "00110898",
-        "001108b0",
-        "001108d0",
-        "001108e0",
-        "001108f0",
-        "00110900",
-        "00110910"
+        "001108f0"
       ],
-      "extra_entries": [
-        "00010740",
-        "00010774",
-        "00010790",
-        "000107c0",
-        "00010800",
-        "00010850",
-        "00010854",
-        "0001085c",
-        "00010880",
-        "00010898",
-        "000108b0",
-        "000108d0",
-        "000108e0",
-        "00010900",
-        "00010910"
-      ]
+      "extra_entries": []
     },
     {
       "id": "aarch64_cpp_o2",
@@ -527,8 +436,8 @@
       "id": "powerpc_plain_pie",
       "status": "fail",
       "metrics": {
-        "fn.precision": 0.0,
-        "fn.recall": 0.0
+        "fn.precision": 1.0,
+        "fn.recall": 0.9230769230769231
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -540,33 +449,13 @@
       "scoring_view_sha256": "fd35952e947677b87c8bc33bce8580848b5526f7bfaff84b377734c7a3ecdd77",
       "raw_oracle_functions": 19,
       "excluded_functions": 6,
-      "native_functions": 7,
+      "native_functions": 12,
       "oracle_functions": 13,
-      "matched_functions": 0,
+      "matched_functions": 12,
       "missing_entries": [
-        "000204c0",
-        "00020500",
-        "00020560",
-        "000205d0",
-        "00020640",
-        "00020644",
-        "00020650",
-        "00020698",
-        "000206a8",
-        "000206b8",
-        "000206c8",
-        "0002070c",
-        "0002071c"
+        "00020698"
       ],
-      "extra_entries": [
-        "000104c0",
-        "00010644",
-        "00010650",
-        "000106b8",
-        "000106c8",
-        "0001070c",
-        "0001071c"
-      ]
+      "extra_entries": []
     },
     {
       "id": "powerpc_cpp_o2",
@@ -622,8 +511,8 @@
     }
   ],
   "summary": {
-    "pass": 10,
-    "fail": 10,
+    "pass": 12,
+    "fail": 8,
     "skipped": 0
   },
   "passed": false
