@@ -872,18 +872,45 @@ M1 — Discovery becomes generic
   cover retired decoder discovery and feature switches, plus a failing
   candidate-flow regression. Precision/recall thresholds remain unchanged.
 
+## m1-010-c verified cutover
+- Test-first commits: `66331bd` and `6b6c236`. Implementation slices:
+  `18e83bf` (generic routing), `7ff1b59` (decoder retirement), `6d32467`
+  (orphaned console discovery and obsolete comparison tooling).
+- Architecture check: 0 legacy native.rs discovery definitions, 0 retained
+  decoder/console discovery helpers, 0 discovery feature switches, 0 ISA
+  matches in the shared worklist. No accelerator retained. Listing/graph
+  instruction decoding remains separate and unchanged in behavior.
+- Full 20-input report: 4 pass, 16 fail, 0 skipped (previously 7/13/0).
+  x86-64 plain_o0/plain_o2 are 11/12; cpp_o2 is 19/20, all precision 1.0.
+  The affected m1-008b acceptance was run and fails both rows. Its thresholds,
+  raw references and scoring policy were deliberately not weakened.
+- Generic non-x86 flow improves AArch64 plain_o0/plain_o2 from 11/17 to
+  15/17 matches and cpp_o2 from 13/24 to 20/24, with precision 1.0.
+  PowerPC plain_o0/plain_o2 are 8/12 with precision 1.0; missing PLT/init
+  seeds and remaining flow failures still belong to m1-010-d.
+- Required checks: workspace 105 tests, core no-default 57, legacy corpus
+  5/5. DOL retains 633/644 matches with 698 native functions (previously
+  699), 65 extras (previously 66), 10 mappings and BSS checked. A candidate
+  filter regression rejecting the one-instruction __OSDBJump call was
+  reproduced, covered and fixed before the cutover commit.
+- Isolated release libc import: 4,049 functions in 4.627 s (<5 s).
+  Generated discovery and DOL reports name implementation `6d32467`;
+  the support-matrix staleness check passes. M1 is not passed.
+- c1–c3 are complete. Retired hand-versus-console comparison scripts cannot
+  compare distinct routes after this cutover; historical results remain in git.
+
 ## Blocked on
 - m1-010-d: generic discovery misses x86-64 `register_tm_clones` behind
   `frame_dummy`'s `endbr64; jmp`. On x86_64_plain_o0 the source is `00201670`,
   jump `00201674`, destination `00201600`. The approved prerequisite requires
   the first instruction itself to be a pure direct jump; skipping a landing
   instruction is outside that approval. Do not implement broader m2-009
-  recognition without a sequencing decision. Finish c's already-scoped
-  retirement and verification only; do not begin d.
+  recognition without a sequencing decision. c is complete; do not begin d.
 
 ## Next task
-- m1-010-c: remove legacy architecture-specific production discovery routes.
-  The existing discovery gate is the acceptance; sub-tasks c–e remain open.
+- m1-010-d, blocked on the landing-instruction thunk sequencing decision above.
+  Acceptance already exists in `benchmarks/discovery_gate.py`; no threshold,
+  reference or corpus changes are authorized. Sub-tasks d–e remain open.
 
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a

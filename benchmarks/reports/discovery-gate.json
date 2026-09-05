@@ -2,36 +2,30 @@
   "gate": "discovery",
   "milestone": "M1",
   "scoring_policy": "code-functions-v1",
-  "commit": "8be0ec7477047629583e68018b3ddbd22790ada0",
+  "commit": "6d32467b74e0e7116e0531bcb5a47a37c708aded",
   "date": "2026-09-05",
   "machine": {
     "os": "Linux-7.1.12-200.fc44.x86_64-x86_64-with-glibc2.43",
     "cpu": "x86_64"
   },
   "architecture_check": {
-    "passed": false,
+    "passed": true,
     "core": "crates/lre-core/src/native/discovery.rs",
-    "core_sha256": "417f31f12b4bcfb3917a89aa14d7d00cf9dd1db20efb08af7dddac2743f84622",
-    "legacy_source_sha256": "c0704255d9c2986fd7d99573679f71b4d2a61a11480c192703b4b6ff9322262a",
-    "legacy_discovery_definitions": [
-      "sweep_ppc_calls",
-      "sweep_calls",
-      "flow_discover",
-      "sweep_calls_x86",
-      "sweep_calls_x86",
-      "flow_discover_x86",
-      "flow_discover_x86",
-      "flow_discover_console"
-    ],
+    "core_sha256": "dec3ada060d747614b826cf0b34f669d349232d4c3b85909cffc279ace09a447",
+    "legacy_source_sha256": "74fbb8d3196f69ddba4b08dbe17bcfd8b732019e2ce63290422a7d8d93b2ddf9",
+    "retired_decoder_discovery": [],
+    "retired_feature_switches": [],
+    "retired_console_discovery": [],
+    "legacy_discovery_definitions": [],
     "isa_specific_lines": []
   },
   "corpus": [
     {
       "id": "x86_64_plain_o0",
-      "status": "pass",
+      "status": "fail",
       "metrics": {
         "fn.precision": 1.0,
-        "fn.recall": 1.0
+        "fn.recall": 0.9166666666666666
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -43,18 +37,20 @@
       "scoring_view_sha256": "a94b3a47bed688dc8ea888bf4708f7a20cfe1aa7d1cdb2ecd25b33f90ad6d49b",
       "raw_oracle_functions": 15,
       "excluded_functions": 3,
-      "native_functions": 12,
+      "native_functions": 11,
       "oracle_functions": 12,
-      "matched_functions": 12,
-      "missing_entries": [],
+      "matched_functions": 11,
+      "missing_entries": [
+        "00201600"
+      ],
       "extra_entries": []
     },
     {
       "id": "x86_64_plain_o2",
-      "status": "pass",
+      "status": "fail",
       "metrics": {
         "fn.precision": 1.0,
-        "fn.recall": 1.0
+        "fn.recall": 0.9166666666666666
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -66,10 +62,12 @@
       "scoring_view_sha256": "773b996b9e753418c54c92a32e99f3a8474abe74b069dd32e8fbf6c9ad44a7d3",
       "raw_oracle_functions": 15,
       "excluded_functions": 3,
-      "native_functions": 12,
+      "native_functions": 11,
       "oracle_functions": 12,
-      "matched_functions": 12,
-      "missing_entries": [],
+      "matched_functions": 11,
+      "missing_entries": [
+        "002015f0"
+      ],
       "extra_entries": []
     },
     {
@@ -89,7 +87,7 @@
       "scoring_view_sha256": "fc2043b5af13a8f10c9763d4d98112f9186e1e43364439e9a7c0a063b1d9fd25",
       "raw_oracle_functions": 18,
       "excluded_functions": 6,
-      "native_functions": 12,
+      "native_functions": 11,
       "oracle_functions": 12,
       "matched_functions": 0,
       "missing_entries": [
@@ -109,7 +107,6 @@
       "extra_entries": [
         "00001630",
         "00001660",
-        "00001690",
         "000016d0",
         "00001710",
         "00001720",
@@ -123,10 +120,10 @@
     },
     {
       "id": "x86_64_cpp_o2",
-      "status": "pass",
+      "status": "fail",
       "metrics": {
         "fn.precision": 1.0,
-        "fn.recall": 1.0
+        "fn.recall": 0.95
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -138,10 +135,12 @@
       "scoring_view_sha256": "fbf90f22bd97325d8324d2d7cbae04866cc3b61a46f8aa64ff38598021648b1f",
       "raw_oracle_functions": 29,
       "excluded_functions": 9,
-      "native_functions": 20,
+      "native_functions": 19,
       "oracle_functions": 20,
-      "matched_functions": 20,
-      "missing_entries": [],
+      "matched_functions": 19,
+      "missing_entries": [
+        "00201900"
+      ],
       "extra_entries": []
     },
     {
@@ -149,7 +148,7 @@
       "status": "pass",
       "metrics": {
         "fn.precision": 1.0,
-        "fn.recall": 1.0
+        "fn.recall": 0.9975550122249389
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -161,10 +160,12 @@
       "scoring_view_sha256": "e5bbd0f8b0419f081f646ed9acc95cf0ebb23519f6e462ff556bdacbb2a1f018",
       "raw_oracle_functions": 411,
       "excluded_functions": 2,
-      "native_functions": 409,
+      "native_functions": 408,
       "oracle_functions": 409,
-      "matched_functions": 409,
-      "missing_entries": [],
+      "matched_functions": 408,
+      "missing_entries": [
+        "00204150"
+      ],
       "extra_entries": []
     },
     {
@@ -338,7 +339,7 @@
       "status": "fail",
       "metrics": {
         "fn.precision": 1.0,
-        "fn.recall": 0.6470588235294118
+        "fn.recall": 0.8823529411764706
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -350,16 +351,12 @@
       "scoring_view_sha256": "1b17f1ed09fc05384be78462c256323977564c1b5ae62a492a1a1233d4e8d345",
       "raw_oracle_functions": 23,
       "excluded_functions": 6,
-      "native_functions": 11,
+      "native_functions": 15,
       "oracle_functions": 17,
-      "matched_functions": 11,
+      "matched_functions": 15,
       "missing_entries": [
-        "00210704",
         "0021078c",
-        "00210880",
-        "00210890",
-        "002108a0",
-        "002108b0"
+        "002108a0"
       ],
       "extra_entries": []
     },
@@ -368,7 +365,7 @@
       "status": "fail",
       "metrics": {
         "fn.precision": 1.0,
-        "fn.recall": 0.6470588235294118
+        "fn.recall": 0.8823529411764706
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -380,16 +377,12 @@
       "scoring_view_sha256": "3fe86f93d325f32cce862024fa07bd0b8156bec54b033fd7bb729775ae34261a",
       "raw_oracle_functions": 23,
       "excluded_functions": 6,
-      "native_functions": 11,
+      "native_functions": 15,
       "oracle_functions": 17,
-      "matched_functions": 11,
+      "matched_functions": 15,
       "missing_entries": [
-        "00210704",
         "0021078c",
-        "00210840",
-        "00210850",
-        "00210860",
-        "00210870"
+        "00210860"
       ],
       "extra_entries": []
     },
@@ -410,7 +403,7 @@
       "scoring_view_sha256": "deed8abb05c9f38d72f1969ffd1886dcb14b10a8770fe5103d4f77fa43631ba2",
       "raw_oracle_functions": 24,
       "excluded_functions": 7,
-      "native_functions": 10,
+      "native_functions": 15,
       "oracle_functions": 17,
       "matched_functions": 0,
       "missing_entries": [
@@ -434,6 +427,7 @@
       ],
       "extra_entries": [
         "00010740",
+        "00010774",
         "00010790",
         "000107c0",
         "00010800",
@@ -442,7 +436,11 @@
         "0001085c",
         "00010880",
         "00010898",
-        "000108b0"
+        "000108b0",
+        "000108d0",
+        "000108e0",
+        "00010900",
+        "00010910"
       ]
     },
     {
@@ -450,7 +448,7 @@
       "status": "fail",
       "metrics": {
         "fn.precision": 1.0,
-        "fn.recall": 0.5416666666666666
+        "fn.recall": 0.8333333333333334
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -462,19 +460,12 @@
       "scoring_view_sha256": "6e68f6d101702cd92ec14ff9d635b24c931a77ce4d59c55083d79da5f22a9ccc",
       "raw_oracle_functions": 36,
       "excluded_functions": 12,
-      "native_functions": 13,
+      "native_functions": 20,
       "oracle_functions": 24,
-      "matched_functions": 13,
+      "matched_functions": 20,
       "missing_entries": [
-        "00210a04",
         "00210a8c",
-        "00210c50",
-        "00210c60",
         "00210c70",
-        "00210c80",
-        "00210c90",
-        "00210ca0",
-        "00210cb0",
         "00210cc0",
         "00210cd0"
       ],
@@ -485,7 +476,7 @@
       "status": "pass",
       "metrics": {
         "fn.precision": 1.0,
-        "fn.recall": 0.9879518072289156
+        "fn.recall": 0.9951807228915662
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -497,14 +488,11 @@
       "scoring_view_sha256": "10e402a4dede46b9f6e670094c5d5b404f273cdde5ba7428aac4862ccc994997",
       "raw_oracle_functions": 420,
       "excluded_functions": 5,
-      "native_functions": 410,
+      "native_functions": 413,
       "oracle_functions": 415,
-      "matched_functions": 410,
+      "matched_functions": 413,
       "missing_entries": [
-        "00213244",
         "002132cc",
-        "002152b0",
-        "002152c0",
         "002152d0"
       ],
       "extra_entries": []
@@ -513,8 +501,8 @@
       "id": "powerpc_plain_o0",
       "status": "fail",
       "metrics": {
-        "fn.precision": 0.5833333333333334,
-        "fn.recall": 0.5833333333333334
+        "fn.precision": 1.0,
+        "fn.recall": 0.6666666666666666
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -526,30 +514,23 @@
       "scoring_view_sha256": "86ad5849850e87f24eaa3d94355ffdf787183a9a50ef8d8721fa7db0262059fb",
       "raw_oracle_functions": 15,
       "excluded_functions": 3,
-      "native_functions": 12,
+      "native_functions": 8,
       "oracle_functions": 12,
-      "matched_functions": 7,
+      "matched_functions": 8,
       "missing_entries": [
-        "10010430",
-        "10010460",
         "10010568",
         "10010588",
+        "100105cc",
         "100105dc"
       ],
-      "extra_entries": [
-        "100103fc",
-        "10010433",
-        "100104e7",
-        "1001059c",
-        "100105f0"
-      ]
+      "extra_entries": []
     },
     {
       "id": "powerpc_plain_o2",
       "status": "fail",
       "metrics": {
-        "fn.precision": 0.6363636363636364,
-        "fn.recall": 0.5833333333333334
+        "fn.precision": 1.0,
+        "fn.recall": 0.6666666666666666
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -561,22 +542,16 @@
       "scoring_view_sha256": "c8927c0e0c7bbb30c24ab767f2445ed9903c12c2e3a6c71e70c889c016d866b2",
       "raw_oracle_functions": 15,
       "excluded_functions": 3,
-      "native_functions": 11,
+      "native_functions": 8,
       "oracle_functions": 12,
-      "matched_functions": 7,
+      "matched_functions": 8,
       "missing_entries": [
-        "10010430",
-        "10010460",
         "10010520",
         "10010540",
+        "10010584",
         "10010594"
       ],
-      "extra_entries": [
-        "100103fc",
-        "10010433",
-        "10010554",
-        "100105a8"
-      ]
+      "extra_entries": []
     },
     {
       "id": "powerpc_plain_pie",
@@ -595,7 +570,7 @@
       "scoring_view_sha256": "fd35952e947677b87c8bc33bce8580848b5526f7bfaff84b377734c7a3ecdd77",
       "raw_oracle_functions": 19,
       "excluded_functions": 6,
-      "native_functions": 15,
+      "native_functions": 4,
       "oracle_functions": 13,
       "matched_functions": 0,
       "missing_entries": [
@@ -615,28 +590,17 @@
       ],
       "extra_entries": [
         "000104c0",
-        "000104cc",
-        "00010503",
-        "0001050c",
-        "0001056c",
-        "000105dc",
         "00010644",
         "00010650",
-        "00010664",
-        "000106a8",
-        "000106b8",
-        "000106dc",
-        "0001070c",
-        "00010730",
-        "00010764"
+        "000106b8"
       ]
     },
     {
       "id": "powerpc_cpp_o2",
       "status": "fail",
       "metrics": {
-        "fn.precision": 0.7368421052631579,
-        "fn.recall": 0.7368421052631579
+        "fn.precision": 0.9375,
+        "fn.recall": 0.7894736842105263
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -648,21 +612,16 @@
       "scoring_view_sha256": "71f9ed74532c828f303f3f75aba487170359e8a8b35ae32ccee7008bff61df1f",
       "raw_oracle_functions": 28,
       "excluded_functions": 9,
-      "native_functions": 19,
+      "native_functions": 16,
       "oracle_functions": 19,
-      "matched_functions": 14,
+      "matched_functions": 15,
       "missing_entries": [
-        "10010680",
-        "100106b0",
         "10010890",
         "10010900",
+        "10010944",
         "10010954"
       ],
       "extra_entries": [
-        "1001064c",
-        "10010683",
-        "10010914",
-        "10010968",
         "10010980"
       ]
     },
@@ -670,8 +629,8 @@
       "id": "powerpc_many_o2",
       "status": "pass",
       "metrics": {
-        "fn.precision": 0.9902200488997555,
-        "fn.recall": 0.9878048780487805
+        "fn.precision": 1.0,
+        "fn.recall": 0.9902439024390244
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -683,27 +642,21 @@
       "scoring_view_sha256": "afbaef542ecc9e34064f8c4577056bb632b9bcc4a0a0c3453a45025b299d584b",
       "raw_oracle_functions": 412,
       "excluded_functions": 2,
-      "native_functions": 409,
+      "native_functions": 406,
       "oracle_functions": 410,
-      "matched_functions": 405,
+      "matched_functions": 406,
       "missing_entries": [
-        "10012f80",
-        "10012fb0",
         "10014f98",
         "10014fa8",
+        "10014fec",
         "10014ffc"
       ],
-      "extra_entries": [
-        "10012f4c",
-        "10012f83",
-        "10014fbc",
-        "10015010"
-      ]
+      "extra_entries": []
     }
   ],
   "summary": {
-    "pass": 7,
-    "fail": 13,
+    "pass": 4,
+    "fail": 16,
     "skipped": 0
   },
   "passed": false

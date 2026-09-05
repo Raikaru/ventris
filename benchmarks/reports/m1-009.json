@@ -1,8 +1,8 @@
 {
   "gate": "m1-009",
   "milestone": "M1",
-  "commit": "f52d1f7f61ed3f6dc059f78f44775e5104af10a0",
-  "date": "2026-09-04",
+  "commit": "6d32467b74e0e7116e0531bcb5a47a37c708aded",
+  "date": "2026-09-05",
   "machine": {
     "os": "Linux-7.1.12-200.fc44.x86_64-x86_64-with-glibc2.43",
     "cpu": "x86_64",
@@ -15,7 +15,7 @@
       "status": "pass",
       "metrics": {
         "fn.recall": 0.9829192546583851,
-        "fn.precision": 0.9055793991416309
+        "fn.precision": 0.9068767908309455
       },
       "thresholds": {
         "fn.recall": 0.95
@@ -24,9 +24,9 @@
       "oracle_sha256": "29b2a3b48badbfef7b62542d14a0ca41f4bfc72a728bb4644c012bc69061446d",
       "oracle": "GQFE78/files/boot.elf",
       "oracle_functions": 644,
-      "native_functions": 699,
+      "native_functions": 698,
       "matched_functions": 633,
-      "false_positive_functions": 66,
+      "false_positive_functions": 65,
       "missing_entries": [
         "80683e34",
         "806846f0",
@@ -75,7 +75,6 @@
         "806851d0",
         "80686360",
         "8068798c",
-        "80688c80",
         "8068ab58",
         "8068dbcc",
         "8068dbd4",
