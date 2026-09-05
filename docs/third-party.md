@@ -64,6 +64,17 @@ Jump xrefs retain `native-import:thunk` provenance only for distinct retained
 destinations. This is not the full multi-instruction, indirect or call-return
 thunk analyzer.
 
+The bounded indirect-linkage prerequisite also follows `getThunkedAddr` and
+`addRegisterUsage` in `CreateThunkFunctionCmd` (Apache-2.0), with stricter
+fail-closed handling of unknown inputs and partial register aliases.
+`native/ventris_linkage.hh` consumes SLEIGH p-code and reuses the decompiler's
+registered `OpBehavior` constant evaluators. It tracks pointer-slot identity,
+not invented external pointer values. Stores, calls, other control flow and
+unused non-flag register writes are rejected. Bounds are 8 instructions,
+128 operations per instruction and 64 live values. Unique temporaries are
+discarded between instructions. A successful query alone does not create a
+function; discovery must associate the slot with loader metadata.
+
 ## ELF loaded images and worker memory
 
 ELF record layouts and relative-relocation constants are checked against the

@@ -427,6 +427,15 @@ pub struct FlowResult {
     pub no_op: bool,
 }
 
+/// Bounded SLEIGH evidence for an indirect transfer through a pointer slot.
+/// A slot alone is not an imported function: the loader must establish its identity.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct LinkageResult {
+    pub address: u64,
+    pub length: u32,
+    pub slot: Option<u64>,
+}
+
 pub fn console_flow(cfg: &RuntimeConfig, binary: &Path, address: u64) -> Result<FlowResult> {
     let console = find_console(cfg)?;
     let ghroot = cfg.ghidra_install.to_string_lossy().into_owned();
@@ -759,6 +768,28 @@ impl ConsoleSession {
         })
     }
 
+    /// Identify linkage stubs without reading or fabricating imported pointer values.
+    pub fn linkage_batch(&mut self, addresses: &[u64]) -> Result<Vec<LinkageResult>> {
+        use std::fmt::Write as _;
+        if addresses.is_empty() { return Ok(Vec::new()); }
+        let mut command = String::with_capacity(addresses.len() * 19 + 9);
+        command.push_str("linkage");
+        for address in addresses { let _ = write!(command, " 0x{address:x}"); }
+        command.push('\n');
+        self.send(&command)?;
+        let response = read_until_prompt(&mut self.reader)?;
+        let results: Vec<LinkageResult> = response.lines()
+            .filter_map(|line| line.strip_prefix("LINKAGE "))
+            .map(|line| serde_json::from_str(line)
+                .map_err(|error| NativeRuntimeError(format!("invalid linkage response: {error}"))))
+            .collect::<Result<_>>()?;
+        if results.len() != addresses.len() || results.iter().zip(addresses).any(|(result, address)|
+            result.address != *address || result.slot.is_some() != (result.length != 0)) {
+            return err("incomplete or mismatched linkage response");
+        }
+        Ok(results)
+    }
+
     /// Close stdin and wait for the child to exit.
     pub fn quit(mut self) -> Result<()> {
         let _ = self.send("quit\n");
@@ -865,7 +896,9 @@ mod tests {
 
     #[test]
     fn linkage_queries_require_bounded_side_effect_free_slot_flow() {
-        let cfg = RuntimeConfig::from_env();
+        let mut cfg = RuntimeConfig::from_env();
+        cfg.language_id = "x86:LE:64:default".into();
+        cfg.language_dir = cfg.ghidra_install.join("Ghidra/Processors/x86/data/languages");
         if find_console(&cfg).is_err() {
             eprintln!("SKIP: SLEIGH console not available");
             return;
@@ -900,15 +933,11 @@ mod tests {
             };
             let mut session = ConsoleSession::new(&cfg).unwrap();
             session.load_mapped(&import).unwrap();
-            session.send("linkage 0x1000 0x1100 0x1200\n").unwrap();
-            let response = read_until_prompt(&mut session.reader).unwrap();
-            let rows: Vec<serde_json::Value> = response.lines()
-                .filter_map(|line| line.strip_prefix("LINKAGE "))
-                .map(|line| serde_json::from_str(line).unwrap()).collect();
-            assert_eq!(rows.len(), 3, "{language}: {response}");
-            assert_eq!(rows[0]["slot"].as_u64(), Some(0x3008), "{language}");
-            assert!(rows[1]["slot"].is_null(), "{language}: unknown incoming register");
-            assert!(rows[2]["slot"].is_null(), "{language}: unused register write");
+            let rows = session.linkage_batch(&[0x1000, 0x1100, 0x1200]).unwrap();
+            assert_eq!(rows[0].slot, Some(0x3008), "{language}");
+            assert_eq!(rows[0].length as usize, code.len(), "{language}");
+            assert!(rows[1].slot.is_none(), "{language}: unknown incoming register");
+            assert!(rows[2].slot.is_none(), "{language}: unused register write");
             // A rejected query must not poison the following console request.
             assert_eq!(session.flow(0x1000).unwrap().address, 0x1000);
         }
@@ -923,11 +952,7 @@ mod tests {
         session.load_mapped(&NativeImport { language: cfg.language_id.clone(),
             mappings: vec![crate::native::Mapping { vaddr: 0x1000, size: bytes.len() as u64,
                 file_off: 0, flags: 6, bytes }], ..Default::default() }).unwrap();
-        session.send("linkage 0x1000 0x1100\n").unwrap();
-        let response = read_until_prompt(&mut session.reader).unwrap();
-        let rows: Vec<serde_json::Value> = response.lines().filter_map(|line| line.strip_prefix("LINKAGE "))
-            .map(|line| serde_json::from_str(line).unwrap()).collect();
-        assert_eq!(rows.len(), 2, "{response}");
-        assert!(rows.iter().all(|row| row["slot"].is_null()), "stores and unbounded chains are not thunks");
+        let rows = session.linkage_batch(&[0x1000, 0x1100]).unwrap();
+        assert!(rows.iter().all(|row| row.slot.is_none()), "stores and unbounded chains are not thunks");
     }
 }

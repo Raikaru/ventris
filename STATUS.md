@@ -1043,6 +1043,19 @@ M1 — Discovery becomes generic
 - Workspace: 113 tests. Full discovery remains 11 pass / 9 fail / 0 skipped.
   No new entry-discovery capability or gate pass is claimed for loader facts.
 
+## m1-010-d4c bounded linkage evidence
+- Regression commit `1e3d496` fails on the missing native `linkage` command.
+- The out-of-tree console now propagates constants and loaded-slot identity
+  through SLEIGH p-code. The typed client rejects missing/mismatched responses.
+- Real-console acceptance resolves slot `0x3008` on x86-64, i386, AArch64
+  and PowerPC; rejects unknown registers, unused register writes, stores
+  and a 9-instruction chain. Requests after rejection remain usable.
+- Locked PowerPC plain_o0 smoke: entry `10010568` resolves slot `1003074c`
+  over 16 bytes; the native console exits 0.
+- Limits: 8 instructions, 128 operations/instruction, 64 live values.
+  Both console and worker builds pass; workspace 114 tests; corpus 5/5.
+  Full discovery remains 11 pass / 9 fail / 0 skipped pending integration.
+
 ## m1-010-d4 prerequisite sub-tasks
 - d4b: record loaded external relocation slots for ELF32/ELF64, independently
   of instruction decoding; preserve symbol-table linkage and endian/load bias.
@@ -1070,9 +1083,9 @@ M1 — Discovery becomes generic
   above. The current M1 discovery gate remains 11 pass / 9 fail.
 
 ## Next task
-- m1-010-d4c: bounded SLEIGH linkage-thunk evidence, then integrate it into
-  discovery under d4d. Complete the d4 prerequisites above against unchanged
-  full discovery acceptance; sub-task e remains open.
+- m1-010-d4d: use loader metadata and bounded linkage evidence to discover
+  PLT and tail-branch entries, replacing the old ELF64 x86 scan.
+  Complete d4e/d4f against unchanged full discovery acceptance; sub-task e is open.
 
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a
