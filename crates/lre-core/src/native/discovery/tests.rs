@@ -335,3 +335,52 @@ fn pic_linkage_requires_proven_consistent_caller_context() {
         }
     }
 }
+
+#[test]
+fn pattern_entries_require_defined_boundaries_and_valid_code() {
+    let mut cfg = crate::session::RuntimeConfig::from_env();
+    let Ok(console) = crate::native_runtime::find_console(&cfg) else {
+        eprintln!("SKIP: SLEIGH console not available");
+        return;
+    };
+    cfg.console_path = Some(console);
+    cfg.language_id = "AARCH64:LE:64:v8A".into();
+    cfg.language_dir = cfg.ghidra_install.join("Ghidra/Processors/AARCH64/data/languages");
+    const RET: u32 = 0xd65f03c0;
+    const NOP: u32 = 0xd503201f;
+    const STP: u32 = 0xa9be7bfd;
+    const MOV: u32 = 0x910003fd;
+    const SUB: u32 = 0xd10043ff;
+    const ADD: u32 = 0x910043ff;
+    let cases: &[(&str, &[u32], &[u64], &[(u64, u64)])] = &[
+        // Validation may cross existing instructions; ownership may not.
+        ("adjacent entry", &[RET, NOP, STP, MOV, RET], &[0x1000, 0x1008],
+            &[(0x1000, 4), (0x1004, 4), (0x1008, 12)]),
+        ("owned prefix", &[NOP, NOP, STP, MOV, RET], &[0x1000, 0x1008],
+            &[(0x1000, 8), (0x1008, 12)]),
+        ("three valid instructions", &[RET, SUB, ADD, RET], &[0x1000],
+            &[(0x1000, 4), (0x1004, 12)]),
+        ("early return", &[RET, SUB, RET, NOP], &[0x1000], &[(0x1000, 4)]),
+        ("invalid instruction", &[RET, SUB, 0, NOP], &[0x1000], &[(0x1000, 4)]),
+        // Bytes matching RET are not an already-defined predecessor instruction.
+        ("undefined predecessor", &[RET, RET, SUB, ADD, RET], &[0x1000], &[(0x1000, 4)]),
+    ];
+    for &(case, words, entries, expected) in cases {
+        let bytes: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        let mut import = NativeImport {
+            cfg: cfg.clone(),
+            language: cfg.language_id.clone(),
+            format: "ELF".into(),
+            mappings: vec![Mapping {
+                vaddr: 0x1000, size: bytes.len() as u64, file_off: 0, flags: 6, bytes,
+            }],
+            functions: entries.iter().map(|&entry| NativeFunction {
+                entry, size: 1, name: format!("seed_{entry:x}"),
+            }).collect(),
+            ..Default::default()
+        };
+        discover_seeded(&mut import);
+        let actual: Vec<_> = import.functions.iter().map(|f| (f.entry, f.size)).collect();
+        assert_eq!(actual, expected, "{case}");
+    }
+}
