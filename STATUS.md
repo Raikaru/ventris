@@ -1126,6 +1126,19 @@ M1 — Discovery becomes generic
   0 skipped; precision 1.0 on all 20 rows. Architecture check passes.
 - No pattern action eligibility is enabled by this change.
 
+## m1-010-d4e2b entry eligibility slices
+- Acceptance `66c48d9` fails on the missing four-byte prefix entry while
+  preserving the following seeded function. It also covers owned prefixes,
+  minimum valid instruction counts, invalid flow and undefined predecessors.
+- b1: expose instruction-level SLEIGH flow and delay-slot facts. Current raw
+  p-code flow conflates intra-instruction branches with machine transfers;
+  numeric pattern validation needs the instruction boundaries as well.
+- b2: implement source-defined pattern prerequisites and bounded validation.
+- b3: integrate definite/possible entry scheduling with existing ownership
+  and flow closure before final PIC linkage reconciliation.
+- Execute these prerequisites in order; each source commit stays below 800
+  changed lines. The pending entry acceptance remains required throughout.
+
 ## m1-010-d4 prerequisite sub-tasks
 - d4b: record loaded external relocation slots for ELF32/ELF64, independently
   of instruction decoding; preserve symbol-table linkage and endian/load bias.

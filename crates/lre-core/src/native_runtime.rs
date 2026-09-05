@@ -1113,6 +1113,32 @@ mod tests {
     }
 
     #[test]
+    fn repeated_instruction_flow_does_not_escape_into_pcode_labels() {
+        let mut cfg = crate::session::RuntimeConfig::from_env();
+        let Ok(console) = find_console(&cfg) else {
+            eprintln!("SKIP: SLEIGH console not available");
+            return;
+        };
+        cfg.console_path = Some(console);
+        cfg.language_id = "x86:LE:64:default".into();
+        cfg.language_dir = cfg.ghidra_install.join("Ghidra/Processors/x86/data/languages");
+        let mut session = ConsoleSession::new(&cfg).unwrap();
+        session.load_mapped(&NativeImport {
+            language: cfg.language_id.clone(),
+            mappings: vec![crate::native::Mapping {
+                vaddr: 0x1000, size: 3, file_off: 0, flags: 6,
+                bytes: vec![0xf3, 0xa4, 0xc3], // REP MOVSB; RET
+            }],
+            ..Default::default()
+        }).unwrap();
+        let flows = session.flow_batch(&[0x1000]).unwrap();
+        assert_eq!(flows[0].kind, FlowKind::Fallthrough);
+        assert_eq!(flows[0].fallthrough, Some(0x1002));
+        assert!(flows[0].targets.is_empty(),
+            "instruction-local repeat branches are not machine flow references");
+    }
+
+    #[test]
     fn elf_pattern_selection_uses_loader_compiler() {
         let mut cfg = crate::session::RuntimeConfig::from_env();
         let Ok(console) = find_console(&cfg) else {
