@@ -198,8 +198,9 @@ Omit `--check` to regenerate evidence with pinned Ghidra. `--oracle-dir` and
 `--output-dir` support isolated toolchain-specific references without replacing
 the committed raw corpus. The policy covers all 20 ELF inputs; the m1-008b
 discovery gate covers x86-64 `plain_o0` and `cpp_o2`, with recall >=0.98.
-Native ELF discovery uses unwind-index function entries and PLT metadata,
-flow-confirmed initializer/data pointers, and the existing batched flow walker.
+Native ELF32/ELF64 discovery shares `.init`, `.fini` and `.plt` section-start
+seeds, alongside unwind-index entries, PLT metadata, flow-confirmed
+initializer/data pointers and the existing batched flow walker.
 Established function entries can seed pure direct-jump thunk destinations,
 optionally after one contiguous instruction with no SLEIGH p-code operations.
 Rebuild the console with `native/build_console.sh` to supply explicit `no_op`
@@ -213,11 +214,12 @@ without the optional console, only structural facts are retained. The
 are removed. The small instruction decoder remains for listing and graph
 consumers, not as a discovery accelerator.
 
-The all-20 discovery gate currently reports **7 pass, 13 fail, 0 skipped**,
-with the architecture check passing. The single-prefix thunk rule restores
-the x86-64 `frame_dummy` → `register_tm_clones` boundary: `plain_o0` and
-`cpp_o2` again score 12/12 and 20/20 with precision 1.0. PIE address alignment
-and remaining loader/seed failures stay open; M1 is not complete.
+The all-20 discovery gate currently reports **10 pass, 10 fail, 0 skipped**,
+with the architecture check passing. Shared ELF startup seeds restore all four
+non-PIE i386 rows to precision/recall 1.0 and raise PowerPC `plain_o0`/`plain_o2`
+to 11/12 matches, precision 1.0. The x86-64 non-PIE rows remain at 1.0.
+PIE address alignment and remaining loader/seed failures stay open; M1 is
+not complete.
 
 ## Support matrix
 

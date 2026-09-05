@@ -291,6 +291,7 @@ fn import_elf32(data: &[u8], be: bool) -> Result<NativeImport> {
             }
         }
     }
+    collect_elf_section_starts(&sections, &mut functions);
     if entry != 0 && !functions.iter().any(|f| f.entry == entry) {
         functions.push(NativeFunction {
             entry,
@@ -324,6 +325,21 @@ struct ElfSection {
     off: u64,
     size: u64,
     link: u32,
+}
+
+fn collect_elf_section_starts(sections: &[ElfSection], functions: &mut Vec<NativeFunction>) {
+    for s in sections {
+        if s.flags & 4 == 0 || s.size == 0 || s.addr == 0 || functions.iter().any(|f| f.entry == s.addr) {
+            continue;
+        }
+        let (name, size) = match s.name.as_str() {
+            ".init" => ("_init", s.size),
+            ".fini" => ("_fini", s.size),
+            ".plt" => ("_plt", 1),
+            _ => continue,
+        };
+        functions.push(NativeFunction { entry: s.addr, name: name.into(), size });
+    }
 }
 
 fn parse_elf_sections(data: &[u8]) -> Result<(Vec<ElfSection>, Vec<u8>)> {
@@ -572,18 +588,7 @@ pub fn import_elf(data: &[u8]) -> Result<NativeImport> {
             }
         }
     }
-    for s in &sections {
-        if s.flags & 4 == 0 || s.size == 0 || s.addr == 0 || functions.iter().any(|f| f.entry == s.addr) {
-            continue;
-        }
-        let (name, size) = match s.name.as_str() {
-            ".init" => ("_init", s.size),
-            ".fini" => ("_fini", s.size),
-            ".plt" => ("_plt", 1),
-            _ => continue,
-        };
-        functions.push(NativeFunction { entry: s.addr, name: name.into(), size });
-    }
+    collect_elf_section_starts(&sections, &mut functions);
     // R_*_RELATIVE relocations: SHT_RELA (typ=4) and SHT_RELR (typ=19).
     // x86-64 R_X86_64_RELATIVE = 8, AArch64 R_AARCH64_RELATIVE = 1027,
     // RISC-V R_RISCV_RELATIVE = 3, PowerPC64 R_PPC64_RELATIVE = 22.
