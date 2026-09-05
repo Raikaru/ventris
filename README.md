@@ -225,10 +225,11 @@ REL, RELA and RELR pointer words are materialized with ELF width/endianness.
 Native memory, console images and both worker paths share those loaded bytes,
 including BSS zero-fill. Scoring performs no address normalization.
 
-The all-20 discovery gate currently reports **12 pass, 8 fail, 0 skipped**,
-with the architecture check passing. All ten x86-64/i386 rows, including PIE,
-have precision/recall 1.0. PowerPC PIE reaches 12/13 matches; remaining
-AArch64/PowerPC seed and flow failures stay open. M1 is not complete.
+The all-20 discovery gate reports **20 pass, 0 fail, 0 skipped**, with the
+architecture check passing and precision/recall 1.0 on every x86-64, i386,
+AArch64 and PowerPC BE32 row. The separate stripped-DOL acceptance matches
+634/644 reference functions (recall 0.984472; precision 0.940653).
+These are discovery results, not a claim of complete program-model parity.
 
 ## Support matrix
 

@@ -499,7 +499,7 @@ green (82 tests across 20 suites); the CPack TGZ builds.
   staleness check and acceptance test `tests/support_matrix_test.py`.
 
 ## Current milestone
-M1 — Discovery becomes generic
+M1 — discovery evidence complete; hosted CI verification pending
 
 ## M1 progress
 - m1-003-d: benchmarked hand decoder vs console flow on libc and the x86-64 corpus.
@@ -1234,14 +1234,26 @@ M1 — Discovery becomes generic
 - The generator no longer extends discovery claims to unmeasured architectures.
   CI runs the scope regression and README staleness check together; both pass.
 
+## m1-010-d4f final measured evidence
+- Source `081879b5cb262bb05ca9d142a61ca7fb69f90a44` produces the complete
+  `benchmarks/reports/discovery-gate.json`: 20 pass / 0 fail / 0 skipped,
+  precision/recall 1.0 on every row, architecture check passed.
+- Fresh DOL report: 634/644 matches, 674 functions, 40 extras; recall
+  0.984472049689441 and precision 0.940652818991098.
+- Workspace 125 tests; corpus 5/5; support-scope/staleness acceptance passes.
+  Final libc timing acceptance: 4.550281763 s < 5.0 s, 3,959 functions.
+- Native console and worker builds pass; MIPS delay-slot and ARM conditional
+  return smoke checks are recorded above. No M2 parity claim is made.
+- Hosted CI still needs verification after this evidence is published.
+
 ## Blocked on
-- No external prerequisite blocks M1. Final committed gate evidence and
-  publication remain required.
+- No external prerequisite blocks publication. Hosted CI must finish before
+  advancing the milestone.
 
 ## Next task
-- m1-010-d4f: generate and commit the unchanged complete discovery gate from
-  the final source commit, update measured status, and publish the changes.
-  The oracle, scorer and corpus remain unchanged.
+- m1-010-d4f: publish the source-linked reports and verify hosted CI.
+  Then schedule m2-001, the constant-propagation console request and its
+  known-global-load acceptance fixture. No corpus or metric changes.
 
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a

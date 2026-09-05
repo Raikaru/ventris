@@ -2,7 +2,7 @@
   "gate": "discovery",
   "milestone": "M1",
   "scoring_policy": "code-functions-v1",
-  "commit": "ed6bbf1b09f7933b05c51e18b7bca55b55a130c8",
+  "commit": "081879b5cb262bb05ca9d142a61ca7fb69f90a44",
   "date": "2026-09-05",
   "machine": {
     "os": "Linux-7.1.12-200.fc44.x86_64-x86_64-with-glibc2.43",
@@ -11,8 +11,8 @@
   "architecture_check": {
     "passed": true,
     "core": "crates/lre-core/src/native/discovery.rs",
-    "core_sha256": "2af7e7ba90d83cc2da789b9a726d3e14141c73bc974e62f2f4b2047046824ab3",
-    "legacy_source_sha256": "45bc03285e9c5879cf688a39bef84a4f67a9d39598f0c01bff2b9ab8d69b858f",
+    "core_sha256": "9f22d85e49c12da4fd1eb77968f4372af0c230e2bb95cb4d787d5ec9f255b8ff",
+    "legacy_source_sha256": "097543cd32b120100331421bb3900b9dd6f1bb7248aa4a2658bff193605ce840",
     "retired_decoder_discovery": [],
     "retired_feature_switches": [],
     "retired_console_discovery": [],
@@ -252,10 +252,10 @@
     },
     {
       "id": "aarch64_plain_o0",
-      "status": "fail",
+      "status": "pass",
       "metrics": {
         "fn.precision": 1.0,
-        "fn.recall": 0.8823529411764706
+        "fn.recall": 1.0
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -267,21 +267,18 @@
       "scoring_view_sha256": "1b17f1ed09fc05384be78462c256323977564c1b5ae62a492a1a1233d4e8d345",
       "raw_oracle_functions": 23,
       "excluded_functions": 6,
-      "native_functions": 15,
+      "native_functions": 17,
       "oracle_functions": 17,
-      "matched_functions": 15,
-      "missing_entries": [
-        "0021078c",
-        "002108a0"
-      ],
+      "matched_functions": 17,
+      "missing_entries": [],
       "extra_entries": []
     },
     {
       "id": "aarch64_plain_o2",
-      "status": "fail",
+      "status": "pass",
       "metrics": {
         "fn.precision": 1.0,
-        "fn.recall": 0.8823529411764706
+        "fn.recall": 1.0
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -293,21 +290,18 @@
       "scoring_view_sha256": "3fe86f93d325f32cce862024fa07bd0b8156bec54b033fd7bb729775ae34261a",
       "raw_oracle_functions": 23,
       "excluded_functions": 6,
-      "native_functions": 15,
+      "native_functions": 17,
       "oracle_functions": 17,
-      "matched_functions": 15,
-      "missing_entries": [
-        "0021078c",
-        "00210860"
-      ],
+      "matched_functions": 17,
+      "missing_entries": [],
       "extra_entries": []
     },
     {
       "id": "aarch64_plain_pie",
-      "status": "fail",
+      "status": "pass",
       "metrics": {
         "fn.precision": 1.0,
-        "fn.recall": 0.8823529411764706
+        "fn.recall": 1.0
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -319,21 +313,18 @@
       "scoring_view_sha256": "deed8abb05c9f38d72f1969ffd1886dcb14b10a8770fe5103d4f77fa43631ba2",
       "raw_oracle_functions": 24,
       "excluded_functions": 7,
-      "native_functions": 15,
+      "native_functions": 17,
       "oracle_functions": 17,
-      "matched_functions": 15,
-      "missing_entries": [
-        "001107fc",
-        "001108f0"
-      ],
+      "matched_functions": 17,
+      "missing_entries": [],
       "extra_entries": []
     },
     {
       "id": "aarch64_cpp_o2",
-      "status": "fail",
+      "status": "pass",
       "metrics": {
         "fn.precision": 1.0,
-        "fn.recall": 0.8333333333333334
+        "fn.recall": 1.0
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -345,15 +336,10 @@
       "scoring_view_sha256": "6e68f6d101702cd92ec14ff9d635b24c931a77ce4d59c55083d79da5f22a9ccc",
       "raw_oracle_functions": 36,
       "excluded_functions": 12,
-      "native_functions": 20,
+      "native_functions": 24,
       "oracle_functions": 24,
-      "matched_functions": 20,
-      "missing_entries": [
-        "00210a8c",
-        "00210c70",
-        "00210cc0",
-        "00210cd0"
-      ],
+      "matched_functions": 24,
+      "missing_entries": [],
       "extra_entries": []
     },
     {
@@ -361,7 +347,7 @@
       "status": "pass",
       "metrics": {
         "fn.precision": 1.0,
-        "fn.recall": 0.9951807228915662
+        "fn.recall": 1.0
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -373,21 +359,18 @@
       "scoring_view_sha256": "10e402a4dede46b9f6e670094c5d5b404f273cdde5ba7428aac4862ccc994997",
       "raw_oracle_functions": 420,
       "excluded_functions": 5,
-      "native_functions": 413,
+      "native_functions": 415,
       "oracle_functions": 415,
-      "matched_functions": 413,
-      "missing_entries": [
-        "002132cc",
-        "002152d0"
-      ],
+      "matched_functions": 415,
+      "missing_entries": [],
       "extra_entries": []
     },
     {
       "id": "powerpc_plain_o0",
-      "status": "fail",
+      "status": "pass",
       "metrics": {
         "fn.precision": 1.0,
-        "fn.recall": 0.9166666666666666
+        "fn.recall": 1.0
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -399,20 +382,18 @@
       "scoring_view_sha256": "86ad5849850e87f24eaa3d94355ffdf787183a9a50ef8d8721fa7db0262059fb",
       "raw_oracle_functions": 15,
       "excluded_functions": 3,
-      "native_functions": 11,
+      "native_functions": 12,
       "oracle_functions": 12,
-      "matched_functions": 11,
-      "missing_entries": [
-        "10010568"
-      ],
+      "matched_functions": 12,
+      "missing_entries": [],
       "extra_entries": []
     },
     {
       "id": "powerpc_plain_o2",
-      "status": "fail",
+      "status": "pass",
       "metrics": {
         "fn.precision": 1.0,
-        "fn.recall": 0.9166666666666666
+        "fn.recall": 1.0
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -424,20 +405,18 @@
       "scoring_view_sha256": "c8927c0e0c7bbb30c24ab767f2445ed9903c12c2e3a6c71e70c889c016d866b2",
       "raw_oracle_functions": 15,
       "excluded_functions": 3,
-      "native_functions": 11,
+      "native_functions": 12,
       "oracle_functions": 12,
-      "matched_functions": 11,
-      "missing_entries": [
-        "10010520"
-      ],
+      "matched_functions": 12,
+      "missing_entries": [],
       "extra_entries": []
     },
     {
       "id": "powerpc_plain_pie",
-      "status": "fail",
+      "status": "pass",
       "metrics": {
         "fn.precision": 1.0,
-        "fn.recall": 0.9230769230769231
+        "fn.recall": 1.0
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -449,20 +428,18 @@
       "scoring_view_sha256": "fd35952e947677b87c8bc33bce8580848b5526f7bfaff84b377734c7a3ecdd77",
       "raw_oracle_functions": 19,
       "excluded_functions": 6,
-      "native_functions": 12,
+      "native_functions": 13,
       "oracle_functions": 13,
-      "matched_functions": 12,
-      "missing_entries": [
-        "00020698"
-      ],
+      "matched_functions": 13,
+      "missing_entries": [],
       "extra_entries": []
     },
     {
       "id": "powerpc_cpp_o2",
-      "status": "fail",
+      "status": "pass",
       "metrics": {
-        "fn.precision": 0.9473684210526315,
-        "fn.recall": 0.9473684210526315
+        "fn.precision": 1.0,
+        "fn.recall": 1.0
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -476,20 +453,16 @@
       "excluded_functions": 9,
       "native_functions": 19,
       "oracle_functions": 19,
-      "matched_functions": 18,
-      "missing_entries": [
-        "10010890"
-      ],
-      "extra_entries": [
-        "10010980"
-      ]
+      "matched_functions": 19,
+      "missing_entries": [],
+      "extra_entries": []
     },
     {
       "id": "powerpc_many_o2",
       "status": "pass",
       "metrics": {
         "fn.precision": 1.0,
-        "fn.recall": 0.9975609756097561
+        "fn.recall": 1.0
       },
       "thresholds": {
         "fn.precision": 0.98,
@@ -501,19 +474,17 @@
       "scoring_view_sha256": "afbaef542ecc9e34064f8c4577056bb632b9bcc4a0a0c3453a45025b299d584b",
       "raw_oracle_functions": 412,
       "excluded_functions": 2,
-      "native_functions": 409,
+      "native_functions": 410,
       "oracle_functions": 410,
-      "matched_functions": 409,
-      "missing_entries": [
-        "10014f98"
-      ],
+      "matched_functions": 410,
+      "missing_entries": [],
       "extra_entries": []
     }
   ],
   "summary": {
-    "pass": 12,
-    "fail": 8,
+    "pass": 20,
+    "fail": 0,
     "skipped": 0
   },
-  "passed": false
+  "passed": true
 }

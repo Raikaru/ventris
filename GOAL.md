@@ -1,10 +1,9 @@
 # GOAL
 
-Drive ventris from Stage 1 (done) through Stage 4: a JVM-free reverse-engineering
-platform whose supported workflow (x86-64 ELF+PE: import, memory inspection,
-functions, disassembly, xrefs, decompile, rename, reopen without reanalysis)
-runs with Java absent, passing differential tests against pinned Ghidra 12.1.3
-and meeting measured memory targets.
+The Stage-4 JVM-free workflow is the verified baseline, not the full completion
+claim. The ratified milestone roadmap requires program-model parity with
+Ghidra (C1), improvements over stock Ghidra measured against ground truth
+(C2), and measured game-first sessions on the approved targets (C3).
 
 ## Stages
 
@@ -19,18 +18,23 @@ and meeting measured memory targets.
 ## Hard rules
 
 - Every Ghidra API call verified against `.ghidra-java/` sources or the
-  install jars — never from memory (see AGENTS.md).
+  install jars — never from memory (see CONTRIBUTING.md).
 - `third_party/ghidra/` stays pinned and hash-manifested; never edited in place.
 - Subagents read-only research only; the primary agent owns all edits.
 - No capability claimed without a test proving it.
 
-## Remaining work (post-Stage-4, in priority order)
+## Remaining work
 
-- UI / consumer surfaces (GPUI decision) over the `lre-core` facade — not
-  started.
-- PIE binaries: native import handles non-PIE only (bridge covers PIE).
-- Indirect-only CRT helpers (`register_tm_clones`, `_init`/`_fini`) and PLT
-  shims are outside native discovery; xrefs are call/branch-only (no data
-  xrefs yet).
-- CI + packaging (the differential/gate need a Ghidra install + the patched
-  native build; no GitHub Actions yet).
+- M1 discovery evidence is measured: all 20 ELF rows have precision/recall
+  1.0; the stripped DOL has recall 0.984472. Hosted CI verification is pending.
+- M2 program-model parity: constant propagation, data references and strings,
+  inferred prototypes, switch recovery, library identification and C++ facts.
+  The parity gate, not discovery alone, establishes C1.
+- M3 ground truth: DWARF scoring, a stock-Ghidra baseline and regression gates.
+- M4 measured improvements over that baseline, behind approved flags and
+  preserving oracle mode until the reserved decisions are made.
+- M5 end-to-end game sessions on the human-approved targets.
+- M6 user/analyzer documentation, release infrastructure and contributor
+  sustainability. Releases and outside contribution merges remain reserved.
+
+`STATUS.md` records the current milestone, exact next task and measured evidence.
