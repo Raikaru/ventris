@@ -346,8 +346,8 @@ fn unreferenced_plt_entry_requires_executable_table_and_bound_slot() {
                 data[0x400..0x404].copy_from_slice(&[0xc0, 0x03, 0x5f, 0xd6]);
                 // LLVM: adrp x16,#-4096; ldr x17,[x16]; add x16,x16,#0; br x17.
                 data[0x590..0x5a0].copy_from_slice(&[
-                    0xf0, 0xff, 0xff, 0xf0, 0x11, 0x02, 0x40, 0xf9,
-                    0x10, 0x02, 0x00, 0x91, 0x20, 0x02, 0x1f, 0xd6,
+                    0xf0, 0xff, 0xff, 0xf0, 0x11, 0x02, 0x40, 0xf9, 0x10, 0x02, 0x00, 0x91, 0x20,
+                    0x02, 0x1f, 0xd6,
                 ]);
             } else {
                 data[0x400] = 0xc3;
@@ -355,9 +355,15 @@ fn unreferenced_plt_entry_requires_executable_table_and_bound_slot() {
             }
             std::fs::write(&path, data).unwrap();
             let import = lre_core::native::load_native(&path).unwrap();
-            let function = import.functions.iter().find(|function| function.entry == 0x403010);
-            assert_eq!(function.is_some(), executable && bound,
-                "width={width}, executable={executable}, bound={bound}");
+            let function = import
+                .functions
+                .iter()
+                .find(|function| function.entry == 0x403010);
+            assert_eq!(
+                function.is_some(),
+                executable && bound,
+                "width={width}, executable={executable}, bound={bound}"
+            );
             if let Some(function) = function {
                 assert_eq!(function.name, "imported");
             }

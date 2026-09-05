@@ -770,10 +770,19 @@ impl ConsoleSession {
 
     /// Identify linkage stubs without reading or fabricating imported pointer values.
     pub fn linkage_batch(&mut self, addresses: &[u64]) -> Result<Vec<LinkageResult>> {
+        self.query_linkages(addresses, "linkage")
+    }
+
+    /// PLT metadata establishes entry boundaries; register setup need not be pure.
+    pub(crate) fn plt_linkage_batch(&mut self, addresses: &[u64]) -> Result<Vec<LinkageResult>> {
+        self.query_linkages(addresses, "linkage --table")
+    }
+
+    fn query_linkages(&mut self, addresses: &[u64], prefix: &str) -> Result<Vec<LinkageResult>> {
         use std::fmt::Write as _;
         if addresses.is_empty() { return Ok(Vec::new()); }
-        let mut command = String::with_capacity(addresses.len() * 19 + 9);
-        command.push_str("linkage");
+        let mut command = String::with_capacity(addresses.len() * 19 + prefix.len() + 1);
+        command.push_str(prefix);
         for address in addresses { let _ = write!(command, " 0x{address:x}"); }
         command.push('\n');
         self.send(&command)?;

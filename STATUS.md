@@ -1070,6 +1070,24 @@ M1 — Discovery becomes generic
   context for PowerPC PIE (its stub reads incoming `r30`); removal of the old
   ELF64 x86 byte scan. Do not assume one global `r30` value across functions.
 
+## m1-010-d4d PLT-entry cutover
+- Acceptance `69e8a93` fails before implementation on an unreferenced i386 PLT
+  entry. The regression also exercises AArch64 register setup and rejects
+  non-executable tables and missing external-slot bindings.
+- Both ELF classes retain `sh_entsize`; zero-width canonical tables require
+  matching `.rel[a].plt` record counts. Each candidate needs bounded SLEIGH
+  evidence within its entry width. The ELF64 x86 byte scan is removed.
+- Workspace 116 tests; corpus 5/5; console and worker builds pass.
+  Full discovery is 15 pass / 5 fail / 0 skipped, with precision 1.0 on all rows.
+- Release libc retains 3959 functions in 4.424 seconds on one isolated run.
+- Remaining misses: AArch64 prefix entries `0021078c` (o0/o2),
+  `001107fc` (PIE), `00210a8c` (C++), and PowerPC PIE `00020698`.
+  The AArch64 case matches the pinned `possiblefuncstart` wildcard-prefix
+  pattern; it is not another PLT entry.
+- Next d4d piece: per-caller PIC linkage context. PowerPC `_start` establishes
+  its GOT base from the PC before the branch; other functions use different
+  `r30` values. Keep source and measured-report commits below 800 changed lines.
+
 ## m1-010-d4 prerequisite sub-tasks
 - d4b: record loaded external relocation slots for ELF32/ELF64, independently
   of instruction decoding; preserve symbol-table linkage and endian/load bias.
@@ -1094,12 +1112,12 @@ M1 — Discovery becomes generic
 
 ## Blocked on
 - None for dependency-driven prerequisite sequencing; authorization is recorded
-  above. The current M1 discovery gate remains 14 pass / 6 fail.
+  above. The current M1 discovery gate remains 15 pass / 5 fail.
 
 ## Next task
-- m1-010-d4d: finish PLT-entry discovery and PIC linkage context, then remove
-  the old ELF64 x86 scan. Complete d4e/d4f against unchanged full discovery
-  acceptance; sub-task e is open.
+- m1-010-d4d: finish per-caller PIC linkage context. Then complete the pinned
+  function-start prerequisite (d4e) and fresh full-gate evidence (d4f).
+  The oracle, scorer and corpus remain unchanged; sub-task e is open.
 
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a

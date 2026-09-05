@@ -164,7 +164,79 @@ pub(super) fn prepare(
     }
     import.externals.sort();
     import.externals.dedup();
+    collect_plt_candidates(sections, import, machine, width as u64);
     Ok(())
+}
+
+fn collect_plt_candidates(
+    sections: &[ElfSection],
+    import: &mut NativeImport,
+    machine: u64,
+    word_width: u64,
+) {
+    if !import.externals.iter().any(|(address, _)| *address != 0) {
+        return;
+    }
+    for section in sections
+        .iter()
+        .filter(|section| section.flags & 6 == 6 && section.typ == 1)
+    {
+        let default_width = match (machine, section.name.as_str()) {
+            (3 | 62, ".plt" | ".plt.sec") | (183, ".plt") => 16,
+            (3 | 62, ".plt.got") => 8,
+            _ => continue,
+        };
+        if section.entry_size == 0 {
+            // Only infer a canonical linker layout when its relocation count
+            // accounts for the whole table. Do not split unknown BTI/PAC layouts.
+            let header = match (machine, section.name.as_str()) {
+                (183, ".plt") => 32,
+                (_, ".plt") => 16,
+                (_, ".plt.sec") => 0,
+                _ => continue,
+            };
+            let count = sections
+                .iter()
+                .filter(|rel| {
+                    matches!(
+                        (rel.typ, rel.name.as_str()),
+                        (4, ".rela.plt") | (9, ".rel.plt")
+                    )
+                })
+                .try_fold(0u64, |count, rel| {
+                    count.checked_add(rel.size / (word_width * if rel.typ == 4 { 3 } else { 2 }))
+                });
+            if count
+                .filter(|count| *count != 0)
+                .and_then(|count| count.checked_mul(default_width))
+                .and_then(|size| size.checked_add(header))
+                != Some(section.size)
+            {
+                continue;
+            }
+        }
+        let width = if section.entry_size == 0 {
+            default_width
+        } else {
+            section.entry_size
+        };
+        if !(8..=64).contains(&width) || section.size % width != 0 {
+            continue;
+        }
+        let Some(mapping) = import
+            .mappings
+            .iter()
+            .find(|mapping| mapping.vaddr == section.addr)
+        else {
+            continue;
+        };
+        if section.size > mapping.bytes.len() as u64 {
+            continue;
+        }
+        import
+            .plt_candidates
+            .extend((0..section.size / width).map(|index| (section.addr + index * width, width)));
+    }
 }
 
 fn external_name<'a>(

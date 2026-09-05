@@ -79,6 +79,21 @@ an unconditional branch target can establish a separate entry only when
 bounded SLEIGH linkage evidence resolves a loader-recorded external slot.
 Conditional targets and unresolved incoming-register values are not promoted.
 
+PLT boundaries use ELF `sh_entsize`, executable mapped sections, and the
+canonical layouts documented by LLVM lld 19.1
+([AArch64](https://github.com/llvm/llvm-project/blob/llvmorg-19.1.0/lld/ELF/Arch/AArch64.cpp),
+Apache-2.0 WITH LLVM-exception): a 32-byte resolver header and 16-byte entries.
+The [x86](https://github.com/llvm/llvm-project/blob/llvmorg-19.1.0/lld/ELF/Arch/X86.cpp)
+and [x86-64](https://github.com/llvm/llvm-project/blob/llvmorg-19.1.0/lld/ELF/Arch/X86_64.cpp)
+layouts use a 16-byte resolver header and 16-byte entries; `.plt.sec`
+has no header. Missing entry widths are inferred only when `.rel[a].plt`
+record counts account for the entire canonical table. Unknown layouts and
+zero-width `.plt.got` sections are rejected.
+These are untrusted candidates, not functions. The table-specific SLEIGH query
+permits unused register setup but still rejects unknown inputs, stores, calls
+and non-indirect terminal flow; its result must fit the entry and resolve a
+loader-recorded external slot. Generic branch-target recognition remains strict.
+
 ## ELF loaded images and worker memory
 
 ELF record layouts and relative-relocation constants are checked against the

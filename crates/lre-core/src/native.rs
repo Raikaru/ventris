@@ -111,6 +111,8 @@ pub struct NativeImport {
     pub pointer_candidates: Vec<u64>,
     /// Loader-declared initializer entry points, also requiring valid flow.
     pub initializer_candidates: Vec<u64>,
+    /// Untrusted PLT entries: loaded address and maximum entry width.
+    pub plt_candidates: Vec<(u64, u64)>,
     pub relocations: Vec<MemoryRelocation>,
     pub format: String,
     /// Ghidra-compatible language id selected from the file machine.
@@ -189,6 +191,7 @@ fn parse_elf32_sections(data: &[u8], be: bool) -> Result<(Vec<ElfSection>, Vec<u
             off: rd32(hdr + 16)? as u64,
             size: rd32(hdr + 20)? as u64,
             link: rd32(hdr + 24)?,
+            entry_size: rd32(hdr + 36)? as u64,
         });
     }
     // shstrtab content for names.
@@ -198,10 +201,6 @@ fn parse_elf32_sections(data: &[u8], be: bool) -> Result<(Vec<ElfSection>, Vec<u
             .get(s.off as usize..s.off as usize + s.size as usize)
             .unwrap_or(&[])
             .to_vec();
-    }
-    for section in &mut sections {
-        let name_off = rd32(shoff + 0)?; // placeholder, replaced below
-        let _ = name_off;
     }
     // Names: re-walk with stored offsets (Shdr sh_name at +0).
     let mut name_offs = Vec::new();
@@ -219,8 +218,8 @@ fn parse_elf32_sections(data: &[u8], be: bool) -> Result<(Vec<ElfSection>, Vec<u
 }
 
 /// ELF32 import (Phase 4 target: GameCube PowerPC BE, PS2 MIPS BE).
-/// Symbols use 16-byte Elf32_Sym entries. Relative relocation, pointer and
-/// unwind collection is shared with ELF64; its x86 GOT-stub scan is not used.
+/// Symbols use 16-byte Elf32_Sym entries. Relative relocations, pointers,
+/// unwind indexes and linkage metadata share the ELF64 implementation.
 fn import_elf32(data: &[u8], be: bool) -> Result<NativeImport> {
     let rd32 = |o: usize| -> Result<u32> {
         if be {
@@ -336,6 +335,7 @@ struct ElfSection {
     off: u64,
     size: u64,
     link: u32,
+    entry_size: u64,
 }
 
 fn collect_elf_section_starts(sections: &[ElfSection], functions: &mut Vec<NativeFunction>) {
@@ -358,11 +358,9 @@ fn parse_elf_sections(data: &[u8]) -> Result<(Vec<ElfSection>, Vec<u8>)> {
     let shnum = u16_at(data, 60)? as usize;
     let shoff = u64_at(data, 40)? as usize;
     let shstrndx = u16_at(data, 62)? as usize;
-    let mut shstr = Vec::new();
     let mut sections = Vec::new();
     for i in 0..shnum {
         let hdr = shoff + i * shentsize;
-        let name_off = u32_at(data, hdr)? as usize;
         sections.push(ElfSection {
             name: String::new(),
             typ: u32_at(data, hdr + 4)?,
@@ -371,16 +369,16 @@ fn parse_elf_sections(data: &[u8]) -> Result<(Vec<ElfSection>, Vec<u8>)> {
             off: u64_at(data, hdr + 24)?,
             size: u64_at(data, hdr + 32)?,
             link: u32_at(data, hdr + 40)?,
+            entry_size: u64_at(data, hdr + 56)?,
         });
-        sections.last_mut().unwrap().name = String::new(); // set below
     }
     // fetch shstrtab content
-    {
+    let shstr = {
         let hdr = shoff + shstrndx * shentsize;
         let off = u64_at(data, hdr + 24)? as usize;
         let sz = u64_at(data, hdr + 32)? as usize;
-        shstr = data.get(off..off + sz).unwrap_or(&[]).to_vec();
-    }
+        data.get(off..off + sz).unwrap_or(&[]).to_vec()
+    };
     // names assigned from shstrtab after fetching; store raw offsets
     let mut name_offs = Vec::new();
     for i in 0..shnum {
@@ -505,10 +503,7 @@ pub fn import_elf(data: &[u8]) -> Result<NativeImport> {
             }
         }
     }
-    // SHT_DYNSYM (6): externals (SHN_UNDEF) that the loader binds; their
-    // PLT stubs are named via SHT_RELA (4) .rela.plt/dyn entries.
-    let mut dynsyms: Vec<String> = Vec::new();
-    // SHT_DYNSYM = 11 (SHT_SYMTAB = 2 already handled above).
+    // Undefined dynamic symbols; elf_image collects their loaded relocation slots.
     for s in sections.iter().filter(|s| s.typ == 11) {
         let strtab = sections
             .get(s.link as usize)
@@ -525,77 +520,14 @@ pub fn import_elf(data: &[u8]) -> Result<NativeImport> {
                 break;
             }
             let name_off = u32_at(data, hdr)? as usize;
-            let info = data[hdr + 4];
             let shndx = u16_at(data, hdr + 6)?;
             let name = strtab
                 .get(name_off..)
                 .and_then(|r| r.split(|c| *c == 0).next())
                 .map(|r| String::from_utf8_lossy(r).into_owned())
                 .unwrap_or_default();
-            if !name.is_empty() {
-                if shndx == 0 {
-                    externals.push((0, name.clone()));
-                }
-            }
-            // Preserve index zero: relocation symbol indexes are absolute.
-            dynsyms.push(name);
-            let _ = info;
-        }
-    }
-    // .rela.plt/.rela.dyn (SHT_RELA=4): r_offset -> symbol name. A PLT stub
-    // `ff 25 <disp32>` references its GOT slot (stub+6+disp == r_offset), so
-    // the exact stub gets the exact name regardless of relocation order.
-    let mut relocs: Vec<(u64, String)> = Vec::new();
-    for r in sections.iter().filter(|s| s.typ == 4 && s.size > 0) {
-        let entry_count = r.size as usize / 24;
-        for i in 0..entry_count {
-            let hdr = r.off as usize + i * 24;
-            if hdr + 24 > data.len() {
-                break;
-            }
-            let got_off = u64_at(data, hdr)?;
-            let r_info = u64_at(data, hdr + 8)?;
-            let sym_idx = (r_info >> 32) as usize;
-            if sym_idx < dynsyms.len() && !dynsyms[sym_idx].is_empty() {
-                relocs.push((got_off, dynsyms[sym_idx].clone()));
-            }
-        }
-    }
-    let mut seen_got: Vec<(u64, String)> = Vec::new();
-    for m in &mappings {
-        let mut i = 0usize;
-        while i + 6 <= m.bytes.len() {
-            if m.bytes[i] == 0xff && m.bytes[i + 1] == 0x25 {
-                let disp = i32::from_le_bytes([
-                    m.bytes[i + 2], m.bytes[i + 3], m.bytes[i + 4], m.bytes[i + 5],
-                ]);
-                let got = (m.vaddr + i as u64 + 6).wrapping_add(disp as u64);
-                if let Some((_, rname)) = relocs.iter().find(|(o, _)| *o == got) {
-                    // .plt.sec on x86-64 is endbr64 (f3 0f 1e fa, 4 bytes) followed
-                    // by the indirect jmp. Align the entry to the start of the stub.
-                    let mut stub_off = i;
-                    let mut stub_size = 6;
-                    if i >= 4
-                        && (m.bytes[i - 4..i] == [0xf3, 0x0f, 0x1e, 0xfa]
-                            || m.bytes[i - 4..i] == [0xf3, 0x0f, 0x1e, 0xfb])
-                    {
-                        stub_off = i - 4;
-                        stub_size = 10;
-                    }
-                    let addr = m.vaddr + stub_off as u64;
-                    if !seen_got.iter().any(|(a, _)| *a == addr) {
-                        functions.push(NativeFunction {
-                            entry: addr,
-                            name: rname.clone(),
-                            size: stub_size,
-                        });
-                        externals.push((got, rname.clone()));
-                        seen_got.push((addr, rname.clone()));
-                    }
-                }
-                i += 6;
-            } else {
-                i += 1;
+            if !name.is_empty() && shndx == 0 {
+                externals.push((0, name));
             }
         }
     }

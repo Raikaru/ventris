@@ -97,10 +97,10 @@ public:
         ++i;
     }
   }
-  bool complete(void) const {
+  bool complete(bool table) const {
     if (bad || !terminal)
       return false;
-    for (size_t i = 0; i < count; ++i) {
+    for (size_t i = 0; !table && i < count; ++i) {
       if (cells[i].var.space->getType() != IPTR_INTERNAL &&
           cells[i].var.size > 1 && !cells[i].used)
         return false;
@@ -194,6 +194,14 @@ public:
   virtual void execute(istream &input) {
     if (dcp->conf == (Architecture *)0)
       throw IfaceExecutionError("No architecture loaded");
+    input >> ws;
+    bool table = input.peek() == '-';
+    if (table) {
+      string option;
+      input >> option;
+      if (option != "--table")
+        throw IfaceExecutionError("Unknown linkage option");
+    }
     while (true) {
       input >> ws;
       if (input.eof())
@@ -224,7 +232,7 @@ public:
       } catch (LowlevelError &) {
         emit.bad = true;
       }
-      bool valid = emit.complete();
+      bool valid = emit.complete(table);
       *status->fileoptr << "LINKAGE {\"address\":" << dec << start.getOffset()
                         << ",\"length\":" << (valid ? length : 0)
                         << ",\"slot\":";

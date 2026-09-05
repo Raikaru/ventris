@@ -15,6 +15,7 @@ mod tests;
 trait FlowProvider {
     fn flow(&mut self, addresses: &[u64]) -> Vec<FlowResult>;
     fn linkages(&mut self, addresses: &[u64]) -> Vec<LinkageResult>;
+    fn plt_linkages(&mut self, addresses: &[u64]) -> Vec<LinkageResult>;
 }
 
 struct ConsoleProvider {
@@ -57,6 +58,16 @@ impl FlowProvider for ConsoleProvider {
 
     fn linkages(&mut self, addresses: &[u64]) -> Vec<LinkageResult> {
         match self.session.linkage_batch(addresses) {
+            Ok(results) => results,
+            Err(error) => {
+                self.failure = Some(error);
+                Vec::new()
+            }
+        }
+    }
+
+    fn plt_linkages(&mut self, addresses: &[u64]) -> Vec<LinkageResult> {
+        match self.session.plt_linkage_batch(addresses) {
             Ok(results) => results,
             Err(error) => {
                 self.failure = Some(error);
@@ -218,6 +229,9 @@ pub fn flow_discover_with_provider<F: FnMut(&[u64]) -> Vec<crate::native_runtime
         fn linkages(&mut self, _: &[u64]) -> Vec<LinkageResult> {
             Vec::new()
         }
+        fn plt_linkages(&mut self, _: &[u64]) -> Vec<LinkageResult> {
+            Vec::new()
+        }
     }
     flow_discover_with_candidates(imp, &[], &mut TestProvider(flow_provider));
 }
@@ -232,6 +246,45 @@ fn flow_discover_with_candidates<P: FlowProvider>(
     let in_code = |a: u64| code.iter().any(|(v, e)| a >= *v && a < *e);
     let has_linkage_slots = imp.externals.iter().any(|(address, _)| *address != 0);
     let mut examined_linkages = HashSet::new();
+    // Table metadata supplies boundaries, not functions. Each entry still needs
+    // bounded p-code evidence ending in an indirect transfer through a known slot.
+    if has_linkage_slots {
+        for chunk in imp.plt_candidates.chunks(1024) {
+            let addresses: Vec<_> = chunk.iter().map(|&(address, _)| address).collect();
+            for (&(address, width), linkage) in
+                chunk.iter().zip(flow_provider.plt_linkages(&addresses))
+            {
+                if linkage.address != address
+                    || linkage.length == 0
+                    || linkage.length as u64 > width
+                    || imp
+                        .functions
+                        .iter()
+                        .any(|function| function.entry == address)
+                    || !code.iter().any(|&(start, end)| {
+                        start <= address && address < end && linkage.length as u64 <= end - address
+                    })
+                {
+                    continue;
+                }
+                let Some(slot) = linkage.slot else {
+                    continue;
+                };
+                let Some((_, name)) = imp
+                    .externals
+                    .iter()
+                    .find(|(slot_address, _)| *slot_address == slot && slot != 0)
+                else {
+                    continue;
+                };
+                imp.functions.push(NativeFunction {
+                    entry: address,
+                    name: name.clone(),
+                    size: linkage.length as u64,
+                });
+            }
+        }
+    }
     // Initial discovery from trusted seeds first:
     let mut entries: Vec<u64> = imp
         .functions
