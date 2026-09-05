@@ -51,7 +51,13 @@ change its fingerprint or the immutable raw oracle references.
 The approved M1 prerequisite follows the single-jump case in Ghidra 12.1.3
 `CreateThunkFunctionCmd.getSimpleFlow` (Apache-2.0), checked in the extracted
 Java source. The native rule is narrower: an established entry must emit
-exactly one direct SLEIGH `BRANCH` operation, with no additional p-code effects.
+exactly one direct SLEIGH `BRANCH` operation, with no additional p-code effects,
+optionally preceded by one contiguous empty-p-code instruction.
+The approved prefix extension follows `getThunkedAddr` lines 567–572, which
+skip one empty-p-code instruction and explicitly mention ENDBR64. The console
+emits `no_op=1` only after successful decoding with an empty p-code operation
+list; no mnemonic or opcode-byte matching is used in discovery. Further prefixes
+and missing evidence are rejected.
 Its destination must independently decode and survive body-containment
 reconciliation. Weak data/boundary candidates do not establish further entries.
 Jump xrefs retain `native-import:thunk` provenance only for distinct retained

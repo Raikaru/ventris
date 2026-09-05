@@ -3,7 +3,7 @@ use crate::native::Mapping;
 use crate::native_runtime::FlowResult;
 
 fn result(address: u64, kind: FlowKind, target: Option<u64>, pure_jump: bool) -> FlowResult {
-    FlowResult { address, length: 2, fallthrough: None,
+    FlowResult { no_op: false, address, length: 2, fallthrough: None,
         targets: target.into_iter().collect(), kind, pure_jump }
 }
 
@@ -45,11 +45,17 @@ fn landing_prefix_preserves_entry_extent_and_actual_jump_xref() {
 #[test]
 fn landing_prefix_requires_exact_single_no_op_and_valid_jump() {
     for case in ["missing-evidence", "wrong-address", "zero-length", "noncontiguous",
-                 "multiple", "effects", "conditional", "self", "invalid-target", "weak"] {
+                 "multiple", "effects", "conditional", "self", "invalid-target", "truncated-jump", "weak"] {
         let mut imp = image();
         if case == "weak" {
             imp.functions[0].entry = 0x1100;
             imp.pointer_candidates.push(0x1000);
+        }
+        if case == "truncated-jump" {
+            imp.mappings[0].size = 5;
+            imp.mappings[0].bytes.truncate(5);
+            imp.mappings.push(Mapping { vaddr: 0x2000, size: 2, file_off: 0,
+                flags: 4, bytes: vec![0; 2] });
         }
         flow_discover_with_provider(&mut imp, |addresses| addresses.iter().map(|&a| {
             if a == 0x1000 {

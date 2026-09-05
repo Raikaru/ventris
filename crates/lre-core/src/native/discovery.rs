@@ -162,6 +162,7 @@ fn flow_discover_with_candidates<F: FnMut(&[u64]) -> Vec<crate::native_runtime::
     let mut thunk_jumps = Vec::new();
     let mut thunk_roots = HashMap::new();
     let mut thunk_continuations = HashMap::new();
+    let mut landing_entries = HashMap::new();
     let mut proven_bodies: std::collections::HashMap<u64, u64> = std::collections::HashMap::with_capacity(4096);
     let mut addr_origin: std::collections::HashMap<u64, u64> = std::collections::HashMap::with_capacity(32768);
     for &s in &entries {
@@ -183,8 +184,20 @@ fn flow_discover_with_candidates<F: FnMut(&[u64]) -> Vec<crate::native_runtime::
         let mut next_active: Vec<u64> = Vec::new();
         for chunk in to_query.chunks(1024) {
             let flows = flow_provider(chunk);
-            let thunks = confirmed_thunks(imp, &entries, &visited, &instruction_extents, chunk, &flows, &mut flow_provider);
+            let thunks = confirmed_thunks(imp, &entries, &landing_entries, &visited, &instruction_extents, chunk, &flows, &mut flow_provider);
             for (addr, info) in chunk.iter().copied().zip(flows) {
+                if info.address == addr && info.no_op && info.length != 0
+                    && info.kind == FlowKind::Fallthrough && info.targets.is_empty()
+                    && info.fallthrough == addr.checked_add(info.length as u64)
+                    && entries.contains(&addr)
+                    && imp.mappings.iter().any(|m| m.flags & 4 != 0 && addr >= m.vaddr
+                        && addr - m.vaddr < m.size && info.length as u64 <= m.size - (addr - m.vaddr))
+                {
+                    // Only the first instruction may be skipped, never a no-op chain.
+                    if let Some(fall) = info.fallthrough {
+                        landing_entries.insert(fall, addr);
+                    }
+                }
                 // A jump chain reaching its source's continuation is an internal
                 // branch-over-body sequence, not a set of separate functions.
                 if let Some(&root) = thunk_continuations.get(&addr) {
@@ -231,7 +244,7 @@ fn flow_discover_with_candidates<F: FnMut(&[u64]) -> Vec<crate::native_runtime::
                                 if !entries.contains(&t) {
                                     entries.push(t);
                                     thunk_candidates.insert(t);
-                                    let root = thunk_roots.get(&addr).copied().unwrap_or(addr);
+                                    let root = thunk_roots.get(&origin).copied().unwrap_or(origin);
                                     thunk_roots.insert(t, root);
                                     thunk_continuations.insert(addr + info.length as u64, root);
                                 }
@@ -466,11 +479,12 @@ fn flow_discover_with_candidates<F: FnMut(&[u64]) -> Vec<crate::native_runtime::
 }
 
 /// Conservative subset of Ghidra CreateThunkFunctionCmd.getSimpleFlow:
-/// only an established entry's single direct branch, with no other p-code ops.
+/// an established entry's pure branch, optionally after one proven no-op.
 /// Unlike arbitrary branch closure, the destination must independently decode.
 fn confirmed_thunks<F: FnMut(&[u64]) -> Vec<crate::native_runtime::FlowResult>>(
     imp: &NativeImport,
     entries: &[u64],
+    landing_entries: &HashMap<u64, u64>,
     visited: &HashSet<u64>,
     extents: &[(u64, u64)],
     addresses: &[u64],
@@ -481,11 +495,16 @@ fn confirmed_thunks<F: FnMut(&[u64]) -> Vec<crate::native_runtime::FlowResult>>(
     for (&address, flow) in addresses.iter().zip(flows) {
         if flow.address != address || flow.length == 0 || !flow.pure_jump
             || flow.kind != FlowKind::Branch || flow.fallthrough.is_some()
-            || flow.targets.len() != 1 || !entries.contains(&address) {
+            || flow.targets.len() != 1
+            || !imp.mappings.iter().any(|m| m.flags & 4 != 0 && address >= m.vaddr
+                && address - m.vaddr < m.size && flow.length as u64 <= m.size - (address - m.vaddr)) {
             continue;
         }
+        let entry = if entries.contains(&address) { address }
+                    else if let Some(&entry) = landing_entries.get(&address) { entry }
+                    else { continue; };
         let target = flow.targets[0];
-        if target == address || (visited.contains(&target) && !entries.contains(&target))
+        if target == address || target == entry || (visited.contains(&target) && !entries.contains(&target))
             || !imp.mappings.iter().any(|m| m.flags & 4 != 0 && target >= m.vaddr && target - m.vaddr < m.size)
             || imp.functions.iter().any(|f| target > f.entry && target - f.entry < f.size)
             || extents.iter().any(|&(start, size)| target > start && target - start < size) {

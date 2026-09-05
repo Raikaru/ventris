@@ -316,7 +316,7 @@ index e62ab6a..6d42a2d 100644
      int4 sz;
      sz = glb->translate->printAssembly(assem,addr);
      addr = addr + sz;
-@@ -836,6 +849,122 @@ void IfcPrintdisasm::execute(istream &s)
+@@ -836,6 +849,123 @@ void IfcPrintdisasm::execute(istream &s)
    }
  }
  
@@ -427,6 +427,7 @@ index e62ab6a..6d42a2d 100644
 +    bool pure_jump = emitter.ops.size() == 1 && emitter.ops[0].opc == CPUI_BRANCH
 +        && emitter.ops[0].direct_target;
 +    *status->fileoptr << " pure_jump=" << (pure_jump ? 1 : 0);
++    *status->fileoptr << " no_op=" << (emitter.ops.empty() ? 1 : 0);
 +    *status->fileoptr << " kind=" << kind << " targets=";
 +    for(size_t i=0;i<targets.size();++i) {
 +      if (i > 0) *status->fileoptr << ",";

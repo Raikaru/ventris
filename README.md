@@ -200,11 +200,12 @@ the committed raw corpus. The policy covers all 20 ELF inputs; the m1-008b
 discovery gate covers x86-64 `plain_o0` and `cpp_o2`, with recall >=0.98.
 Native ELF discovery uses unwind-index function entries and PLT metadata,
 flow-confirmed initializer/data pointers, and the existing batched flow walker.
-Established function entries can also seed pure direct-jump thunk destinations.
-Rebuild the console with `native/build_console.sh` to supply the required
-single-operation p-code purity evidence. Missing evidence fails closed.
-Conditional/interior branches, weak seeds and jump chains returning into their
-own body do not establish additional functions.
+Established function entries can seed pure direct-jump thunk destinations,
+optionally after one contiguous instruction with no SLEIGH p-code operations.
+Rebuild the console with `native/build_console.sh` to supply explicit `no_op`
+and `pure_jump` evidence. Missing evidence fails closed. Multiple prefixes,
+conditional/interior branches, effects, weak seeds and jump chains returning
+into their own body do not establish additional functions.
 
 ELF/PE discovery now uses the generic SLEIGH worklist over native mappings;
 without the optional console, only structural facts are retained. The
@@ -212,12 +213,11 @@ without the optional console, only structural facts are retained. The
 are removed. The small instruction decoder remains for listing and graph
 consumers, not as a discovery accelerator.
 
-The all-20 discovery gate currently reports **4 pass, 16 fail, 0 skipped**.
-The cutover loses the x86-64 `register_tm_clones` entry behind
-`frame_dummy`'s `endbr64; jmp`: the approved thunk rule covers only a pure
-jump in the first instruction. PIE address alignment and remaining loader/seed
-failures also remain open. These results supersede earlier discovery counts,
-not the immutable historical reports.
+The all-20 discovery gate currently reports **7 pass, 13 fail, 0 skipped**,
+with the architecture check passing. The single-prefix thunk rule restores
+the x86-64 `frame_dummy` → `register_tm_clones` boundary: `plain_o0` and
+`cpp_o2` again score 12/12 and 20/20 with precision 1.0. PIE address alignment
+and remaining loader/seed failures stay open; M1 is not complete.
 
 ## Support matrix
 
