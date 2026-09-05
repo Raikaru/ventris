@@ -862,4 +862,72 @@ mod tests {
 
         session.quit().unwrap();
     }
+
+    #[test]
+    fn linkage_queries_require_bounded_side_effect_free_slot_flow() {
+        let cfg = RuntimeConfig::from_env();
+        if find_console(&cfg).is_err() {
+            eprintln!("SKIP: SLEIGH console not available");
+            return;
+        }
+        // LLVM llvm-mc encodings; every positive computes the slot at 0x3008.
+        let cases: &[(&str, &str, &[u8], &[u8], &[u8])] = &[
+            ("x86", "x86:LE:64:default",
+             &[0xff, 0x25, 0x02, 0x20, 0, 0], &[0xff, 0xe0], &[0xb8, 1, 0, 0, 0]),
+            ("x86", "x86:LE:32:default",
+             &[0xff, 0x25, 0x08, 0x30, 0, 0], &[0xff, 0xe0], &[0xb8, 1, 0, 0, 0]),
+            ("AARCH64", "AARCH64:LE:64:v8A",
+             &[0x10, 0, 0, 0xd0, 0x11, 6, 0x40, 0xf9, 0x20, 2, 0x1f, 0xd6],
+             &[0x20, 2, 0x1f, 0xd6], &[0x20, 0, 0x80, 0xd2]),
+            ("PowerPC", "PowerPC:BE:32:default",
+             &[0x3d, 0x60, 0, 0, 0x81, 0x6b, 0x30, 8, 0x7d, 0x69, 3, 0xa6, 0x4e, 0x80, 4, 0x20],
+             &[0x4e, 0x80, 4, 0x20], &[0x38, 0x60, 0, 1]),
+        ];
+        for &(processor, language, code, unknown, extra_write) in cases {
+            let mut cfg = cfg.clone();
+            cfg.language_id = language.into();
+            cfg.language_dir = cfg.ghidra_install.join(format!("Ghidra/Processors/{processor}/data/languages"));
+            let mut bytes = vec![0; 0x300];
+            bytes[..code.len()].copy_from_slice(code);
+            bytes[0x100..0x100 + unknown.len()].copy_from_slice(unknown);
+            bytes[0x200..0x200 + extra_write.len()].copy_from_slice(extra_write);
+            bytes[0x200 + extra_write.len()..0x200 + extra_write.len() + code.len()].copy_from_slice(code);
+            let import = NativeImport {
+                language: language.into(),
+                mappings: vec![crate::native::Mapping { vaddr: 0x1000, size: bytes.len() as u64,
+                    file_off: 0, flags: 6, bytes }],
+                ..Default::default()
+            };
+            let mut session = ConsoleSession::new(&cfg).unwrap();
+            session.load_mapped(&import).unwrap();
+            session.send("linkage 0x1000 0x1100 0x1200\n").unwrap();
+            let response = read_until_prompt(&mut session.reader).unwrap();
+            let rows: Vec<serde_json::Value> = response.lines()
+                .filter_map(|line| line.strip_prefix("LINKAGE "))
+                .map(|line| serde_json::from_str(line).unwrap()).collect();
+            assert_eq!(rows.len(), 3, "{language}: {response}");
+            assert_eq!(rows[0]["slot"].as_u64(), Some(0x3008), "{language}");
+            assert!(rows[1]["slot"].is_null(), "{language}: unknown incoming register");
+            assert!(rows[2]["slot"].is_null(), "{language}: unused register write");
+            // A rejected query must not poison the following console request.
+            assert_eq!(session.flow(0x1000).unwrap().address, 0x1000);
+        }
+        let mut session = ConsoleSession::new(&cfg).unwrap();
+        let mut bytes = vec![0; 0x300];
+        // A store to a constant address, followed by a valid indirect transfer.
+        bytes[..13].copy_from_slice(&[0xc6, 5, 0, 0, 0, 0, 1, 0xff, 0x25, 0xfb, 0x1f, 0, 0]);
+        // One load, seven self-copies, one jump: exceeds the eight-instruction bound.
+        bytes[0x100..0x107].copy_from_slice(&[0x48, 0x8b, 5, 1, 0x1f, 0, 0]);
+        for i in 0..7 { bytes[0x107 + i * 3..0x10a + i * 3].copy_from_slice(&[0x48, 0x89, 0xc0]); }
+        bytes[0x11c..0x11e].copy_from_slice(&[0xff, 0xe0]);
+        session.load_mapped(&NativeImport { language: cfg.language_id.clone(),
+            mappings: vec![crate::native::Mapping { vaddr: 0x1000, size: bytes.len() as u64,
+                file_off: 0, flags: 6, bytes }], ..Default::default() }).unwrap();
+        session.send("linkage 0x1000 0x1100\n").unwrap();
+        let response = read_until_prompt(&mut session.reader).unwrap();
+        let rows: Vec<serde_json::Value> = response.lines().filter_map(|line| line.strip_prefix("LINKAGE "))
+            .map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(rows.len(), 2, "{response}");
+        assert!(rows.iter().all(|row| row["slot"].is_null()), "stores and unbounded chains are not thunks");
+    }
 }
