@@ -231,13 +231,17 @@ fn entry_jump_chain_returning_to_own_body_is_not_a_thunk_chain() {
 #[test]
 fn branch_target_requires_proven_linkage_and_imported_slot() {
     let mut cfg = crate::session::RuntimeConfig::from_env();
-    if crate::native_runtime::find_console(&cfg).is_err() {
+    let Ok(console) = crate::native_runtime::find_console(&cfg) else {
         eprintln!("SKIP: SLEIGH console not available");
         return;
-    }
+    };
+    cfg.console_path = Some(console);
     cfg.language_id = "PowerPC:BE:32:default".into();
     cfg.language_dir = cfg.ghidra_install.join("Ghidra/Processors/PowerPC/data/languages");
-    for (bound, conditional, promoted) in [(true, false, true), (false, false, false), (true, true, false)] {
+    for (bound, conditional, promoted, sweep) in [
+        (true, false, true, false), (false, false, false, false), (true, true, false, false),
+        (true, false, true, true), (false, false, false, true), (true, true, false, true),
+    ] {
         let mut bytes = vec![0; 0x50];
         bytes[..4].copy_from_slice(&[0x38, 0x60, 0, 0]); // li r3,0: caller setup, not a pure-entry jump
         bytes[4..8].copy_from_slice(&if conditional { [0x40, 0x82, 0, 0x3c] } else { [0x48, 0, 0, 0x3c] });
@@ -256,9 +260,9 @@ fn branch_target_requires_proven_linkage_and_imported_slot() {
             externals: if bound { vec![(0x3000, "libc_entry".into())] } else { Vec::new() },
             ..Default::default()
         };
-        discover_mapped(&mut import).unwrap();
+        if sweep { discover_mapped(&mut import).unwrap(); } else { discover_seeded(&mut import); }
         let function = import.functions.iter().find(|function| function.entry == 0x1040);
-        assert_eq!(function.is_some(), promoted, "bound={bound}, conditional={conditional}");
+        assert_eq!(function.is_some(), promoted, "bound={bound}, conditional={conditional}, sweep={sweep}");
         if let Some(function) = function {
             assert_eq!(function.name, "libc_entry");
             assert_eq!(function.size, 16);
