@@ -696,8 +696,8 @@ fn pattern_entries_require_defined_boundaries_and_valid_code() {
     const NOP: u32 = 0xd503201f;
     const STP: u32 = 0xa9be7bfd;
     const MOV: u32 = 0x910003fd;
-    const SUB: u32 = 0xd10043ff;
-    const ADD: u32 = 0x910043ff;
+    // RET x19 is terminal but is not one of the unconstrained prepatterns.
+    const RET_OTHER: u32 = 0xd65f0260;
     let cases: &[(&str, &[u32], &[u64], &[(u64, u64)])] = &[
         // Validation may cross existing instructions; ownership may not.
         (
@@ -714,26 +714,26 @@ fn pattern_entries_require_defined_boundaries_and_valid_code() {
         ),
         (
             "three valid instructions",
-            &[RET, SUB, ADD, RET],
+            &[RET_OTHER, STP, MOV, RET],
             &[0x1000],
             &[(0x1000, 4), (0x1004, 12)],
         ),
         (
             "early return",
-            &[RET, SUB, RET, NOP],
+            &[RET_OTHER, STP, RET, NOP],
             &[0x1000],
             &[(0x1000, 4)],
         ),
         (
             "invalid instruction",
-            &[RET, SUB, 0, NOP],
+            &[RET_OTHER, STP, 0, NOP],
             &[0x1000],
             &[(0x1000, 4)],
         ),
         // Bytes matching RET are not an already-defined predecessor instruction.
         (
             "undefined predecessor",
-            &[RET, RET, SUB, ADD, RET],
+            &[RET_OTHER, RET_OTHER, STP, MOV, RET],
             &[0x1000],
             &[(0x1000, 4)],
         ),
@@ -824,5 +824,117 @@ fn terminal_call_does_not_invent_fallthrough() {
             .map(|function| function.entry)
             .collect::<Vec<_>>(),
         [0x1000, 0x2000]
+    );
+}
+
+#[test]
+fn possible_pattern_entry_rejects_later_conditional_reference() {
+    let mut cfg = crate::session::RuntimeConfig::from_env();
+    let Ok(console) = crate::native_runtime::find_console(&cfg) else {
+        eprintln!("SKIP: SLEIGH console not available");
+        return;
+    };
+    cfg.console_path = Some(console);
+    cfg.language_id = "AARCH64:LE:64:v8A".into();
+    cfg.language_dir = cfg
+        .ghidra_install
+        .join("Ghidra/Processors/AARCH64/data/languages");
+    // RET x19; STP; MOV; RET; CBZ x0,0x1004; RET. The relocation-rooted
+    // conditional branch is discovered after pattern prerequisites are checked.
+    let words = [
+        0xd65f0260u32,
+        0xa9be7bfd,
+        0x910003fd,
+        0xd65f03c0,
+        0xb4ffffa0,
+        0xd65f03c0,
+    ];
+    let bytes: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+    let mut import = NativeImport {
+        language: cfg.language_id.clone(),
+        cfg,
+        format: "ELF".into(),
+        mappings: vec![Mapping {
+            vaddr: 0x1000,
+            size: bytes.len() as u64,
+            file_off: 0,
+            flags: 6,
+            bytes,
+        }],
+        functions: vec![NativeFunction {
+            entry: 0x1000,
+            size: 1,
+            name: "seed".into(),
+        }],
+        reloc_candidates: vec![0x1010],
+        ..Default::default()
+    };
+    discover_seeded(&mut import);
+    assert_eq!(
+        import
+            .functions
+            .iter()
+            .map(|function| function.entry)
+            .collect::<Vec<_>>(),
+        [0x1000, 0x1010]
+    );
+}
+
+#[test]
+fn possible_pattern_batch_waits_for_its_own_disassembly() {
+    let mut cfg = crate::session::RuntimeConfig::from_env();
+    let Ok(console) = crate::native_runtime::find_console(&cfg) else {
+        eprintln!("SKIP: SLEIGH console not available");
+        return;
+    };
+    cfg.console_path = Some(console);
+    cfg.language_id = "AARCH64:LE:64:v8A".into();
+    cfg.language_dir = cfg
+        .ghidra_install
+        .join("Ghidra/Processors/AARCH64/data/languages");
+    // Both candidates pass after=defined and validcode=3 before either is
+    // disassembled. The first subsequently exposes a conditional reference to
+    // the second, which must remain code rather than become a separate function.
+    let words = [
+        0xd65f0260u32,
+        0xa9be7bfd,
+        0x910003fd,
+        0xb4000060,
+        0xd65f03c0,
+        0xd65f0260,
+        0xa9be7bfd,
+        0x910003fd,
+        0xd65f03c0,
+    ];
+    let bytes: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+    let mut import = NativeImport {
+        language: cfg.language_id.clone(),
+        cfg,
+        format: "ELF".into(),
+        mappings: vec![Mapping {
+            vaddr: 0x1000,
+            size: bytes.len() as u64,
+            file_off: 0,
+            flags: 6,
+            bytes,
+        }],
+        functions: [0x1000, 0x1014]
+            .into_iter()
+            .map(|entry| NativeFunction {
+                entry,
+                size: 1,
+                name: format!("seed_{entry:x}"),
+            })
+            .collect(),
+        ..Default::default()
+    };
+    discover_seeded(&mut import);
+    assert_eq!(
+        import
+            .functions
+            .iter()
+            .map(|function| function.entry)
+            .collect::<Vec<_>>(),
+        [0x1000, 0x1004, 0x1014]
     );
 }
