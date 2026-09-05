@@ -280,7 +280,7 @@ fn pic_linkage_requires_proven_consistent_caller_context() {
     cfg.console_path = Some(console);
     cfg.language_id = "PowerPC:BE:32:default".into();
     cfg.language_dir = cfg.ghidra_install.join("Ghidra/Processors/PowerPC/data/languages");
-    for (known, conflicting) in [(true, false), (false, false), (true, true)] {
+    for (known, caller) in [(true, "none"), (false, "none"), (true, "strong"), (true, "weak"), (true, "bypass")] {
         let mut bytes = vec![0; 0x120];
         let setup = [
             0x90, 0x01, 0, 0,       // stw r0,0(r1): caller effects are not thunk effects
@@ -297,11 +297,19 @@ fn pic_linkage_requires_proven_consistent_caller_context() {
             0x81, 0x7e, 0, 0x48, 0x7d, 0x69, 3, 0xa6, 0x4e, 0x80, 4, 0x20,
         ]); // lwz r11,72(r30); mtctr r11; bctr
         let mut functions = vec![NativeFunction { entry: 0x1000, name: "_entry".into(), size: 1 }];
-        if conflicting {
+        if caller != "none" {
             bytes[0x100..0x114].copy_from_slice(&setup);
             bytes[0x10c..0x110].copy_from_slice(&[0x3b, 0xde, 0x3e, 0xf8]); // r30 = 0x5000
             bytes[0x110..0x114].copy_from_slice(&[0x4b, 0xff, 0xff, 0x30]); // b 0x1040
-            functions.push(NativeFunction { entry: 0x1100, name: "other".into(), size: 1 });
+            if caller == "bypass" {
+                bytes[0x100..0x108].copy_from_slice(&[
+                    0x7c, 0x7e, 0x1b, 0x78, // unknown r30
+                    0x4b, 0xff, 0xff, 0x08, // enter the first caller at 0x100c, skipping its PC setup
+                ]);
+            }
+            if caller != "weak" {
+                functions.push(NativeFunction { entry: 0x1100, name: "other".into(), size: 1 });
+            }
         }
         let mut import = NativeImport {
             cfg: cfg.clone(), language: cfg.language_id.clone(), format: "elf32".into(),
@@ -311,13 +319,14 @@ fn pic_linkage_requires_proven_consistent_caller_context() {
                 Mapping { vaddr: 0x5000, size: 0x100, file_off: 0, flags: 2, bytes: vec![0; 0x100] },
             ],
             functions,
+            pointer_candidates: if caller == "weak" { vec![0x1100] } else { Vec::new() },
             externals: vec![(0x3048, "libc_entry".into()), (0x5048, "different_entry".into())],
             ..Default::default()
         };
         discover_seeded(&mut import);
         let function = import.functions.iter().find(|function| function.entry == 0x1040);
-        assert_eq!(function.is_some(), known && !conflicting,
-            "known={known}, conflicting={conflicting}");
+        assert_eq!(function.is_some(), known && caller == "none",
+            "known={known}, caller={caller}");
         if let Some(function) = function {
             assert_eq!(function.name, "libc_entry");
             assert_eq!(function.size, 12);
