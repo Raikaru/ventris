@@ -214,12 +214,16 @@ without the optional console, only structural facts are retained. The
 are removed. The small instruction decoder remains for listing and graph
 consumers, not as a discovery accelerator.
 
-The all-20 discovery gate currently reports **10 pass, 10 fail, 0 skipped**,
-with the architecture check passing. Shared ELF startup seeds restore all four
-non-PIE i386 rows to precision/recall 1.0 and raise PowerPC `plain_o0`/`plain_o2`
-to 11/12 matches, precision 1.0. The x86-64 non-PIE rows remain at 1.0.
-PIE address alignment and remaining loader/seed failures stay open; M1 is
-not complete.
+ELF PIE addresses use Ghidra's loaded coordinate system: a zero-based ELF64
+receives bias `0x100000`, ELF32 `0x10000`; nonzero prelinked bases are preserved.
+REL, RELA and RELR pointer words are materialized with ELF width/endianness.
+Native memory, console images and both worker paths share those loaded bytes,
+including BSS zero-fill. Scoring performs no address normalization.
+
+The all-20 discovery gate currently reports **12 pass, 8 fail, 0 skipped**,
+with the architecture check passing. All ten x86-64/i386 rows, including PIE,
+have precision/recall 1.0. PowerPC PIE reaches 12/13 matches; remaining
+AArch64/PowerPC seed and flow failures stay open. M1 is not complete.
 
 ## Support matrix
 

@@ -83,7 +83,7 @@ fn console_output(cfg: &RuntimeConfig, binary: &Path, address: &str) -> Result<S
     } else {
         format!("0x{address}")
     };
-    let mapped = MappedImage::for_dol(binary)?;
+    let mapped = MappedImage::for_elf_or_dol(binary)?;
     let bfd_target = bfd_target_for(&cfg.language_id, binary)?;
     let load_script = if let Some(image) = &mapped {
         image.command()
@@ -432,7 +432,7 @@ pub fn console_flow(cfg: &RuntimeConfig, binary: &Path, address: u64) -> Result<
     let ghroot = cfg.ghidra_install.to_string_lossy().into_owned();
     let langs = cfg.language_dir.to_string_lossy().into_owned();
 
-    let mapped = MappedImage::for_dol(binary)?;
+    let mapped = MappedImage::for_elf_or_dol(binary)?;
     let target = bfd_target_for(&cfg.language_id, binary)?;
     let mappings = crate::native::load_native_mappings(binary).unwrap_or_default();
     let adjust_vma = mappings
@@ -589,10 +589,10 @@ impl ConsoleSession {
         })
     }
 
-    /// Load a binary and, for non-x86 targets, set the image base so virtual
-    /// addresses line up with the BFD load (vaddr - file_off of the first mapping).
+    /// Load ELF/DOL through the native mapped image. Other formats retain
+    /// their BFD/raw address-base handling.
     pub fn load(&mut self, binary: &Path, base: u64) -> Result<()> {
-        if let Some(image) = MappedImage::for_dol(binary)? {
+        if let Some(image) = MappedImage::for_elf_or_dol(binary)? {
             return self.load_xml(&image);
         }
         let target = bfd_target_for(&self.language_id, binary)?;

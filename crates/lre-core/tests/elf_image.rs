@@ -90,5 +90,15 @@ fn loaded_elf_addresses_and_relative_pointer_bytes_agree() {
             }
         }
     }
+    // BSS relocations overlay zero-fill, never bytes at the section's file offset.
+    let mut data = fixture(8, false, 4, 0);
+    data[0x184..0x188].copy_from_slice(&8u32.to_le_bytes()); // SHT_NOBITS
+    data[0x1a0..0x1a8].copy_from_slice(&32u64.to_le_bytes());
+    data[0x440..0x460].fill(0xa5);
+    std::fs::write(&path, data).unwrap();
+    let image = ProgramImage::open(&path).unwrap();
+    assert_eq!(image.read(0x102000, 8).unwrap(), 0x101010u64.to_le_bytes());
+    assert_eq!(image.read(0x102018, 8).unwrap(), [0; 8]);
+    drop(image);
     std::fs::remove_file(path).unwrap();
 }

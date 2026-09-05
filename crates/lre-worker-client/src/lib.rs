@@ -35,15 +35,7 @@ impl WorkerSession {
         base: u64,
     ) -> PoolResult<Self> {
         let mut provider =
-            ProgramProvider::new(BinaryBacking::from_file(binary)?, base, Vec::new());
-        if let Ok(imp) = lre_core::native::load_native(binary) {
-            let maps: Vec<(u64, u64, u64)> = imp
-                .mappings
-                .iter()
-                .map(|m| (m.vaddr, m.size, m.file_off))
-                .collect();
-            provider.set_mappings(maps);
-        }
+            ProgramProvider::new(BinaryBacking::from_file(binary, base)?, Vec::new());
         provider.load_language_info(spec_root)?;
         let db = open_store(project_dir)?;
         let pid = db.program_id(program)?;

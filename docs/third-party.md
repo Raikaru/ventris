@@ -63,3 +63,18 @@ reconciliation. Weak data/boundary candidates do not establish further entries.
 Jump xrefs retain `native-import:thunk` provenance only for distinct retained
 destinations. This is not the full multi-instruction, indirect or call-return
 thunk analyzer.
+
+## ELF loaded images and worker memory
+
+ELF record layouts and relative-relocation constants are checked against the
+public GNU C Library `elf.h` SDK header (LGPL-2.1-or-later). No implementation
+code is copied. REL/RELA/RELR materialization uses ELF word size and byte order.
+Ghidra 12.1.3 `ElfLoaderOptionsFactory` and `ElfProgramBuilder` (Apache-2.0)
+establish the default image-base policy: zero-based ET_DYN images receive
+0x100000 for ELF64 or 0x10000 for ELF32; prelinked bases remain unchanged.
+
+Worker short reads follow `DecompileCallback.getBytes` lines 150–171 and
+`ArchitectureGhidra::getBytes` (`ghidra_arch.cc`, lines 723–759), Apache-2.0:
+a mapped starting address may return available bytes followed by zeros in
+the requested-size buffer; an unmapped start remains unavailable. Ordinary
+Core memory reads retain their strict region-boundary contract.

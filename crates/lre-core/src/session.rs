@@ -149,6 +149,7 @@ pub struct ProgramImage {
     path: PathBuf,
     map: memmap2::Mmap,
     regions: Vec<MemoryRegion>,
+    relocations: Vec<crate::native::MemoryRelocation>,
     patches: BTreeMap<u64, Vec<u8>>,
 }
 
@@ -156,6 +157,12 @@ impl ProgramImage {
     /// Maps `binary` and derives regions from the existing native loader
     /// (the loader's section/mapping knowledge, minus its discovery work).
     pub fn open(binary: &Path) -> crate::Result<Self> {
+        Self::open_with_raw_base(binary, None)
+    }
+
+    /// Native formats use loader addresses; unrecognized raw files may use
+    /// an explicit base. A malformed ELF/PE never falls back to raw bytes.
+    pub fn open_with_raw_base(binary: &Path, raw_base: Option<u64>) -> crate::Result<Self> {
         let file = std::fs::File::open(binary).map_err(crate::CoreError::Io)?;
         // SAFETY: the file handle stays alive for the mapping's lifetime
         // (memmap2's `Mmap` keeps the mapping; the handle is only needed
@@ -173,21 +180,27 @@ impl ProgramImage {
         })?;
         // Region derivation reuses the native parser (sections -> ranges;
         // flags preserved so discovery classification still sees them).
-        let mappings = crate::native::load_native_mappings(binary)?;
-        let regions = mappings
-            .iter()
-            .map(|m| MemoryRegion {
-                vaddr: m.vaddr,
-                size: m.size,
-                file_off: m.file_off,
-                file_size: m.bytes.len() as u64,
-                flags: m.flags,
-            })
-            .collect();
+        let (regions, relocations) = match crate::native::parse_native(&map) {
+            Ok(import) => {
+                let regions = import.mappings.iter().map(|m| MemoryRegion {
+                    vaddr: m.vaddr, size: m.size, file_off: m.file_off,
+                    file_size: m.bytes.len() as u64, flags: m.flags,
+                }).collect();
+                (regions, import.relocations)
+            }
+            Err(_) if raw_base.is_some() && !map.starts_with(b"\x7fELF") && !map.starts_with(b"MZ") => {
+                let vaddr = raw_base.unwrap();
+                let size = map.len() as u64;
+                vaddr.checked_add(size).ok_or_else(|| crate::native::ImportError::Bad("raw image overflow".into()))?;
+                (vec![MemoryRegion { vaddr, size, file_off: 0, file_size: size, flags: 6 }], Vec::new())
+            }
+            Err(error) => return Err(error.into()),
+        };
         Ok(Self {
             path: binary.to_path_buf(),
             map,
             regions,
+            relocations,
             patches: BTreeMap::new(),
         })
     }
@@ -212,10 +225,25 @@ impl ProgramImage {
     /// override region reads. Returns `None` when the range crosses a
     /// region boundary or is unmapped.
     pub fn read(&self, vaddr: u64, size: u64) -> Option<Vec<u8>> {
-        let region = self.regions.iter().find(|r| {
-            vaddr >= r.vaddr && vaddr.checked_add(size).map(|e| e <= r.vaddr + r.size).unwrap_or(false)
-        })?;
-        let mut out = vec![0u8; size as usize];
+        let region = self.region_for(vaddr, size)?;
+        let mut out = vec![0u8; usize::try_from(size).ok()?];
+        self.read_region(region, vaddr, &mut out)?;
+        Some(out)
+    }
+
+    /// Strict mapped read into an existing buffer; no allocation.
+    pub fn read_into(&self, vaddr: u64, out: &mut [u8]) -> Option<()> {
+        let region = self.region_for(vaddr, out.len() as u64)?;
+        self.read_region(region, vaddr, out)
+    }
+
+    fn region_for(&self, vaddr: u64, size: u64) -> Option<&MemoryRegion> {
+        let end = vaddr.checked_add(size)?;
+        self.regions.iter().find(|r| vaddr >= r.vaddr && end <= r.vaddr + r.size)
+    }
+
+    fn read_region(&self, region: &MemoryRegion, vaddr: u64, out: &mut [u8]) -> Option<()> {
+        let size = out.len() as u64;
         let local = vaddr - region.vaddr;
         let file_bytes = region.file_off.checked_add(local)?;
         // Zero-fill by default (BSS); copy file-backed bytes where the
@@ -226,6 +254,17 @@ impl ProgramImage {
                 *b = self.map.get(at as usize).copied().unwrap_or(0);
             } else {
                 *b = 0;
+            }
+        }
+        let first = self.relocations.partition_point(|r| r.address < vaddr.saturating_sub(7));
+        for relocation in self.relocations[first..].iter().take_while(|r| r.address < vaddr + size) {
+            let start = vaddr.max(relocation.address);
+            let end = (vaddr + size).min(relocation.address + relocation.width as u64);
+            if start < end {
+                let src = (start - relocation.address) as usize;
+                let dst = (start - vaddr) as usize;
+                out[dst..dst + (end - start) as usize]
+                    .copy_from_slice(&relocation.bytes[src..src + (end - start) as usize]);
             }
         }
         for (p, bytes) in &self.patches {
@@ -239,7 +278,7 @@ impl ProgramImage {
                     .copy_from_slice(&bytes[src..src + (oend - ostart) as usize]);
             }
         }
-        Some(out)
+        Some(())
     }
 }
 
@@ -260,7 +299,7 @@ pub struct SessionMetadata {
     pub language: String,
     /// `ELF` / `PE`
     pub format: String,
-    /// Load address used for byte resolution (0 for ET_DYN, image base for PE).
+    /// Lowest loaded mapping address, rounded down to a page boundary.
     pub image_base: u64,
 }
 
@@ -318,6 +357,7 @@ mod tests {
                 MemoryRegion { vaddr: 0x400000, size: 0x100, file_off: 0, file_size: 0x100, flags: 0x6 },
                 MemoryRegion { vaddr: 0x400100, size: 0x200, file_off: 0x100, file_size: 0x40, flags: 0x2 },
             ],
+            relocations: Vec::new(),
             patches: BTreeMap::new(),
         };
         img.patch(0x400010, vec![0xde, 0xad]);

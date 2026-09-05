@@ -11,43 +11,36 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// Read-only bytes of the analyzed binary, resolved at file offsets.
-///
-/// `maps` carries the section map (vaddr -> file offset) so ELF and PE both
-/// resolve their addresses correctly (PE RVAs are NOT base-relative).
+/// Shared loader-backed bytes, including load bias, relocations and BSS.
 #[derive(Clone)]
 pub struct BinaryBacking {
-    data: Arc<Vec<u8>>,
-    /// (vaddr, size, file_off) per allocated section, ascending vaddr.
-    pub maps: Vec<(u64, u64, u64)>,
+    image: Arc<lre_core::session::ProgramImage>,
 }
 
 impl BinaryBacking {
-    /// Reads the whole binary. (Spec 8.4 mmap comes with the memory-layer
-    /// refactor; a shared owned buffer is correct for the spike-sized
-    /// fixtures and keeps `unsafe` out of this crate.)
-    pub fn from_file(path: &Path) -> Result<Self> {
-        let data = std::fs::read(path)
-            .map_err(|e| WorkerError::Setup(format!("{}: {e}", path.display())))?;
-        Ok(Self {
-            data: Arc::new(data),
-            maps: Vec::new(),
-        })
+    pub fn from_file(path: &Path, raw_base: u64) -> Result<Self> {
+        let image = lre_core::session::ProgramImage::open_with_raw_base(path, Some(raw_base))
+            .map_err(|e| WorkerError::Setup(e.to_string()))?;
+        Ok(Self { image: Arc::new(image) })
     }
 
-    /// Bytes at `vaddr` via the section map; falls back to base-relative
-    /// when no section covers it (ELF loaded-at-base fixtures).
-    pub fn slice_at(&self, vaddr: u64, size: u64, base: u64) -> Option<&[u8]> {
-        for (sv, ss, sf) in &self.maps {
-            if vaddr >= *sv && vaddr.checked_add(size)? <= sv + ss {
-                let start = (vaddr - sv) as usize + *sf as usize;
-                let end = start.checked_add(size as usize)?;
-                return self.data.get(start..end);
-            }
+    pub fn read(&self, vaddr: u64, size: u64) -> Option<Vec<u8>> {
+        // DecompileCallback.getBytes returns a zero-initialized buffer after
+        // a valid short read; an unmapped initial address is still an error.
+        let region_at = |address| self.image.regions().iter()
+            .find(|r| address >= r.vaddr && address - r.vaddr < r.size);
+        region_at(vaddr)?;
+        let mut bytes = vec![0; usize::try_from(size).ok()?];
+        let mut copied = 0usize;
+        while copied < bytes.len() {
+            let at = vaddr.checked_add(copied as u64)?;
+            let Some(region) = region_at(at) else { break; };
+            let available = usize::try_from(region.size - (at - region.vaddr)).ok()?;
+            let count = available.min(bytes.len() - copied);
+            self.image.read_into(at, &mut bytes[copied..copied + count])?;
+            copied += count;
         }
-        let start = usize::try_from(vaddr.checked_sub(base)?).ok()?;
-        let end = start.checked_add(usize::try_from(size).ok()?)?;
-        self.data.get(start..end)
+        Some(bytes)
     }
 }
 
@@ -56,8 +49,6 @@ impl BinaryBacking {
 /// treats missing data as "unknown", which is the honest state.
 pub struct ProgramProvider {
     pub backing: BinaryBacking,
-    /// Raw image base (ELF fixture: 0x400000).
-    pub base: u64,
     /// Function entry addresses, sorted.
     pub functions: Vec<u64>,
     /// Entry address -> name (from the store; used by getMappedSymbols).
@@ -85,12 +76,11 @@ pub struct ProgramProvider {
 }
 
 impl ProgramProvider {
-    pub fn new(backing: BinaryBacking, base: u64, functions: Vec<u64>) -> Self {
+    pub fn new(backing: BinaryBacking, functions: Vec<u64>) -> Self {
         let mut functions = functions;
         functions.sort_unstable();
         Self {
             backing,
-            base,
             functions,
             function_names: HashMap::new(),
             function_sizes: HashMap::new(),
@@ -109,11 +99,6 @@ impl ProgramProvider {
     /// Name of the function at `vaddr`, if known.
     pub fn function_name(&self, vaddr: u64) -> Option<String> {
         self.function_names.get(&vaddr).cloned()
-    }
-
-    /// Installs the section map for section-aware byte resolution.
-    pub fn set_mappings(&mut self, maps: Vec<(u64, u64, u64)>) {
-        self.backing.maps = maps;
     }
 
     /// Loads registers.txt (name<TAB>offset<TAB>size) and the ram/register
@@ -286,15 +271,13 @@ impl NativeWorker {
             .ok_or_else(|| WorkerError::Protocol("bad packed <addr>".into()))?;
 
         let mut buf = Vec::new();
-        match provider.backing.slice_at(vaddr, size, provider.base) {
+        match provider.backing.read(vaddr, size) {
             Some(bytes) => {
                 encode_burst(&mut buf, burst::QRESPONSE_OPEN);
                 encode_burst(&mut buf, burst::BYTESTREAM_OPEN);
-                let nibbles: Vec<u8> = bytes
-                    .iter()
-                    .flat_map(|b| [(b >> 4) + b'A', (b & 0xf) + b'A'])
-                    .collect();
-                buf.extend_from_slice(&nibbles);
+                for byte in &bytes {
+                    buf.extend_from_slice(&[(byte >> 4) + b'A', (byte & 0xf) + b'A']);
+                }
                 encode_burst(&mut buf, burst::BYTESTREAM_CLOSE);
                 encode_burst(&mut buf, burst::QRESPONSE_CLOSE);
             }
@@ -412,8 +395,7 @@ impl NativeWorker {
             .or_else(|| {
                 provider
                     .backing
-                    .slice_at(address, max_size as u64, provider.base)
-                    .map(|value| value.to_vec())
+                    .read(address, max_size as u64)
             })
             .unwrap_or_default();
         let mut utf8 = bytes;

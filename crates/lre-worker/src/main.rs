@@ -49,19 +49,9 @@ fn run(
     base: u64,
 ) -> lre_worker::Result<()> {
     let mut provider = lre_worker::ProgramProvider::new(
-        lre_worker::BinaryBacking::from_file(Path::new(binary))?,
-        base,
+        lre_worker::BinaryBacking::from_file(Path::new(binary), base)?,
         Vec::new(),
     );
-    // Section map (ELF file offsets / PE RVA-to-raw) from the native loader.
-    if let Ok(imp) = lre_core::native::load_native(Path::new(binary)) {
-        let maps: Vec<(u64, u64, u64)> = imp
-            .mappings
-            .iter()
-            .map(|m| (m.vaddr, m.size, m.file_off))
-            .collect();
-        provider.set_mappings(maps);
-    }
     provider.load_language_info(Path::new(lang_dir))?;
 
     // Function entries from the project store.
