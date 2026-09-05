@@ -823,13 +823,23 @@ M1 — Discovery becomes generic
   remains 633/644 matches with 699 native functions. Sub-tasks c–e are not
   complete; the failing gate is evidence, not a passing milestone claim.
 
+## Approved m1-010 thunk prerequisite
+- Human approved moving the minimal m2-009 thunk/tail-call prerequisite into
+  M1. Scope: an established function whose first instruction is a pure
+  direct jump; validate and retain its destination as a distinct function.
+  Conditional jumps, interior branches, side-effecting transfers, self loops
+  and invalid destinations do not establish functions. No blanket branch
+  promotion, full thunk analyzer, signature matching or metric change.
+- m1-010-t: commit failing thunk acceptance, add SLEIGH purity evidence and
+  generic destination discovery, then verify the real i386 blocker and gates.
+  Acceptance: `native::discovery::tests` and the existing discovery gate.
+
 ## Blocked on
-- m1-010: approved resequencing is needed for the m2-009 thunk/tail-call
-  prerequisite above. Do not start M2 or substitute branch promotion.
+- None for the approved minimal m1-010-t prerequisite; broader M2 work remains
+  outside this approval.
 
 ## Next task
-- m1-010-c, blocked on the sequencing decision above. The failing acceptance
-  exists; do not start a later-milestone task without that decision.
+- m1-010-t: implement the approved direct-thunk prerequisite test first.
 
 ## Reserved decisions
 - m1-010 gate amendment: architecture-specific code is permitted only in a

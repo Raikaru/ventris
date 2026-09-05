@@ -4,6 +4,9 @@ use super::{close_call_targets, code_ranges, extern_name, filter_candidate, Cand
 use crate::native_runtime::{ConsoleSession, FlowKind};
 use std::collections::{HashMap, HashSet};
 
+#[cfg(test)]
+mod tests;
+
 pub(super) fn discover_mapped(import: &mut NativeImport) -> Result<()> {
     let mut session = ConsoleSession::new(&import.cfg)
         .map_err(|e| ImportError::Bad(e.to_string()))?;
