@@ -7,6 +7,19 @@ use std::collections::{HashMap, HashSet};
 #[cfg(test)]
 mod tests;
 
+/// ELF/PE retain structural facts when the optional console is unavailable.
+/// All supported languages use the same mapped addresses and flow worklist.
+pub(super) fn discover_seeded(import: &mut NativeImport) {
+    if import.mappings.is_empty()
+        || import.cfg.console_path.as_ref().map_or(true, |path| !path.is_file())
+    {
+        return;
+    }
+    let Ok(mut session) = ConsoleSession::new(&import.cfg) else { return; };
+    if session.load_mapped(import).is_err() { return; }
+    flow_discover_with_provider(import, |chunk| session.try_flow_batch(chunk));
+}
+
 pub(super) fn discover_mapped(import: &mut NativeImport) -> Result<()> {
     let mut session = ConsoleSession::new(&import.cfg)
         .map_err(|e| ImportError::Bad(e.to_string()))?;

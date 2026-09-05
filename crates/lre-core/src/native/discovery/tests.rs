@@ -18,20 +18,21 @@ fn image() -> NativeImport {
 
 #[test]
 fn candidate_entry_uses_flow_instead_of_opcode_prefix() {
-    for (byte, falls_into_entry) in [(0x90, false), (0x01, true)] {
+    for (byte, kind) in [(0x90, FlowKind::Return), (0x01, FlowKind::Fallthrough), (0x01, FlowKind::Call)] {
         let mut imp = image();
         imp.mappings[0].bytes.fill(byte);
         imp.functions.push(NativeFunction { entry: 0x2002, size: 2, name: "neighbor".into() });
         imp.reloc_candidates.push(0x2000);
         flow_discover_with_provider(&mut imp, |addresses| addresses.iter().map(|&a| {
             let mut flow = result(a, FlowKind::Return, None, false);
-            if a == 0x2000 && falls_into_entry {
-                flow.kind = FlowKind::Fallthrough;
+            if a == 0x2000 && kind != FlowKind::Return {
+                flow.kind = kind.clone();
+                if kind == FlowKind::Call { flow.targets.push(0x60); }
                 flow.fallthrough = Some(0x2002);
             }
             flow
         }).collect());
-        let expected = if falls_into_entry { vec![0x1000, 0x2002] }
+        let expected = if kind == FlowKind::Fallthrough { vec![0x1000, 0x2002] }
                        else { vec![0x1000, 0x2000, 0x2002] };
         assert_eq!(imp.functions.iter().map(|f| f.entry).collect::<Vec<_>>(), expected);
     }
