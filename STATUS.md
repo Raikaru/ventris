@@ -971,6 +971,15 @@ M1 — Discovery becomes generic
   support-matrix staleness check passes. M1 is not passed.
 - d2 is complete. d3/d4 and e remain open.
 
+## m1-010-d3 acceptance
+- `crates/lre-core/tests/elf_image.rs` checks ELF64 LE and ELF32 LE/BE
+  REL, RELA and RELR pointers, zero/signed addends, prelinked bases, partial
+  memory reads and user-patch precedence against console mapping bytes.
+- `tests/m1-004_pie.sh` compares zero-based PIE symbols at Ghidra's loaded
+  base. Unsupported RELR generation exits 77 instead of substituting RELA.
+- Before implementation: the image regression fails at the first rebased
+  entry; both real PIE fixtures have 0 oracle matches at loaded addresses.
+
 ## Blocked on
 - None for the remaining M1 loader/seed work; the landing-prefix blocker is resolved.
   Full multi-instruction/indirect thunk analysis is not authorized.

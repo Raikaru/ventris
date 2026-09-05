@@ -50,8 +50,8 @@ strip "$WORK/plain_pie.unstripped" -o "$WORK/plain_pie.bin"
 if cc -O2 -fPIE -pie -Wl,-z,pack-relative-relocs "$WORK/relr_pie.c" -o "$WORK/relr_pie.unstripped" 2>/dev/null; then
     strip "$WORK/relr_pie.unstripped" -o "$WORK/relr_pie.bin"
 else
-    cc -O2 -fPIE -pie "$WORK/relr_pie.c" -o "$WORK/relr_pie.unstripped"
-    strip "$WORK/relr_pie.unstripped" -o "$WORK/relr_pie.bin"
+    echo "SKIP: toolchain cannot produce the required RELR fixture" >&2
+    exit 77
 fi
 
 FAILED=0
@@ -61,17 +61,27 @@ for name in plain_pie relr_pie; do
     stripped="$WORK/$name.bin"
     proj="$WORK/${name}_proj"
 
-    # Oracle from unstripped symbol table (FUNC symbols in allocated sections)
+    # Compare symbol entries at Ghidra's loaded base, not link-time offsets.
     oracle_file="$WORK/${name}_oracle.txt"
     python3 -c '
-import sys, subprocess
+import sys, subprocess, struct
+image = open(sys.argv[1], "rb").read()
+assert image[:6] == b"\x7fELF\x02\x01"
+assert struct.unpack_from("<H", image, 16)[0] == 3
+phoff = struct.unpack_from("<Q", image, 32)[0]
+stride, count = struct.unpack_from("<HH", image, 54)
+loads = [struct.unpack_from("<Q", image, phoff + i * stride + 16)[0]
+         for i in range(count) if struct.unpack_from("<I", image, phoff + i * stride)[0] == 1]
+assert min(loads) == 0, "acceptance fixture must be a zero-based PIE"
+# Pinned ElfLoaderOptionsFactory.IMAGE64_BASE_DEFAULT.
+bias = 0x100000
 out = subprocess.check_output(["readelf", "-s", "-W", sys.argv[1]]).decode()
 for line in out.splitlines():
     p = line.split()
     if len(p) >= 8 and p[3] == "FUNC" and p[6] not in ("UND", "ABS"):
         v = int(p[1], 16)
         if v != 0:
-            print(f"{v:08x}")
+            print(f"{v + bias:08x}")
 ' "$unstripped" | sort -u > "$oracle_file"
 
     oracle_count=$(wc -l < "$oracle_file")
