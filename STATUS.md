@@ -1279,6 +1279,10 @@ M2 — Program-model parity
   `benchmarks/reports/discovery-gate.json`: 20 pass / 0 fail / 0 skipped,
   precision/recall 1.0 on every row; architecture check passed.
   This is not an M2 program-model parity gate or a new default analyzer.
+- Hosted CI run 33979109416 passes all 10 jobs on published commit
+  `49b027b62a99ac7a0531b858e3cc246e72e67456`, including the native constant
+  propagation step and the complete oracle/discovery gate.
+  https://github.com/Raikaru/ventris/actions/runs/33979109416
 
 ## Blocked on
 - None. M1 gate evidence is committed and enforced by passing hosted CI.
