@@ -269,3 +269,58 @@ fn branch_target_requires_proven_linkage_and_imported_slot() {
         }
     }
 }
+
+#[test]
+fn pic_linkage_requires_proven_consistent_caller_context() {
+    let mut cfg = crate::session::RuntimeConfig::from_env();
+    let Ok(console) = crate::native_runtime::find_console(&cfg) else {
+        eprintln!("SKIP: SLEIGH console not available");
+        return;
+    };
+    cfg.console_path = Some(console);
+    cfg.language_id = "PowerPC:BE:32:default".into();
+    cfg.language_dir = cfg.ghidra_install.join("Ghidra/Processors/PowerPC/data/languages");
+    for (known, conflicting) in [(true, false), (false, false), (true, true)] {
+        let mut bytes = vec![0; 0x120];
+        let setup = [
+            0x90, 0x01, 0, 0,       // stw r0,0(r1): caller effects are not thunk effects
+            0x42, 0x9f, 0, 5,       // bcl to the next instruction, capturing PC
+            0x7f, 0xc8, 2, 0xa6,    // mflr r30
+            0x3b, 0xde, 0x1f, 0xf8, // addi r30,r30,8184: r30 = 0x3000
+            0x48, 0, 0, 0x30,       // b 0x1040
+        ];
+        bytes[..setup.len()].copy_from_slice(&setup);
+        if !known {
+            bytes[8..12].copy_from_slice(&[0x7c, 0x7e, 0x1b, 0x78]); // mr r30,r3
+        }
+        bytes[0x40..0x4c].copy_from_slice(&[
+            0x81, 0x7e, 0, 0x48, 0x7d, 0x69, 3, 0xa6, 0x4e, 0x80, 4, 0x20,
+        ]); // lwz r11,72(r30); mtctr r11; bctr
+        let mut functions = vec![NativeFunction { entry: 0x1000, name: "_entry".into(), size: 1 }];
+        if conflicting {
+            bytes[0x100..0x114].copy_from_slice(&setup);
+            bytes[0x10c..0x110].copy_from_slice(&[0x3b, 0xde, 0x3e, 0xf8]); // r30 = 0x5000
+            bytes[0x110..0x114].copy_from_slice(&[0x4b, 0xff, 0xff, 0x30]); // b 0x1040
+            functions.push(NativeFunction { entry: 0x1100, name: "other".into(), size: 1 });
+        }
+        let mut import = NativeImport {
+            cfg: cfg.clone(), language: cfg.language_id.clone(), format: "elf32".into(),
+            mappings: vec![
+                Mapping { vaddr: 0x1000, size: bytes.len() as u64, file_off: 0, flags: 6, bytes },
+                Mapping { vaddr: 0x3000, size: 0x100, file_off: 0, flags: 2, bytes: vec![0; 0x100] },
+                Mapping { vaddr: 0x5000, size: 0x100, file_off: 0, flags: 2, bytes: vec![0; 0x100] },
+            ],
+            functions,
+            externals: vec![(0x3048, "libc_entry".into()), (0x5048, "different_entry".into())],
+            ..Default::default()
+        };
+        discover_seeded(&mut import);
+        let function = import.functions.iter().find(|function| function.entry == 0x1040);
+        assert_eq!(function.is_some(), known && !conflicting,
+            "known={known}, conflicting={conflicting}");
+        if let Some(function) = function {
+            assert_eq!(function.name, "libc_entry");
+            assert_eq!(function.size, 12);
+        }
+    }
+}
