@@ -104,6 +104,26 @@ permits unused register setup but still rejects unknown inputs, stores, calls
 and non-indirect terminal flow; its result must fit the entry and resolve a
 loader-recorded external slot. Generic branch-target recognition remains strict.
 
+## Native function-start pattern matching
+
+`native/ventris_patterns.hh` follows Ghidra 12.1.3 BytePatterns (Apache-2.0):
+`Patterns`, `Pattern`, `PatternPairSet`, `DittedBitSequence`, `AlignRule`,
+`LanguageConstraint`, `CompilerConstraint`, and `generic.constraint.DecisionNode`.
+The existing native XML parser reads installed `patternconstraints.xml` and the
+selected pattern files. Selection uses the loaded language and resolved compiler
+specification, including more-specific decision precedence; it does not infer a
+compiler from opcode bytes.
+
+The console command `functionstarts <start> <end> ...` accepts exclusive-end
+mapped ranges and returns `PATTERNS` JSON: instruction alignment, shared source
+rules with ordered action attributes, and address/rule matches. Matching preserves
+hex/binary wildcards, explicit marks, pair fixed-bit thresholds and raw-start
+alignment. XML integers retain `SpecXmlUtils.decodeInt` low-32-bit semantics.
+Parsed sequences are shared across pairs; bounded scan windows retain lookahead.
+These are raw matches, not functions. Consumers must enforce action prerequisites
+and ownership; `validcode="function"` is never new-function evidence.
+
+
 ## ELF loaded images and worker memory
 
 ELF record layouts and relative-relocation constants are checked against the

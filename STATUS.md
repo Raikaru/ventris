@@ -1106,6 +1106,17 @@ M1 — Discovery becomes generic
   function ownership and validated flow; commit eligibility regressions first.
   Keep each test/implementation commit below 800 changed lines.
 
+## m1-010-d4e1 native pattern matcher
+- Acceptance commits `d17e3f9`, `28c123b` and `71fc4df` cover pinned prefix/pair
+  marks, alignment, fixed-bit thresholds, scan-window edges and XML integer wrap.
+- Native CLI smoke matched AArch64, PowerPC, i386 GCC and x86-64 GCC fixtures.
+  Shared action metadata is returned without creating functions.
+- Workspace 118 tests; corpus 5/5; console and worker builds pass.
+- Full discovery remains 16 pass / 4 fail / 0 skipped, precision 1.0 on all rows.
+- Integration prerequisite: mapped XML currently appends `:default`; x86 resolves
+  that to Windows specifications. Retain loader compiler selection before
+  applying compiler-specific patterns to ELF imports.
+
 ## m1-010-d4 prerequisite sub-tasks
 - d4b: record loaded external relocation slots for ELF32/ELF64, independently
   of instruction decoding; preserve symbol-table linkage and endian/load bias.
@@ -1133,8 +1144,8 @@ M1 — Discovery becomes generic
   above. The current M1 discovery gate remains 16 pass / 4 fail.
 
 ## Next task
-- m1-010-d4e1: native pattern selection and matching, then d4e2 action
-  eligibility and d4f full-gate evidence. Per-caller PIC linkage is complete.
+- m1-010-d4e2: retain loader compiler selection, then apply upstream pattern
+  action eligibility; write regressions first. Follow with d4f full-gate evidence.
   The oracle, scorer and corpus remain unchanged; sub-task e is open.
 
 ## Reserved decisions
