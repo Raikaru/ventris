@@ -36,7 +36,9 @@ done
 BUILD=$(mktemp -d /tmp/ghidra-console-build.XXXXXX)
 trap 'rm -rf "$BUILD"' EXIT
 cp -r "$ROOT/third_party/ghidra/decompiler" "$BUILD/decompiler"
-cp "$ROOT/native/ventris_linkage.hh" "$ROOT/native/ventris_patterns.hh" "$ROOT/native/ventris_flow.hh" "$BUILD/decompiler/"
+cp "$ROOT/native/ventris_linkage.hh" "$ROOT/native/ventris_patterns.hh" \
+   "$ROOT/native/ventris_flow.hh" "$ROOT/native/ventris_constant_state.hh" \
+   "$ROOT/native/ventris_constants.hh" "$BUILD/decompiler/"
 cp "$PATCH" "$BUILD/apply.patch"
 git -C "$BUILD" init -q
 git -C "$BUILD" add -A

@@ -289,27 +289,29 @@ diff --git a/decompiler/ifacedecomp.cc b/decompiler/ifacedecomp.cc
 index e62ab6a..6d42a2d 100644
 --- a/decompiler/ifacedecomp.cc
 +++ b/decompiler/ifacedecomp.cc
-@@ -16,6 +16,9 @@
+@@ -16,6 +16,10 @@
  #include "ifacedecomp.hh"
 +#include "ventris_linkage.hh"
 +#include "ventris_patterns.hh"
 +#include "ventris_flow.hh"
++#include "ventris_constants.hh"
  extern "C" {
  #include <time.h>
  }
  #include "pcodeparse.hh"
  #include "blockaction.hh"
-@@ -63,6 +66,9 @@ void IfaceDecompCapability::registerCommands(IfaceStatus *status)
+@@ -63,6 +67,10 @@ void IfaceDecompCapability::registerCommands(IfaceStatus *status)
    status->registerCom(new IfcMapconvert(),"map","convert");
    status->registerCom(new IfcMapunionfacet(), "map", "unionfacet");
    status->registerCom(new IfcPrintdisasm(),"disassemble");
 +  status->registerCom(new IfcFlow(),"flow");
 +  status->registerCom(new IfcLinkage(),"linkage");
 +  status->registerCom(new IfcFunctionStarts(),"functionstarts");
++  status->registerCom(new IfcConstants(),"constants");
    status->registerCom(new IfcDecompile(),"decompile");
    status->registerCom(new IfcDump(),"dump");
    status->registerCom(new IfcDumpbinary(),"binary");
-@@ -829,6 +835,18 @@ void IfcPrintdisasm::execute(istream &s)
+@@ -829,6 +837,18 @@ void IfcPrintdisasm::execute(istream &s)
    }
    IfaceAssemblyEmit assem(status->fileoptr,10);
    while(size > 0) {
@@ -328,7 +330,7 @@ index e62ab6a..6d42a2d 100644
      int4 sz;
      sz = glb->translate->printAssembly(assem,addr);
      addr = addr + sz;
-@@ -836,6 +854,80 @@ void IfcPrintdisasm::execute(istream &s)
+@@ -836,6 +856,80 @@ void IfcPrintdisasm::execute(istream &s)
    }
  }
  
