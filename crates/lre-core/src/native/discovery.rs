@@ -9,6 +9,8 @@ use crate::native_runtime::{
 };
 use std::collections::{HashMap, HashSet};
 
+mod patterns;
+
 #[cfg(test)]
 mod tests;
 
@@ -106,12 +108,19 @@ pub(super) fn discover_seeded(import: &mut NativeImport) {
     if session.load_mapped(import).is_err() {
         return;
     }
+    let ranges = code_ranges(import);
+    if ranges.is_empty() {
+        return;
+    }
+    let Ok(patterns) = session.function_patterns(&ranges) else {
+        return;
+    };
     let mut provider = ConsoleProvider {
         session,
         decoded: None,
         failure: None,
     };
-    flow_discover_with_candidates(import, &[], &mut provider);
+    let _ = flow_discover_with_candidates(import, &[], Some(&patterns), &mut provider);
 }
 
 pub(super) fn discover_mapped(import: &mut NativeImport) -> Result<()> {
@@ -121,6 +130,9 @@ pub(super) fn discover_mapped(import: &mut NativeImport) -> Result<()> {
         .load_mapped(import)
         .map_err(|e| ImportError::Bad(e.to_string()))?;
     let ranges = code_ranges(import);
+    if ranges.is_empty() {
+        return Ok(());
+    }
     let in_code = |address| {
         ranges
             .iter()
@@ -168,12 +180,15 @@ pub(super) fn discover_mapped(import: &mut NativeImport) -> Result<()> {
         cursors.retain(|&(address, end, _)| address < end);
     }
     close_call_targets(import);
+    let patterns = session
+        .function_patterns(&ranges)
+        .map_err(|error| ImportError::Bad(error.to_string()))?;
     let mut provider = ConsoleProvider {
         session,
         decoded: Some(decoded),
         failure: None,
     };
-    flow_discover_with_candidates(import, &candidates, &mut provider);
+    flow_discover_with_candidates(import, &candidates, Some(&patterns), &mut provider)?;
     if let Some(error) = provider.failure {
         return Err(ImportError::Bad(error.to_string()));
     }
@@ -247,14 +262,16 @@ pub fn flow_discover_with_provider<F: FnMut(&[u64]) -> Vec<crate::native_runtime
             Vec::new()
         }
     }
-    flow_discover_with_candidates(imp, &[], &mut TestProvider(flow_provider));
+    flow_discover_with_candidates(imp, &[], None, &mut TestProvider(flow_provider))
+        .expect("flow-only discovery has no pattern prerequisites");
 }
 
 fn flow_discover_with_candidates<P: FlowProvider>(
     imp: &mut NativeImport,
     candidates: &[u64],
+    patterns: Option<&crate::native_runtime::FunctionPatterns>,
     flow_provider: &mut P,
-) {
+) -> Result<()> {
     use crate::native_runtime::FlowKind;
     let code = code_ranges(imp);
     let in_code = |a: u64| code.iter().any(|(v, e)| a >= *v && a < *e);
@@ -545,155 +562,271 @@ fn flow_discover_with_candidates<P: FlowProvider>(
     let instruction_start = extents.len();
     extents.extend(instruction_extents);
 
-    let filter_ctx = CandidateFilterContext {
-        mappings: &imp.mappings,
-        known_extents: &extents,
-        initial_seeds: &entries.iter().copied().collect(),
-    };
-
-    // Relocation candidates: reject candidates already visited inside trusted bodies
-    let unvisited_relocs: Vec<u64> = imp
-        .reloc_candidates
-        .iter()
-        .chain(imp.pointer_candidates.iter())
-        .chain(imp.initializer_candidates.iter())
-        .chain(candidates.iter())
-        .copied()
-        .filter(|&cand| in_code(cand) && !visited.contains(&cand) && !entries.contains(&cand))
-        .collect();
-
-    if !unvisited_relocs.is_empty() {
-        let flows = flow_provider.flow(&unvisited_relocs);
-        let confirmed_relocs: Vec<u64> = unvisited_relocs
-            .into_iter()
-            .zip(flows)
-            .filter(|&(c, ref info)| filter_candidate(c, &filter_ctx, |_| info.clone()))
-            .map(|(c, _)| c)
-            .collect();
-
-        if !confirmed_relocs.is_empty() {
-            for &r in &confirmed_relocs {
-                if !entries.contains(&r) {
-                    entries.push(r);
-                    addr_origin.insert(r, r);
-                }
+    // Settle loader/call-derived ownership before testing pattern prerequisites.
+    // Pattern entries are a separate creation batch, not mergeable relocations.
+    for pattern_round in [false, true] {
+        let pattern_candidates = if pattern_round {
+            if let Some(patterns) = patterns {
+                patterns::collect(
+                    imp,
+                    patterns,
+                    &entries,
+                    &extents[instruction_start..],
+                    &conditional_targets,
+                    flow_provider,
+                )?
+            } else {
+                break;
             }
-            let reloc_set: HashSet<u64> = confirmed_relocs
+        } else {
+            Vec::new()
+        };
+        let existing_entry_count = entries.len();
+        let mut pattern_edges = Vec::new();
+        let filter_ctx = CandidateFilterContext {
+            mappings: &imp.mappings,
+            known_extents: &extents,
+            initial_seeds: &entries.iter().copied().collect(),
+        };
+
+        // Relocation candidates: reject candidates already visited inside trusted bodies
+        let mut unvisited_relocs: Vec<u64> = if pattern_round {
+            pattern_candidates
                 .iter()
-                .chain(thunk_candidates.iter())
+                .map(|candidate| candidate.address)
+                .collect()
+        } else {
+            imp.reloc_candidates
+                .iter()
+                .chain(imp.pointer_candidates.iter())
+                .chain(imp.initializer_candidates.iter())
+                .chain(candidates.iter())
                 .copied()
+                .collect()
+        };
+        unvisited_relocs
+            .retain(|&cand| in_code(cand) && !visited.contains(&cand) && !entries.contains(&cand));
+        unvisited_relocs.sort_unstable();
+        unvisited_relocs.dedup();
+
+        if !unvisited_relocs.is_empty() {
+            let flows = flow_provider.flow(&unvisited_relocs);
+            let confirmed_relocs: Vec<u64> = unvisited_relocs
+                .into_iter()
+                .zip(flows)
+                .filter(|&(c, ref info)| {
+                    info.address == c
+                        && info.length != 0
+                        && !matches!(info.kind, FlowKind::Bad | FlowKind::Unimpl)
+                        && (pattern_round || filter_candidate(c, &filter_ctx, |_| info.clone()))
+                })
+                .map(|(c, _)| c)
                 .collect();
-            let mut reloc_active = confirmed_relocs;
-            while !reloc_active.is_empty() {
-                reloc_active.sort_unstable();
-                reloc_active.dedup();
-                let to_query: Vec<u64> = reloc_active
-                    .drain(..)
-                    .filter(|a| *a != 0 && in_code(*a) && visited.insert(*a))
-                    .collect();
-                if to_query.is_empty() {
-                    break;
+
+            if !confirmed_relocs.is_empty() {
+                for &r in &confirmed_relocs {
+                    if !entries.contains(&r) {
+                        entries.push(r);
+                        addr_origin.insert(r, r);
+                    }
                 }
-                let mut next_active: Vec<u64> = Vec::new();
-                for chunk in to_query.chunks(1024) {
-                    let flows = flow_provider.flow(chunk);
-                    for (addr, info) in chunk.iter().copied().zip(flows) {
-                        let origin = get_canonical_origin(addr, &addr_origin);
-                        let span = addr + info.length as u64;
-                        if info.conditional {
-                            conditional_targets.extend(info.targets.iter().copied());
-                        }
-                        if has_linkage_slots {
+                let reloc_set: HashSet<u64> = if pattern_round {
+                    HashSet::new()
+                } else {
+                    confirmed_relocs
+                        .iter()
+                        .chain(thunk_candidates.iter())
+                        .copied()
+                        .collect()
+                };
+                let mut reloc_active = confirmed_relocs;
+                while !reloc_active.is_empty() {
+                    reloc_active.sort_unstable();
+                    reloc_active.dedup();
+                    let to_query: Vec<u64> = reloc_active
+                        .drain(..)
+                        .filter(|a| *a != 0 && in_code(*a) && visited.insert(*a))
+                        .collect();
+                    if to_query.is_empty() {
+                        break;
+                    }
+                    let mut next_active: Vec<u64> = Vec::new();
+                    for chunk in to_query.chunks(1024) {
+                        let flows = flow_provider.flow(chunk);
+                        for (addr, info) in chunk.iter().copied().zip(flows) {
+                            let origin = get_canonical_origin(addr, &addr_origin);
+                            let span = addr + info.length as u64;
+                            if pattern_round
+                                && !matches!(info.kind, FlowKind::Bad | FlowKind::Unimpl)
+                            {
+                                for target in info
+                                    .targets
+                                    .iter()
+                                    .copied()
+                                    .filter(|_| {
+                                        matches!(
+                                            info.kind,
+                                            FlowKind::Branch
+                                                | FlowKind::CBranch
+                                                | FlowKind::BranchInd
+                                        )
+                                    })
+                                    .chain(info.fallthrough)
+                                {
+                                    if pattern_candidates
+                                        .binary_search_by_key(&target, |candidate| {
+                                            candidate.address
+                                        })
+                                        .is_ok()
+                                    {
+                                        pattern_edges.push((target, addr));
+                                    }
+                                }
+                            }
+                            if info.conditional {
+                                conditional_targets.extend(info.targets.iter().copied());
+                            }
                             if !matches!(info.kind, FlowKind::Bad | FlowKind::Unimpl) {
                                 extents.push((addr, info.length as u64));
                             }
-                            if info.kind != FlowKind::Fallthrough {
-                                flow_endings.push((addr, info.kind == FlowKind::BranchInd));
+                            if has_linkage_slots {
+                                if info.kind != FlowKind::Fallthrough {
+                                    flow_endings.push((addr, info.kind == FlowKind::BranchInd));
+                                }
                             }
-                        }
-                        proven_bodies
-                            .entry(origin)
-                            .and_modify(|e| *e = (*e).max(span))
-                            .or_insert(span);
+                            proven_bodies
+                                .entry(origin)
+                                .and_modify(|e| *e = (*e).max(span))
+                                .or_insert(span);
 
-                        match info.kind {
-                            FlowKind::Call => {
-                                for t in &info.targets {
-                                    if in_code(*t) && !entries.contains(t) {
-                                        entries.push(*t);
-                                        addr_origin.insert(*t, *t);
-                                        next_active.push(*t);
-                                    }
-                                    if *t != 0 {
-                                        calls.push((addr, *t));
-                                    }
-                                }
-                            }
-                            FlowKind::Branch => {
-                                if let Some(&t) = info.targets.first() {
-                                    if has_linkage_slots && t != span {
-                                        branch_targets.push(t);
-                                    }
-                                    if linkage_candidates.contains(&t)
-                                        && code
-                                            .iter()
-                                            .any(|&(start, end)| start <= addr && span <= end)
-                                    {
-                                        context_edges.push((t, addr));
-                                    }
-                                    merge_reached_candidate(
-                                        t,
-                                        origin,
-                                        &reloc_set,
-                                        &mut addr_origin,
-                                        &mut proven_bodies,
-                                    );
-                                    if in_code(t) && !visited.contains(&t) {
-                                        addr_origin.insert(t, origin);
-                                        next_active.push(t);
+                            match info.kind {
+                                FlowKind::Call => {
+                                    for t in &info.targets {
+                                        if in_code(*t) && !entries.contains(t) {
+                                            entries.push(*t);
+                                            addr_origin.insert(*t, *t);
+                                            next_active.push(*t);
+                                        }
+                                        if *t != 0 {
+                                            calls.push((addr, *t));
+                                        }
                                     }
                                 }
-                            }
-                            FlowKind::CBranch => {
-                                if let Some(&t) = info.targets.first() {
-                                    if has_linkage_slots && t != span {
-                                        branch_targets.push(t);
-                                    }
-                                    merge_reached_candidate(
-                                        t,
-                                        origin,
-                                        &reloc_set,
-                                        &mut addr_origin,
-                                        &mut proven_bodies,
-                                    );
-                                    if in_code(t) && !visited.contains(&t) {
-                                        addr_origin.insert(t, origin);
-                                        next_active.push(t);
+                                FlowKind::Branch => {
+                                    if let Some(&t) = info.targets.first() {
+                                        if has_linkage_slots && t != span {
+                                            branch_targets.push(t);
+                                        }
+                                        if linkage_candidates.contains(&t)
+                                            && code
+                                                .iter()
+                                                .any(|&(start, end)| start <= addr && span <= end)
+                                        {
+                                            context_edges.push((t, addr));
+                                        }
+                                        merge_reached_candidate(
+                                            t,
+                                            origin,
+                                            &reloc_set,
+                                            &mut addr_origin,
+                                            &mut proven_bodies,
+                                        );
+                                        if in_code(t) && !visited.contains(&t) {
+                                            addr_origin.insert(t, origin);
+                                            next_active.push(t);
+                                        }
                                     }
                                 }
+                                FlowKind::CBranch => {
+                                    if let Some(&t) = info.targets.first() {
+                                        if has_linkage_slots && t != span {
+                                            branch_targets.push(t);
+                                        }
+                                        merge_reached_candidate(
+                                            t,
+                                            origin,
+                                            &reloc_set,
+                                            &mut addr_origin,
+                                            &mut proven_bodies,
+                                        );
+                                        if in_code(t) && !visited.contains(&t) {
+                                            addr_origin.insert(t, origin);
+                                            next_active.push(t);
+                                        }
+                                    }
+                                }
+                                _ => {}
                             }
-                            _ => {}
-                        }
-                        if let Some(fall) = info
-                            .fallthrough
-                            .filter(|_| !matches!(info.kind, FlowKind::Bad | FlowKind::Unimpl))
-                        {
-                            merge_reached_candidate(
-                                fall,
-                                origin,
-                                &reloc_set,
-                                &mut addr_origin,
-                                &mut proven_bodies,
-                            );
-                            if in_code(fall) && !visited.contains(&fall) {
-                                addr_origin.insert(fall, origin);
-                                next_active.push(fall);
+                            if let Some(fall) = info
+                                .fallthrough
+                                .filter(|_| !matches!(info.kind, FlowKind::Bad | FlowKind::Unimpl))
+                            {
+                                merge_reached_candidate(
+                                    fall,
+                                    origin,
+                                    &reloc_set,
+                                    &mut addr_origin,
+                                    &mut proven_bodies,
+                                );
+                                if in_code(fall) && !visited.contains(&fall) {
+                                    addr_origin.insert(fall, origin);
+                                    next_active.push(fall);
+                                }
                             }
                         }
                     }
+                    reloc_active = next_active;
                 }
-                reloc_active = next_active;
             }
+        }
+        if pattern_round {
+            let called = |address| calls.iter().any(|&(_, target)| target == address);
+            let established = |address| {
+                entries[..existing_entry_count].contains(&address)
+                    || called(address)
+                    || pattern_candidates
+                        .binary_search_by_key(&address, |candidate| candidate.address)
+                        .is_ok_and(|index| !pattern_candidates[index].possible)
+            };
+            let mut rejected = HashSet::new();
+            loop {
+                let mut changed = false;
+                for candidate in &pattern_candidates {
+                    if !candidate.possible
+                        || called(candidate.address)
+                        || rejected.contains(&candidate.address)
+                    {
+                        continue;
+                    }
+                    let owner = pattern_edges
+                        .iter()
+                        .filter(|&&(target, _)| target == candidate.address)
+                        .map(|&(_, source)| get_canonical_origin(source, &addr_origin))
+                        .filter(|&origin| {
+                            origin != candidate.address && !rejected.contains(&origin)
+                        })
+                        .min_by_key(|&origin| (!established(origin), origin));
+                    if conditional_targets.contains(&candidate.address)
+                        || owner.is_some_and(established)
+                    {
+                        rejected.insert(candidate.address);
+                        if let Some(owner) = owner {
+                            merge_reached_candidate(
+                                candidate.address,
+                                owner,
+                                &rejected,
+                                &mut addr_origin,
+                                &mut proven_bodies,
+                            );
+                        }
+                        changed = true;
+                    }
+                }
+                if !changed {
+                    break;
+                }
+            }
+            entries.retain(|entry| !rejected.contains(entry));
         }
     }
     // A local linkage must reach an indirect branch in at most eight contiguous
@@ -887,6 +1020,7 @@ fn flow_discover_with_candidates<P: FlowProvider>(
     }
     imp.xrefs = xrefs;
     close_call_targets(imp);
+    Ok(())
 }
 
 fn linkage_flow_shape(target: u64, instructions: &[(u64, u64)], endings: &[(u64, bool)]) -> bool {
