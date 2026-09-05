@@ -465,6 +465,31 @@ pub(crate) struct LinkageContext {
     pub target: u64,
 }
 
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct FunctionPatterns {
+    pub alignment: u64,
+    pub rules: Vec<FunctionPatternRule>,
+    pub matches: Vec<FunctionPatternMatch>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct FunctionPatternRule {
+    pub file: String,
+    pub actions: Vec<FunctionPatternAction>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct FunctionPatternAction {
+    pub kind: String,
+    pub attributes: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct FunctionPatternMatch {
+    pub address: u64,
+    pub rule: usize,
+}
+
 pub fn console_flow(cfg: &RuntimeConfig, binary: &Path, address: u64) -> Result<FlowResult> {
     let console = find_console(cfg)?;
     let ghroot = cfg.ghidra_install.to_string_lossy().into_owned();
@@ -957,6 +982,43 @@ impl ConsoleSession {
             return err("incomplete or mismatched linkage response");
         }
         Ok(results)
+    }
+
+    pub(crate) fn function_patterns(&mut self, ranges: &[(u64, u64)]) -> Result<FunctionPatterns> {
+        use std::fmt::Write as _;
+        let mut command = String::from("functionstarts");
+        for &(start, end) in ranges {
+            if start >= end {
+                return err("invalid function-pattern search range");
+            }
+            let _ = write!(command, " 0x{start:x} 0x{end:x}");
+        }
+        command.push('\n');
+        self.send(&command)?;
+        let response = read_until_prompt(&mut self.reader)?;
+        let mut lines = response
+            .lines()
+            .filter_map(|line| line.strip_prefix("PATTERNS "));
+        let patterns: FunctionPatterns = serde_json::from_str(
+            lines
+                .next()
+                .ok_or_else(|| NativeRuntimeError("missing function-pattern response".into()))?,
+        )
+        .map_err(|error| {
+            NativeRuntimeError(format!("invalid function-pattern response: {error}"))
+        })?;
+        if lines.next().is_some()
+            || patterns.alignment == 0
+            || patterns.matches.iter().any(|hit| {
+                hit.rule >= patterns.rules.len()
+                    || !ranges
+                        .iter()
+                        .any(|&(start, end)| start <= hit.address && hit.address < end)
+            })
+        {
+            return err("mismatched function-pattern response");
+        }
+        Ok(patterns)
     }
 
     /// Close stdin and wait for the child to exit.

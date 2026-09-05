@@ -147,6 +147,33 @@ than replacing it with the architecture default (Windows on x86). This is
 base load-spec selection, not producer identification from Go/Swift metadata.
 
 
+## Function-start eligibility and scheduling
+
+`crates/lre-core/src/native/discovery/patterns.rs` follows Ghidra 12.1.3
+`FunctionStartAnalyzer`, `PseudoDisassembler`, `RepeatInstructionByteTracker`
+and `PossibleDelayedFunctionCreator` (Apache-2.0). This is entry selection
+against retained native facts, not a replacement for all BytePatterns
+annotations or context analysis.
+
+Creation requires alignment, a valid decoded instruction and the action's
+preconditions. Numeric `validcode` counts contiguous parent instructions, not
+delay slots; validation may cross existing instruction boundaries without
+granting ownership of another function. Bounded validation rejects unavailable
+bytes, zero prefixes, invalid/repeated decoding, overlapping instructions,
+known pointer data and offcut references. Subroutine checks distinguish
+terminal instructions from actual RETURN p-code and known callees.
+`validcode="function"` only applies at an already-defined function.
+Rules needing unavailable section/context facts abort selection rather than
+silently dropping those prerequisites.
+
+Loader-derived discovery settles first. Definite/possible pattern candidates
+then form a separate creation batch; they are not merged as relocation roots.
+Possible entries are checked again after their disassembly exposes references:
+conditional targets and entries reached from established functions are not
+new functions. Definite actions take precedence over possible actions at the
+same address. Rejected bodies are reconciled with their surviving owner before
+the existing PIC linkage pass.
+
 ## ELF loaded images and worker memory
 
 ELF record layouts and relative-relocation constants are checked against the

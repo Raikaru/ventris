@@ -1163,6 +1163,18 @@ M1 — Discovery becomes generic
 - d4f: generate and commit the complete unchanged gate from the source commit.
   Each publication commit stays below 800 changed lines.
 
+## m1-010-d4e2b2/b3 implementation verification
+- `2cd5f1b` isolates constrained AArch64 rules with RET x19 rather than the
+  unconstrained RET prepattern. The adjacent four-byte entry and its following
+  function both survive; owned prefixes and insufficient/invalid code do not.
+- Two additional regressions reproduced premature possible-function creation:
+  a relocation-rooted conditional reference and a same-pattern-batch reference.
+  Both now pass after phased discovery and post-disassembly reconciliation.
+- Workspace 125 tests; corpus 5/5. The source-defined validator uses retained
+  native instruction/data/reference facts; unavailable section/context
+  prerequisites fail closed. Full BytePatterns annotation coverage is not claimed.
+- Source publication and the committed d4f gate report remain required.
+
 ## m1-010-d4 prerequisite sub-tasks
 - d4b: record loaded external relocation slots for ELF32/ELF64, independently
   of instruction decoding; preserve symbol-table linkage and endian/load bias.
